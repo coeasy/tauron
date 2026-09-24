@@ -1,0 +1,262 @@
+{
+  "version": 1,
+  "generated_at": "2026-09-21",
+  "note": "机器生成的权限词表（计划 §4.2 / R3）。identifier 必须为 Tauri 2.x 真实权限标识；risk 为框架自补元数据（Tauri 官方未提供）。审批 UI 文案与代码共享此单一来源（§4.5）。禁止授予清单见 crates/open-client-host/src/authz.rs::FORBIDDEN_PLAIN。",
+  "entries": [
+    {
+      "identifier": "core:default",
+      "risk": "low",
+      "description": "Tauri 核心默认权限集（事件桥、路径解析等基础设施）"
+    },
+    {
+      "identifier": "core:allow-convert-file-srcpath",
+      "risk": "low",
+      "description": "把本地文件路径转换为可被 webview 读取的 src 路径"
+    },
+
+    {
+      "identifier": "store:allow-get",
+      "risk": "low",
+      "description": "读取持久化键值存储中的单个值"
+    },
+    {
+      "identifier": "store:allow-contains",
+      "risk": "low",
+      "description": "判断持久化键值存储中是否存在某键"
+    },
+    {
+      "identifier": "store:allow-set",
+      "risk": "elevated",
+      "description": "写入持久化键值存储中的单个值",
+      "scoped": true
+    },
+    {
+      "identifier": "store:allow-remove",
+      "risk": "elevated",
+      "description": "删除持久化键值存储中的单个键"
+    },
+    {
+      "identifier": "store:allow-clear",
+      "risk": "high",
+      "description": "清空整个持久化键值存储"
+    },
+    {
+      "identifier": "store:allow-merge",
+      "risk": "elevated",
+      "description": "合并写入多个键值对"
+    },
+    {
+      "identifier": "store:allow-set-many",
+      "risk": "elevated",
+      "description": "批量写入多个键值对"
+    },
+    {
+      "identifier": "store:allow-get-many",
+      "risk": "low",
+      "description": "批量读取多个键的值"
+    },
+
+    {
+      "identifier": "fs:allow-app-read",
+      "risk": "low",
+      "description": "读取应用数据目录下的文件",
+      "scoped": true
+    },
+    {
+      "identifier": "fs:allow-app-read-recursive",
+      "risk": "elevated",
+      "description": "递归读取应用数据目录",
+      "scoped": true
+    },
+    {
+      "identifier": "fs:allow-app-write",
+      "risk": "elevated",
+      "description": "写入应用数据目录下的文件",
+      "scoped": true
+    },
+    {
+      "identifier": "fs:allow-app-write-recursive",
+      "risk": "high",
+      "description": "递归写入应用数据目录（含创建/删除子目录）",
+      "scoped": true
+    },
+    {
+      "identifier": "fs:allow-read-text-file",
+      "risk": "low",
+      "description": "读取单个文本文件",
+      "scoped": true
+    },
+    {
+      "identifier": "fs:allow-write-text-file",
+      "risk": "elevated",
+      "description": "写入单个文本文件",
+      "scoped": true
+    },
+    {
+      "identifier": "fs:allow-remove",
+      "risk": "high",
+      "description": "删除文件或目录",
+      "scoped": true
+    },
+    {
+      "identifier": "fs:allow-copy-file",
+      "risk": "elevated",
+      "description": "复制文件",
+      "scoped": true
+    },
+    {
+      "identifier": "fs:allow-rename-file",
+      "risk": "elevated",
+      "description": "重命名/移动文件",
+      "scoped": true
+    },
+
+    {
+      "identifier": "http:allow-fetch",
+      "risk": "elevated",
+      "description": "发起 HTTP/HTTPS 请求",
+      "scoped": true
+    },
+    {
+      "identifier": "http:default",
+      "risk": "elevated",
+      "description": "HTTP 默认权限集"
+    },
+
+    {
+      "identifier": "event:allow-emit",
+      "risk": "low",
+      "description": "向宿主/其他 webview 广播事件"
+    },
+    {
+      "identifier": "event:allow-listen",
+      "risk": "low",
+      "description": "监听事件"
+    },
+    {
+      "identifier": "event:allow-unlisten",
+      "risk": "low",
+      "description": "取消事件监听"
+    },
+
+    {
+      "identifier": "shell:allow-execute",
+      "risk": "high",
+      "description": "执行任意外部命令（在禁止授予清单内，见 authz::check_grants）"
+    },
+    {
+      "identifier": "shell:allow-open",
+      "risk": "elevated",
+      "description": "用系统默认程序打开 URL 或文件"
+    },
+
+    {
+      "identifier": "opener:allow-open-url",
+      "risk": "elevated",
+      "description": "调用系统 opener 打开外部 URL"
+    },
+
+    {
+      "identifier": "dialog:allow-open",
+      "risk": "low",
+      "description": "弹出系统文件选择对话框"
+    },
+    {
+      "identifier": "dialog:allow-save",
+      "risk": "low",
+      "description": "弹出系统保存文件对话框"
+    },
+    {
+      "identifier": "dialog:allow-message",
+      "risk": "low",
+      "description": "弹出系统消息对话框"
+    },
+
+    {
+      "identifier": "window:allow-create",
+      "risk": "elevated",
+      "description": "创建新的 webview 窗口"
+    },
+    {
+      "identifier": "window:allow-close",
+      "risk": "low",
+      "description": "关闭窗口"
+    },
+    {
+      "identifier": "window:allow-set-title",
+      "risk": "low",
+      "description": "修改窗口标题"
+    },
+    {
+      "identifier": "window:allow-set-focus",
+      "risk": "low",
+      "description": "设置窗口焦点"
+    },
+
+    {
+      "identifier": "app:allow-version",
+      "risk": "low",
+      "description": "读取宿主应用版本"
+    },
+    {
+      "identifier": "app:allow-name",
+      "risk": "low",
+      "description": "读取宿主应用名称"
+    },
+
+    {
+      "identifier": "global-shortcut:allow-register",
+      "risk": "elevated",
+      "description": "注册全局快捷键"
+    },
+    {
+      "identifier": "global-shortcut:allow-unregister-all",
+      "risk": "elevated",
+      "description": "注销全部全局快捷键"
+    },
+
+    {
+      "identifier": "autostart:allow-enable",
+      "risk": "high",
+      "description": "注册开机自启动（持久化系统级设置）"
+    },
+    {
+      "identifier": "autostart:allow-disable",
+      "risk": "elevated",
+      "description": "注销开机自启动"
+    },
+
+    {
+      "identifier": "updater:allow-check",
+      "risk": "elevated",
+      "description": "检查应用更新"
+    },
+    {
+      "identifier": "updater:allow-download-and-install",
+      "risk": "high",
+      "description": "下载并安装更新（写程序目录）"
+    },
+
+    {
+      "identifier": "clipboard-manager:allow-read-text",
+      "risk": "elevated",
+      "description": "读取系统剪贴板文本"
+    },
+    {
+      "identifier": "clipboard-manager:allow-write-text",
+      "risk": "elevated",
+      "description": "写入系统剪贴板文本"
+    },
+
+    {
+      "identifier": "os:allow-platform",
+      "risk": "low",
+      "description": "读取当前操作系统平台标识"
+    },
+    {
+      "identifier": "process:allow-restart",
+      "risk": "high",
+      "description": "重启宿主进程"
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+# Rust
+# 用 `**/target/` 而不是 `/target`：`examples/minimal-app/src-tauri` 被
+# workspace `exclude` 在外，是**另一棵**依赖树，它的产物落在
+# `examples/minimal-app/src-tauri/target/`。只写 `/target` 会漏掉它，
+# 首次构建示例就会把几百 MB 的编译产物带进提交。
+**/target/
+# Cargo.lock **入版本控制**：本仓库同时产出可执行客户端，锁文件是构建可复现的
+# 前提（`cargo test/build --locked` 依赖它）。`examples/minimal-app/src-tauri`
+# 独立成树，自带锁文件，同样提交。
+**/*.rs.bk
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+.pnpm-store/
+.eslintcache
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# 工具元数据
+.wpscomate/
+
+# AI 协作助手的本地工作记忆（项目约定、审计笔记等）。
+# 这不是缓存、不要删；但也不该进公开仓库 —— 里面的口径笔记是**内部**分析。
+# 若团队希望共享这些笔记，删掉这一行即可。
+.workbuddy-ai/
+
+# 本地生成物（permissions.index.json 是版本化提交，不算生成物）
+schema/*.generated.*
+
+# 发布物（安装包走 GitHub Releases，不进版本库）
+*.exe
+*.msi
+*.nsi
+*.dmg
+*.AppImage

@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# 示例的 Tauri 工程独立构建（自带 tauri/tauri-build 依赖树，不进主 workspace）
+exclude = ["examples/minimal-app/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/coeasy/tauron"
+homepage = "https://github.com/coeasy/tauron"
+# 不设 `documentation`：本仓库的 docs/ 是架构文档（Markdown），不是 rustdoc 站点，
+# 指向它会让 crates.io 的「Documentation」按钮落到非 API 文档上。留空即由
+# docs.rs 自动接管。
+# 注意：`crates.io` 发布**尚不可用**。内部互引用写的是
+# `{ path = "crates/xxx" }`，cargo 要求 path 依赖同时给出 `version` 才能
+# 打包；`examples/minimal-app/src-tauri` 也被 `exclude` 在外。
+# 在补齐 version 之前不要执行 `cargo publish`。
+
+[workspace.dependencies]
+# ── serde 系：一切边界的唯一校验器（计划 §1.2 第 4 条）─────────────
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# ── 错误 ─────────────────────────────────────────────────────────
+thiserror = "2"
+# ── 正则（schema `pattern` 校验，§4.13）─────────────────────────
+regex = "1"
+# ── 版本区间（manifest `framework` range，§4.2）──────────────────
+semver = { version = "1", features = ["serde"] }
+# ── 并发原语（注册表；计划 §4.1 要求 RwLock/ArcSwap，禁全局 Mutex）─
+parking_lot = "0.12"
+arc-swap = "1"
+# ── 标识 ─────────────────────────────────────────────────────────
+uuid = { version = "1", features = ["v4", "serde"] }
+# ── 时间 / TTL ───────────────────────────────────────────────────
+chrono = { version = "0.4", features = ["serde", "clock"] }
+# ── 哈希 / 签名（商城验签，§4.18 后续）───────────────────────────
+sha2 = "0.10"
+hex = "0.4"
+# ── HMAC（§4.5 授予集防篡改签名）──────────────────────────────────
+hmac = "0.12"
+# ── 测试 ─────────────────────────────────────────────────────────
+criterion = "0.5"
+proptest = "1"
+tempfile = "3"
+# ── 内部 crate 互引用 ───────────────────────────────────────────
+tauron-host = { path = "crates/tauron-host" }
+tauron-i18n = { path = "crates/tauron-i18n" }
+tauron-notify = { path = "crates/tauron-notify" }
+tauron-recovery = { path = "crates/tauron-recovery" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,23 @@
+{
+  "name": "minimal-app",
+  "version": "0.1.0",
+  "description": "tauron 应用层贯通示例：iframe 插件握手/调用 + 窗口控制 + 自动更新 + 剪贴板",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "tauri": "pnpm dlx @tauri-apps/cli@2"
+  },
+  "dependencies": {
+    "@tauron/core": "workspace:*",
+    "@tauron/host": "workspace:*",
+    "@tauron/plugin-sdk": "workspace:*",
+    "@tauron/ui": "workspace:*",
+    "@tauri-apps/api": "^2.5.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "vite": "^7.0.0"
+  }
+}

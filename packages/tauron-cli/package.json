@@ -1,0 +1,38 @@
+{
+  "name": "@tauron/cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "tauron CLI 工具（设计文档 §7）：create-tauron-app 脚手架、plugin new/dev/test/pack/sign/publish、doctor 诊断",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "tauron": "./bin/tauron.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@tauron/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "22.13.5",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "tauron-brand"
+description = "§4.16 白标：品牌清单 → tauri.conf 片段合并 + 唯一性校验 + 图标管线"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }

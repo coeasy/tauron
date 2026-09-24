@@ -1,0 +1,12 @@
+# 统一换行符：仓库内一律 LF，避免 Windows 检出时的 CRLF 抖动。
+* text=auto eol=lf
+
+# 明确标记不可编辑的二进制产物（发布时生成，不入版本库）。
+*.exe binary
+*.msi binary
+*.nsi binary
+*.dmg binary
+*.AppImage binary
+*.png binary
+*.jpg binary
+*.ico binary

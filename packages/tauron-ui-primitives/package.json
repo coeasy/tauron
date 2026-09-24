@@ -1,0 +1,58 @@
+{
+  "name": "@tauron/ui-primitives",
+  "version": "0.1.0",
+  "private": true,
+  "description": "tauron UI 原语：零宿主依赖的 Web Components + 设计令牌 + 动效基础设施（任意宿主可直接取用）",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./tokens": {
+      "types": "./dist/tokens.d.ts",
+      "default": "./dist/tokens.js"
+    },
+    "./wc": {
+      "types": "./dist/wc.d.ts",
+      "default": "./dist/wc.js"
+    },
+    "./theme-picker": {
+      "types": "./dist/theme-picker.d.ts",
+      "default": "./dist/theme-picker.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": [
+    "./dist/wc.js",
+    "./dist/wc-shell.js",
+    "./dist/wc-motion.js",
+    "./dist/skeleton.js",
+    "./dist/theme-picker.js"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint ."
+  },
+  "peerDependencies": {
+    "lit": "^3.0.0"
+  },
+  "dependencies": {
+    "@tauron/shell-events": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "happy-dom": "^17.0.0",
+    "lit": "^3.0.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
+}

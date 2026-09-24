@@ -1,0 +1,40 @@
+{
+  "name": "@tauron/framework",
+  "version": "0.1.0",
+  "private": true,
+  "description": "tauron 框架薄封装：细粒度 signals 响应式内核 + 框架无关 bindings（useInvoke/useEvent/useCapabilities）",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./signals": {
+      "types": "./dist/signals.d.ts",
+      "default": "./dist/signals.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint ."
+  },
+  "peerDependencies": {
+    "@tauron/host": "workspace:*"
+  },
+  "devDependencies": {
+    "@tauron/host": "workspace:*",
+    "@types/node": "^22.13.5",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
+}

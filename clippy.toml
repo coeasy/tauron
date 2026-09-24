@@ -1,0 +1,20 @@
+# clippy 配置。
+#
+# 这里只放**阈值类**配置——clippy 的 lint 级别（deny/warn/allow）不放这里，
+# 由 CI 命令行（`-- -D warnings`）或各 crate 的 `[lints]` 段控制。
+#
+# ⚠️ 诚实边界：本仓库**尚未**做过 clippy 清理，CI 里的 clippy 任务是
+# advisory（`continue-on-error: true`），不构成合并门禁。详见 CHANGELOG.md
+# 的「已知债务」。
+
+# 适配层的 `cmd_*` 入口普遍是「状态 + 若干参数」的直筒签名，7 个参数
+# （clippy 默认阈值）偏紧，放宽到 9 以只保留真正的坏味道。
+too-many-arguments-threshold = 9
+
+# 线格式信封与 wire 断言里存在深层嵌套的泛型/联合类型，
+# 默认 250 会大面积误报，放宽到 400。
+type-complexity-threshold = 400
+
+# 枚举变体名与结构体字段名在跨语言契约里承载语义（如 `E_INVALID_MANIFEST`），
+# 不做大小写近似检查。
+upper-case-acronyms-aggressive = false

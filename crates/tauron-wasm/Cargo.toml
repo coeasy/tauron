@@ -1,0 +1,16 @@
+[package]
+name = "tauron-wasm"
+description = "WASM supervisor：Extism 加载、host_fn 白名单、资源上限、独立子进程承载"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+parking_lot = { workspace = true }

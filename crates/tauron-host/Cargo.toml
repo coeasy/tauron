@@ -1,0 +1,24 @@
+[package]
+name = "tauron-host"
+description = "tauron 宿主插件核心：manifest 校验、三档授权、生命周期状态机、注册表"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+semver.workspace = true
+parking_lot.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true

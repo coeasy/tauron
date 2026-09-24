@@ -1,0 +1,23 @@
+# Prettier 不处理的路径。
+#
+# 说明：本仓库的 TypeScript 代码从未跑过 Prettier，`pnpm format` 会产生
+# 全量重排。CI 里没有 format 门禁（只有 advisory 的 eslint），这里列出的
+# 是**永远**不该被 Prettier 动的部分。
+
+node_modules/
+**/dist/
+*.tsbuildinfo
+
+# 锁文件由包管理器生成，格式不属于本仓库
+pnpm-lock.yaml
+Cargo.lock
+
+# Markdown：docs/ 下的架构文档是人工排版的中文长文（含表格与对齐的
+# 注释块），Prettier 重排会破坏可读性，且没有任何收益。
+*.md
+
+# 示例的 Tauri 工程是独立依赖树
+examples/minimal-app/src-tauri/
+examples/minimal-app/dist/
+
+.workbuddy-ai/

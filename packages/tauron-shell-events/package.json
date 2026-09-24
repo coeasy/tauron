@@ -1,0 +1,32 @@
+{
+  "name": "@tauron/shell-events",
+  "version": "0.1.0",
+  "private": true,
+  "description": "tauron 壳层事件契约：oc-* 事件名常量与 detail 类型（零依赖，UI 组件与宿主控制器共用的唯一事实源）",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
+}

@@ -1,0 +1,197 @@
+name: Release
+
+# 触发：推 `v*` tag（如 v0.1.0），或手动触发做一次干跑。
+#
+# 约定：tag 必须从 **CI 已绿的 main** 上打。本工作流不重跑全量测试，
+# 只做一件廉价的强校验 —— tag 号与三处版本号必须一致（见 version-check）。
+# 这样「打了 v0.2.0 但忘了升版本号」不会产出错版安装包。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ══════════════════════════════════════════════════════════════════
+  # tag 号 vs 版本号一致性
+  #
+  # 本仓库的版本号散落在三处：workspace 的 `[workspace.package] version`
+  # （15 个 crate 全部 `version.workspace = true` 继承它）、根 package.json、
+  # 以及 20 个 `packages/*/package.json`。任一处掉队都会产出「名字是 0.2.0、
+  # 实际是 0.1.0」的产物 —— 这是纯机械可查的漂移，值得一道硬门禁。
+  # ══════════════════════════════════════════════════════════════════
+  version-check:
+    name: 版本号一致性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: tag 与 Cargo.toml / package.json 必须一致
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_ws=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          root_pkg=$(node -p "require('./package.json').version")
+          echo "tag=${tag}  Cargo.toml=${cargo_ws}  package.json=${root_pkg}"
+
+          rc=0
+          if [ "$tag" != "$cargo_ws" ]; then
+            echo "::error::tag v${tag} 与 Cargo.toml 的 [workspace.package] version=${cargo_ws} 不一致"
+            rc=1
+          fi
+          if [ "$tag" != "$root_pkg" ]; then
+            echo "::error::tag v${tag} 与根 package.json 的 version=${root_pkg} 不一致"
+            rc=1
+          fi
+
+          # 20 个 npm 包必须与根一致（否则 workspace 内部互引会跨版本）
+          node -e '
+            const fs = require("fs");
+            const want = require("./package.json").version;
+            let bad = 0;
+            for (const d of fs.readdirSync("packages")) {
+              const f = `packages/${d}/package.json`;
+              if (!fs.existsSync(f)) continue;
+              const v = JSON.parse(fs.readFileSync(f, "utf8")).version;
+              if (v !== want) { console.log(`::error::${f} 的 version=${v}，应为 ${want}`); bad++; }
+            }
+            if (bad) process.exit(1);
+            console.log("packages/* 版本号全部一致");
+          ' || rc=1
+
+          exit $rc
+
+  # ══════════════════════════════════════════════════════════════════
+  # 桌面产物构建：windows / macOS(arm64 + x64) / linux
+  # ══════════════════════════════════════════════════════════════════
+  build:
+    name: 构建 ${{ matrix.label }}
+    needs: version-check
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      # 一个平台失败不取消其他平台：先拿到能拿的产物，再看日志。
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x64
+            platform: ubuntu-22.04
+            args: ""
+            rust-targets: ""
+          - label: windows-x64
+            platform: windows-latest
+            args: ""
+            rust-targets: ""
+          - label: macos-arm64
+            platform: macos-latest
+            args: "--target aarch64-apple-darwin"
+            rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+          - label: macos-x64
+            platform: macos-latest
+            args: "--target x86_64-apple-darwin"
+            rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Linux 系统依赖（webkit2gtk 系列 + 打包工具）──────────────
+      - name: 安装 Linux 系统依赖
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            file \
+            rpm
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      # 缓存示例工程（被 workspace `exclude`，是独立依赖树）。
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/minimal-app/src-tauri -> target
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      # tauri.conf.json 的 `frontendDist` 是 `../dist`，而 `dist/` 不入版本库
+      # —— 必须先构建前端，否则 tauri build 会因为找不到前端产物而失败。
+      # 用 `pnpm -r build` 而不是只 build minimal-app：它依赖 `@tauron/core`
+      # 等 workspace 包，那些包的 dist/ 也得先在。
+      - name: 构建前端
+        run: pnpm -r build
+
+      - name: tauri build
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: examples/minimal-app
+          # 示例工程 package.json 里声明的脚本就是 `pnpm dlx @tauri-apps/cli@2`，
+          # 直接复用它，避免在 CI 里另装一份 CLI。
+          tauriScript: pnpm tauri
+          args: ${{ matrix.args }}
+
+      - name: 收集产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.label }}
+          # 不带 --target 时产物在 target/release/bundle，
+          # 带 --target 时在 target/<triple>/release/bundle。
+          path: |
+            examples/minimal-app/src-tauri/target/release/bundle/**
+            examples/minimal-app/src-tauri/target/*/release/bundle/**
+          if-no-files-found: error
+          # 安装包本身已压缩，再压一遍没有收益。
+          compression-level: 0
+
+  # ══════════════════════════════════════════════════════════════════
+  # 汇总发布：单点创建 Release，避免 4 个 matrix 分支并发写同一个
+  # Release 造成的竞态。
+  # ══════════════════════════════════════════════════════════════════
+  release:
+    name: 创建 GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 列出待发布文件
+        run: find artifacts -type f | sort
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          # draft：产物先落成草稿，人工过一眼再点发布。
+          draft: true
+          generate_release_notes: true
+          files: artifacts/**/*

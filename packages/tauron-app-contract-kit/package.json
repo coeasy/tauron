@@ -1,0 +1,23 @@
+{
+  "name": "@tauron/app-contract-kit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "tauron 应用契约测试套件：core API 行为 / 事件协议 / 错误码用例集 + mock Backend",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint ."
+  },
+  "peerDependencies": {
+    "@tauron/host": "workspace:*"
+  },
+  "devDependencies": {
+    "@tauron/host": "workspace:*",
+    "@tauron/framework": "workspace:*",
+    "@types/node": "^22.13.5",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
+}

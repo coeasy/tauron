@@ -1,0 +1,41 @@
+{
+  "name": "@tauron/adapter-react",
+  "version": "0.1.0",
+  "private": true,
+  "description": "tauron React 适配器（设计文档 §4.2）：useInvoke/useEvent/useCapabilities/usePluginId 钩子、ReactiveStore",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@tauron/core": "workspace:*",
+    "@tauron/types": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/react-hooks": "^8.0.1",
+    "@types/react": "^18.3.0",
+    "react": "^18.3.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
+}

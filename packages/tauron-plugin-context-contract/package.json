@@ -1,0 +1,33 @@
+{
+  "name": "@tauron/plugin-context-contract",
+  "version": "0.1.0",
+  "private": true,
+  "description": "tauron 插件上下文共享契约：PluginContext 及其窄接口（仅类型，零运行时依赖；两代插件 SDK 共用的唯一事实源）",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
+}

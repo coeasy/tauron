@@ -1,0 +1,24 @@
+[package]
+name = "tauron-minimal-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tauri = { version = "2", features = ["wry"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 框架层：plugin_invoke / plugin_cancel / plugin_emit 三条信封命令
+tauron-shell = { path = "../../../crates/tauron-shell", features = ["tauri"] }
+# 应用层：host_* 命令族（54 条：窗口/剪贴板/对话框/更新/事件总线/恢复/i18n…）
+tauron-adapter = { path = "../../../crates/tauron-adapter", features = ["tauri"] }
+
+[features]
+default = []
+# 验收标准 1 的证据（方案 §9-1）：只 `manage(SubstrateState)` + 底座命令族
+# （38 条），不建 PluginRuntimeState、不注册插件命令。
+#   cargo check --manifest-path examples/minimal-app/src-tauri/Cargo.toml \
+#     --features substrate-only --all-targets
+substrate-only = []
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

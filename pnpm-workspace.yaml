@@ -1,0 +1,8 @@
+packages:
+  - "packages/*"
+  - "examples/*"
+
+# pnpm 11 默认拒绝依赖的 postinstall 脚本，必须逐个显式放行。
+# esbuild 的 postinstall 负责链接平台二进制；vitest 依赖 esbuild。
+allowBuilds:
+  esbuild: true

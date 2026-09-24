@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗与插件面板窗的 IPC 授权：本示例的 54 条 host_* 命令走 root 注册（裸命令名），不受 Tauri 插件 ACL 管辖；本能力文件授予的是 Tauri 核心命令面（事件监听/窗口操作等）。`windows` 必须同时覆盖 `plugin-*`：`host_window_create` 铸出的插件面板窗 label 恒为 `plugin-<插件 id>`，不在任何能力文件里就等于该窗口没有任何 IPC 访问权（Tauri v2 的规则是「不匹配任何 capability 的 webview 完全没有 IPC 访问」），插件界面会一片空白。",
+  "windows": ["main", "plugin-*"],
+  "permissions": ["core:default"]
+}

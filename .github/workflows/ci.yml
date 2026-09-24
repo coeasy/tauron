@@ -1,0 +1,231 @@
+name: CI
+
+# 触发：main 的 push、所有 PR、以及手动触发。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一 ref 上连发 push 时取消旧运行，避免排队。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ══════════════════════════════════════════════════════════════════
+  # TypeScript：build → typecheck → test
+  #
+  # ⚠️ 顺序不可换。`@tauron/*` 之间以 `workspace:*` 互引，测试是从 `dist/`
+  # 解析导入的；不先 build 会得到一批 "Failed to resolve import" 的**假失败**
+  # （本仓库踩过这个坑）。根 package.json 的 `verify` 脚本就是这个顺序，
+  # 这里拆成独立 step 只是为了失败时能一眼看出卡在哪一步。
+  # ══════════════════════════════════════════════════════════════════
+  typescript:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # pnpm 11 默认拒绝依赖的 postinstall 脚本；`pnpm-workspace.yaml` 的
+      # `allowBuilds` 已放行 esbuild（vitest 依赖它的平台二进制）。
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 构建（第 1 步，不可省）
+        run: pnpm -r build
+
+      - name: 类型检查（第 2 步）
+        run: pnpm -r --no-bail typecheck
+
+      # ESLint 目前 **0 error / 83 warning**，因此可以作为硬门禁：`eslint .`
+      # 只在 error 上非零退出，warning 不阻塞。
+      # 那 83 条 warning 绝大多数是测试文件里的未用导入，属于待清理债务
+      # （见 CHANGELOG.md「已知债务」）。**不要**在这里加 `--max-warnings 0`，
+      # 那会把仓库直接变红，反而丢掉信号价值。
+      - name: Lint（ESLint）
+        run: pnpm lint
+
+      - name: 测试（第 3 步）
+        run: pnpm -r --no-bail test
+
+      # wire-gate 在 `pnpm -r test` 里已经跑过。这里再单独跑一次，是为了让
+      # 「TS↔Rust 契约被破坏」这件事在 CI 摘要里**一眼可见**，而不是淹在
+      # 1500+ 条用例的输出里。它直接正则解析 Rust 源码文本做断言，是唯一
+      # 能拦住「改了 Rust 侧字段名但没改 TS 侧」的门。
+      - name: 跨语言契约门禁（wire-gate）
+        run: pnpm --filter @tauron/contract-tests exec vitest run src/wire-gate.test.ts
+
+  # ══════════════════════════════════════════════════════════════════
+  # Rust 底座线：默认特性。
+  # `tauri` 在 tauron-shell / tauron-adapter 里都是 **optional**，默认构建
+  # 完全不碰它 —— 因此这一步不需要任何系统库（webkit2gtk 等），可以跑在
+  # 最便宜的 runner 上。这是本仓库「核心逻辑离线可测」的设计在 CI 上的兑现。
+  # ══════════════════════════════════════════════════════════════════
+  rust:
+    name: Rust (default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `--locked` 是硬要求：本仓库提交 Cargo.lock，构建必须可复现。
+      - name: 测试
+        run: cargo test --workspace --locked
+
+      # 抓「只在某个 target 下才编译到的死代码 / 未用导入」。
+      # 本仓库的历史缺陷类型之一是「有类型、有接口、有测试、没有入口」，
+      # 编译全 target 是第一道筛子。
+      - name: 编译检查（全部 target）
+        run: cargo check --workspace --all-targets --locked
+
+  # ══════════════════════════════════════════════════════════════════
+  # Rust 应用层：`tauri` feature + 示例工程。
+  # 打开 tauri 会引入 wry → Linux 上需要 webkit2gtk 系列系统库。
+  # ══════════════════════════════════════════════════════════════════
+  rust-tauri:
+    name: Rust (tauri feature)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Tauri 的 Linux 系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 测试 tauron-shell（tauri feature）
+        run: cargo test -p tauron-shell --features tauri --locked
+
+      - name: 测试 tauron-adapter（tauri feature）
+        run: cargo test -p tauron-adapter --features tauri --locked
+
+      # 全 feature 组合的编译检查。放在这个 job 里是因为 `--all-features`
+      # 会打开 tauri，需要上面那批系统库。
+      - name: 全特性编译检查
+        run: cargo check --workspace --all-targets --all-features --locked
+
+  # ══════════════════════════════════════════════════════════════════
+  # 示例工程「任意宿主底座」装配路径
+  #
+  # 这是方案 §9-1 验收标准 1 的命令，取自
+  # `examples/minimal-app/src-tauri/Cargo.toml` 的注释：只 manage 底座状态、
+  # 不建 PluginRuntimeState、不注册插件命令，证明「底座可以脱离插件框架
+  # 单独装配」。
+  #
+  # ⚠️ advisory（continue-on-error）：该工程被 workspace `exclude`，是独立
+  # 依赖树，且 `bundle.icon` 目前只有 `icon.ico`（Linux 打包需要 png）。
+  # 首次 CI 跑通、图标补齐之后再转硬门禁。
+  # ══════════════════════════════════════════════════════════════════
+  example-substrate-only:
+    name: 示例工程 substrate-only（advisory）
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Tauri 的 Linux 系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/minimal-app/src-tauri -> target
+
+      # tauri-build 会校验 `frontendDist`（../dist）存在，而 `dist/` 是构建
+      # 产物、不入版本库。这里造一个占位，避免 `cargo check` 被无关原因绊倒。
+      # 真实产物由 release 工作流构建。
+      - name: 占位前端产物
+        run: mkdir -p examples/minimal-app/dist && echo '<!doctype html>' > examples/minimal-app/dist/index.html
+
+      - name: cargo check --features substrate-only
+        run: |
+          cargo check \
+            --manifest-path examples/minimal-app/src-tauri/Cargo.toml \
+            --features substrate-only \
+            --all-targets
+
+  # ══════════════════════════════════════════════════════════════════
+  # 以下为 **advisory** 任务：报告问题，但不构成合并门禁。
+  #
+  # 原因写在 rustfmt.toml / clippy.toml 的「诚实边界」段里，这里不重复。
+  # 一句话：这两个工具从未在本仓库上跑过，一次 `--check` 会报出全量差异
+  # （rustfmt 实测 691 hunk / 59 文件）。在代码库规范化并验证编译/测试
+  # 之前，把它们设成硬门禁只会让 CI 永久红着，反而失去信号价值。
+  # 规范化之后把 `continue-on-error` 删掉即可转正。
+  # ══════════════════════════════════════════════════════════════════
+  fmt:
+    name: cargo fmt --check（advisory）
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy（advisory）
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  # cargo-deny 配置（licenses 白名单 + RustSec advisories + bans）是完备的，
+  # 但 advisories 库每天更新，一条新披露就可能让构建变红。设成 advisory，
+  # 让「有新披露」变成一条待处理信号而不是阻塞。
+  deny:
+    name: cargo-deny（advisory）
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: embarkstudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features

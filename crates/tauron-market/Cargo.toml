@@ -1,0 +1,15 @@
+[package]
+name = "tauron-market"
+description = "§4.18 商城：索引、验签、受控解包、版本比对、审计日志"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = "0.10"

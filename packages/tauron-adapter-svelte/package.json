@@ -1,0 +1,35 @@
+{
+  "name": "@tauron/adapter-svelte",
+  "version": "0.1.0",
+  "private": true,
+  "description": "tauron Svelte 适配器（设计文档 §4.2）：invoke/event/capabilities stores",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@tauron/types": "workspace:*",
+    "@tauron/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "svelte": "^4.0.0 || ^5.0.0"
+  },
+  "devDependencies": {
+    "svelte": "^4.2.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
+}

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>tauron minimal app</title>
+  </head>
+  <body>
+    <main style="font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem">
+      <h1>tauron 应用层贯通示例</h1>
+      <p id="status" style="color:#666">初始化中…</p>
+
+      <section>
+        <h2>1. iframe 沙箱插件（握手 + 方法调用）</h2>
+        <p>插件页在 <code>sandbox="allow-scripts"</code> 的 iframe 中运行，
+        宿主经 URL hash 注入握手 token；调用走 <code>__invoke:/__result:</code> 协议。</p>
+        <input id="plugin-input" value="  let  x = 1;  " style="width:14rem" />
+        <button id="btn-plugin" disabled>调用插件 format</button>
+        <pre id="plugin-out"></pre>
+      </section>
+
+      <section>
+        <h2>2. 窗口与系统能力（host_* 命令）</h2>
+        <button id="btn-minimize">最小化窗口</button>
+        <button id="btn-clipboard">读剪贴板</button>
+        <button id="btn-update">检查更新</button>
+        <pre id="host-out"></pre>
+      </section>
+
+      <section>
+        <h2>3. UI 组件（@tauron/ui）</h2>
+        <button id="btn-toast">推送 oc-toast 通知</button>
+        <oc-toast id="toast"></oc-toast>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

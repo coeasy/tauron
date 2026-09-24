@@ -1,0 +1,39 @@
+[package]
+name = "tauron-adapter"
+description = "Tauri 命令适配层：tauron-host → Tauri bridge（guard() 每入口）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+default = []
+# 启用 Tauri v2 命令桥接（#[tauri::command] 包装 + invoke_handler）
+tauri = ["dep:tauri"]
+
+[dependencies]
+tauron-host = { workspace = true }
+tauron-i18n = { workspace = true }
+tauron-notify = { workspace = true }
+tauron-recovery = { workspace = true }
+# 设置存储（R7-2 激活孤儿 crate）：宿主设置的 schema 校验与版本迁移都在它的
+# `SettingsStore` 里，适配层不再自己持一个裸 `HashMap`。用 path 而非 workspace
+# 依赖：workspace 根的 `[workspace.dependencies]` 属**只读文件**，本轮不改。
+tauron-settings = { path = "../tauron-settings" }
+# 进程插件 host（P0-2 激活孤儿 crate）：只被**插件运行时域**用到——
+# `tauron_host` 不依赖它（租约表认识的是 plugin_id/pid，不认识进程 API），
+# 启动/探测存活留在适配层这一侧，平台细节与进程细节都不进核心。
+tauron-proc = { path = "../tauron-proc" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+semver = { workspace = true }
+# 可选：仅在 `tauri` feature 下编译，核心逻辑保持平台无关
+tauri = { version = "2", optional = true, default-features = false, features = ["wry"] }
+
+[dev-dependencies]
+# 恢复标记持久化的单测需要一个可删除的临时目录（已在 workspace dev-deps 中）。
+tempfile = { workspace = true }

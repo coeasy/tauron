@@ -1,0 +1,51 @@
+{
+  "name": "@tauron/app-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "tauron 应用 CLI 工具：create-tauron-app 脚手架、plugin new/dev/pack/sign/publish、brand build",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "create-tauron-app": "./dist/cli.js",
+    "tauron-app": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./scaffold": {
+      "types": "./dist/scaffold.d.ts",
+      "default": "./dist/scaffold.js"
+    },
+    "./plugin": {
+      "types": "./dist/plugin.d.ts",
+      "default": "./dist/plugin.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@tauron/market": "workspace:*"
+  },
+  "peerDependencies": {
+    "@tauron/host": "workspace:*"
+  },
+  "devDependencies": {
+    "@tauron/host": "workspace:*",
+    "@types/node": "^22.13.5",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
+}

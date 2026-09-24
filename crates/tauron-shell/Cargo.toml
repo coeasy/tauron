@@ -1,0 +1,35 @@
+[package]
+name = "tauron-shell"
+description = "tauron Rust 壳层（设计文档 §1.1/§2/§3/§4/§8）：plugin_invoke handler、注册表、ACL 检查、Extism WASM、进程插件、tracing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+default = []
+# 启用 Tauri v2 命令注册层（`plugin_invoke` / `plugin_cancel` / `plugin_emit`）。
+# 核心逻辑（dispatch/registry/eventbus/acl）不依赖此 feature，默认构建完全离线可测。
+tauri = ["dep:tauri"]
+extism = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hex.workspace = true
+hmac.workspace = true
+tracing = "0.1"
+# 可选：仅在 `tauri` feature 下编译（薄命令适配层）
+tauri = { version = "2", optional = true, default-features = false, features = ["wry"] }
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }

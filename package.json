@@ -1,0 +1,31 @@
+{
+  "name": "open-client-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Tauri 客户端基础框架 monorepo（开发计划 v1.2-draft §3 工程形态）",
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint .",
+    "lint:rust": "cargo clippy --workspace --all-targets --locked -- -D warnings",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "fmt:rust": "cargo fmt --all",
+    "fmt:rust:check": "cargo fmt --all -- --check",
+    "verify": "pnpm -r build && pnpm -r --no-bail typecheck && pnpm -r --no-bail test"
+  },
+  "devDependencies": {
+    "@tauri-apps/api": "2.5.0",
+    "eslint": "^10.11.0",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.9",
+    "typescript": "^5.8.0",
+    "typescript-eslint": "^8.70.1"
+  }
+}

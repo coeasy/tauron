@@ -1,0 +1,57 @@
+{
+  "name": "@tauron/host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "tauron 能力编排层：invoke/event/channel 封装、错误规范化、能力探测、Backend provider 抽象",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./tauri": {
+      "types": "./dist/tauri-backend.d.ts",
+      "default": "./dist/tauri-backend.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "prebuild": "rimraf dist",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@tauron/core": "workspace:*",
+    "@tauron/shell-events": "workspace:*",
+    "@tauron/types": "workspace:*"
+  },
+  "peerDependencies": {
+    "@tauri-apps/api": "^2.5.0"
+  },
+  "peerDependenciesMeta": {
+    "@tauri-apps/api": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@tauri-apps/api": "2.5.0",
+    "@types/node": "^22.13.5",
+    "happy-dom": "^17.0.0",
+    "rimraf": "^6.0.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
+}

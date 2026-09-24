@@ -1,0 +1,21 @@
+{
+  "productName": "Tauron Minimal App",
+  "version": "0.1.0",
+  "identifier": "com.tauron.minimal-app",
+  "build": {
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Tauron Minimal App",
+        "width": 1024,
+        "height": 768
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

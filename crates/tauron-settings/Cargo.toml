@@ -1,0 +1,18 @@
+[package]
+name = "tauron-settings"
+description = "§4.12 设置中心：schema 注册表 + 四层合并 + get/set/watch + 渲染数据产出"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tauron-schema = { path = "../tauron-schema" }
+
+[dev-dependencies]
+tempfile = "3"

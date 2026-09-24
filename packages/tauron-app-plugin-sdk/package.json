@@ -1,0 +1,39 @@
+{
+  "name": "@tauron/app-plugin-sdk",
+  "version": "0.1.0",
+  "description": "tauron 应用插件开发 SDK：类型安全、生命周期管理、Contributes 注册",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    }
+  },
+  "files": ["dist"],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@tauron/plugin-context-contract": "workspace:*"
+  },
+  "peerDependencies": {
+    "@tauron/host": "workspace:*"
+  },
+  "devDependencies": {
+    "@tauron/host": "workspace:*",
+    "@tauron/plugin-sdk": "workspace:*",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
+}
