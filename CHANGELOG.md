@@ -72,6 +72,14 @@
   ——此前 `bundle` 段整体缺失，Linux 的 `deb`/`AppImage` 与 macOS 的 `.app`
   都没有图标来源。Windows NSIS 已重测出包；Linux / macOS **仍未实测**
   （见「已知债务」第 7 条）
+- 修 `release.yml` 的 Windows 腿：`校验示例工程锁文件` 步骤写的是 `\` 续行
+  （bash 语法），而 windows runner 上 `run:` 默认走 pwsh（pwsh 的续行是反引号），
+  于是三行被拆成三条独立语句、第一条变成「`cargo metadata` 带一个 `\` 参数」，
+  cargo 非零退出 → 步骤失败 → 整条 Windows 腿失败 → `release` job（`needs: build`）
+  根本没执行。**v0.1.0 首次 Release 实测**：windows-x64 于 1m6s 失败，
+  `tauri build` 与 `收集产物` 均被 skip（同一提交的 linux/macOS 三腿全部成功）。
+  该步骤固定 `shell: bash` 并加注释说明为什么不能删；同时把 Windows 腿的 bundle
+  显式钉成 `--bundles nsis`（理由见「已知债务」第 11 条）
 - `rustfmt.toml` / `clippy.toml` / `eslint.config.js` / `.prettierrc.json`
 - 本文件
 
@@ -347,6 +355,20 @@ host 命令面缺 menu / tray / fs / http 四域。
 `@testing-library/react-hooks@8` 声明 `react ^16.9 || ^17`，实际装的是 react 18；
 `@testing-library/react@16` 缺 `react-dom` peer。属既有状态，不影响测试通过
 （`pnpm peers check` 可复现）。
+
+**11. Windows 只出 NSIS，不出 MSI**
+
+`release.yml` 的 Windows 腿显式传 `--bundles nsis`，因此**不产出 `.msi`**。
+原因是 `tauri.conf.json` 的 `targets: "all"` 在 Windows 上等于 `nsis + msi`，
+而 MSI 需要 tauri-bundler 在**构建期**去 GitHub Releases 下载 WiX v3.14 工具链
+（本机实测日志：`Info Verifying wix package` → `Downloading
+https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip`
+→ 失败即 `failed to bundle project`）。那是一次额外的网络依赖，一旦失败整条
+Windows 腿红掉、连 NSIS 也拿不到。NSIS 是 Windows 侧主安装包格式，先保证它
+确定可出。
+
+**未实测**：CI 上 `--bundles nsis,msi`（即 WiX 下载在 runner 上是否稳定）——
+本机因沙箱代理无法验证。要加回 MSI，需先在 CI 上确认这一步能过。
 
 **11. sidecar ABI 校验的「实际值」无可信来源**
 

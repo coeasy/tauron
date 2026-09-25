@@ -106,7 +106,14 @@ jobs:
             rust-targets: ""
           - label: windows-x64
             platform: windows-latest
-            args: ""
+            # 只出 NSIS，不跟着 `tauri.conf.json` 的 `targets: "all"` 走。
+            # Windows 上 "all" = nsis + **msi**，而 MSI 需要 tauri-bundler 在
+            # 构建期去 GitHub Releases 下载 WiX v3.14 工具链——那是一次额外的
+            # 网络依赖，失败时整条 Windows 腿红掉、连 NSIS 也拿不到（本机实测：
+            # `Downloading .../wix314-binaries.zip` 失败即 `failed to bundle
+            # project`）。NSIS 是 Windows 侧主安装包格式，先保证它确定可出。
+            # MSI 待补齐 WiX 依赖后再加回（见 CHANGELOG「已知债务」）。
+            args: "--bundles nsis"
             rust-targets: ""
           - label: macos-arm64
             platform: macos-latest
@@ -169,7 +176,14 @@ jobs:
       # 未文档化行为，不能当作可复现性的保证。这一步用 `cargo metadata --locked`
       # 硬校验「锁文件与 Cargo.toml 一致」，不一致直接红，而不是打出一个依赖树
       # 与提交不符的安装包。
+      # ⚠️ `shell: bash` 不能删。windows runner 上 `run:` 默认走 pwsh，而 `\`
+      # 续行是 bash 语法（pwsh 的续行是反引号 `` ` ``）。没有这行时，Windows 腿
+      # 会把三行拆成三条独立语句，第一条变成「`cargo metadata` 带一个 `\` 参数」
+      # → cargo 非零退出 → 步骤失败 → 整条 Windows 腿失败 → `release` job
+      # （needs: build）不执行。v0.1.0 首次 Release 实测就卡在这里（1m6s，
+      # step 10 failure，tauri build / 收集产物 均被 skip）。
       - name: 校验示例工程锁文件
+        shell: bash
         run: |
           cargo metadata \
             --manifest-path examples/minimal-app/src-tauri/Cargo.toml \
