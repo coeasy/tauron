@@ -239,22 +239,89 @@ jobs:
           find artifacts -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \) | sort
 
       # 未认证的 `GET /releases` 看不到草稿，所以「有没有草稿」在外部查不出来。
-      # 这一步用带 token 的 gh 把状态打到日志里：重跑时若已有草稿，action 会
-      # **复用**它（而不是新建），配合默认的 overwrite_files=true 走 PATCH
-      # 资产那条路——正是 v0.1.0 第二次 Release 报的那个
-      # `Not Found .../releases/assets#update-a-release-asset`。先看清楚再动手。
-      - name: 查看该 tag 是否已有 Release（含草稿）
+      # 这两步用带 token 的 gh 先把状态打到日志里，再**删掉已有草稿**。
+      #
+      # 为什么要删：action 在发现同名草稿时会**复用它**（README：reuses an existing
+      # draft release），于是资产走「已存在 → 覆盖」那条路——v0.1.0 第二次 Release
+      # 就是在这里报的 `Not Found .../releases/assets#update-a-release-asset`（当时
+      # 还叠加了 .app 内部文件互相覆盖的问题）。先删草稿，让 action 每次都走「新建」
+      # 这条已被实测验证的路径：重跑、重打 tag 都得到一份干净产物。
+      #
+      # ⚠️ `--cleanup-tag=false` 不能省：只删 Release，绝不动 tag（删 tag 会让本次
+      # 运行的 GITHUB_REF 失效）。已**正式发布**的 Release 也绝不删——流水线不该
+      # 静默改写已公开的版本。
+      - name: 查看并清理该 tag 已有的草稿 Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+          tag="$GITHUB_REF_NAME"
+          echo "── 清理前 ──"
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
             --json tagName,isDraft,assets 2>&1 || echo "（该 tag 尚无任何 Release）"
 
-      - uses: softprops/action-gh-release@v2
+          is_draft=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft -q .isDraft 2>/dev/null || echo "")
+          if [ "$is_draft" = "true" ]; then
+            echo "::notice::删除已存在的草稿 Release（$tag），改走新建路径"
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag=false
+          else
+            echo "无需清理（isDraft='${is_draft}'，非草稿或不存在）"
+          fi
+
+      - uses: softprops/action-gh-release@v3
         with:
           # draft：产物先落成草稿，人工过一眼再点发布。
           draft: true
           generate_release_notes: true
+          # `body` 会**前置**到自动生成的 notes（action README：the body will be
+          # pre-pended to the automatically generated notes），因此这里是给 Releases
+          # 页面访问者的「这是什么 / 下载哪个 / 安装前必读 / 装完怎么自检」，后面
+          # 接的是本版本完整提交列表。文案与 docs/installation.md 保持一致。
+          body: |
+            ## tauron v0.1.0 —— 首个版本
+
+            **tauron 是跑在 Tauri 2 之上的插件化桌面客户端基础设施**——它交付的是
+            **框架**（15 个 Rust crate + 20 个 npm 包），不是一个开箱即用的成品应用。
+            本 Release 提供的是仓库里**唯一可安装**的东西：`examples/minimal-app`
+            示例应用，用来把框架的四条真实链路跑给人看。
+
+            ### 下载哪个
+
+            | 平台 | 文件 | 格式 |
+            |---|---|---|
+            | Windows x64 | `Tauron Minimal App_0.1.0_x64-setup.exe` | NSIS 安装包 |
+            | macOS（Apple Silicon） | `..._aarch64.dmg` | 磁盘映像 |
+            | macOS（Intel） | `..._x64.dmg` | 磁盘映像 |
+            | Linux | `..._amd64.deb` / `..._x86_64.rpm` / `..._amd64.AppImage` | 三种任选 |
+
+            ### ⚠️ 安装前必读
+
+            - **安装包未签名、未公证**：Windows 会弹 SmartScreen（点「更多信息」→
+              「仍要运行」），macOS 会被 Gatekeeper 拦（右键点图标 → 打开）。**这不是
+              安装包坏了。**
+            - **Windows 只提供 NSIS，不提供 MSI**：MSI 需要构建期下载 WiX 工具链，
+              属额外网络依赖，失败时会连 NSIS 一起拿不到。
+            - 图标是示例图标（由 `app-icon.svg` 生成的几何标记），非正式品牌资产。
+
+            ### 装完怎么确认「真的通了」
+
+            启动后有四条可点的演示链路：**格式化**（沙箱插件握手）/ **最小化窗口** /
+            **读剪贴板** / **检查更新**。四条都点得出反应，说明
+            Rust 命令层 ↔ Tauri IPC ↔ 前端适配层这条主链是通的。
+
+            > 「检查更新」返回带 `simulated: true` 标记的响应是**正确行为**——本项目
+            > 刻意区分「真实实现」与「接口占位」，用诚实失败码表达，不伪造成功。
+
+            ### 文档
+
+            - [安装与使用](https://github.com/coeasy/tauron/blob/main/docs/installation.md)
+              —— 三种「安装」怎么选、各平台步骤、从源码构建、装完自检
+            - [架构概览](https://github.com/coeasy/tauron/blob/main/docs/architecture/overview.md)
+              —— 含「接线状态（诚实披露）」
+            - [CHANGELOG / 已知债务](https://github.com/coeasy/tauron/blob/main/CHANGELOG.md)
+              —— 未发布到 registry、MSI 缺失、进程插件 JSON-RPC 未接线等边界逐条登记
+
+            ---
           # 只上传真正的安装包，**不要**写 `artifacts/**/*`。
           # `download-artifact` 会把 macOS 的 `Tauron Minimal App.app` 整棵目录树
           # 摊进 artifacts/，宽 glob 会把 .app 内部的 Info.plist / icon.icns /

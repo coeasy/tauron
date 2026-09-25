@@ -96,6 +96,23 @@
 - `rustfmt.toml` / `clippy.toml` / `eslint.config.js` / `.prettierrc.json`
 - 本文件
 
+**发布流程加固**（发布前补齐）
+
+- `release.yml` 的 `release` 作业新增**「查看并清理该 tag 已有的草稿 Release」**：
+  先打印状态（未认证的 `GET /releases` 看不到草稿，外部查不出来），若该 tag 已存在
+  **草稿**则删掉，让 `softprops/action-gh-release` 每次走「新建」这条已被实测验证的
+  路径。原因是该 action 会**复用**同名草稿，于是资产走「已存在 → 覆盖」那条路——
+  v0.1.0 第二次 Release 正是在这里报的 `Not Found .../releases/assets#update-a-release-asset`。
+  只删草稿，**绝不删已正式发布的 Release**；`--cleanup-tag=false` 保证不动 tag
+- `release.yml` 的 release 作业新增**策展版 release 正文**（`body`，会**前置**到
+  `generate_release_notes` 自动生成的提交列表之前）：这是什么 / 下载哪个 / 安装前
+  必读（未签名未公证、Windows 无 MSI）/ 装完怎么自检 / 文档索引。此前只有自动生成的
+  提交列表，对访问 Releases 页面的人没有可用信息
+- `softprops/action-gh-release` 由 `@v2` 升到 **`@v3`**：v3.0.0 把运行时从 Node 20
+  迁到 Node 24（v2.6.2 是最后一个 Node 20 兼容版，已停止维护），且 v3.0.2 含
+  「复用草稿时正确发布」「替换已存在资产」「加固流式资产上传」「澄清创建 404」
+  等修复，正好命中本仓库踩过的坑
+
 **文档**（本次补齐）
 
 - 新增 [`docs/installation.md`](./docs/installation.md)：此前的**完整缺口**——仓库
