@@ -75,7 +75,7 @@ import { MockBackend } from '@tauron/host/testing';
 ## 主窗客户端（应用层）
 
 以下客户端面向**主窗**，通过 `host_window_*` / `host_dialog_*` / `host_clipboard_*` /
-`host_market_*` / `host_deep_link_*` 等主窗命令族工作（完整 45 条命令面见
+`host_market_*` / `host_deep_link_*` 等主窗命令族工作（完整 54 条命令面见
 `crates/tauron-adapter/src/tauri.rs` 的 `generate_handler!`）：
 
 - `ShellClient` / `ShellController` — 标题栏动作、主题、更新事件路由（`bootstrap()` 已接线）

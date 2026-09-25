@@ -6,6 +6,7 @@
 
 | 文档 | 内容 | 性质 |
 |---|---|---|
+| [../installation.md](../installation.md) | 安装与使用：三种「安装」辨析、各平台安装示例应用、从源码构建、接入自己项目、装完自检、已知限制与 FAQ | 落地入口——**第一次接触先读这份** |
 | [overview.md](./overview.md) | 整体架构图、两层架构、包命名体系、模块依赖、关键设计决策 | **权威说明**——改架构先改这里 |
 | [app-layer-wire.md](./app-layer-wire.md) | 应用层 `host_*` 命令族的线格式规范（参数形状 / 返回值 / 生命周期事件 / 能力档位）与限制登记 | 协议契约，由 wire-gate 门禁锁定 |
 | [canonical-owners.md](./canonical-owners.md) | canonical 归属表：哪些实现是唯一事实源、哪些是已冻结的 legacy 门面 | 架构决策——改这张表等于改架构 |

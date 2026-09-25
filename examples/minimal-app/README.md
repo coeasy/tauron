@@ -1,7 +1,17 @@
 # Minimal App Example — tauron 应用层贯通示例
 
 可运行的集成示例：宿主主窗 + **iframe 沙箱插件**（握手/调用全协议）+
-**45 条 `host_*` 命令族**（窗口/剪贴板/更新…）+ `@tauron/ui` Web Components。
+**54 条 `host_*` 命令族**（底座 38 + 插件运行时 16）+ `@tauron/ui` Web Components。
+
+## 安装包获取与运行
+
+不想自己构建的话，[Releases](https://github.com/coeasy/tauron/releases) 页有各平台
+安装包（Windows NSIS / macOS dmg / Linux deb·rpm·AppImage）。注意两点：
+
+- Release 产物先落成**草稿**，需维护者点发布后才可见；
+- 安装包**未签名、未公证**，Windows 会弹 SmartScreen、macOS 会被 Gatekeeper 拦——
+  这不是安装包坏了。处理办法与「装完怎么自检」见
+  [安装与使用](../../docs/installation.md)。
 
 ## 运行
 
@@ -17,6 +27,8 @@ cd examples/minimal-app
 pnpm tauri dev
 ```
 
+出安装包：`pnpm tauri build`（只想出 NSIS 用 `pnpm tauri build --bundles nsis`）。
+
 ## 项目结构
 
 ```
@@ -29,7 +41,7 @@ minimal-app/
 │   ├── main.ts                # 宿主侧全部接线（4 条链路）
 │   └── plugin/first.ts        # registerPlugin 声明式插件
 ├── src-tauri/
-│   ├── src/main.rs            # root 注册 45 条命令 + state_init
+│   ├── src/main.rs            # root 注册 54 条命令 + state_init
 │   ├── Cargo.toml
 │   ├── build.rs               # tauri-build
 │   ├── tauri.conf.json        # 含 bundle.icon 声明

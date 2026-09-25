@@ -10,6 +10,59 @@
 
 ---
 
+## 这是什么
+
+tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它解决的不是「怎么画界面」，
+而是「一个桌面客户端要怎么安全地加载第三方代码、把它们互相隔离、给它们受控的能力，
+并且能在不重新发版的前提下换掉它们」。
+
+它由两层组成，**可以分开取用**：
+
+| 层 | 面向 | 拿到什么 |
+|---|---|---|
+| **框架层** | 通用集成 | 信封协议 `plugin_invoke`、双世界沙箱、4+1 插件形态、双层 ACL、事件总线、插件市场、CLI |
+| **应用层** | 完整客户端交付 | `host_*` 命令族（54 条 = 底座 38 + 插件运行时 16）、生命周期状态机、三档授权、设置中心、白标、崩溃恢复、UI 组件 |
+
+### 它不是什么
+
+把边界说清楚比列特性更有用：
+
+- **不是成品应用**。仓库里**唯一能装**的是 `examples/minimal-app` 示例应用，
+  用来演示链路，不是产品形态的客户端。
+- **不是 Tauri 的替代品**。它建在 Tauri 2 之上——Tauri 管窗口 / WebView / IPC，
+  tauron 管其上的插件运行时与能力治理。
+- **不是「已发布、可 `install` 的 SDK」**。20 个 npm 包与 15 个 crate **都未发布到
+  registry**，只能 path / workspace 接入。
+- **不是 1.0**。版本 0.1.0，API 未冻结。
+
+### 成熟度：哪些是真的，哪些还是占位
+
+本项目刻意区分「真实实现」与「接口占位」，用 `simulated` 字段与诚实失败码表达，
+**不伪造成功**。判断某个能力到底能不能用，看这三处（不要只看本页的特性表）：
+
+- [架构概览的「接线状态（诚实披露）」](./docs/architecture/overview.md)
+- [竞品分析的兑现度标记](./docs/competitive-analysis/competitive-analysis.md)（带核对日期）
+- [CHANGELOG 的「已知债务」](./CHANGELOG.md)
+
+一句话概览：**信封协议、命令层、双层 ACL、注册表、事件总线、生命周期状态机、设置
+中心、崩溃恢复、i18n、通知、白标/主题是真实实现；QuickJS-WASM 引擎接入、Shell 矩阵
+的运行时、Process 插件的执行体、更新下载链路是接口占位或模拟原型。**
+
+### 现在适合拿它做什么
+
+| 场景 | 适不适合 |
+|---|---|
+| 给已有 Tauri 应用加一套插件系统 | ✅ 接框架层 |
+| 做一个要装第三方插件的桌面客户端 | ✅ 接应用层，按「三档装配」选档 |
+| 需要一个带设置中心 / 白标 / 崩溃恢复的客户端底座 | ✅ 接应用层 |
+| 想要开箱即用的成品桌面应用 | ❌ 这是框架，没有成品 |
+| 想要 `pnpm add` 就能用的稳定 SDK | ❌ 未发布 registry，且 API 未冻结（0.x） |
+
+**准备上手**：[安装与使用](./docs/installation.md) —— 三种「安装」怎么选、
+各平台安装步骤、从源码构建、装完怎么自检。
+
+---
+
 ## 特性
 
 | 特性 | 说明 |
@@ -21,8 +74,8 @@
 | **事件总线** | 每插件队列隔离，背压可配置，命名空间隔离 |
 | **配置 4 层合并** | session > plugin > user > default |
 | **Shell 矩阵** | local / local-server / remote-url / sub-webview（接口已定义，运行时为模拟原型） |
-| **插件市场** | HMAC-SHA256 签名，注册表搜索/发布 |
-| **CLI 工具链** | create/plugin new/dev/test/pack/sign/publish/doctor |
+| **插件市场** | HMAC-SHA256 签名，注册表搜索/发布（宿主侧 `host_market_*` 目前是桩，见上文成熟度） |
+| **CLI 工具链** | `create` / `plugin new` 真落盘；`doctor` 真探测环境；`plugin sign` 写真实 SHA-256 摘要（如实标 `simulated:true`，非签名）；`plugin dev/test/pack/publish` **未实现**且如实返回 `success:false`——不谎报成功 |
 | **UI 适配层** | React / Vue / Svelte hooks 和 composables |
 | **契约测试** | TS↔Rust 跨语言协议验证 |
 
@@ -383,7 +436,8 @@ tauron/
 │   ├── tauron-distribute/           # CI 分发运维
 │   ├── tauron-proc/                 # 进程插件 Host
 │   └── tauron-wasm/                 # WASM Supervisor
-├── packages/                        # 框架层（npm 包）
+├── packages/                        # npm 包（20 个，同一个目录；下面按层分组）
+│   # ── 框架层（12 个）──
 │   ├── types/                       # @tauron/types — 信封/错误码/ACL/Manifest/事件
 │   ├── tauron-core/                 # @tauron/core — invoke/backend/registry/event-bus/acl/config
 │   ├── tauron-plugin-sdk/           # @tauron/plugin-sdk — bridge/context
@@ -395,8 +449,8 @@ tauron/
 │   ├── tauron-cli/                  # @tauron/cli — 插件工具链（bin: tauron）
 │   ├── tauron-market/               # @tauron/market — 签名/注册表
 │   ├── tauron-shell-matrix/         # @tauron/shell-matrix — 4 种 shell 形态
-│   └── tauron-contract-tests/       # @tauron/contract-tests — TS↔Rust 跨语言门禁
-├── packages/                        # 应用层（npm 包）
+│   ├── tauron-contract-tests/       # @tauron/contract-tests — TS↔Rust 跨语言门禁
+│   # ── 应用层（8 个）──
 │   ├── tauron-host/                 # @tauron/host — 能力编排层（HostClient/TauriBackend）
 │   ├── tauron-shell-events/         # @tauron/shell-events — 壳层事件名常量（零依赖）
 │   ├── tauron-ui-primitives/        # @tauron/ui-primitives — UI 原语（零宿主依赖）
@@ -406,8 +460,9 @@ tauron/
 │   ├── tauron-framework/            # @tauron/framework — 框架薄封装
 │   └── tauron-ui/                   # @tauron/ui — Lit Web Components
 ├── examples/
-│   └── minimal-app/                 # 最小应用示例
+│   └── minimal-app/                 # 最小应用示例（仓库里唯一可打包运行的应用）
 └── docs/
+    ├── installation.md              # ★ 安装与使用（落地入口：怎么装 / 怎么跑 / 怎么自检）
     ├── architecture/                # 权威架构说明 / 线格式协议 / canonical 归属 / 0.3 方案
     ├── integration/                 # 渐进接入指南（三档装配）
     ├── api/                         # 插件开发指南
@@ -451,7 +506,7 @@ pnpm install
 #    不先 build 会得到一批 "Failed to resolve import" 的假失败。
 pnpm -r build
 pnpm -r --no-bail typecheck
-pnpm -r lint          # ESLint（当前 0 error / 82 warning）
+pnpm -r lint          # ESLint（当前 0 error / 81 warning）
 pnpm -r --no-bail test
 
 # 等价的一键命令（build → typecheck → test）
@@ -496,6 +551,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 | 文档 | 说明 |
 |---|---|
+| [安装与使用](./docs/installation.md) | 三种「安装」辨析、各平台安装示例应用、从源码构建、接入自己项目、装完自检、已知限制与 FAQ |
 | [架构概览](./docs/architecture/overview.md) | 整体架构图、两层架构、包命名体系、模块依赖、关键设计决策、架构演进 |
 | [应用层线格式协议](./docs/architecture/app-layer-wire.md) | `host_*` 命令族的参数 / 返回 / 生命周期事件 / 能力档位规范与限制登记 |
 | [canonical 归属](./docs/architecture/canonical-owners.md) | 唯一事实源与已冻结的 legacy 门面（改这张表等于改架构） |

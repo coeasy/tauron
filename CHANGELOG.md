@@ -96,6 +96,24 @@
 - `rustfmt.toml` / `clippy.toml` / `eslint.config.js` / `.prettierrc.json`
 - 本文件
 
+**文档**（本次补齐）
+
+- 新增 [`docs/installation.md`](./docs/installation.md)：此前的**完整缺口**——仓库
+  有架构文档、线格式协议、插件开发指南，却**没有一份「怎么装、怎么跑」的文档**。
+  覆盖三种「安装」辨析（跑起来看看 / 改代码构建 / 当库接入）、各平台安装步骤与
+  未签名未公证的实际处理（SmartScreen / Gatekeeper / `xattr`）、**装完怎么自检**
+  的四条演示链路表、从源码构建的完整流程与产物路径、三档装配入口、7 条已知限制
+  诚实清单、7 条 FAQ
+- README 新增「这是什么」整节：两层架构表、「它不是什么」4 条、成熟度指向三处
+  权威源（架构概览的接线状态 / 竞品分析的兑现度标记 / CHANGELOG 的已知债务）、
+  「现在适合拿它做什么」适不适合表，并挂上安装文档入口
+- **文档数字按实测重测并修正**：ESLint `0 error / 81 warning`（原写 82，已过期）；
+  示例工程 README 与 `@tauron/host` README 的 `host_*` 命令数 `45 条` → **54 条**
+  （底座 38 + 插件运行时 16，逐条数过 `tauron_substrate_handler!` /
+  `tauron_plugin_handler!` 的宏定义）
+- `docs/architecture/README.md` 文档地图补 `installation.md` 一行（标注为「落地
+  入口——第一次接触先读这份」）；示例工程 README 补「安装包获取与运行」一节
+
 ### Changed
 
 - **15 个 crate 的 `[package]` 元数据统一为 workspace 继承**。此前 9 个 crate 硬编码
