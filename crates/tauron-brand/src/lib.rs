@@ -204,16 +204,31 @@ pub fn merge_config(base: &Value, overlay: &Value) -> Value {
 ///
 /// 返回合并后的配置。未知键静默忽略（不报错——CI 环境可能注入额外变量）。
 pub fn apply_env_overrides(config: &Value, env_str: &str) -> Value {
+    apply_env_overrides_reporting(config, env_str).0
+}
+
+/// [`apply_env_overrides`] 的**带诊断**版本：额外返回被**丢弃**的键。
+///
+/// 「丢弃」= 点路径中途撞上非对象（例如先 `productName=x` 再
+/// `productName.foo=1`——`productName` 已是字符串，写不进去）。此前这条路径被
+/// `let _ = set_path(...)` 静默吞掉：CI 注入的覆盖没生效，却没有任何痕迹。
+/// 调用方（宿主启动装配）应把返回的键列表记进日志/诊断，而不是当作成功。
+pub fn apply_env_overrides_reporting(
+    config: &Value,
+    env_str: &str,
+) -> (Value, Vec<String>) {
     if env_str.trim().is_empty() {
-        return config.clone();
+        return (config.clone(), Vec::new());
     }
     let mut result = config.clone();
+    let mut dropped = Vec::new();
     for pair in env_str.split(';') {
         let pair = pair.trim();
         if pair.is_empty() {
             continue;
         }
         let Some((key, val)) = pair.split_once('=') else {
+            // 没有 `=`：不是覆盖项（可能只是分隔符残留），不算"丢弃"。
             continue;
         };
         let key = key.trim();
@@ -222,9 +237,11 @@ pub fn apply_env_overrides(config: &Value, env_str: &str) -> Value {
             Some(v) => v,
             None => Value::String(val.to_string()),
         };
-        let _ = set_path(&mut result, key, json_val);
+        if !set_path(&mut result, key, json_val) {
+            dropped.push(key.to_string());
+        }
     }
-    result
+    (result, dropped)
 }
 
 /// 按点号路径设置值。
@@ -589,6 +606,27 @@ mod tests {
         let base = serde_json::json!({"a": 1});
         let result = apply_env_overrides(&base, "");
         assert_eq!(result, base);
+    }
+
+    #[test]
+    fn apply_env_overrides_reports_dropped_paths_instead_of_swallowing_them() {
+        // `productName` 已是字符串，`productName.foo=1` 写不进去。此前被
+        // `let _ =` 静默吞掉——覆盖没生效却毫无痕迹。诊断版必须如实报告。
+        let base = serde_json::json!({"productName": "Base"});
+        let (result, dropped) =
+            apply_env_overrides_reporting(&base, "productName.foo=1;ok=5");
+        assert_eq!(dropped, vec!["productName.foo".to_string()]);
+        assert_eq!(result["ok"], 5);
+        // 兼容版行为不变（返回值仍是合并后的配置）。
+        let compat = apply_env_overrides(&base, "productName.foo=1;ok=5");
+        assert_eq!(compat, result);
+    }
+
+    #[test]
+    fn apply_env_overrides_reports_nothing_for_clean_input() {
+        let base = serde_json::json!({"window": {"width": 800}});
+        let (_, dropped) = apply_env_overrides_reporting(&base, "window.width=1024;debug=true");
+        assert!(dropped.is_empty(), "全部覆盖生效时不该报告任何丢弃");
     }
 
     // ── 唯一性校验 ───────────────────────────────────────────────────

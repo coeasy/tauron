@@ -328,6 +328,39 @@ mod tests {
         assert!(config.plugin_filter().is_none());
     }
 
+    /// 模块头那条「典型用法（第三方集成）」示例的**可执行镜像**。
+    ///
+    /// 为什么不用 doctest 独占：本机 doctest 需要另起 `rustc` 子进程编译示例，
+    /// 在管道资源紧张时 `Failed to spawn rustc.exe: Os { code: 231 }`（环境问题，
+    /// 非代码问题）——于是"文档里的用法到底编不编得过"在本机**无法验证**。
+    /// 这个用例把同一段用法搬进 crate 内测试，任何环境都能验证；
+    /// doctest 仍保留（CI 的 Linux runner 上照常跑）。
+    #[test]
+    fn documented_third_party_usage_compiles_and_works() {
+        // 与模块头 doctest 的第一段逐字对应（只把 `tauron_host::config::` 换成 crate 内路径）。
+        let config = ClientConfig::from_json(
+            r#"{
+    "registry": {
+        "plugin_filter": {
+            "allow": ["com.example.formatter"],
+            "types": ["js"],
+            "platforms": ["win"]
+        }
+    }
+}"#,
+        )
+        .unwrap();
+
+        // 与 doctest 的第三段对应：拿到合并后的 RegistryConfig。
+        let registry_config = config.registry_config();
+        let filter = config.plugin_filter().expect("过滤器应被解析出来");
+        assert_eq!(filter.allow, vec!["com.example.formatter".to_string()]);
+        assert_eq!(filter.types, vec!["js".to_string()]);
+        assert_eq!(filter.platforms, vec!["win".to_string()]);
+        // 未声明的项回落到默认值（缺省即安全）。
+        assert_eq!(registry_config.max_plugins, default_config().max_plugins);
+    }
+
     #[test]
     fn from_json_full_load() {
         let config = ClientConfig::from_json(full_load_json()).unwrap();

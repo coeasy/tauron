@@ -594,6 +594,19 @@ impl HeartbeatTracker {
         self.missed_count = 0;
         self.state = HeartbeatState::Healthy;
     }
+
+    /// 把追踪器直接推到 `Timeout`（**仅测试**）。
+    ///
+    /// 缺省 `timeout_ms` 是 15s，而 `spawn()` 会把 `last_heartbeat` 置为"现在"，
+    /// 于是 `check()` 在此后 15s 内恒为 `Healthy`——测试要覆盖超时分支就得真等
+    /// 15s。这里直接把状态摆成"已漏够次数"，让 `check()` 立刻判 `Timeout`，
+    /// 测试无需 sleep。
+    #[cfg(test)]
+    pub fn force_timeout(&mut self) {
+        self.last_heartbeat = None;
+        self.missed_count = self.config.max_missed;
+        self.state = HeartbeatState::Timeout;
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

@@ -232,10 +232,14 @@ describe('门禁：应用层宿主错误码 TS ↔ Rust 一致', () => {
     );
   }
 
-  it('线名逐项同序一致（Rust 18 码 ↔ TS HOST_ERROR_CODES）', () => {
+  it('线名逐项同序一致（Rust ErrorCode ↔ TS HOST_ERROR_CODES）', () => {
     const rustCodes = [...variantToCode().values()];
     expect(rustCodes, 'Rust 侧应解析出全部变体').toEqual([...HOST_ERROR_CODES]);
-    expect(HOST_ERROR_CODES).toHaveLength(18);
+    // 不再硬编码个数（此前写死 18，新增 `E_STREAM_FULL` 就得改这里——个数是从
+    // 两侧解析结果里导出的，硬编码只会制造"改一处忘一处"的假失败）。
+    // 这里改钉**下限**：确保正则真的抓到了码表，而不是空匹配蒙混过关。
+    expect(HOST_ERROR_CODES.length).toBeGreaterThanOrEqual(18);
+    expect(rustCodes.length).toBe(HOST_ERROR_CODES.length);
   });
 
   it('线名必须等于枚举变体名（E_* 大写蛇形，禁止 camelCase 漂移）', () => {
@@ -423,6 +427,48 @@ describe('门禁：应用层 host_* 命令族 TS ↔ Rust 一致', () => {
     for (const cmd of ['host_recover_report', 'host_recover_trial_enable', 'host_i18n_set_locale', 'host_i18n_load', 'host_i18n_stats', 'host_i18n_cleanup_plugin']) {
       expect(calls, `ShellClient 缺少 ${cmd} 的包装方法`).toContain(cmd);
     }
+  });
+
+  it('Rust 注册的每个命令都有 TS 调用点（防孤儿命令：注册了却没人调）', () => {
+    // 反向门禁。此前只有「TS 调了 Rust 没注册」这一个方向被钉住，于是
+    // `host_stream_write` 可以长期注册着、在 TS SDK 里**没有任何入口**——
+    // `pluginCall` 的错误文案甚至拿它当"已接线"的替代路径来推荐。
+    //
+    // 口径：把 Rust 注册表当作全集，要求每条命令至少在一个**真实调用面**上出现。
+    // 刻意排除三类文件，否则门禁会自我满足：
+    //   - `*.test.ts`（测试里出现不算接通）；
+    //   - `capabilities.ts`（它按定义列举**全部**命令，是清单不是调用点）；
+    //   - `tauri-backend.ts`（路由表，同样列举全部命令）。
+    const rust = [...new Set(rustHostCommands())];
+    expect(rust.length, 'Rust 注册命令数异常').toBeGreaterThanOrEqual(36);
+
+    // 相对**仓库根**遍历（`read()` 也是相对根解析的）。
+    const files: string[] = [];
+    const walk = (rel: string): void => {
+      for (const entry of readdirSync(resolve(workspaceRoot, rel), { withFileTypes: true })) {
+        const p = `${rel}/${entry.name}`;
+        if (entry.isDirectory()) {
+          if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+          walk(p);
+        } else if (
+          entry.name.endsWith('.ts') &&
+          !entry.name.endsWith('.test.ts') &&
+          entry.name !== 'capabilities.ts' &&
+          entry.name !== 'tauri-backend.ts'
+        ) {
+          files.push(p);
+        }
+      }
+    };
+    walk('packages');
+    expect(files.length, '未扫到任何 TS 源文件（路径失配）').toBeGreaterThan(50);
+
+    const blob = files.map((f) => read(f)).join('\n');
+    const orphaned = rust.filter((cmd) => !blob.includes(`'${cmd}'`));
+    expect(
+      orphaned,
+      `Rust 注册但 TS 无任何调用点的命令（孤儿命令）: ${orphaned.join(', ')}`,
+    ).toEqual([]);
   });
 
   it('订阅链路四件套齐全（subscribe / unsubscribe / drain / publish）', () => {
@@ -2442,7 +2488,7 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       scope,
       '命名空间判定不得用裸前缀比较（plugin:p.a 会穿透 plugin:p.ab）',
     ).not.toMatch(/starts_with\((?:&)?(?:ns|namespace|prefix)\b/);
-    // 拒绝码必须是既有身份/越权码：新增错误码会破坏 18 码词表的封闭性。
+    // 拒绝码必须是既有身份/越权码：不得为"身份/越权"这类判定另造新码。
     for (const core of ['require_main_window', 'require_settings_key_scope']) {
       expect(fnBody(lib, core), `${core} 的拒绝码必须是既有的 E_AUTH_DENIED`).toMatch(
         /E_AUTH_DENIED/,

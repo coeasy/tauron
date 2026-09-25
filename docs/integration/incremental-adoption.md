@@ -88,7 +88,7 @@ foreach ($m in 'tauron_substrate_handler','tauron_plugin_handler') {
 }
 # 输出（2026-09-24 17:0x）：
 # tauron_substrate_handler = 38
-# tauron_plugin_handler = 50
+# tauron_plugin_handler = 54
 ```
 
 另有**门禁**持续守住这两个数字之间的关系（不靠人眼）：
@@ -203,11 +203,11 @@ UI 取 **`@tauron/ui-primitives`**（只依赖 `@tauron/shell-events`），
 
 ### 1.4 命令面
 
-**38 条**（§0.1 的域拆分）。`tauron_plugin_handler!` 的 15 条全部不可达。
+**38 条**（§0.1 的域拆分）。`tauron_plugin_handler!` 的 16 条全部不可达。
 
 ### 1.5 会失去什么能力
 
-- **插件运行时全部 15 条**：插件注册表（列表/启停/卸载）、`host_plugin_call` 调用、
+- **插件运行时全部 16 条**：插件注册表（列表/启停/卸载）、`host_plugin_call` 调用、
   contributes 注册、流式调用、进程 sidecar 的启动与健康探测、安全模式下的试验性启用。
   前端调用这些命令得到 `command not found`（未注册即不可达，正是期望行为）。
 - **`@tauron/ui` 与插件管理 UI**：只能用原语包。
@@ -256,7 +256,7 @@ await shell.notificationsRead('notif-id');        // 缺省 = 全部已读
 
 ### 2.3 会失去什么能力
 
-相对档 3 仍然失去插件运行时的 15 条（见 §1.5）；相对档 1 **不失去任何命令**——
+相对档 3 仍然失去插件运行时的 16 条（见 §1.5）；相对档 1 **不失去任何命令**——
 本档是「把已经付过编译代价的 6 + 3 条命令真的用起来」。
 
 ---
@@ -380,7 +380,7 @@ const health = await shell.runtimeHealth(handle.lease);                 // → {
 
 ### 3.5 会失去什么能力
 
-相对档 1/2 没有失去——它是全集。反过来要清楚**档 1/2 失去的 15 条**正是插件的
+相对档 1/2 没有失去——它是全集。反过来要清楚**档 1/2 失去的 16 条**正是插件的
 生命周期与调用面：没有它们，`@tauron/ui` 的插件管理器、contributes 驱动的命令面板/
 设置页、流式调用、sidecar 都无从谈起。
 
@@ -390,13 +390,13 @@ const health = await shell.runtimeHealth(handle.lease);                 // → {
 
 | 能力 | 档 1 只底座 | 档 2 + i18n/notify | 档 3 + 插件运行时 |
 |---|:--:|:--:|:--:|
-| 窗口 / 剪贴板 / 对话框 / 深链接 | ✅ 17 条 shell 命令（其中 market 3 条是桩） | ✅ | ✅ |
+| 窗口 / 剪贴板 / 对话框 / 深链接 | ✅ 18 条 shell 命令（其中 market 3 条是桩） | ✅ | ✅ |
 | 事件总线（三通道） | ✅ 4 条 | ✅ | ✅ |
 | 设置读写 | ✅ 2 条（`host_settings_get/set`；底层正从扁平 KV 换成 `SettingsStore`，见 §5） | ✅ | ✅ |
 | 崩溃恢复（三级降级 + 跨进程标记） | ✅ 2 条（进程插件崩溃检测为轮询式） | ✅ | ✅ |
 | i18n 命令面 | 已注册（6 条），本档不消费 | ✅ 消费 | ✅ |
 | 通知命令面 | 已注册（3 条），本档不消费 | ✅ 消费（系统派发未接线） | ✅ |
-| 插件注册表 / 调用 / contributes / 流式 / sidecar | ❌ 15 条不可达 | ❌ | ✅ |
+| 插件注册表 / 调用 / contributes / 流式 / sidecar | ❌ 16 条不可达 | ❌ | ✅ |
 | `@tauron/ui`（插件管理器） | ❌（用 `ui-primitives`） | ❌ | ✅ |
 | **实测命令数** | **38** | **38** | **54** |
 

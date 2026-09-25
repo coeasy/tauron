@@ -1282,7 +1282,7 @@ pub fn host_contributes_list(
 /// | 平台拒绝该操作（Tauri 返回 `Err`） | [`ErrorCode::E_STATE_INVALID_TRANSITION`] |
 /// | `create` 目标 label 已存在 | [`ErrorCode::E_PLUGIN_EXISTS`] |
 ///
-/// 18 码封闭词表里没有"平台操作失败"这一类；`E_STATE_INVALID_TRANSITION` 的语义
+/// 19 码封闭词表里没有"平台操作失败"这一类；`E_STATE_INVALID_TRANSITION` 的语义
 /// （该操作在当前状态下不成立）是其中最贴近的，且 `deep_link_delivered` 已有同样
 /// 用法。**静默 no-op 是更坏的选择**：前端会以为窗口已经动过了。
 pub struct TauriWindowSink {

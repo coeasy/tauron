@@ -477,7 +477,7 @@ capability/ACL 强制（生产客户端应采用——把 3 条特权命令只�
 ```
 
 - `code` 为 `E_*` 大写蛇形，**线名即 Rust 枚举变体名**（`ErrorCode` 未配
-  `rename_all`，`Display` 输出与序列化一致）；**18 个**变体与 TS
+  `rename_all`，`Display` 输出与序列化一致）；**19 个**变体与 TS
   `HOST_ERROR_CODES` 逐名、逐序镜像。
 - `retryable` 三值（`E_CALL_TIMEOUT` / `E_HOST_PANIC` / `E_PLUGIN_FILTERED`）
   与 Rust `ErrorCode::retryable()` 同集合；TS 侧以

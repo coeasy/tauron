@@ -5,6 +5,12 @@
 //! `plugin_invoke` 仍在用的**旧一代实现**（9 个公开方法），按实测决策冻结：
 //! **不得再添加功能**（wire-gate 会比对方法集指纹）。
 //! 决策依据与迁移路线见 `docs/architecture/canonical-owners.md`。
+//!
+//! **已知边界（不在此修复，属冻结范围）**：`emit()` 没有重入闸——订阅者的
+//! `deliver()` 里若反过来调 `emit()`，会因为外层持有 `&mut self` 而在 `std::sync::
+//! RwLock`（`dispatch.rs` 的 `events`）上**死锁**而不是无限递归（Rust 的 `RwLock`
+//! 不可重入）。修复它需要给 `emit` 加重入标志，那会改变公开方法的语义，已超出
+//! "冻结"允许的范围。canonical 侧的 `tauron_host::eventbus` 不受此限制。
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,6 +49,18 @@ pub trait EventSubscriber: Send + Sync {
 pub enum EventBusError {
     QueueOverflow,
 }
+
+/// 单个主题上的订阅者上限。
+///
+/// 没有它，反复调 `subscribe` 的插件可以让 `subscribers` 里那一项的 `Vec`
+/// 无界增长（订阅者持有 `Box<dyn EventSubscriber>`，往往又闭包捕获了别的东西，
+/// 实际是内存泄漏）。达到上限时新的订阅**被丢弃并计入 `dropped_count`**——
+/// 可通过既有的 `queue_stats()` 观察到，不是静默丢失。
+///
+/// 与 canonical 侧 `tauron_host::eventbus::MAX_SUBSCRIPTIONS`（4096，作用于
+/// **全局订阅数**）口径不同：本模块按主题计，且数值更小，因为 legacy 面不该
+/// 被当成容量主力来用。
+pub const MAX_SUBSCRIBERS_PER_TOPIC: usize = 256;
 
 /// 事件总线（设计文档 §4.5）
 pub struct EventBus {
@@ -107,10 +125,13 @@ impl EventBus {
         subscriber: Box<dyn EventSubscriber>,
     ) {
         let key = format!("plugin:{plugin_id}:{event_name}");
-        self.subscribers
-            .entry(key)
-            .or_default()
-            .push(subscriber);
+        let subs = self.subscribers.entry(key).or_default();
+        if subs.len() >= MAX_SUBSCRIBERS_PER_TOPIC {
+            // 超上限：丢弃新订阅并计数（不静默——`queue_stats()` 看得到）。
+            self.dropped_count += 1;
+            return;
+        }
+        subs.push(subscriber);
     }
 
     /// 取消订阅

@@ -52,6 +52,14 @@ export interface WindowStateConfig {
 export class WindowState {
   private readonly _config: Required<WindowStateConfig>;
   private _currentState: WindowStateData;
+  /**
+   * 最近一次持久化/应用失败的原因（成功或从未失败时为 `null`）。
+   *
+   * 为什么需要它：`localStorage` 在隐私模式、配额耗尽、跨域 iframe 下会抛异常。
+   * 此前 `save()` 用空 `catch {}` 吞掉——窗口状态永远存不上，宿主却毫不知情。
+   * 现在失败会被**如实记录**，`save()`/`clear()`/`apply()` 也返回布尔结果。
+   */
+  private _lastError: string | null = null;
 
   constructor(config: WindowStateConfig = {}) {
     this._config = {
@@ -69,6 +77,16 @@ export class WindowState {
   /** 当前保存的窗口状态 */
   get currentState(): WindowStateData {
     return { ...this._currentState };
+  }
+
+  /** 最近一次持久化/应用失败的原因（成功或从未失败时为 `null`）。 */
+  get lastError(): string | null {
+    return this._lastError;
+  }
+
+  /** 记录一次失败原因（内部用）。 */
+  private _fail(err: unknown): void {
+    this._lastError = err instanceof Error ? err.message : String(err);
   }
 
   /**
@@ -106,29 +124,43 @@ export class WindowState {
 
   /**
    * 保存当前窗口状态到 localStorage。
+   *
+   * @returns `true` = 已写入；`false` = 写入失败（原因见 {@link lastError}）。
+   * 内存态始终更新——即便写盘失败，本次会话内读取仍是一致的。
    */
-  save(state: Partial<WindowStateData> = {}): void {
+  save(state: Partial<WindowStateData> = {}): boolean {
     this._currentState = {
       ...this._currentState,
       ...state,
     };
     try {
       localStorage.setItem(this._config.storageKey, JSON.stringify(this._currentState));
-    } catch {
-      // localStorage 不可用，静默失败
+      this._lastError = null;
+      return true;
+    } catch (err) {
+      // localStorage 不可用（隐私模式 / 配额 / 跨域）——如实记录，不静默吞掉。
+      this._fail(err);
+      return false;
     }
   }
 
   /**
    * 清除保存的窗口状态。
+   *
+   * @returns `true` = 已清除；`false` = 清除失败（原因见 {@link lastError}）。
+   * 无论成败，内存态都重置为默认值。
    */
-  clear(): void {
+  clear(): boolean {
+    let ok = true;
     try {
       localStorage.removeItem(this._config.storageKey);
-    } catch {
-      // 静默失败
+      this._lastError = null;
+    } catch (err) {
+      this._fail(err);
+      ok = false;
     }
     this._currentState = this._defaults();
+    return ok;
   }
 
   /**
@@ -164,8 +196,11 @@ export class WindowState {
 
   /**
    * 应用窗口状态（调用后端命令）。
+   *
+   * @returns `true` = 全部命令成功；`false` = 中途失败（原因见 {@link lastError}）。
+   * 失败时窗口停在部分应用的状态，调用方可据此决定是否回退到默认尺寸。
    */
-  async apply(backend: Backend): Promise<void> {
+  async apply(backend: Backend): Promise<boolean> {
     const state = this.getRestoreState();
     try {
       await backend.invoke('host_window_set_position', {
@@ -179,8 +214,11 @@ export class WindowState {
       if (state.isMaximized) {
         await backend.invoke('host_window_maximize');
       }
+      this._lastError = null;
+      return true;
     } catch (err) {
-      console.warn('WindowState: failed to apply state', err);
+      this._fail(err);
+      return false;
     }
   }
 }

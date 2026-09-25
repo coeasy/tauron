@@ -47,9 +47,10 @@
 
 **跨语言契约**
 
-- `@tauron/contract-tests` 的 wire-gate：直接正则解析 Rust 源码文本做断言，**125 条**
+- `@tauron/contract-tests` 的 wire-gate：直接正则解析 Rust 源码文本做断言，**110 条**
+  （`vitest run src/wire-gate.test.ts` 实跑计数）
 - 全部跨 IPC 边界的 Rust 结构体强制 `#[serde(rename_all = "camelCase", deny_unknown_fields)]`
-- 双套错误码且零交集：框架层 `SC-xxxx`（14 个）/ 应用层 `E_*`（18 个）
+- 双套错误码且零交集：框架层 `SC-xxxx`（14 个）/ 应用层 `E_*`（19 个）
 
 **工程与发布基础设施**（本次补齐）
 
@@ -59,6 +60,11 @@
 - `.github/workflows/release.yml`：tag 版本一致性校验 → windows / macOS(arm64+x64) / linux
   矩阵构建 → 草稿 Release
 - `Cargo.lock` 纳入版本控制（原先被 `.gitignore` 忽略，构建不可复现）
+- `ci.yml` 的示例工程 `cargo check` 补 `--locked`；`release.yml` 的版本校验补
+  `examples/minimal-app/package.json` 与 `src-tauri/Cargo.toml`（示例才是被打包的
+  那个应用，它掉队就会产出「tag 是 v0.2.0、安装包写 0.1.0」），并在 `tauri build`
+  前加一步 `cargo metadata --locked` 硬校验示例工程的锁文件（`tauri build` 没有
+  `--locked` 选项，`-- --locked` 透传属未文档化行为，不能当可复现性保证）
 - `rustfmt.toml` / `clippy.toml` / `eslint.config.js` / `.prettierrc.json`
 - 本文件
 
@@ -147,6 +153,69 @@
   `TrialBudgetAvailable` / `Action::SetCircuitOpen`），并补门禁
   `every_guard_and_action_is_referenced_by_a_rule` 防止再出现「有实现、没入口」。
 
+#### 全链路审计（三轮）修复的断链与孤儿
+
+- **生命周期零耗环门禁漏检自环**（`tauron-host/src/lifecycle.rs`）：注释声称「自环在
+  调用处单独处理」，实际无此代码——`chain.is_none()` 的自环规则会绕过门禁。现在
+  门禁显式覆盖自环分支，并补测试 `zero_cost_cycle_gate_actually_catches_bad_self_loops`。
+- **流句柄表无上限且终帧不回收句柄**（`tauron-host/src/stream.rs`）：`open()` 无容量闸，
+  `push()` 终帧后只置 `closed` 而不摘除句柄 → 句柄表单调增长。新增
+  `MAX_STREAMS = 1024` 与终帧回收，新增错误码 `E_STREAM_FULL`（追加到枚举末尾）。
+- **`check_heartbeat` 跨插件污染**（`tauron-proc/src/spawn.rs`）：签名缺 `plugin_id`，
+  无差别把所有 Running 进程标 Crashed。改为只标记目标进程。
+- **shell 事件总线无订阅上限**（`tauron-shell/src/eventbus.rs`）：新增
+  `MAX_SUBSCRIBERS_PER_TOPIC = 256`，超限丢弃并计入 `dropped_count`。
+- **`host_stream_write` 在 TS SDK 无入口**：`host.ts` 补 `openStreamHandle()` /
+  `writeStream()`，导出 `StreamHandle` / `StreamWriteInput`。
+- **`Registry::install` 无生产入口**（孤儿 API）：新增
+  `tauron_adapter::install_plugin_from_json`（含失败留痕），示例工程接线。
+- **`ClientConfig` 无生产消费方**：新增 `AdapterConfig::from_client_config`。
+- **`call_status`（TTL 校验）无生产接线**：接进 `Registry::end_call`——过期调用返回
+  `E_CALL_TIMEOUT` 而非「成功」。
+- **`Registry::install` 的检查-写入竞态（TOCTOU）**：并发安装同一 id 会静默覆盖。
+  改为单写锁内原子完成的 `try_put_entry`，补两个并发回归测试。
+- **设置只改内存态、不落盘**（`tauron-adapter/src/lib.rs`）：`cmd_settings_set` 写成功
+  但重启即丢。新增 `settings_path` + 原子写 `persist_settings_doc` / 装配期
+  `load_settings_doc`；`adopt_legacy` / `migrate` 同样落盘。补 3 个跨进程回归测试。
+- **`@tauron/cli` 生成的插件模板引用不存在的 `ctx.pluginId`**：生成代码过不了 `tsc`。
+- **`registerPlugin` 的 `onDisable` 声明了却从未触发**：补
+  `TAURON_DISABLE_EVENT` 接线 + `bridge.notifyDisabled()`。
+- **`WindowState.save()` / `clear()` / `apply()` 空 `catch {}`**：localStorage 不可用时
+  静默失败。改为记录 `lastError` 并返回布尔结果。
+- **`tauron-brand::apply_env_overrides` 用 `let _ =` 吞掉写失败的键**：新增
+  `apply_env_overrides_reporting`，如实返回被丢弃的点路径。
+- **`ShellController` 用户动作失败只 `console.warn`**：新增 `onError` 回调
+  （缺省回落 `console.warn`），标题栏/更新/插件开关的失败都能进 UI。
+- **插件卸载无入口**（「有接口、无入口」）：新增 `oc-plugin-uninstall` 事件 +
+  `<oc-plugin-manager>` 的卸载按钮 + `ShellController` 接线。
+- **`PluginManagerStore` 非测试零消费者**：`<oc-plugin-manager>` 的开关/卸载按钮
+  现经 `SHELL_EVENTS` 契约接线到 `host_registry_admin`。
+- **`tauron-adapter` 重复装配时静默丢弃 `plugin_flags` 注入**：冲突改为留痕告警
+  （同一底座装配两个插件运行时会写向旧注册表）。
+
+#### 第三轮（终检）：两套真相、谎报状态、无界增长
+
+- **删除 `lifecycle::BootTier` / `boot_tier()`**（**两套真相 + 一套死代码**）：本模块
+  的档位判定（`Repair` if 已在安全模式，否则 `Safemode` if 连续失败 ≥ 2）与真正在跑的
+  `tauron_recovery::BootCounter::decide_phase()`（阈值常量在那边）**语义并不等价**，
+  且 `boot_tier()` 在生产代码里零调用点——只有单测在调它。留着它，读者会以为它权威，
+  改了恢复引擎的阈值它也不会跟着变。现在启动档位的唯一权威是 `tauron-recovery`。
+- **`Registry::install` 的失败文案谎报状态**：校验失败路径用 `let _ = try_put_entry(...)`
+  记 `INSTALL_FAILED`，写入失败（同 id 已存在 / 注册表已满）被静默吞掉，而返回的错误
+  文案仍宣称「已记入 INSTALL_FAILED，可卸载」——调用方会据此去列表里找一条并不存在的
+  记录。改为按真实写入结果分支文案。
+- **`install_plugin_from_json` 同一问题**：`record_install_failure` 的结果被丢弃，
+  文案同样谎报。已改为如实分支。
+- **`ContributesRegistry` 无容量上限**：`host_contributes_register` 是 `self` 档命令，
+  只按 `(plugin_id, id)` 去重——换个 `id` 就能再插一条，`Vec` 无界增长。新增
+  `MAX_CONTRIBUTES = 4096`，到顶返回 `E_REGISTRY_FULL`（如实拒绝，不静默丢弃）。
+- **`MemoryWindowSink` 留痕无上限**：未注入平台 sink 的宿主（非 Tauri / 降级装配）
+  用的就是它，每次窗口操作永久追加一条。改为环形（`MAX_WINDOW_OPS = 512`，丢最旧）。
+- **`tauron-settings` 的变更订阅队列无上限**：`broadcast` 无条件 `push`，订阅者不
+  `drain` 时队列随每次写入无限增长。新增 `MAX_PENDING_EVENTS = 1024`（环形）。
+  同时给 `watch()` 补上**诚实边界**文档：它目前**没有生产调用点**，`plugin_id` 参数
+  被忽略（广播不按命名空间过滤）——要用得先在宿主侧接一条事件出口。
+
 ### 文档
 
 - **删除已失效的历史文档**（4 份，均无引用或状态为假）：
@@ -178,11 +247,28 @@
   `PluginManifest::validate` 拒绝）；② `package.json` 示例写 `"type": "js"` 并塞入
   `permissions`（应为 `type: module`，权限在宿主清单里）。另补齐此前缺失的章节：
   `tauron.plugin.json` 清单字段表、宿主命令面（16 条档位表 + 底座命令说明）、
-  两套错误码表（`SC-xxxx` 14 个 / `E_*` 18 个）、生命周期状态机（10 态 / 18 事件 /
+  两套错误码表（`SC-xxxx` 14 个 / `E_*` 19 个）、生命周期状态机（10 态 / 18 事件 /
   3 个预算）、sidecar ABI 契约。
 - **修正 `docs/architecture/app-layer-wire.md`** 的 `host_runtime_spawn` 失败码清单：
   补 `E_ABI_MISMATCH`（原文只列了 `E_PLUGIN_TYPE_NO_RUNTIME` 与 `E_LEASE_EXPIRED`），
   并说明它独立于 `E_INSTALL_FAILED` 的理由。
+- **全仓文档数字与实测对齐**（三轮审计的副产物，逐条按命令重测）：
+
+  | 位置 | 原文 | 实测 |
+  |---|---|---|
+  | `README.md` 徽章 + 测试表 | TS 1577 / Rust 1258 | TS **1626** / Rust **1284** |
+  | `README.md` 契约测试行 | wire-gate 125 | wire-gate **110** |
+  | `CHANGELOG.md` 跨语言契约节 | wire-gate 125 | **110** |
+  | `CHANGELOG.md` / `errors.ts` / 开发指南 / `app-layer-wire.md` | `E_*` 18 个 | **19** 个（新增 `E_STREAM_FULL`） |
+  | `plugin-development-guide.md` 状态机 | 55 条规则 | **57** 条 |
+  | `incremental-adoption.md` | 插件域差集 15 条、shell 17 条、计数输出 50 | **16** / **18** / **54** |
+  | `competitive-analysis.md` §四 | Rust 1221 / TS 1577 / 97 文件 | **1251**（执行）/ **1626** / **98** |
+
+  另把「Rust 测试」的**两个口径**在 `competitive-analysis.md` 脚注里讲清楚：
+  README 给的是源码 `#[test]` **声明数**（1284，含 feature 门控），
+  `cargo test --workspace --lib --tests` 的**执行数**是 1251——两者不要混读。
+  `multi-plugin-substrate-roadmap.md` 的基线表按它自己声明的「轮 12 快照、不随后续
+  改动刷新」保持原值，只在下方口径注里给出当前实测值。
 
 ### 已知债务
 
@@ -204,9 +290,9 @@ cargo clippy --workspace --all-targets -- -D warnings   # 从未运行
 
 `pnpm format:check` 当前会失败。CI 里没有 format 门禁，避免永久红。
 
-**3. ESLint 有 82 条 warning（0 error）**
+**3. ESLint 有 81 条 warning（0 error）**
 
-`pnpm lint` 退出码为 0，因此已作为**硬门禁**接入 CI。82 条 warning 绝大多数是
+`pnpm lint` 退出码为 0，因此已作为**硬门禁**接入 CI。81 条 warning 绝大多数是
 测试文件里的未用导入。**不要**加 `--max-warnings 0`，那会让仓库直接变红。
 
 **4. Rust 测试未在有网络的环境执行过**
@@ -224,10 +310,12 @@ cargo clippy --workspace --all-targets -- -D warnings   # 从未运行
 
 20 个 `packages/*/package.json` 均为 `private`，无法 `npm publish`。
 
-**7. 示例工程的打包图标不全**
+**7. 示例工程的打包图标不全（Windows 已实测可打包，Linux/macOS 未验证）**
 
-`examples/minimal-app/src-tauri/icons/` 只有 `icon.ico`，Linux 打包需要 png。
-CI 里 `example-substrate-only` job 因此设为 advisory。
+`examples/minimal-app/src-tauri/icons/` 只有 `icon.ico`（16×16）。**已实测**：
+Windows 上 `tauri build` 不带 `bundle` 段也能出 NSIS 安装包（Tauri v2 用默认值）
+——`tauri.conf.json` 缺 `bundle` 不是缺口。但 `deb` / `AppImage` / `.app` 需要
+png / icns，本仓库**没有在 Linux / macOS 上实测过**，发布前必须补图标或验证。
 
 **8. 命令面缺口**
 

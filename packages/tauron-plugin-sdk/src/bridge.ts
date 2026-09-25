@@ -24,6 +24,10 @@ import {
   type BridgeMessage,
 } from '@tauron/types';
 
+// 禁用通知的保留事件名（与插件侧 `registerPlugin` 的 `onDisable` 接线共用同一常量，
+// 避免两侧各写一份字面量后悄悄漂移）。
+import { TAURON_DISABLE_EVENT } from './register-plugin.js';
+
 /** 进行中的调用（用于取消语义）。 */
 interface InflightCall {
   /** 已取消：结果到达后丢弃，不再回发。 */
@@ -283,6 +287,17 @@ export class PluginBridge {
    */
   emitToPlugin(eventName: string, payload: unknown): void {
     this.sendMessage(buildEventMessage(this.token, eventName, payload));
+  }
+
+  /**
+   * 通知插件「你已被禁用 / 卸载」（触发插件的 `onDisable`）。
+   *
+   * 宿主在 `host_registry_admin` 的 `disable` / `uninstall` 成功之后调它。
+   * 此前这条通知**不存在**：`RegisterPluginConfig.onDisable` 声明了却永不触发，
+   * 插件的清理逻辑（停定时器、断开连接、释放资源）是死代码。
+   */
+  notifyDisabled(reason = 'disabled'): void {
+    this.emitToPlugin(TAURON_DISABLE_EVENT, { reason });
   }
 
   /**

@@ -199,16 +199,22 @@ registerPlugin({
   name: '${config.name}',
   version: '0.1.0',
   methods: {
-    ping({ args, ctx }) {
-      return { pong: true, pluginId: ctx.pluginId, echo: args };
+    // ⚠️ iframe bridge 一代的 PluginContext **没有** pluginId 成员
+    //（那是 R2 契约形状 @tauron/plugin-context-contract 才有的）。这里用
+    // registerPlugin 的 name 即可——此前模板写 ctx.pluginId，生成出来的代码
+    // 直接过不了 tsc（TS2339）。
+    ping({ args }) {
+      return { pong: true, plugin: '${config.name}', echo: args };
     },
   },
   events: {},
-  onEnable(ctx) {
-    console.log('[${config.name}] enabled as', ctx.pluginId);
+  onEnable() {
+    console.log('[${config.name}] enabled');
   },
-  onDisable(ctx) {
-    console.log('[${config.name}] disabled', ctx.pluginId);
+  // 宿主在 disable/uninstall 之后用 bridge.notifyDisabled() 触发本钩子
+  //（底层是保留事件 TAURON_DISABLE_EVENT，见 @tauron/plugin-sdk 导出）。
+  onDisable() {
+    console.log('[${config.name}] disabled');
   },
 });
 `;

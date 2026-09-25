@@ -122,4 +122,35 @@ describe('<oc-plugin-manager>', () => {
     const empty = el.shadowRoot?.querySelector('.empty-state');
     expect(empty?.textContent).toContain('暂无插件');
   });
+
+  // 注：happy-dom 派发 click 时会以错误接收者调用 Lit 监听器的 handleEvent
+  // （TypeError，见 theme-picker.test.ts 的既有说明），故这里直接驱动组件的
+  // `_requestToggle` / `_requestUninstall`（模板 @click 调的就是这两个方法）。
+  const P1 = { id: 'p1', name: 'P1', version: '1.0.0', enabled: false, type: 'js' } as const;
+
+  it('点开关派发 oc-plugin-toggle（detail 为取反后的状态）', async () => {
+    const el = document.createElement('oc-plugin-manager');
+    el.plugins = [{ ...P1 }];
+    document.body.appendChild(el);
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.toggle-switch')).toBeTruthy();
+    const events: CustomEvent[] = [];
+    el.addEventListener('oc-plugin-toggle', (e) => events.push(e as CustomEvent));
+    el._requestToggle({ ...P1 });
+    expect(events.length).toBe(1);
+    expect(events[0]?.detail).toEqual({ id: 'p1', enabled: true });
+  });
+
+  it('点卸载派发 oc-plugin-uninstall（此前卸载无入口）', async () => {
+    const el = document.createElement('oc-plugin-manager');
+    el.plugins = [{ ...P1, enabled: true }];
+    document.body.appendChild(el);
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.uninstall-btn')).toBeTruthy();
+    const events: CustomEvent[] = [];
+    el.addEventListener('oc-plugin-uninstall', (e) => events.push(e as CustomEvent));
+    el._requestUninstall({ ...P1 });
+    expect(events.length).toBe(1);
+    expect(events[0]?.detail).toEqual({ id: 'p1' });
+  });
 });

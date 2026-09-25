@@ -157,7 +157,12 @@ export type {
 
 // R5：流式帧（唯一词表，与 Rust `tauron_host::stream::StreamFrame` 同构）。
 export { STREAM_KINDS, isStreamFrame, isTerminalKind, parseStreamKind } from './stream.js';
-export type { StreamFrame, StreamKind } from './stream.js';
+export type {
+  StreamFrame,
+  StreamHandle,
+  StreamKind,
+  StreamWriteInput,
+} from './stream.js';
 
 // R5：传输无关的宿主 RPC 面。
 export { toHostRpc } from './rpc.js';

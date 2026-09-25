@@ -24,15 +24,19 @@
 |---|---|---|
 | Rust 测试 | **1221 / 0 failed**（15 crate） | 轮 12 收口 |
 | TS 测试 | **1571 / 0 failed**（97 文件，21 包） | 轮 12 收口 |
-| 跨语言门禁 wire-gate | **125 / 125** | `packages/tauron-contract-tests/src/wire-gate.test.ts` |
+| 跨语言门禁 wire-gate | **125 / 125**（当轮计数口径，见下方口径注） | `packages/tauron-contract-tests/src/wire-gate.test.ts` |
 | 命令面 | **54 = 底座 38 + 插件运行时 16** | `tauron_substrate_handler!` / `tauron_plugin_handler!` |
 | 能力表 | 16（13 插件面 + 3 特权） | `authz::COMMANDS` / `capabilities.ts` |
 | 底座独立装配 | ✅ 有编译证据 + 功能证据 | `substrate-only` feature + `substrate_only_host_is_functionally_complete` |
 
 > **数字口径**：上表是**轮 12 收口时**的快照，作为本方案的比较基准，不随后续改动刷新。
-> 当前实测（2026-09-24，发布基建轮之后）：TS **1577**（`pnpm -r test` 实跑）；
-> Rust 源码 `#[test]` 声明数 **1258**——**这不是执行结果**，feature 门控
-> （`tauron-adapter` / `tauron-shell` 的 `tauri` feature）另计，真实执行结果以 CI 为准。
+> 当前实测（2026-09-25，三轮全链路审计之后）：TS **1626**（`pnpm -r test` 实跑，98 文件）；
+> Rust 执行结果 **1251 passed / 0 failed**（`cargo test --workspace --locked --lib --tests`，
+> 15 suite），源码 `#[test]` 声明数 **1284**——**声明数不是执行结果**，feature 门控
+> （`tauron-adapter` / `tauron-shell` 的 `tauri` feature）另计，真实执行结果以 CI 为准；
+> wire-gate **110**（`vitest run src/wire-gate.test.ts` 实跑；基线表的 125 是更早的计数
+> 口径，那个口径下同一文件曾按包含 `contract.test.ts` 的整包计）。
+> 本节只陈述口径，不再回头改基线表的数字。
 
 **已达成的硬不变量**（不得回退，本方案所有改动都必须保持）：
 

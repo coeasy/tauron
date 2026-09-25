@@ -13,6 +13,7 @@ import type {
   CommandSelectEventDetail,
   ShortcutChangeEventDetail,
   PluginToggleEventDetail,
+  PluginUninstallEventDetail,
 } from '@tauron/shell-events';
 import { ShortcutRecorderStore, type ShortcutRecorderState, type ModifierKey } from './shortcut-recorder.js';
 
@@ -23,6 +24,7 @@ export type {
   CommandSelectEventDetail,
   ShortcutChangeEventDetail,
   PluginToggleEventDetail,
+  PluginUninstallEventDetail,
 };
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -454,6 +456,8 @@ export class OcPluginManager extends LitElement {
     .toggle-switch.enabled { background: var(--oc-primary-color, #2563eb); border-color: var(--oc-primary-color, #2563eb); }
     .toggle-knob { width: 18px; height: 18px; background: white; border-radius: 50%; position: absolute; top: 2px; left: 2px; transition: left 0.2s; }
     .toggle-switch.enabled .toggle-knob { left: 18px; }
+    .uninstall-btn { padding: 6px 12px; font-size: 12px; border-radius: 6px; cursor: pointer; border: 1px solid var(--oc-danger-color, #dc3545); background: transparent; color: var(--oc-danger-color, #dc3545); }
+    .uninstall-btn:hover { background: var(--oc-danger-color, #dc3545); color: white; }
     .empty-state { text-align: center; padding: 32px; color: var(--oc-text-secondary, #868e96); }
   `;
 
@@ -461,6 +465,34 @@ export class OcPluginManager extends LitElement {
 
   get plugins(): PluginInfo[] { return this._plugins; }
   set plugins(v: PluginInfo[]) { this._plugins = v; this.requestUpdate(); }
+
+  /**
+   * 请求切换插件启用状态（派发 `oc-plugin-toggle`）。
+   *
+   * 抽成方法而非内联箭头函数：happy-dom 在派发 `click` 时会以错误的接收者调用
+   * Lit 监听器的 `handleEvent`（TypeError），组件内的点击路径无法在测试里走通
+   * （同 `theme-picker` 的既有处置）。方法化后测试可直接驱动，语义不变。
+   */
+  _requestToggle(plugin: PluginInfo): void {
+    this.dispatchEvent(
+      new CustomEvent(SHELL_EVENTS.pluginToggle, {
+        bubbles: true,
+        composed: true,
+        detail: { id: plugin.id, enabled: !plugin.enabled } satisfies PluginToggleEventDetail,
+      }),
+    );
+  }
+
+  /** 请求卸载插件（派发 `oc-plugin-uninstall`）。 */
+  _requestUninstall(plugin: PluginInfo): void {
+    this.dispatchEvent(
+      new CustomEvent(SHELL_EVENTS.pluginUninstall, {
+        bubbles: true,
+        composed: true,
+        detail: { id: plugin.id } satisfies PluginUninstallEventDetail,
+      }),
+    );
+  }
 
   protected override render() {
     if (this._plugins.length === 0) {
@@ -479,7 +511,12 @@ export class OcPluginManager extends LitElement {
               <p class="plugin-meta">v${plugin.version} · ${plugin.type} · ${plugin.id}</p>
               ${plugin.description ? html`<p class="plugin-meta">${plugin.description}</p>` : ''}
             </div>
-            <div class="toggle-switch ${plugin.enabled ? 'enabled' : ''}" @click="${() => this.dispatchEvent(new CustomEvent(SHELL_EVENTS.pluginToggle, { bubbles: true, composed: true, detail: { id: plugin.id, enabled: !plugin.enabled } satisfies PluginToggleEventDetail }))}">
+            <button
+              class="uninstall-btn"
+              title="卸载插件"
+              @click="${() => this._requestUninstall(plugin)}"
+            >卸载</button>
+            <div class="toggle-switch ${plugin.enabled ? 'enabled' : ''}" @click="${() => this._requestToggle(plugin)}">
               <div class="toggle-knob"></div>
             </div>
           </div>
@@ -539,5 +576,7 @@ declare global {
     'oc-shortcut-change': CustomEvent<ShortcutChangeEventDetail>;
     /** `<oc-plugin-manager>` 插件启用状态切换。 */
     'oc-plugin-toggle': CustomEvent<PluginToggleEventDetail>;
+    /** `<oc-plugin-manager>` 请求卸载插件。 */
+    'oc-plugin-uninstall': CustomEvent<PluginUninstallEventDetail>;
   }
 }

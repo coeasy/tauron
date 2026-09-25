@@ -30,4 +30,8 @@ export {
 } from './contract-context.js';
 
 // ---- 插件注册（registerPlugin）----
-export { registerPlugin, type RegisterPluginConfig } from './register-plugin.js';
+export {
+  registerPlugin,
+  TAURON_DISABLE_EVENT,
+  type RegisterPluginConfig,
+} from './register-plugin.js';

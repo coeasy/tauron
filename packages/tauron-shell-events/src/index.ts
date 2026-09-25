@@ -67,6 +67,13 @@ export const SHELL_EVENTS = {
   // ── 插件管理器（<oc-plugin-manager>）──────────────────────────────────
   /** 插件启用/禁用开关切换。detail：{@link PluginToggleEventDetail}。 */
   pluginToggle: 'oc-plugin-toggle',
+  /**
+   * 请求卸载插件（「卸载」按钮）。detail：{@link PluginUninstallEventDetail}。
+   *
+   * 补的是「有接口、无入口」：`PluginManagerStore.uninstall()` 与宿主的
+   * `host_registry_admin({op:'uninstall'})` 都在，但此前没有任何按钮能触发。
+   */
+  pluginUninstall: 'oc-plugin-uninstall',
 
   // ── 主题选择器（<oc-theme-picker>）────────────────────────────────────
   /**
@@ -115,6 +122,12 @@ export interface PluginToggleEventDetail {
   id: string;
   /** 请求切换到的启用状态（当前状态取反）。 */
   enabled: boolean;
+}
+
+/** `oc-plugin-uninstall` 事件详情。 */
+export interface PluginUninstallEventDetail {
+  /** 插件 ID。 */
+  id: string;
 }
 
 /** `oc-theme-change` 事件详情。 */

@@ -179,10 +179,14 @@ jobs:
 
       - name: cargo check --features substrate-only
         run: |
+          # --locked：示例工程自带 Cargo.lock（独立依赖树，`exclude` 在主 workspace 外）。
+          # 不加它，CI 可能解析出与提交的锁文件不同的依赖树，"本地能过、CI 过不了"
+          # 或反之，且构建不可复现。
           cargo check \
             --manifest-path examples/minimal-app/src-tauri/Cargo.toml \
             --features substrate-only \
-            --all-targets
+            --all-targets \
+            --locked
 
   # ══════════════════════════════════════════════════════════════════
   # 以下为 **advisory** 任务：报告问题，但不构成合并门禁。

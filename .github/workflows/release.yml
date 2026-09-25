@@ -67,6 +67,25 @@ jobs:
             console.log("packages/* 版本号全部一致");
           ' || rc=1
 
+          # 示例工程是**被 workspace exclude 的独立树**，但它才是真正被打包的那个
+          # 应用：它的两个版本号掉队，产出的安装包版本就是错的（tag v0.2.0、
+          # 安装包却写 0.1.0）。此前这两处不在校验范围内。
+          node -e '
+            const fs = require("fs");
+            const want = require("./package.json").version;
+            const f = "examples/minimal-app/package.json";
+            const v = JSON.parse(fs.readFileSync(f, "utf8")).version;
+            if (v !== want) { console.log(`::error::${f} 的 version=${v}，应为 ${want}`); process.exit(1); }
+            console.log("examples/minimal-app/package.json 版本号一致");
+          ' || rc=1
+
+          ex_cargo=$(sed -n "s/^version = \"\(.*\)\"$/\1/p" examples/minimal-app/src-tauri/Cargo.toml | head -1)
+          echo "examples/minimal-app/src-tauri/Cargo.toml=${ex_cargo}"
+          if [ "$tag" != "$ex_cargo" ]; then
+            echo "::error::tag v${tag} 与 examples/minimal-app/src-tauri/Cargo.toml 的 version=${ex_cargo} 不一致"
+            rc=1
+          fi
+
           exit $rc
 
   # ══════════════════════════════════════════════════════════════════
@@ -144,6 +163,18 @@ jobs:
       # 等 workspace 包，那些包的 dist/ 也得先在。
       - name: 构建前端
         run: pnpm -r build
+
+      # 示例工程自带 Cargo.lock（独立依赖树）。先做一次**必然生效**的锁文件校验：
+      # `tauri build` 没有 `--locked` 选项，靠 `-- --locked` 透传给 cargo 属于
+      # 未文档化行为，不能当作可复现性的保证。这一步用 `cargo metadata --locked`
+      # 硬校验「锁文件与 Cargo.toml 一致」，不一致直接红，而不是打出一个依赖树
+      # 与提交不符的安装包。
+      - name: 校验示例工程锁文件
+        run: |
+          cargo metadata \
+            --manifest-path examples/minimal-app/src-tauri/Cargo.toml \
+            --locked --format-version 1 > /dev/null
+          echo "examples/minimal-app/src-tauri/Cargo.lock 与 Cargo.toml 一致"
 
       - name: tauri build
         uses: tauri-apps/tauri-action@v0

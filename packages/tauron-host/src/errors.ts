@@ -5,7 +5,7 @@
 // 这里**不**定义任何 Tauri 依赖；所有错误对象都可被 JSON 序列化。
 // ──────────────────────────────────────────────────────────────────────────
 
-/** 线上错误码全集（与 Rust `ErrorCode` 枚举同序，共 18 个）。 */
+/** 线上错误码全集（与 Rust `ErrorCode` 枚举同序，共 19 个）。 */
 export const HOST_ERROR_CODES = [
   'E_HOST_PANIC',
   'E_UNKNOWN_PLUGIN',
@@ -36,6 +36,16 @@ export const HOST_ERROR_CODES = [
    * （重新 spawn，而不是放弃一次 pending 调用）。
    */
   'E_LEASE_EXPIRED',
+  /**
+   * 流句柄数已达上限（同一进程内并发打开的流太多）。
+   *
+   * **不是** `E_REGISTRY_FULL`：后者是**插件**数达上限（`max_plugins`），
+   * 调用方该卸载插件；本码是**流句柄**达上限（`MAX_STREAMS`），调用方该
+   * 先 `host_stream_close` 再开。
+   *
+   * ⚠️ 追加码必须加在数组**末尾**：wire-gate 按声明顺序与 Rust 枚举比对。
+   */
+  'E_STREAM_FULL',
 ] as const;
 
 export type HostErrorCode = (typeof HOST_ERROR_CODES)[number];

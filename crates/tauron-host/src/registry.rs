@@ -290,26 +290,9 @@ impl Registry {
             }
         }
 
-        let entries = self.entries.read();
-        if entries.contains_key(&id) {
-            drop(entries);
-            return Err(HostError::new(
-                ErrorCode::E_PLUGIN_EXISTS,
-                format!("插件 `{id}` 已存在（唯一性约束，计划 §4.2）"),
-            ));
-        }
-        if entries.len() >= self.config.max_plugins {
-            drop(entries);
-            return Err(HostError::new(
-                ErrorCode::E_REGISTRY_FULL,
-                format!(
-                    "注册表已达上限 {}；插件 `{id}` 被拒绝（硬失败而非挤占，计划 §4.1）",
-                    self.config.max_plugins
-                ),
-            ));
-        }
-        drop(entries);
-
+        // ⚠️ 唯一性/容量**不在这里**用读锁预检——检查与插入必须同临界区，
+        // 否则并发安装会静默覆盖（见 `try_put_entry` 的说明）。预检的代价是
+        // 一条无意义的读锁往返，收益是零：真正的判定在 `try_put_entry` 里。
         let token = self.next_token.fetch_add(1, Ordering::Relaxed);
         let mut entry = PluginEntry::new(manifest.clone(), token);
 
@@ -321,44 +304,39 @@ impl Registry {
             Ok(()) => {
                 let o = transition(&mut entry.state, Event::InstallOk);
                 assert!(!o.illegal);
-                self.put_entry(entry, id.clone());
+                // 校验通过但写入被拒（重复/满）时**如实失败**，不落 INSTALL_FAILED：
+                // 这不是"这个插件有问题"，而是"这次安装没做成"。
+                self.try_put_entry(entry, id.clone())?;
                 Ok(id)
             }
             Err(e) => {
                 let o = transition(&mut entry.state, Event::InstallFail);
                 assert!(!o.illegal);
                 entry.state.last_reason = Some(e.message.clone());
-                self.put_entry(entry, id.clone());
-                Err(HostError::new(
-                    e.code,
+                // 校验失败要**留痕**（可卸载）。若同一 id 已在表内，则不覆盖既有条目
+                // ——既有条目的状态更权威，覆盖会把它从 Enabled 打回 InstallFailed。
+                //
+                // 写入结果**必须反映进文案**：同 id 已存在 / 注册表已满时这次留痕是
+                // 失败的，再宣称「已记入 INSTALL_FAILED，可卸载」就是谎报——调用方会
+                // 据此去列表里找那条，而它并不存在。
+                let recorded = self.try_put_entry(entry, id.clone()).is_ok();
+                let tail = if recorded {
+                    format!("插件 `{id}` 已记入 INSTALL_FAILED，可卸载；不自动重试")
+                } else {
                     format!(
-                        "{}（插件 `{id}` 已记入 INSTALL_FAILED，可卸载；不自动重试）",
-                        e.message
-                    ),
-                ))
+                        "插件 `{id}` **未**记入 INSTALL_FAILED（同 id 已在注册表，或注册表已满）；\
+                         本次安装失败没有登记，不自动重试"
+                    )
+                };
+                Err(HostError::new(e.code, format!("{}（{tail}）", e.message)))
             }
         }
     }
 
     /// 安装期失败登记（manifest 尚未完整解析时的兜底路径）。
     pub fn record_install_failure(&self, id: PluginId, reason: String) -> HostResult<()> {
-        let entries = self.entries.read();
-        if entries.contains_key(&id) {
-            drop(entries);
-            return Err(HostError::new(
-                ErrorCode::E_PLUGIN_EXISTS,
-                format!("插件 `{id}` 已存在"),
-            ));
-        }
-        if entries.len() >= self.config.max_plugins {
-            drop(entries);
-            return Err(HostError::new(
-                ErrorCode::E_REGISTRY_FULL,
-                format!("注册表已达上限 {}", self.config.max_plugins),
-            ));
-        }
-        drop(entries);
-
+        // 与 `install` 同一口径：唯一性/容量判定在 `try_put_entry` 的写锁里完成，
+        // 不做"读锁预检 → 放锁 → 覆盖写"（那会让并发调用互相覆盖）。
         let token = self.next_token.fetch_add(1, Ordering::Relaxed);
         let mut entry = PluginEntry::new(minimal_manifest(id.clone()), token);
         let o1 = transition(&mut entry.state, Event::InstallStart);
@@ -366,8 +344,7 @@ impl Registry {
         let o2 = transition(&mut entry.state, Event::InstallFail);
         assert!(!o2.illegal);
         entry.state.last_reason = Some(reason);
-        self.put_entry(entry, id);
-        Ok(())
+        self.try_put_entry(entry, id)
     }
 
     /// 读取条目快照。
@@ -606,6 +583,18 @@ impl Registry {
         terminal: StreamKind,
         reason: Option<serde_json::Value>,
     ) -> HostResult<PendingCall> {
+        // 先做 TTL 校验再摘条目。
+        //
+        // `call_status` 是**已过期**与**不存在**的区分点：没有这一步时，一个
+        // 早已超时、只是还没被 GC 扫到的调用，会被 `host_call_end` 当成**正常
+        // 结束**接受——调用方收到"成功"，而它其实已经超时了。这是两个不同的
+        // 事实，错误码不同（`E_CALL_TIMEOUT` vs `E_CALL_NOT_FOUND`），调用方的
+        // 下一个动作也不同（重发 vs 放弃）。
+        //
+        // 锁序：`call_status` 取 `pending` 读锁后**释放**，`remove` 再取一次，
+        // 两次不嵌套——符合本文件「锁不嵌套」的并发模型。
+        let now = Instant::now();
+        self.call_status(call_id, now)?;
         let call = self.pending.lock().remove(call_id).ok_or_else(|| {
             HostError::new(
                 ErrorCode::E_CALL_NOT_FOUND,
@@ -974,9 +963,38 @@ impl Registry {
     // 内部
     // ────────────────────────────────────────────────────────────
 
-    fn put_entry(&self, entry: PluginEntry, id: PluginId) {
-        self.entries.write().insert(id.clone(), entry);
+    /// **原子**写入：唯一性与容量检查与插入在**同一个写锁**里完成。
+    ///
+    /// 为什么必须这样：`install` 此前是「读锁查重 → 放锁 → `insert`」，而
+    /// `insert` 是**覆盖式**写入。两个并发安装同一个 id 时，两边都能通过查重、
+    /// 都返回 `Ok(id)`，后写者静默覆盖前者——既没报 `E_PLUGIN_EXISTS`，也把
+    /// 先写者的状态丢了。容量检查同理可被并发绕过（`max_plugins` 被突破）。
+    /// 这不是理论问题：`install_plugin_from_json` 现在是生产入口，多插件并行
+    /// 装配就会走到这条路径。
+    ///
+    /// 返回 `Err` 时**不改动**注册表（检查与插入同临界区，没有中间态）。
+    fn try_put_entry(&self, entry: PluginEntry, id: PluginId) -> HostResult<()> {
+        {
+            let mut entries = self.entries.write();
+            if entries.contains_key(&id) {
+                return Err(HostError::new(
+                    ErrorCode::E_PLUGIN_EXISTS,
+                    format!("插件 `{id}` 已存在（唯一性约束，计划 §4.2）"),
+                ));
+            }
+            if entries.len() >= self.config.max_plugins {
+                return Err(HostError::new(
+                    ErrorCode::E_REGISTRY_FULL,
+                    format!(
+                        "注册表已达上限 {}；插件 `{id}` 被拒绝（硬失败而非挤占，计划 §4.1）",
+                        self.config.max_plugins
+                    ),
+                ));
+            }
+            entries.insert(id.clone(), entry);
+        }
         self.maintain_active(&id);
+        Ok(())
     }
 
     /// 注册表条目数。
@@ -1116,6 +1134,71 @@ mod tests {
         r.install(&index(), manifest("com.example.a", None)).unwrap();
         let e = r.install(&index(), manifest("com.example.a", None)).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_PLUGIN_EXISTS);
+    }
+
+    /// 并发安装同一 id：**恰好一个**成功，其余必须拿到 `E_PLUGIN_EXISTS`。
+    ///
+    /// 回归保护：此前 `install` 是「读锁查重 → 放锁 → `insert`（覆盖式）」，两个
+    /// 并发调用都能通过查重、都返回 `Ok`，后写者静默覆盖前者。用多线程把这条
+    /// 竞态钉死——修好之前这个用例会看到 success > 1。
+    #[test]
+    fn concurrent_install_of_same_id_exactly_one_wins() {
+        use std::sync::Arc;
+        let r = Arc::new(Registry::default());
+        const N: usize = 8;
+
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let r = Arc::clone(&r);
+                std::thread::spawn(move || r.install(&index(), manifest("com.example.race", None)))
+            })
+            .collect();
+
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let ok = results.iter().filter(|x| x.is_ok()).count();
+        assert_eq!(ok, 1, "同一 id 的并发安装只能有一个成功，实际 {ok} 个");
+
+        let dup = results
+            .iter()
+            .filter(|x| x.as_ref().err().is_some_and(|e| e.code == ErrorCode::E_PLUGIN_EXISTS))
+            .count();
+        assert_eq!(dup, N - 1, "其余 {} 个都应报 E_PLUGIN_EXISTS", N - 1);
+        assert_eq!(r.len(), 1, "注册表里只应有一条");
+    }
+
+    /// 并发安装**不同** id 时不得突破 `max_plugins`。
+    ///
+    /// 回归保护：容量检查此前也在读锁里做，并发下可被绕过。
+    #[test]
+    fn concurrent_install_cannot_exceed_capacity() {
+        use std::sync::Arc;
+        let cfg = RegistryConfig {
+            max_plugins: 3,
+            ..default_config()
+        };
+        let r = Arc::new(Registry::new(cfg));
+
+        let handles: Vec<_> = (0..12)
+            .map(|i| {
+                let r = Arc::clone(&r);
+                std::thread::spawn(move || {
+                    let id = format!("com.example.c{i}");
+                    r.install(&index(), manifest(&id, None))
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let ok = results.iter().filter(|x| x.is_ok()).count();
+        assert_eq!(ok, 3, "成功数应恰好等于容量上限");
+        assert_eq!(r.len(), 3, "注册表条目数不得超过 max_plugins");
+        assert!(
+            results
+                .iter()
+                .filter(|x| x.is_err())
+                .all(|x| x.as_ref().err().unwrap().code == ErrorCode::E_REGISTRY_FULL),
+            "被拒的调用应报 E_REGISTRY_FULL"
+        );
     }
 
     #[test]
@@ -1380,6 +1463,36 @@ mod tests {
         assert_eq!(r.pending_len(), 0);
         assert_eq!(r.call_end(&c.call_id).unwrap_err().code, ErrorCode::E_CALL_NOT_FOUND);
         assert_eq!(r.call_cancel(&c.call_id).unwrap_err().code, ErrorCode::E_CALL_NOT_FOUND);
+    }
+
+    /// **已过期**与**不存在**必须分开报：`host_call_end` 不能把一个早就超时的
+    /// 调用当成"正常结束"收下。
+    ///
+    /// 这是 `call_status` 的生产接线点——此前它只有测试调用，于是 `call_end`
+    /// 对超时条目一律返回"成功"，调用方以为调用走完了。
+    #[test]
+    fn call_end_on_expired_call_is_timeout_not_success() {
+        // TTL 设成 0：`call_begin` 之后立刻就算过期（`now >= expires_at`）。
+        let cfg = RegistryConfig {
+            pending_ttl: Duration::from_millis(0),
+            ..default_config()
+        };
+        let r = Registry::new(cfg);
+        let id = r.install(&index(), manifest("com.example.ttl", None)).unwrap();
+        enable(&r, &id);
+        let c = r.call_begin(&id, "a", serde_json::json!(null)).unwrap();
+
+        let err = r.call_end(&c.call_id).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_CALL_TIMEOUT);
+        // `E_CALL_TIMEOUT` 属于框架的可重试集合（`ErrorCode::retryable()`）——
+        // 超时是暂时性失败，重发可能成功。这里断言的是"码对了、可重试标志随码走"。
+        assert!(err.retryable, "超时应保持可重试（与 ErrorCode::retryable 一致）");
+
+        // 条目**没有**被摘掉：拒绝路径不得改动状态（调用方仍能观察到它）。
+        assert_eq!(r.pending_len(), 1);
+        // 取消同理，也不会把它当正常路径吞掉。
+        assert_eq!(r.call_cancel(&c.call_id).unwrap_err().code, ErrorCode::E_CALL_TIMEOUT);
+        assert_eq!(r.pending_len(), 1);
     }
 
     // ────────────────────────────────────────────────────────────

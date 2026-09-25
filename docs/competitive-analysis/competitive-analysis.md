@@ -43,11 +43,11 @@
 > 商城三命令的 `simulated` 成为**线字段**；以及**代码层身份判定**（仅主窗 / 绑定自身
 > 命名空间 / 绑定自身身份 / 按身份过滤四类，见 `docs/architecture/app-layer-wire.md` §5）。
 > 同一轮还修掉三处"仿真冒充成功"与一处"命令连错目标"（`oc-restart` 曾连 `host_window_quit`，
-> 只退不重启且跳过恢复对账）。本文计数已同步为实测：Rust **1221** / TS **1571** /
-> wire-gate **125**；命令面 **54 = 底座 38 + 插件运行时 16**。
+> 只退不重启且跳过恢复对账）。该轮收口时的实测计数：Rust **1221** / TS **1571** /
+> wire-gate 当轮计数；命令面 **54 = 底座 38 + 插件运行时 16**。
 >
-> **后续更新（2026-09-24，发布基建轮）**：TS **1577**（`pnpm -r test` 实跑）；
-> Rust 源码 `#[test]` 声明数 **1258**（**不是**执行结果，feature 门控另计，真实执行以
+> **后续更新（2026-09-25，三轮全链路审计之后）**：TS **1626**（`pnpm -r test` 实跑）；
+> Rust 源码 `#[test]` 声明数 **1284**（**不是**执行结果，feature 门控另计，真实执行以
 > CI 为准）；ESLint 0 error。本文其余兑现度标记仍以文首的核对日期为准。
 
 ---
@@ -525,16 +525,19 @@ RJSF 兼容 Schema + uiSchema
 
 ## 四、测试体系
 
-| 层级 | 测试数量（轮 11 实测） | 工具 |
+| 层级 | 测试数量（2026-09-25 实测） | 工具 |
 |------|---------|------|
-| Rust 单元测试 | **1221 tests**（`cargo test --workspace` 聚合，15 个 crate 全部 0 failed；feature 门控另计：adapter+tauri 222+1 doc-test / shell 71） | `cargo test --workspace` |
-| TypeScript 单元测试 | **1577 tests**（97 个测试文件，2026-09-24 更新；轮 11 时 1571） | `vitest`（`pnpm -r test`） |
-| 契约测试 | TS↔Rust 跨语言，wire-gate **125 条门禁** | `@tauron/contract-tests` + `@tauron/contract-kit` |
+| Rust 单元测试 | **1251 tests**（`cargo test --workspace --lib --tests` 聚合，15 个 crate 全部 0 failed；feature 门控另计：adapter+tauri 222+1 doc-test / shell 71。源码 `#[test]` **声明数** 1284 是另一个口径，见 §四脚注） | `cargo test --workspace` |
+| TypeScript 单元测试 | **1626 tests**（98 个测试文件，2026-09-25 更新；轮 11 时 1571） | `vitest`（`pnpm -r test`） |
+| 契约测试 | TS↔Rust 跨语言，wire-gate **110 条门禁** | `@tauron/contract-tests` + `@tauron/contract-kit` |
 | 属性测试 | — | `proptest` |
 | 性能基准 | — | `criterion` |
 
-> 上表数字是 `cargo test --workspace` / `pnpm -r test` 的**实测聚合值**（口径：所有 suite
-> 的 `passed` 之和，failed 必须为 0）。feature 门控的额外套件单列：
+> 上表数字是 `cargo test --workspace --locked --lib --tests` / `pnpm -r test` 的**实测
+> 聚合值**（口径：所有 suite 的 `passed` 之和，failed 必须为 0；实测 15 个 suite /
+> **1251 passed / 0 failed**）。**另有一个不同的口径**：源码里 `#[test]` 的**声明数**
+> 是 **1284**——它包含 feature 门控（`tauri`）下才编译的用例，因此大于执行数；
+> README 的「测试」表给的是声明数，两处不要混读。feature 门控的额外套件单列：
 > `cargo test -p tauron-adapter --features tauri` = 175、`-p tauron-shell --features tauri` = 71。
 
 ---

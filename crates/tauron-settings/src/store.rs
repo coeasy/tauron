@@ -21,7 +21,13 @@ use crate::merge;
 use crate::registry::SchemaRegistry;
 
 /// 一个插件的完整配置状态（四层）。
-#[derive(Debug, Default, Clone)]
+///
+/// 派生 `Serialize`/`Deserialize`：本模块按设计**不做磁盘 I/O**（见模块头），
+/// 但持久化的落点需要能序列化这一层——`snapshot_all()` 的结果要能写进文件、
+/// 读回来喂 `restore()`。没有这两个 derive，`snapshot_all`/`restore` 就只能是
+/// 测试里的玩具（本仓曾如此：设置写进去，重启即丢）。
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct PluginState {
     pub builtin: Value,
     pub brand: Value,
@@ -113,6 +119,13 @@ pub struct ChangeEvent {
     pub source: LayerKind,
 }
 
+/// 单个订阅者待消费事件的**上限**（环形：超限丢最旧一条）。
+///
+/// 为什么需要：`broadcast` 是无条件 `push`。订阅者若从不 `drain`，队列会随每次
+/// 设置写入无限增长——这是宿主内存被订阅方单方面拖垮的路径。到顶后丢最旧，
+/// 与 `tauron-notify` 的环形缓冲、`MemoryWindowSink` 的留痕上限同一策略。
+pub const MAX_PENDING_EVENTS: usize = 1024;
+
 /// 变更订阅者（简单广播：每个订阅者一条独立队列）。
 #[derive(Default)]
 pub struct Watcher {
@@ -135,6 +148,9 @@ impl Watcher {
 
     pub fn broadcast(&mut self, event: &ChangeEvent) {
         for q in self.queues.values_mut() {
+            if q.len() >= MAX_PENDING_EVENTS {
+                q.remove(0);
+            }
             q.push(event.clone());
         }
     }
@@ -302,6 +318,16 @@ impl SettingsStore {
     }
 
     /// 订阅变更。
+    ///
+    /// # 诚实边界
+    ///
+    /// - 本 API 目前**没有生产调用点**（仓内只有单测用）。`tauron-adapter` 的
+    ///   设置命令走的是"写即落盘"，没有订阅回推路径。要用它需要先在宿主侧
+    ///   接一条事件出口。
+    /// - `plugin_id` 参数当前**被忽略**：`broadcast` 会把所有命名空间的变更都投给
+    ///   每个订阅者。真要做按插件隔离的订阅，得先让 `ChangeEvent` 的过滤落到
+    ///   队列分发处，而不是在这里加一个没人读的参数。
+    /// - 队列有上限（[`MAX_PENDING_EVENTS`]）：订阅者不 `drain` 时丢最旧，不无限增长。
     pub fn watch(&mut self, _plugin_id: &str) -> u64 {
         self.watcher.subscribe()
     }
@@ -682,6 +708,30 @@ mod tests {
         s.set("p.audio", "p.audio", "volume", &json!(50)).unwrap();
         assert_eq!(s.drain(a).len(), 1);
         assert_eq!(s.drain(b).len(), 1, "每个订阅者独立收一份");
+    }
+
+    #[test]
+    fn watcher_queue_is_bounded_so_a_silent_subscriber_cannot_grow_forever() {
+        // `broadcast` 是无条件 push：订阅者从不 drain 时队列会随每次写入无限增长。
+        // 到顶后丢最旧，稳定在 MAX_PENDING_EVENTS。
+        let mut w = Watcher::default();
+        let id = w.subscribe();
+        for i in 0..(MAX_PENDING_EVENTS + 25) {
+            w.broadcast(&ChangeEvent {
+                plugin_id: "p".to_string(),
+                key: format!("k{i}"),
+                value: json!(i),
+                source: LayerKind::User,
+            });
+        }
+        let drained = w.drain(id);
+        assert_eq!(drained.len(), MAX_PENDING_EVENTS, "队列必须有上限");
+        // 丢的是**最旧**的：留下的是最后 MAX_PENDING_EVENTS 条。
+        assert_eq!(drained[0].key, format!("k{}", 25));
+        assert_eq!(
+            drained[MAX_PENDING_EVENTS - 1].key,
+            format!("k{}", MAX_PENDING_EVENTS + 24)
+        );
     }
 
     #[test]

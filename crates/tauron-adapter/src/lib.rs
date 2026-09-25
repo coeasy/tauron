@@ -32,10 +32,9 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use tauron_host::{
-    authz::RegistryAdminOp,
     eventbus::{ChannelKind, EventBus, Frame, PublishResult, SubscribeOutcome},
     lifecycle::{Event, State as LifecycleStateName, TransitionOutcome},
-    manifest::{EventDecl, PluginId, PluginType},
+    manifest::{EventDecl, PluginId, PluginManifest, PluginType},
     registry::{PluginSummary, Registry, RegistryConfig},
     runtime::{LeaseReaper, ReapOutcome, ReapStats, RuntimeHandle},
     stream::{StreamFrame, StreamKind},
@@ -46,6 +45,12 @@ use tauron_host::{
 // `$crate::tauri::HostResult` 只在 feature `tauri` 下存在。因此在 crate 根重新导出：
 // 「写一条宿主形态命令」不必先自己依赖 `tauron-host`，也不必打开某个 feature。
 pub use tauron_host::{ErrorCode, HostError, HostResult};
+// 装配方需要它来调 `cmd_registry_admin`（启用/禁用/卸载/清除）。不导出的话
+// 下游宿主只能自己 `tauron_host::authz::RegistryAdminOp`——即多一条隐式依赖。
+pub use tauron_host::authz::RegistryAdminOp;
+// 第三方集成用的客户端配置（`AdapterConfig::from_client_config` 的输入）。
+// 不导出的话接入方得直接依赖 `tauron-host` 才能构造它。
+pub use tauron_host::config::ClientConfig;
 use tauron_i18n::{I18nEngine, ResourceBundle};
 use tauron_notify::{dispatch, DispatchSink, NotifyEntry, NotifyKind, NotifyStore};
 use tauron_proc::{
@@ -65,6 +70,13 @@ pub struct ContributeEntry {
     pub label: String,
 }
 
+/// 贡献表容量上限。
+///
+/// `host_contributes_register` 是 `self` 档命令：任何插件窗口都能反复调用。
+/// 只按 `(plugin_id, id)` 去重是不够的——换个 `id` 就能再插一条，`Vec` 会无界
+/// 增长（宿主内存被插件单方面拖垮）。到顶后**如实拒绝**，不静默丢弃。
+pub const MAX_CONTRIBUTES: usize = 4096;
+
 /// 贡献注册表：管理所有已注册贡献。
 #[derive(Debug, Default)]
 pub struct ContributesRegistry {
@@ -81,6 +93,16 @@ impl ContributesRegistry {
                 format!("贡献 {} 已存在", entry.id),
             ));
         }
+        // 容量闸（与 `Registry::try_put_entry` 同一口径：判定与插入同临界区，
+        // 本方法已持 `&mut self`，天然满足）。
+        if self.entries.len() >= MAX_CONTRIBUTES {
+            return Err(tauron_host::HostError::new(
+                ErrorCode::E_REGISTRY_FULL,
+                format!(
+                    "贡献表已达上限 {MAX_CONTRIBUTES}；先 `clear_plugin` 或卸载插件再注册"
+                ),
+            ));
+        }
         self.entries.push(entry);
         Ok(())
     }
@@ -90,12 +112,11 @@ impl ContributesRegistry {
         &self.entries
     }
 
-    /// 按插件获取贡献。
-    pub fn list_by_plugin(&self, plugin_id: &str) -> Vec<&ContributeEntry> {
-        self.entries.iter().filter(|e| e.plugin_id == plugin_id).collect()
-    }
-
     /// 按类型获取贡献。
+    ///
+    /// 注：曾有一个 `list_by_plugin` 兄弟方法，全仓零调用（连测试都没有），已删除。
+    /// 要按插件过滤，需要先让 `host_contributes_list` 的线格式支持插件维度——
+    /// 那是协议变更，不是在这里加一个没人调的 getter 就能解决的。
     pub fn list_by_kind(&self, kind: &str) -> Vec<&ContributeEntry> {
         self.entries.iter().filter(|e| e.kind == kind).collect()
     }
@@ -110,6 +131,42 @@ impl ContributesRegistry {
     /// 贡献数量。
     pub fn count(&self) -> usize {
         self.entries.len()
+    }
+}
+
+impl AdapterConfig {
+    /// 从第三方集成用的 [`ClientConfig`] 派生装配配置。
+    ///
+    /// **这是 `ClientConfig` 的生产消费点**。在此之前 `ClientConfig`
+    /// （`tauron-host` 里 500 余行、文档称"第三方集成的唯一入口"）只被 `pub use`
+    /// 再导出、从未被任何生产代码读过——配置写得再对也不生效，
+    /// `plugin_filter` 这类"配置化选择加载"等于没实现。
+    ///
+    /// 映射关系（只映射**有落点**的字段，其余见 `config.rs` 的诚实边界说明）：
+    /// - `registry` → [`AdapterConfig::registry`]（含 `plugin_filter` 容量与过滤）；
+    /// - `data_dir` → [`AdapterConfig::recovery_data_dir`]（相对路径按当前目录解析；
+    ///   解析不出来时回落到调用方给的 `fallback_data_dir`）。
+    ///
+    /// `log_level` 不由本函数消费：日志初始化属于宿主进程的事（`tracing` 订阅者
+    /// 在宿主侧装配），调用方可自行 `cfg.log_level()` 取用。
+    pub fn from_client_config(
+        cfg: &ClientConfig,
+        fallback_data_dir: Option<PathBuf>,
+    ) -> Self {
+        let recovery_data_dir = cfg
+            .data_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .or(fallback_data_dir);
+
+        Self {
+            registry: Some(cfg.registry_config()),
+            recovery_data_dir,
+            required_plugins: HashSet::new(),
+            origin_allowlist: Vec::new(),
+        }
     }
 }
 
@@ -213,7 +270,7 @@ pub struct WindowOpRecord {
 /// 与 R8 之前包装器里 `window.close()` 的语义逐字一致。sink 是**状态级**对象、
 /// 不知道"当前调用来自哪个窗口"，所以目标必须显式传进来。
 ///
-/// **错误码（18 码封闭词表内复用）**：目标窗口不存在、或平台拒绝该操作 →
+/// **错误码（19 码封闭词表内复用）**：目标窗口不存在、或平台拒绝该操作 →
 /// `E_STATE_INVALID_TRANSITION`（词表里没有"平台操作失败"这一类，最贴近的语义是
 /// 「该操作在当前状态下不成立」；`deep_link_delivered` 已有同样用法）。宁可如实
 /// 报"没做成"，也不新增错误码。
@@ -262,15 +319,26 @@ pub struct MemoryWindowSink {
     ops: Mutex<Vec<WindowOpRecord>>,
 }
 
+/// 进程内窗口 sink 的留痕上限（环形：超限丢**最旧**一条）。
+///
+/// 为什么需要：未注入平台 sink 的宿主（非 Tauri / 降级装配）用的就是本实现，
+/// 每次窗口操作都会永久追加一条——长跑客户端的 `Vec` 只增不减。留痕是诊断
+/// 用途，最近 512 条足够定位；丢最旧与 `NotifyStore` 的溢出策略一致。
+pub const MAX_WINDOW_OPS: usize = 512;
+
 impl MemoryWindowSink {
     /// 空记录器。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 记一次操作。
+    /// 记一次操作（环形：到顶后丢最旧，保持最近 [`MAX_WINDOW_OPS`] 条）。
     fn record(&self, op: &'static str, label: Option<&str>, detail: String) {
-        self.ops.lock().push(WindowOpRecord {
+        let mut ops = self.ops.lock();
+        if ops.len() >= MAX_WINDOW_OPS {
+            ops.remove(0);
+        }
+        ops.push(WindowOpRecord {
             op,
             label: label.map(str::to_string),
             detail,
@@ -531,7 +599,14 @@ pub struct SubstrateState {
     /// 都由 Store 负责（见 [`cmd_settings_set`] 与 [`host_settings_migrate`]）。
     /// 命名空间是单个伪插件 id [`HOST_SETTINGS_NAMESPACE`]——宿主设置的键是
     /// 开放集合，不需要 per-plugin 隔离。
+    ///
+    /// **落盘**：`SettingsStore` 自身按设计只管内存态（见其模块头），磁盘 I/O 由
+    /// 调用方承担——这里就是那个调用方。装配时从
+    /// [`SubstrateState::settings_path`] 读回，每次写成功后落盘。`None` = 不落盘
+    /// （测试与底座-only 宿主），行为与之前一致。
     pub settings: Arc<Mutex<SettingsStore>>,
+    /// 设置文档的落盘位置（`None` = 纯内存，重启即丢）。
+    pub settings_path: Option<std::path::PathBuf>,
     pub notifications: Arc<Mutex<Vec<NotificationRecord>>>,
     /// 通知存储（P0-5：对接 tauron-notify crate）。
     pub notify_store: Arc<Mutex<NotifyStore>>,
@@ -888,9 +963,28 @@ impl SubstrateState {
         let mut settings = SettingsStore::new();
         install_host_settings_schema(&mut settings);
 
+        // 设置落盘：与恢复标记共用数据目录。读不回来（首次启动 / 文件损坏）时
+        // 保留空文档并**如实记录**——不静默吞掉，也不因为一个坏文件拒绝启动。
+        let settings_path = cfg
+            .recovery_data_dir
+            .as_ref()
+            .map(|d| d.join(HOST_SETTINGS_FILE));
+        if let Some(path) = settings_path.as_ref() {
+            match load_settings_doc(path) {
+                Ok(Some(entries)) => settings.restore(&entries),
+                Ok(None) => {}
+                Err(e) => eprintln!(
+                    "[tauron] 设置文档 {} 读回失败，本轮以空文档启动：{}",
+                    path.display(),
+                    e.message
+                ),
+            }
+        }
+
         Self {
             bus: Arc::new(Mutex::new(EventBus::default())),
             settings: Arc::new(Mutex::new(settings)),
+            settings_path,
             notifications: Arc::new(Mutex::new(Vec::new())),
             notify_store: Arc::new(Mutex::new(notify_store)),
             notify_sink: Arc::new(std::sync::OnceLock::new()),
@@ -965,11 +1059,23 @@ impl PluginRuntimeState {
         registry.set_lease_reaper(Arc::new(SpawnerReaper(spawner.clone())));
         // 注入恢复对账的插件侧写回口。`OnceLock::set` 只接受第一次注入：重复装配
         // 不会换掉已注入的写回口（否则两套插件运行时会让对账写到错误的注册表）。
-        let _ = substrate
+        //
+        // **冲突必须留痕，不能静默丢弃**：若底座已经注入过写回口，本次新建的
+        // `RegistryFlagSink` 会被 `OnceLock` 丢掉——对账仍写向**旧**注册表，而
+        // 调用方手里的却是新注册表。这几乎必然是「同一底座装配了两个插件运行时」
+        // 的误用，静默吞掉会让故障表现为「对账写到了看不见的地方」。
+        if substrate
             .plugin_flags
             .set(Arc::new(RegistryFlagSink {
                 registry: registry.clone(),
-            }));
+            }))
+            .is_err()
+        {
+            eprintln!(
+                "[tauron] 底座已注入插件侧写回口：本次装配的注册表不参与恢复对账。\
+                 同一底座不应装配两个插件运行时。"
+            );
+        }
         Self {
             substrate,
             registry,
@@ -1308,6 +1414,68 @@ pub fn cmd_registry_list_all_as(
 }
 
 /// `host_registry_admin`：主窗特权命令（启用/禁用/卸载/清除）。
+/// **装配期插件安装**（宿主接入方在 `setup()` 阶段调用）。
+///
+/// 这是 `Registry::install` 的**生产入口**。在此之前它只在测试里被调用过：
+/// 注册表在生产上永远是空的，于是 `host_plugin_call` / 流式 / 生命周期 /
+/// `host_runtime_spawn` 这一整条插件链在真机上**没有起点**——「有类型、有接口、
+/// 有测试、没有入口」的典型形态。
+///
+/// 三个动作：
+/// 1. 解析 manifest JSON（`deny_unknown_fields`，拼写漂移即失败）；
+/// 2. 解析失败但 `id` 可辨认 → [`Registry::record_install_failure`] 落一条
+///    `INSTALL_FAILED`，让 UI **看得见**这次失败（否则插件凭空消失）；
+/// 3. 解析成功 → 用**内嵌权限词表**（[`tauron_host::manifest::embedded_permission_index`]）
+///    做 `validate` 并落库。
+///
+/// 为什么不做成命令：安装发生在宿主**装配期**，输入是接入方自己的插件清单，
+/// 不是前端可控的运行期动作。运行期的管理面是 `host_registry_admin`
+/// （enable/disable/uninstall/purge）——两者分工明确。
+///
+/// 用法见 `examples/minimal-app/src-tauri/src/main.rs`。
+pub fn install_plugin_from_json(
+    state: &PluginRuntimeState,
+    manifest_json: &str,
+) -> HostResult<PluginId> {
+    let index = tauron_host::manifest::embedded_permission_index();
+
+    match serde_json::from_str::<PluginManifest>(manifest_json) {
+        Ok(manifest) => state.registry.install(&index, manifest),
+        Err(parse_err) => {
+            // 兜底：manifest 都解析不出来时，尽力从原始 JSON 里抠出 id，
+            // 把它记成 INSTALL_FAILED，而不是让这个插件"从没出现过"。
+            let reason = format!("manifest JSON 解析失败：{parse_err}");
+            let recovered_id = serde_json::from_str::<serde_json::Value>(manifest_json)
+                .ok()
+                .and_then(|v| v.get("id").and_then(|id| id.as_str()).map(String::from))
+                .and_then(|raw| PluginId::new(&raw).ok());
+
+            if let Some(id) = recovered_id {
+                // 已经装过就不覆盖（`record_install_failure` 会返回 E_PLUGIN_EXISTS）。
+                // 结果要进文案：留痕失败时不能宣称"已记入 INSTALL_FAILED"。
+                let recorded = state
+                    .registry
+                    .record_install_failure(id.clone(), reason.clone())
+                    .is_ok();
+                let tail = if recorded {
+                    format!("插件 `{id}` 已记入 INSTALL_FAILED，可卸载")
+                } else {
+                    format!("插件 `{id}` **未**记入 INSTALL_FAILED（同 id 已在注册表，或注册表已满）")
+                };
+                return Err(HostError::new(
+                    ErrorCode::E_INVALID_MANIFEST,
+                    format!("{reason}（{tail}）"),
+                ));
+            }
+
+            Err(HostError::new(
+                ErrorCode::E_INVALID_MANIFEST,
+                format!("{reason}；且无法从 JSON 中辨认插件 id，未落库"),
+            ))
+        }
+    }
+}
+
 pub fn cmd_registry_admin(
     state: &PluginRuntimeState,
     plugin_id: &str,
@@ -2005,6 +2173,79 @@ pub const HOST_SETTINGS_NAMESPACE: &str = "host.settings";
 /// 这正是 R7 之前裸 `HashMap` 的契约。
 pub const HOST_SETTINGS_SCHEMA_V1: &str = "1.0.0";
 
+/// 设置文档的落盘文件名（放在宿主数据目录下，与恢复标记同目录）。
+pub const HOST_SETTINGS_FILE: &str = "host-settings.json";
+
+/// 从磁盘读回设置文档。
+///
+/// 返回 `Ok(None)` = 文件不存在（首次启动，不是错误）；`Err` = 文件存在但读不动
+/// 或解析不了（**不静默当成空文档**——那会让用户以为设置还在，其实被清了）。
+fn load_settings_doc(
+    path: &std::path::Path,
+) -> HostResult<Option<Vec<(String, tauron_settings::PluginState)>>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(HostError::new(
+                ErrorCode::E_INVALID_MANIFEST,
+                format!("设置文档读取失败：{e}"),
+            ))
+        }
+    };
+    let entries: Vec<(String, tauron_settings::PluginState)> =
+        serde_json::from_str(&text).map_err(|e| {
+            HostError::new(
+                ErrorCode::E_INVALID_MANIFEST,
+                format!("设置文档 JSON 解析失败：{e}"),
+            )
+        })?;
+    Ok(Some(entries))
+}
+
+/// 把设置文档写回磁盘（原子写：先写临时文件再 rename）。
+///
+/// **失败必须让调用方知道**：设置写成功但落盘失败，是"重启后设置消失"的根因。
+/// 这里返回 `Err`，由 [`cmd_settings_set`] 冒泡给前端——不静默吞掉。
+fn persist_settings_doc(state: &SubstrateState) -> HostResult<()> {
+    let Some(path) = state.settings_path.as_ref() else {
+        // 未配置数据目录（测试 / 底座-only 宿主）：纯内存，不是错误。
+        return Ok(());
+    };
+    let entries = state.settings.lock().snapshot_all();
+    let json = serde_json::to_string_pretty(&entries).map_err(|e| {
+        HostError::new(
+            ErrorCode::E_INVALID_MANIFEST,
+            format!("设置文档序列化失败：{e}"),
+        )
+    })?;
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| {
+            HostError::new(
+                ErrorCode::E_INVALID_MANIFEST,
+                format!("设置目录创建失败 {}：{e}", dir.display()),
+            )
+        })?;
+    }
+    // 原子写：临时文件 + rename，避免写到一半断电留下半截 JSON
+    //（下次启动会因解析失败而丢掉**全部**设置）。
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json.as_bytes()).map_err(|e| {
+        HostError::new(
+            ErrorCode::E_INVALID_MANIFEST,
+            format!("设置文档写入失败 {}：{e}", tmp.display()),
+        )
+    })?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        HostError::new(
+            ErrorCode::E_INVALID_MANIFEST,
+            format!("设置文档落位失败 {}：{e}", path.display()),
+        )
+    })?;
+    Ok(())
+}
+
 /// 宿主设置文档的**当前**（v2）schema 版本。
 ///
 /// v2 的键是**单段转义**键（见 [`settings_path`]）：一键 = 一段 = 一叶。
@@ -2184,11 +2425,16 @@ pub fn cmd_settings_set(
             ));
         }
         let path = settings_path(key);
-        let mut store = state.settings.lock();
-        store
-            .set(HOST_SETTINGS_NAMESPACE, HOST_SETTINGS_NAMESPACE, &path, &value)
-            .map_err(settings_to_host_error)?;
-        Ok(())
+        {
+            let mut store = state.settings.lock();
+            store
+                .set(HOST_SETTINGS_NAMESPACE, HOST_SETTINGS_NAMESPACE, &path, &value)
+                .map_err(settings_to_host_error)?;
+        }
+        // 落盘。写成功但落盘失败必须**如实失败**——否则前端显示"已保存"，
+        // 重启后设置却没了（这正是本仓此前的行为：Store 只改内存态，
+        // 没有调用方承担磁盘 I/O，`snapshot_all`/`restore` 只在测试里出现过）。
+        persist_settings_doc(state)
     })?
 }
 
@@ -2206,7 +2452,10 @@ pub fn cmd_settings_adopt_legacy(
     doc: serde_json::Value,
 ) -> HostResult<()> {
     guard("settings_adopt_legacy", || {
-        host_settings_adopt_legacy(state, doc)
+        host_settings_adopt_legacy(state, doc)?;
+        // 接手旧版文档同样要落盘：只改内存态的话，重启后磁盘上的旧文档又盖回来，
+        // 迁移看起来"成功"了却永远不生效。
+        persist_settings_doc(state)
     })?
 }
 
@@ -2235,7 +2484,15 @@ pub fn cmd_settings_adopt_legacy_as(
 /// 编译与用户数据改写，一旦 panic 必须是 `E_HOST_PANIC` 而不是把 panic  unwind
 /// 穿过 IPC 边界。
 pub fn cmd_settings_migrate(state: &SubstrateState) -> HostResult<usize> {
-    guard("settings_migrate", || host_settings_migrate(state))?
+    guard("settings_migrate", || {
+        let steps = host_settings_migrate(state)?;
+        // 只有真的发生了迁移（steps > 0）才落盘：已是当前版本时不该因为一次
+        // 诊断性的 migrate 调用而重写磁盘（也避免无谓的临时文件抖动）。
+        if steps > 0 {
+            persist_settings_doc(state)?;
+        }
+        Ok(steps)
+    })?
 }
 
 /// `host_settings_migrate` 的**带身份判定**版本（wire 层转调的就是它）。
@@ -6159,6 +6416,64 @@ mod tests {
     }
 
     #[test]
+    fn settings_survive_a_restart_when_a_data_dir_is_configured() {
+        // 本仓此前的行为：`cmd_settings_set` 只改内存态，Store 从不落盘，
+        // 于是「保存成功 → 重启 → 设置没了」。这条用例把「落盘 → 重装配读回」
+        // 钉死：没有 `persist_settings_doc` 与装配期 `load_settings_doc` 就过不了。
+        let t = tempfile::tempdir().unwrap();
+
+        {
+            let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+            cmd_settings_set(&state, "plugin:p.theme", serde_json::json!("dark")).unwrap();
+            cmd_settings_set(&state, "a.b", serde_json::json!(7)).unwrap();
+        }
+
+        // 新进程：同一数据目录重新装配，设置必须从磁盘回来。
+        let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+        assert_eq!(
+            cmd_settings_get(&state, "plugin:p.theme").unwrap(),
+            serde_json::json!("dark")
+        );
+        assert_eq!(cmd_settings_get(&state, "a.b").unwrap(), serde_json::json!(7));
+        // 落盘文件名固定，方便宿主/运维定位。
+        assert!(t.path().join(HOST_SETTINGS_FILE).is_file());
+    }
+
+    #[test]
+    fn settings_adopt_legacy_and_migrate_also_persist() {
+        // 迁移只改内存态的话，重启后磁盘上的旧文档又盖回来——"迁移成功"却永不生效。
+        let t = tempfile::tempdir().unwrap();
+
+        {
+            let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+            cmd_settings_adopt_legacy(&state, serde_json::json!({"plugin:p.theme": "dark"}))
+                .unwrap();
+            assert_eq!(cmd_settings_migrate(&state).unwrap(), 1);
+        }
+
+        let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+        assert_eq!(
+            host_settings_data_version(&state).as_deref(),
+            Some(HOST_SETTINGS_SCHEMA_V2),
+            "迁移后的版本标注必须跨进程"
+        );
+        assert_eq!(
+            cmd_settings_get(&state, "plugin:p.theme").unwrap(),
+            serde_json::json!("dark"),
+            "迁移后的值必须跨进程可读"
+        );
+    }
+
+    #[test]
+    fn settings_persistence_is_off_when_no_data_dir_is_configured() {
+        // 无数据目录 = 纯内存（测试 / 底座-only 宿主）：`persist` 是 no-op，
+        // 不得凭空在进程 CWD 落文件。
+        let state = CommandState::new();
+        cmd_settings_set(&state, "k", serde_json::json!(1)).unwrap();
+        assert!(state.settings_path.is_none());
+    }
+
+    #[test]
     fn settings_bridge_migrates_v1_documents_to_v2() {
         let state = CommandState::new();
         // 旧版宿主配置：裸键平铺（R7 之前的裸 HashMap 形态）。
@@ -6446,6 +6761,47 @@ mod tests {
     }
 
     #[test]
+    fn contributes_register_is_bounded_and_fails_loudly_at_the_cap() {
+        // `host_contributes_register` 是 self 档：插件换个 `id` 就能再插一条，
+        // 只按 (plugin_id, id) 去重等于没有上限。到顶后必须**如实拒绝**。
+        let mut reg = ContributesRegistry::default();
+        for i in 0..MAX_CONTRIBUTES {
+            reg.register(ContributeEntry {
+                plugin_id: "p.greedy".to_string(),
+                kind: "command".to_string(),
+                id: format!("c{i}"),
+                label: "x".to_string(),
+            })
+            .expect("未到上限前必须成功");
+        }
+        assert_eq!(reg.count(), MAX_CONTRIBUTES);
+
+        let err = reg
+            .register(ContributeEntry {
+                plugin_id: "p.greedy".to_string(),
+                kind: "command".to_string(),
+                id: "overflow".to_string(),
+                label: "x".to_string(),
+            })
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_REGISTRY_FULL);
+        assert_eq!(reg.count(), MAX_CONTRIBUTES, "拒绝路径不得改变容量");
+    }
+
+    #[test]
+    fn memory_window_sink_traces_are_a_ring_not_an_unbounded_log() {
+        // 未注入平台 sink 的宿主用的就是这个实现：每次窗口操作永久追加一条，
+        // 长跑客户端内存只增不减。环形后必须稳定在 MAX_WINDOW_OPS。
+        let sink = MemoryWindowSink::new();
+        for _ in 0..(MAX_WINDOW_OPS + 50) {
+            sink.minimize("plugin-p").unwrap();
+        }
+        let ops = sink.ops();
+        assert_eq!(ops.len(), MAX_WINDOW_OPS, "到顶后丢最旧，不是无限增长");
+        assert!(sink.recorded("minimize"));
+    }
+
+    #[test]
     fn cmd_notify_records_notification() {
         let state = CommandState::new();
         cmd_notify(&state, "p.audio", "Title", "Body").unwrap();
@@ -6613,6 +6969,164 @@ mod tests {
         let result = state.registry.install(&index, manifest);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ErrorCode::E_PLUGIN_EXISTS);
+    }
+
+    // ── 装配期安装入口（`install_plugin_from_json`）─────────────────────────
+    //
+    // 这组用例的意义：`Registry::install` 此前**只有测试调用**——注册表在生产上
+    // 永远是空的，`host_plugin_call` / 流式 / 生命周期 / `host_runtime_spawn`
+    // 整条链在真机上没有起点。`install_plugin_from_json` 是它的生产入口。
+
+    #[test]
+    fn install_plugin_from_json_installs_and_becomes_visible() {
+        let state = CommandState::new();
+        let json = serde_json::to_string(&test_manifest("p.assemble")).unwrap();
+
+        let id = install_plugin_from_json(&state, &json).expect("合法 manifest 应装得上");
+        assert_eq!(id.as_str(), "p.assemble");
+
+        // 可见性：进列表（UI 看得到）。
+        let list = cmd_registry_list_all(&state).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "p.assemble");
+
+        // 生命周期：落 INSTALLED（不是 INSTALL_FAILED）。
+        let entry = state.registry.find(&id).unwrap();
+        assert_eq!(entry.state.state, tauron_host::lifecycle::State::Installed);
+
+        // 装完之后管理面（enable）可用——证明这条链真的有下游。
+        let out = cmd_registry_admin(&state, "p.assemble", RegistryAdminOp::Enable).unwrap();
+        assert_eq!(out.to, tauron_host::lifecycle::State::Enabled);
+    }
+
+    #[test]
+    fn install_plugin_from_json_records_install_failed_when_manifest_malformed() {
+        let state = CommandState::new();
+        // id 合法、但 `version` 不是 semver → 解析失败。
+        let bad = r#"{"id":"p.broken","name":"Broken","version":"not-a-semver"}"#;
+
+        let err = install_plugin_from_json(&state, bad).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST);
+        assert!(
+            err.message.contains("INSTALL_FAILED"),
+            "错误信息应告知已落 INSTALL_FAILED，实际：{}",
+            err.message
+        );
+
+        // 关键：插件**没有凭空消失**——UI 能看到一条失败记录并可卸载。
+        let list = cmd_registry_list_all(&state).unwrap();
+        assert_eq!(list.len(), 1, "解析失败也必须留痕");
+        let entry = state.registry.find(&PluginId::new("p.broken").unwrap()).unwrap();
+        assert_eq!(
+            entry.state.state,
+            tauron_host::lifecycle::State::InstallFailed
+        );
+        assert!(
+            entry.state.last_reason.as_deref().unwrap_or("").contains("解析失败"),
+            "失败原因要落在 last_reason 上"
+        );
+    }
+
+    #[test]
+    fn install_plugin_from_json_without_recoverable_id_does_not_register() {
+        let state = CommandState::new();
+        let err = install_plugin_from_json(&state, r#"{"nope":1}"#).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST);
+        assert!(err.message.contains("无法从 JSON 中辨认插件 id"));
+        assert!(
+            cmd_registry_list_all(&state).unwrap().is_empty(),
+            "连 id 都认不出来时不该留下无名条目"
+        );
+    }
+
+    #[test]
+    fn install_plugin_from_json_rejects_unknown_field() {
+        // `deny_unknown_fields`：拼写漂移必须失败，而不是静默忽略。
+        let state = CommandState::new();
+        let mut value = serde_json::to_value(test_manifest("p.typo")).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("pluginType".to_string(), serde_json::json!("js"));
+        let err = install_plugin_from_json(&state, &value.to_string()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST);
+    }
+
+    // ── 配置化装配（`ClientConfig` 的生产消费点）───────────────────────────
+
+    /// `ClientConfig` → `AdapterConfig` 的映射必须真的生效。
+    ///
+    /// 回归保护：此前 `ClientConfig` 只被 `pub use` 再导出、没有生产消费方——
+    /// 配置里写 `plugin_filter` 也不会有任何效果（"配置化选择加载"是空的）。
+    #[test]
+    fn adapter_config_from_client_config_maps_registry_and_data_dir() {
+        let cfg = ClientConfig::from_json(
+            r#"{
+                "registry": {
+                    "plugin_filter": { "allow": ["com.example.formatter"] },
+                    "max_plugins": 3
+                },
+                "data_dir": "/tmp/tauron-data"
+            }"#,
+        )
+        .unwrap();
+
+        let adapter = AdapterConfig::from_client_config(&cfg, None);
+
+        let registry = adapter.registry.expect("registry 必须被映射");
+        assert_eq!(registry.max_plugins, 3, "max_plugins 覆盖必须生效");
+        let filter = registry.plugin_filter.expect("过滤器必须被映射");
+        assert_eq!(filter.allow, vec!["com.example.formatter".to_string()]);
+        assert_eq!(
+            adapter.recovery_data_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/tauron-data")),
+            "data_dir 必须映射到恢复数据目录（否则配置无效）"
+        );
+
+        // 空配置 → 全部回落默认值，且不 panic（"缺省即安全"）。
+        let fallback = AdapterConfig::from_client_config(
+            &ClientConfig::default(),
+            Some(std::path::PathBuf::from("/fallback")),
+        );
+        assert_eq!(
+            fallback.recovery_data_dir.as_deref(),
+            Some(std::path::Path::new("/fallback")),
+            "未配置 data_dir 时用调用方给的兜底目录"
+        );
+        assert_eq!(
+            fallback.registry.expect("registry 恒有值").max_plugins,
+            tauron_host::registry::default_config().max_plugins
+        );
+    }
+
+    /// 配置里的 `plugin_filter` 真的会拦住被排除的插件（端到端：配置 → 安装）。
+    #[test]
+    fn client_config_filter_actually_blocks_install() {
+        let cfg = ClientConfig::from_json(
+            r#"{ "registry": { "plugin_filter": { "deny": ["com.blocked"] } } }"#,
+        )
+        .unwrap();
+        let state = CommandState::with_adapter_config(AdapterConfig::from_client_config(&cfg, None));
+
+        // 被 deny 的插件：`install` 应返回 E_PLUGIN_FILTERED，且不入库。
+        let mut blocked = test_manifest("com.blocked");
+        blocked.id = PluginId::new("com.blocked").unwrap();
+        let json = serde_json::to_string(&blocked).unwrap();
+        let err = install_plugin_from_json(&state, &json).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_PLUGIN_FILTERED);
+        assert!(cmd_registry_list_all(&state).unwrap().is_empty());
+
+        // 未被过滤的插件照常装上（证明拦住它的是过滤器，不是别的原因）。
+        let ok = serde_json::to_string(&test_manifest("com.allowed")).unwrap();
+        assert!(install_plugin_from_json(&state, &ok).is_ok());
+    }
+
+    #[test]
+    fn embedded_permission_index_parses_and_is_non_empty() {
+        // 内嵌词表是 `install` 的必填参数；它坏了整条安装链就断了。
+        let idx = tauron_host::manifest::embedded_permission_index();
+        assert_eq!(idx.version, 1);
+        assert!(!idx.entries.is_empty(), "词表不该为空");
     }
 
     #[test]

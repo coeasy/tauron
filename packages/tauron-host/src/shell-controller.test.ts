@@ -144,14 +144,55 @@ describe('ShellController', () => {
       ],
     });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const seen: Array<{ err: unknown; context: string }> = [];
     try {
-      const c = new ShellController({ backend: degradeBackend });
+      const c = new ShellController({
+        backend: degradeBackend,
+        onError: (err, context) => seen.push({ err, context }),
+      });
       c.start([container]);
       container.dispatchEvent(new CustomEvent('oc-restart'));
       await new Promise(r => setTimeout(r, 10));
-      expect(warn.mock.calls.some(args => String(args[0]).includes('宿主没有重启原语'))).toBe(true);
+      // 降级必须经**用户可见的**错误出口（onError），而不是只打 console。
+      const hit = seen.find(s => s.context === 'window.relaunch');
+      expect(hit, 'onError 必须收到 window.relaunch 降级').toBeDefined();
+      expect(String((hit!.err as Error).message)).toContain('宿主没有重启原语');
       // 关键：降级时**不动** —— 回退到 quit 会变成"点了重启却直接退出且不再起来"。
       expect(degradeBackend.invocations.some(i => i.cmd === 'host_window_quit')).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  /** 让 host_window_minimize 真的失败（MockBackend 无 case 时视作成功）。 */
+  function failingBackend(): MockBackend {
+    return new MockBackend({
+      capabilities: CONTROLLER_CAPS,
+      pluginId: 'p.shell',
+      cases: [{ cmd: 'host_window_minimize', error: new Error('boom') }],
+    });
+  }
+
+  it('命令失败经 onError 上报（不再只 console.warn 静默）', async () => {
+    const seen: Array<{ err: unknown; context: string }> = [];
+    const c = new ShellController({
+      backend: failingBackend(),
+      onError: (err, context) => seen.push({ err, context }),
+    });
+    c.start([container]);
+    container.dispatchEvent(new CustomEvent('oc-minimize'));
+    await new Promise(r => setTimeout(r, 10));
+    expect(seen.some(s => s.context === 'window.minimize')).toBe(true);
+  });
+
+  it('未传 onError 时回落到 console.warn（保持既有行为，不静默）', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const c = new ShellController({ backend: failingBackend() });
+      c.start([container]);
+      container.dispatchEvent(new CustomEvent('oc-minimize'));
+      await new Promise(r => setTimeout(r, 10));
+      expect(warn.mock.calls.some(args => String(args[0]).includes('window.minimize'))).toBe(true);
     } finally {
       warn.mockRestore();
     }
@@ -173,5 +214,15 @@ describe('ShellController', () => {
     await new Promise(r => setTimeout(r, 10));
     inv = backend.invocations.filter(i => i.cmd === 'host_registry_admin').pop();
     expect(inv?.args).toEqual({ op: { op: 'disable', id: 'com.a' } });
+  });
+
+  it('oc-plugin-uninstall 触发 host_registry_admin uninstall（此前卸载无入口）', async () => {
+    controller.start([container]);
+    container.dispatchEvent(
+      new CustomEvent('oc-plugin-uninstall', { detail: { id: 'com.a' } }),
+    );
+    await new Promise(r => setTimeout(r, 10));
+    const inv = backend.invocations.find(i => i.cmd === 'host_registry_admin');
+    expect(inv?.args).toEqual({ op: { op: 'uninstall', id: 'com.a' } });
   });
 });

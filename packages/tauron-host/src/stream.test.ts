@@ -258,6 +258,80 @@ describe('HostRpc（R5）', () => {
     off();
   });
 
+  // ── 前端写帧出口（此前 `host_stream_write` 在 TS SDK 里没有入口）────────
+  //
+  // Rust 侧 `host_stream_write` 一直注册着，`pluginCall` 的错误文案甚至拿它当
+  // "已接线"的替代路径来推荐；但 TS 侧没有任何方法能调到它——开流之后既拿不到
+  // `streamId` 也没有写帧出口，`open → write → close` 在前端是断的。
+
+  it('openStreamHandle：open → write → close 全程可达，且拿到宿主铸造的 streamId', async () => {
+    const { backend, host } = setup();
+    const seen: StreamFrame[] = [];
+    const pending = await host.pluginCall(
+      { callId: 'caller-c', method: 'fmt', kind: 'stream' },
+      (f) => seen.push(f),
+    );
+
+    const handle = host.openStreamHandle(pending.callId, () => {});
+    const streamId = await handle.ready;
+    expect(typeof streamId).toBe('string');
+    expect(streamId.length).toBeGreaterThan(0);
+
+    const frame = await handle.write({ argsJson: { hello: 'world' } });
+    expect(frame.seq).toBe(1);
+    expect(frame.kind).toBe('data');
+    expect(frame.argsJson).toEqual({ hello: 'world' });
+
+    handle.close();
+    await flush();
+    // 关流走的是 `host_stream_close`，请求里必须带刚拿到的 streamId。
+    const closeCalls = backend.invocations.filter((c) => c.cmd === 'host_stream_close');
+    expect(closeCalls).toHaveLength(1);
+    expect(closeCalls[0]!.args).toMatchObject({ req: { streamId, kind: 'end' } });
+  });
+
+  it('writeStream：二进制帧经 argsRaw 直达，不经 base64', async () => {
+    const { backend, host } = setup();
+    const pending = await host.pluginCall(
+      { callId: 'caller-c', method: 'fmt', kind: 'stream' },
+      () => {},
+    );
+    const { streamId } = await openStream(backend, pending.callId);
+
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    await host.writeStream(streamId, { argsRaw: bytes });
+
+    const writeCall = backend.invocations.find((c) => c.cmd === 'host_stream_write');
+    expect(writeCall).toBeDefined();
+    const req = (writeCall!.args as { req: { argsRaw?: Uint8Array } }).req;
+    expect(req.argsRaw).toBeInstanceOf(Uint8Array);
+    expect(Array.from(req.argsRaw!)).toEqual([0x89, 0x50, 0x4e, 0x47]);
+  });
+
+  it('已关闭的句柄再写帧 → 立即失败（不静默丢弃）', async () => {
+    const { host } = setup();
+    const pending = await host.pluginCall(
+      { callId: 'caller-c', method: 'fmt', kind: 'stream' },
+      () => {},
+    );
+    const handle = host.openStreamHandle(pending.callId, () => {});
+    await handle.ready;
+    handle.close();
+    await expect(handle.write({ argsJson: 1 })).rejects.toThrow(/流已关闭/);
+  });
+
+  it('openStream 简写仍只返回退订函数（行为未变）', async () => {
+    const { host } = setup();
+    const pending = await host.pluginCall(
+      { callId: 'caller-c', method: 'fmt', kind: 'stream' },
+      () => {},
+    );
+    const off = host.openStream(pending.callId, () => {});
+    expect(typeof off).toBe('function');
+    off();
+    off(); // 幂等
+  });
+
   it('帧种类词表闭集且大小写敏感', () => {
     expect(parseStreamKind('data')).toBe('data');
     expect(parseStreamKind('end')).toBe('end');

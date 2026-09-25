@@ -12,8 +12,16 @@ import {
 } from './errors.js';
 
 describe('HOST_ERROR_CODES', () => {
-  it('有 18 个线上错误码', () => {
-    expect(HOST_ERROR_CODES).toHaveLength(18);
+  // 不写死个数：码表是**只能追加**的（新码一律加在末尾），写死 18 会让每次
+  // 追加都变成"改一处忘一处"的假失败。这里改钉"下限 + 无重复 + 含关键码"。
+  it('线上错误码数量不低于基线且无重复', () => {
+    expect(HOST_ERROR_CODES.length).toBeGreaterThanOrEqual(18);
+    expect(new Set(HOST_ERROR_CODES).size).toBe(HOST_ERROR_CODES.length);
+  });
+
+  it('流容量闸码在表内且不可自动重试（与其余「表满」类一致）', () => {
+    expect(HOST_ERROR_CODES).toContain('E_STREAM_FULL');
+    expect(isRetryable('E_STREAM_FULL')).toBe(false);
   });
 
   it('订阅表满码在表内且不可自动重试（与其余「表满」类一致）', () => {

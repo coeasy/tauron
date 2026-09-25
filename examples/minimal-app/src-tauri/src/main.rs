@@ -21,6 +21,60 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+/// 装配配置的来源（**配置化选择加载**的生产消费点）。
+///
+/// `ClientConfig` 是 `tauron-host` 文档里"第三方集成的唯一入口"，但在本示例接上
+/// 之前**没有任何生产代码读它**——配置写得再对也不生效。这里把它接到
+/// [`tauron_adapter::AdapterConfig::from_client_config`]：
+///
+/// - 设了环境变量 `TAURON_CLIENT_CONFIG=/path/to/client-config.json` 就按它加载；
+/// - 没设（或文件读不出来）就退回默认装配，并**如实打印**失败原因（不静默降级）；
+/// - `log_level` 在这里落到 `RUST_LOG`（未显式设置时才写，不覆盖宿主自己的设置）。
+#[cfg(not(feature = "substrate-only"))]
+fn load_adapter_config() -> tauron_adapter::AdapterConfig {
+    let Some(path) = std::env::var("TAURON_CLIENT_CONFIG").ok().filter(|p| !p.trim().is_empty())
+    else {
+        return tauron_adapter::AdapterConfig::default();
+    };
+
+    match tauron_adapter::ClientConfig::from_file(std::path::Path::new(&path)) {
+        Ok(cfg) => {
+            if std::env::var_os("RUST_LOG").is_none() {
+                std::env::set_var("RUST_LOG", cfg.log_level());
+            }
+            println!(
+                "[tauron] 已加载客户端配置 {path}（logLevel={}, 插件路径 {} 项）",
+                cfg.log_level(),
+                cfg.plugin_paths.as_ref().map_or(0, Vec::len),
+            );
+            tauron_adapter::AdapterConfig::from_client_config(&cfg, None)
+        }
+        Err(e) => {
+            eprintln!("[tauron] 客户端配置 `{path}` 加载失败，回落默认装配：{}", e.message);
+            tauron_adapter::AdapterConfig::default()
+        }
+    }
+}
+
+/// 示例插件的 manifest（与 `src/plugin/first.ts` 的 `name` 一致）。
+///
+/// 字段名是 **snake_case**（manifest 是插件自己的文件格式，不是 IPC 线格式，
+/// 因此不适用"跨边界强制 camelCase"那条约定）；`type` 是唯一的重命名项
+/// （`#[serde(rename = "type")]`）。
+///
+/// `entry.js` 指向打包后的插件页面——`vite` 把 `plugin.html` 与它的 chunk 产到
+/// `dist/`，宿主按 `frontendDist` 提供。
+#[cfg(not(feature = "substrate-only"))]
+const DEMO_PLUGIN_MANIFEST: &str = r#"{
+  "id": "com.example.formatter",
+  "name": "Formatter",
+  "version": "1.0.0",
+  "type": "js",
+  "entry": { "js": "plugin.html" },
+  "permissions": [],
+  "framework": ">=0.1.0, <0.2.0"
+}"#;
+
 fn main() {
     let builder = tauri::Builder::default();
 
@@ -30,9 +84,42 @@ fn main() {
         // CommandState 需在 setup 阶段 manage（窗口/剪贴板/更新状态载体）。
         // state_init 同时打开恢复持久化（app_config_dir）——§4.14 崩溃检测的
         // 前提；前端必须每轮启动上报一次 host_recover_report，见 src/main.ts。
-        .plugin(tauron_adapter::tauri::state_init())
+        //
+        // 用 `state_init_with_adapter_config` 而不是 `state_init`：前者把
+        // `ClientConfig`（`TAURON_CLIENT_CONFIG` 指向的 JSON）真正接进注册表配置，
+        // 「配置化选择加载」（`plugin_filter`）才会生效。
+        .plugin(tauron_adapter::tauri::state_init_with_adapter_config(
+            load_adapter_config(),
+        ))
         // 54 条 host_* 命令：root 注册（裸名调用，不依赖插件 ACL capability）
         .invoke_handler(tauron_adapter::tauron_generate_handler![])
+        // ── 装配期插件安装（插件的「发现 → 注册表」这一段）─────────────
+        //
+        // 注册表不会自己长出插件：`Registry::install` 必须由**宿主装配方**调用。
+        // 示例在这里装一个演示插件并启用它，于是
+        // `host_registry_list_all` / `host_plugin_call` / 生命周期 / 流式
+        // 这几条链在真机上是**有起点**的（否则插件列表恒为空，整条插件链没有入口）。
+        .setup(|app| {
+            use tauri::Manager;
+            let state = app.state::<tauron_adapter::CommandState>();
+            match tauron_adapter::install_plugin_from_json(&state, DEMO_PLUGIN_MANIFEST) {
+                Ok(id) => {
+                    // 装完即启用（Installed → Enabled），前端可直接调用它的方法。
+                    match tauron_adapter::cmd_registry_admin(
+                        &state,
+                        id.as_str(),
+                        tauron_adapter::RegistryAdminOp::Enable,
+                    ) {
+                        Ok(_) => println!("[tauron] 已安装并启用示例插件 `{id}`"),
+                        Err(e) => eprintln!("[tauron] 示例插件 `{id}` 启用失败：{}", e.message),
+                    }
+                }
+                // 安装失败**不阻断启动**：注册表里会留下一条 INSTALL_FAILED，
+                // UI 能看到并可卸载（这正是 `record_install_failure` 的用途）。
+                Err(e) => eprintln!("[tauron] 示例插件安装失败：{}", e.message),
+            }
+            Ok(())
+        })
         // R8 §2：装配器宏的**真实消费者**（见下方 app_commands 模块）。
         .plugin(app_commands::init())
         // 窗口销毁 → 回收该插件的订阅/队列与 pending 调用（§8-3 零悬挂订阅）。

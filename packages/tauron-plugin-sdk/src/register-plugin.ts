@@ -65,6 +65,23 @@ export interface RegisterPluginConfig {
   handshakeToken?: string;
 }
 
+/**
+ * 宿主通知插件"你已被禁用/卸载"的**保留事件名**。
+ *
+ * 传输复用既有的 `{ action: 'event' }` 通道（`PluginBridge.emitToPlugin`），
+ * 因此不需要在 postMessage 协议里新增消息类型。宿主侧一行即可：
+ *
+ * ```ts
+ * bridge.emitToPlugin(TAURON_DISABLE_EVENT, { reason: 'disabled' });
+ * // 或 bridge.notifyDisabled('disabled')
+ * ```
+ *
+ * 为什么需要它：`RegisterPluginConfig.onDisable` 此前**声明了却没有任何触发
+ * 路径**——`registerPlugin` 只 wire 了 `onEnable`，宿主也没有下发禁用通知的
+ * 手段。于是插件作者写的清理逻辑（停定时器、断开连接）永远不会跑。
+ */
+export const TAURON_DISABLE_EVENT = 'tauron:disable';
+
 /** 方法调用请求载荷。 */
 interface InvokeRequest {
   callId: string;
@@ -127,6 +144,15 @@ export function registerPlugin(config: RegisterPluginConfig): PluginContext {
   if (config.onEnable) {
     ctx.onInit(() => {
       config.onEnable!(ctx);
+    });
+  }
+
+  // `onDisable` 挂到保留事件上（见 `TAURON_DISABLE_EVENT`）。
+  // 在此之前它**只声明、不接线**：宿主没有任何手段通知插件被禁用，
+  // 插件作者的清理逻辑永远不会执行。
+  if (config.onDisable) {
+    ctx.onEvent(TAURON_DISABLE_EVENT, () => {
+      config.onDisable!(ctx);
     });
   }
 

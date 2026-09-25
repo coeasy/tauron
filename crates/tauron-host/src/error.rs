@@ -64,6 +64,16 @@ pub enum ErrorCode {
     /// **不是** `E_CALL_NOT_FOUND`：这是租约语义，调用方据此分流的动作也不同
     /// （重新 spawn，而不是放弃一次 pending 调用）。
     E_LEASE_EXPIRED,
+    /// 流句柄数已达上限（同一进程内并发打开的流太多）。
+    ///
+    /// **不是** `E_REGISTRY_FULL`：后者说的是**插件**数达上限（`max_plugins`），
+    /// 调用方该卸载插件；本码说的是**流句柄**达上限
+    /// （[`crate::stream::MAX_STREAMS`]），调用方该先 `host_stream_close` 再开。
+    /// 与 `E_SUBSCRIPTION_FULL` 同属"容量闸"族，但对象是流而不是订阅。
+    ///
+    /// ⚠️ 追加码必须加在枚举**末尾**：TS 侧 `HOST_ERROR_CODES` 按声明顺序比对
+    /// （`@tauron/contract-tests` 的 wire-gate 钉死）。
+    E_STREAM_FULL,
 }
 
 impl ErrorCode {
@@ -97,6 +107,7 @@ impl fmt::Display for ErrorCode {
             // 客户端的分流表整体错位。
             Self::E_PLUGIN_TYPE_NO_RUNTIME => write!(f, "E_PLUGIN_TYPE_NO_RUNTIME"),
             Self::E_LEASE_EXPIRED => write!(f, "E_LEASE_EXPIRED"),
+            Self::E_STREAM_FULL => write!(f, "E_STREAM_FULL"),
         }
     }
 }

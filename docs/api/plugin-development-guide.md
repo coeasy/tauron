@@ -333,7 +333,7 @@ capability 的 `windows` 字段限制（只授予 `main`），不走 `authz` 表
 | `SC-3003` | `PLUGIN_EXITED` | 插件退出 |
 | `SC-9001` | `INTERNAL` | 内部错误（**可重试**） |
 
-### 应用层 `E_*`（18 个，`tauron-host`）
+### 应用层 `E_*`（19 个，`tauron-host`）
 
 变体名即**跨 IPC 线协议名**（改名即破坏兼容）。TS 侧 `HOST_ERROR_CODES`
 按**声明顺序**比对（wire-gate 门禁）。
@@ -358,6 +358,7 @@ capability 的 `windows` 字段限制（只授予 `main`），不走 `authz` 表
 | `E_PLUGIN_FILTERED` | 被配置过滤器排除（**可重试**） |
 | `E_PLUGIN_TYPE_NO_RUNTIME` | 该插件类型没有运行期执行器（如对 js/wasm 插件调 `host_runtime_spawn`） |
 | `E_LEASE_EXPIRED` | 运行时租约不存在或已失效 |
+| `E_STREAM_FULL` | 流句柄数达到上限（`MAX_STREAMS = 1024`）——先 `host_stream_close` 再开 |
 
 **可重试集合只有 3 个**：`E_HOST_PANIC` / `E_CALL_TIMEOUT` / `E_PLUGIN_FILTERED`。
 其余一律不可自动重试——把一个确定性失败标成可重试会让前端无限重试。
@@ -367,7 +368,7 @@ capability 的 `windows` 字段限制（只授予 `main`），不走 `authz` 表
 ## 生命周期状态机
 
 **10 态 / 18 事件 / 7 守卫**，表驱动（`crates/tauron-host/src/lifecycle.rs::TRANSITIONS`，
-55 条规则，表内顺序即匹配优先级）。
+57 条规则，表内顺序即匹配优先级）。
 
 ### 状态（10）
 

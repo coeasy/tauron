@@ -28,6 +28,7 @@ describe('@tauron/shell-events 契约自检', () => {
     expect(SHELL_EVENTS.updateStart).toBe('oc-update-start');
     expect(SHELL_EVENTS.restart).toBe('oc-restart');
     expect(SHELL_EVENTS.pluginToggle).toBe('oc-plugin-toggle');
+    expect(SHELL_EVENTS.pluginUninstall).toBe('oc-plugin-uninstall');
     expect(SHELL_EVENTS.trayItem).toBe('oc-tray-item');
     expect(SHELL_EVENTS.commandSelect).toBe('oc-command-select');
     expect(SHELL_EVENTS.shortcutChange).toBe('oc-shortcut-change');

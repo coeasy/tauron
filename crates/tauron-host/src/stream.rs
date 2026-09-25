@@ -109,6 +109,15 @@ impl StreamSink for NullSink {
     }
 }
 
+/// 单个宿主进程内可同时打开的流句柄上限。
+///
+/// 与 [`crate::eventbus::MAX_QUEUE`] / [`crate::eventbus::MAX_SUBSCRIPTIONS`] 同属
+/// "容量闸"族：没有它，一个不主动 `host_stream_close` 的插件可以无界地开流，
+/// 句柄表（`handles`）与每个句柄持有的 `Arc<dyn StreamSink>` 都会线性增长，
+/// 直到宿主 OOM。达到上限时 [`StreamRegistry::open`] 返回
+/// `ErrorCode::E_STREAM_FULL`（**不是**静默丢弃已有句柄）。
+pub const MAX_STREAMS: usize = 1024;
+
 /// 一次调用的帧载体登记项。
 struct CallBinding {
     subscriber: String,
@@ -172,6 +181,16 @@ impl StreamRegistry {
                 ),
             ));
         }
+        // 容量闸：未关闭的句柄会一直占着 sink，必须拒而不是无限收。
+        if self.handles.len() >= MAX_STREAMS {
+            return Err(HostError::new(
+                ErrorCode::E_STREAM_FULL,
+                format!(
+                    "流句柄已达上限 {MAX_STREAMS}（当前 {}）：请先 `host_stream_close` 再开流",
+                    self.handles.len()
+                ),
+            ));
+        }
         let sink = binding.sink.clone();
         self.opened += 1;
         let id = format!("st-{}", uuid::Uuid::new_v4());
@@ -223,37 +242,51 @@ impl StreamRegistry {
         args_json: Option<serde_json::Value>,
         args_raw: Option<Vec<u8>>,
     ) -> HostResult<StreamFrame> {
-        let handle = self.handles.get_mut(stream_id).ok_or_else(|| {
-            HostError::new(
-                ErrorCode::E_CALL_NOT_FOUND,
-                format!("流 `{stream_id}` 不存在或已终结"),
-            )
-        })?;
-        if handle.subscriber != subscriber {
-            return Err(HostError::new(
-                ErrorCode::E_AUTH_DENIED,
-                format!("流 `{stream_id}` 属于插件 `{}`", handle.subscriber),
-            ));
-        }
-        if handle.closed {
-            return Err(HostError::new(
-                ErrorCode::E_CALL_NOT_FOUND,
-                format!("流 `{stream_id}` 已终结（终帧后句柄失效）"),
-            ));
-        }
-        // seq 先占位再派发：载体失败不回滚（见模块文档）。
-        handle.seq += 1;
+        // 先把需要的东西取出并结束借用，再派发、再回收（见下）。
+        let (sink, seq, terminal) = {
+            let handle = self.handles.get_mut(stream_id).ok_or_else(|| {
+                HostError::new(
+                    ErrorCode::E_CALL_NOT_FOUND,
+                    format!("流 `{stream_id}` 不存在或已终结"),
+                )
+            })?;
+            if handle.subscriber != subscriber {
+                return Err(HostError::new(
+                    ErrorCode::E_AUTH_DENIED,
+                    format!("流 `{stream_id}` 属于插件 `{}`", handle.subscriber),
+                ));
+            }
+            if handle.closed {
+                return Err(HostError::new(
+                    ErrorCode::E_CALL_NOT_FOUND,
+                    format!("流 `{stream_id}` 已终结（终帧后句柄失效）"),
+                ));
+            }
+            // seq 先占位再派发：载体失败不回滚（见模块文档）。
+            handle.seq += 1;
+            (handle.sink.clone(), handle.seq, kind.is_terminal())
+        };
         let frame = StreamFrame {
-            seq: handle.seq,
+            seq,
             kind,
             args_json,
             args_raw,
         };
-        if frame.is_terminal() {
-            handle.closed = true;
-        }
-        let sink = handle.sink.clone();
         sink.send(&frame)?;
+
+        // 终帧即回收句柄。
+        //
+        // ⚠️ 此前这里只把 `handle.closed = true`，**不从 `handles` 里摘掉**。于是
+        // 「开流 → 正常关流」这条**最规矩的用法**也会让句柄表单调增长：每个句柄
+        // 还攥着一个 `Arc<dyn StreamSink>`，长跑的宿主最终 OOM。回收只能靠
+        // `close_for_call` / `close_for_subscriber` 兜底，而那两条只在调用结束/
+        // 窗口关闭时跑——一次长调用内反复开关流照样涨。
+        //
+        // 摘掉之后 `is_open()` 对已终结的流返回 `false`（"不存在或已终结"本就是
+        // 同一个错误码 `E_CALL_NOT_FOUND`），语义不变。
+        if terminal {
+            self.handles.remove(stream_id);
+        }
         Ok(frame)
     }
 
@@ -559,5 +592,50 @@ mod tests {
         for k in [StreamKind::Data, StreamKind::End, StreamKind::Error] {
             assert_eq!(StreamKind::parse(k.as_str()), Some(k));
         }
+    }
+
+    /// 容量闸：开流数达 `MAX_STREAMS` 后**拒绝**而不是无限收。
+    ///
+    /// 此前 `open()` 无上限——一个不主动 `host_stream_close` 的插件可以无界开流，
+    /// 句柄表与每个句柄持有的 `Arc<dyn StreamSink>` 线性增长到宿主 OOM。
+    #[test]
+    fn open_is_bounded_by_max_streams() {
+        let sink = Arc::new(RecordingSink::default());
+        let mut reg = StreamRegistry::new();
+        // 同一个调用可以开多条流（语义允许），正好用来顶到上限。
+        reg.bind("c-1", "p1", sink);
+
+        for _ in 0..MAX_STREAMS {
+            reg.open("c-1", "p1").expect("未达上限时应能开流");
+        }
+        assert_eq!(reg.handles.len(), MAX_STREAMS);
+
+        let err = reg.open("c-1", "p1").unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_STREAM_FULL);
+        assert!(
+            err.message.contains("host_stream_close"),
+            "错误信息应给出可执行的下一步，实际：{}",
+            err.message
+        );
+        // 拒绝路径不得留下半成品句柄。
+        assert_eq!(reg.handles.len(), MAX_STREAMS);
+
+        // 关掉一条后应能再开——闸是"容量"，不是"一次性熔断"。
+        let victim = reg.handles.keys().next().unwrap().clone();
+        reg.close(&victim, "p1", StreamKind::End).expect("关流");
+        assert!(reg.open("c-1", "p1").is_ok(), "腾出容量后应可再开");
+    }
+
+    /// `opened_total()` 是**累计**计数，不随 close 回退（诊断口径）。
+    #[test]
+    fn opened_total_is_cumulative() {
+        let sink = Arc::new(RecordingSink::default());
+        let mut reg = StreamRegistry::new();
+        reg.bind("c-1", "p1", sink);
+        let id = reg.open("c-1", "p1").unwrap();
+        assert_eq!(reg.opened_total(), 1);
+        reg.close(&id, "p1", StreamKind::End).unwrap();
+        assert_eq!(reg.handles.len(), 0, "关闭后句柄清零");
+        assert_eq!(reg.opened_total(), 1, "累计开流数不回退");
     }
 }

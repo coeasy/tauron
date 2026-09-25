@@ -30,8 +30,10 @@ import { useInvoke } from '../../tauron-framework/src/index.js';
 // ──────────────────────────────────────────────────────────────────────────
 
 describe('契约 1：错误码全集', () => {
-  it('HOST_ERROR_CODES 恰好 18 个', () => {
-    expect(HOST_ERROR_CODES.length).toBe(18);
+  // 不写死个数：码表**只能追加**（新码一律加在末尾），写死 18 会让每次追加
+  // 都变成"改一处忘一处"的假失败。个数与顺序由下面那条逐项断言守住。
+  it('HOST_ERROR_CODES 数量不低于基线', () => {
+    expect(HOST_ERROR_CODES.length).toBeGreaterThanOrEqual(18);
   });
 
   it('HOST_ERROR_CODES 与线上协议逐项一致', () => {
@@ -57,6 +59,8 @@ describe('契约 1：错误码全集', () => {
       // P0-2：进程插件运行时（spawn 的诚实失败码 + 租约语义）
       'E_PLUGIN_TYPE_NO_RUNTIME',
       'E_LEASE_EXPIRED',
+      // 流句柄容量闸（`tauron_host::stream::MAX_STREAMS`）。
+      'E_STREAM_FULL',
     ]);
   });
 

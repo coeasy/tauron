@@ -3,7 +3,7 @@
 > Tauri 2 插件化框架 —— 安全沙箱、双世界隔离、多形态插件加载的开源客户端基础设施。
 
 [![CI](https://github.com/coeasy/tauron/actions/workflows/ci.yml/badge.svg)](https://github.com/coeasy/tauron/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-1577%20TS%20%C2%B7%201258%20Rust-informational)](#测试)
+[![Tests](https://img.shields.io/badge/tests-1626%20TS%20%C2%B7%201284%20Rust-informational)](#测试)
 [![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![Node](https://img.shields.io/badge/Node-22.x-brightgreen)](#)
 [![Rust](https://img.shields.io/badge/Rust-1.98-orange)](#)
@@ -431,9 +431,9 @@ tauron/
 
 | 侧 | 用例数 | 口径 |
 |---|---|---|
-| TypeScript | **1577**（97 个测试文件 / 20 包） | `pnpm -r test` 实跑通过 |
-| Rust | **1258** | 源码内 `#[test]` 声明数（静态计数） |
-| 跨语言契约 | **125** | `@tauron/contract-tests` 的 wire-gate |
+| TypeScript | **1626**（98 个测试文件 / 20 包） | `pnpm -r test` 实跑通过 |
+| Rust | **1284** | 源码内 `#[test]` 声明数（静态计数） |
+| 跨语言契约 | **110** | `@tauron/contract-tests` 的 wire-gate（`vitest run src/wire-gate.test.ts` 实跑） |
 
 > **关于 Rust 一栏的口径**：Rust 侧除默认特性外还有 **feature 门控**用例
 > （`tauron-adapter` / `tauron-shell` 的 `tauri` feature），两者不是同一个数。

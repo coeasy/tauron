@@ -19,7 +19,7 @@ import type {
   Subscription,
   TopicDescriptor,
 } from './events.js';
-import type { StreamFrame, StreamKind } from './stream.js';
+import type { StreamFrame, StreamHandle, StreamKind, StreamWriteInput } from './stream.js';
 import type { LifecycleEvent } from './lifecycle.js';
 
 /** 插件 → 自己 C/D 后端的调用请求。 */
@@ -136,11 +136,30 @@ export class HostClient {
    * 与 {@link pluginCall} 的 `onFrame` 是两条入口：本方法为**已有**调用（通常是
    * 别处发起、或在重连后接管）新建通道并开流，返回的退订函数会**关流**。
    * 未带载体的调用在这里以 `E_CALL_NOT_FOUND` 显式失败——不会静默挂住。
+   *
+   * 需要**写帧**或拿到 `streamId` 时用 {@link openStreamHandle}；本方法是它的
+   * 简写（只要退订函数）。两者共用同一份实现，不存在第二套开流逻辑。
    */
   openStream(callId: string, onFrame: (frame: StreamFrame) => void): () => void {
+    return this.openStreamHandle(callId, onFrame).close;
+  }
+
+  /**
+   * 开流并返回可写的句柄（R5 / P0-1 的**完整**入口）。
+   *
+   * 补齐此前缺失的一段：`host_stream_write` 在 Rust 侧已注册、在
+   * {@link pluginCall} 的错误文案里也被当作"已接线"的替代路径来推荐，
+   * 但 TS SDK **没有任何方法能调到它**——开流之后既拿不到 `streamId`、
+   * 也没有写帧出口，`open → write → close` 这条链在前端是断的。
+   *
+   * `write()` 支持 `argsRaw`：字节不经 base64 夹带 JSON（§4.8 R6）。
+   * `close()` 幂等；句柄最终还有调用回收兜底。
+   */
+  openStreamHandle(callId: string, onFrame: (frame: StreamFrame) => void): StreamHandle {
     const sink = new FrameSink(onFrame, this.backend);
     let streamId: string | null = null;
     let closed = false;
+
     const close = (): void => {
       if (closed) return;
       closed = true;
@@ -150,20 +169,61 @@ export class HostClient {
         });
       }
     };
-    void this.call<{ streamId: string }>('host_stream_open', {
+
+    const ready = this.call<{ streamId: string }>('host_stream_open', {
       req: { callId },
       channel: sink.port,
     })
       .then((opened) => {
         streamId = opened.streamId;
         if (closed) close();
+        return opened.streamId;
       })
-      .catch(() => {
-        // 开流失败（如未注册插件）：把失败留给调用方通过后续 write/callEnd 暴露，
+      .catch((err: unknown) => {
+        // 开流失败（如未注册插件）：把失败留给调用方通过后续 write/close 暴露，
         // 但退订仍是幂等的关流尝试。
         closed = true;
+        throw err;
       });
-    return close;
+
+    // `openStream()`（只要退订函数的简写入口）此前**吞掉**开流失败，保持"退订
+    // 永远可用"。现在 `ready` 会 reject 以便 `write()` 如实报错，但没人 await 它时
+    // 就成了 unhandled rejection——这里补一个空 catch 兜住这个副作用，
+    // `ready` 本身仍然 reject（`write()` 依赖它拿到真实失败原因）。
+    void ready.catch(() => {});
+
+    const write = (frame: StreamWriteInput): Promise<StreamFrame> => {
+      if (closed) {
+        return Promise.reject(new Error('openStreamHandle: 流已关闭，不得再写帧'));
+      }
+      return ready.then((id) =>
+        this.call<StreamFrame>('host_stream_write', {
+          req: {
+            streamId: id,
+            ...(frame.argsJson !== undefined ? { argsJson: frame.argsJson } : {}),
+            ...(frame.argsRaw !== undefined ? { argsRaw: frame.argsRaw } : {}),
+          },
+        }),
+      );
+    };
+
+    return { ready, write, close };
+  }
+
+  /**
+   * 向已开的流写一帧（`host_stream_write`）。
+   *
+   * {@link openStreamHandle} 的 `write()` 就是转调本方法；需要凭 `streamId`
+   * 直接写（例如句柄来自别处）时用这个。
+   */
+  async writeStream(streamId: string, frame: StreamWriteInput = {}): Promise<StreamFrame> {
+    return this.call<StreamFrame>('host_stream_write', {
+      req: {
+        streamId,
+        ...(frame.argsJson !== undefined ? { argsJson: frame.argsJson } : {}),
+        ...(frame.argsRaw !== undefined ? { argsRaw: frame.argsRaw } : {}),
+      },
+    });
   }
 
   /** 传输无关的原始请求入口（{@link toHostRpc} 的 `request` 落地于此）。 */

@@ -396,13 +396,24 @@ impl ProcRunner {
         Ok(())
     }
 
-    /// 检查心跳状态。
-    pub fn check_heartbeat(&mut self) -> ProcResult<HeartbeatState> {
+    /// 检查心跳状态，**只**影响 `plugin_id` 指定的那个进程。
+    ///
+    /// ⚠️ 此前这里无差别遍历 `self.processes`，把**所有** `Running` 进程一并标成
+    /// `Crashed`（`exit_code = -2`）。后果是：给插件 A 做一次心跳检查，会把健康
+    /// 的插件 B、C 一起判死——它们随后被回收，宿主侧表现为"莫名其妙少了一批
+    /// sidecar"。心跳检查必须是**按插件作用域**的。
+    ///
+    /// **诚实边界**：`heartbeat_tracker` 目前仍是**全局单例**（不按插件分账），
+    /// 因此"任一插件发心跳即刷新全局计时"这一语义限制依然存在——本函数修掉的是
+    /// **误伤**（作用域），不是**共享计时器**（建模）。要做到真正的按插件心跳，
+    /// 需要把 `HeartbeatTracker` 改成 `HashMap<plugin_id, HeartbeatTracker>`，
+    /// 属独立改动，见 CHANGELOG「已知债务」。
+    pub fn check_heartbeat(&mut self, plugin_id: &str) -> ProcResult<HeartbeatState> {
         let state = self.heartbeat_tracker.check();
 
         if matches!(state, HeartbeatState::Timeout) {
-            // 心跳超时，标记进程崩溃
-            for process in self.processes.values_mut() {
+            // 心跳超时，只标记目标进程崩溃（不波及其他插件）。
+            if let Some(process) = self.processes.get_mut(plugin_id) {
                 if process.state == ProcessState::Running {
                     process.state = ProcessState::Crashed;
                     process.exit_code = Some(-2);
@@ -699,8 +710,39 @@ mod tests {
         let config = make_plugin_config();
         runner.spawn(&config).unwrap();
 
-        let state = runner.check_heartbeat().unwrap();
+        let state = runner.check_heartbeat("test.plugin").unwrap();
         assert_eq!(state, HeartbeatState::Healthy);
+    }
+
+    /// 心跳超时**不得**波及其他插件的进程。
+    ///
+    /// 回归保护：此前 `check_heartbeat()` 无差别把所有 `Running` 进程标成
+    /// `Crashed`，给 A 检查一次心跳会把健康的 B 一起判死。
+    #[test]
+    fn test_check_heartbeat_timeout_does_not_kill_other_plugins() {
+        let mut runner = ProcRunner::default_runner();
+        let a = make_plugin_config();
+        let mut b = a.clone();
+        b.plugin_id = "other.plugin".into();
+        runner.spawn(&a).unwrap();
+        runner.spawn(&b).unwrap();
+        assert!(runner.is_running("test.plugin"));
+        assert!(runner.is_running("other.plugin"));
+
+        // 把 tracker 摆成 Timeout（缺省 `timeout_ms` 15s，真等太慢），然后只对 A 检查。
+        // `spawn()` 会把 `last_heartbeat` 置为"现在"，故必须显式推进，不能靠 sleep。
+        runner.heartbeat_tracker.force_timeout();
+        let state = runner.check_heartbeat("test.plugin").unwrap();
+        assert_eq!(state, HeartbeatState::Timeout);
+
+        assert!(
+            !runner.is_running("test.plugin"),
+            "被检查的插件应被判死"
+        );
+        assert!(
+            runner.is_running("other.plugin"),
+            "未参与检查的插件不得被连带判死"
+        );
     }
 
     // ── 崩溃处理测试 ──

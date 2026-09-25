@@ -252,6 +252,20 @@ impl PermissionIndex {
         Ok(idx)
     }
 
+    /// 从 JSON 字符串加载词表（与 [`PermissionIndex::load`] 同一套校验）。
+    ///
+    /// `load` 需要文件系统路径，而**宿主二进制**不该依赖"运行时当前目录下正好有
+    /// `schema/` 目录"——所以生产侧用 [`embedded_permission_index`]（编译期把词表
+    /// 嵌进二进制），本函数是它的落地实现。
+    pub fn from_json(json: &str) -> HostResult<Self> {
+        serde_json::from_str(json).map_err(|e| {
+            HostError::new(
+                ErrorCode::E_INVALID_MANIFEST,
+                format!("权限词表 JSON 解析失败: {e}"),
+            )
+        })
+    }
+
     pub fn contains(&self, identifier: &str) -> bool {
         self.entries.iter().any(|e| e.identifier == identifier)
     }
@@ -880,6 +894,29 @@ impl std::fmt::Display for PluginIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}@{}", self.webview_label, self.token)
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// 内嵌权限词表（生产加载入口）
+// ──────────────────────────────────────────────────────────────────────────
+
+/// 随框架发版的权限词表（编译期嵌入二进制）。
+///
+/// **为什么内嵌而不是运行时读文件**：词表是 `install()` 的**必填参数**
+/// （`manifest.validate(index)` 用它判定权限标识是否合法）。此前它**只在测试里
+/// 被加载过**（`manifest.rs` 的 `SCHEMA_PATH` 常量），生产侧压根没有加载点——
+/// 于是 `Registry::install` 也从未被生产代码调用过，整条插件链在生产上是断的。
+/// 内嵌之后宿主二进制不再依赖"运行目录下正好有 `schema/`"。
+pub const EMBEDDED_PERMISSION_INDEX_JSON: &str =
+    include_str!("../../../schema/permissions.index.json");
+
+/// 解析内嵌词表。
+///
+/// 只可能因为**框架自身的发布事故**失败（文件缺失/语法错误），因此这里
+/// `expect` 是可接受的：那属于构建期就该暴露的问题，而不是运行期输入。
+pub fn embedded_permission_index() -> PermissionIndex {
+    PermissionIndex::from_json(EMBEDDED_PERMISSION_INDEX_JSON)
+        .expect("内嵌权限词表必须可解析（schema/permissions.index.json）")
 }
 
 #[cfg(test)]

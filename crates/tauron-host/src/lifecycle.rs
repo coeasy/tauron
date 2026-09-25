@@ -727,7 +727,7 @@ pub fn validate_table() -> HostResult<()> {
     }
 
     // 5. 无零耗环
-    if let Err(e) = check_no_zero_cost_cycle() {
+    if let Err(e) = check_no_zero_cost_cycle_in(TRANSITIONS) {
         return Err(e);
     }
 
@@ -781,9 +781,9 @@ fn chain_depth(rule: &Rule) -> usize {
 }
 
 /// 计算所有强连通分量（|states| 很小，用可达性矩阵判定即可）。
-fn strongly_connected_components() -> Vec<Vec<State>> {
+fn strongly_connected_components_of(rules: &[Rule]) -> Vec<Vec<State>> {
     let states = State::ALL;
-    let edges: HashMap<State, Vec<State>> = TRANSITIONS
+    let edges: HashMap<State, Vec<State>> = rules
         .iter()
         .fold(HashMap::new(), |mut m, r| {
             m.entry(r.from).or_default().push(r.to);
@@ -824,22 +824,64 @@ fn strongly_connected_components() -> Vec<Vec<State>> {
                 assigned[j] = true;
             }
         }
-        // 去掉自环分量（size==1 且无自环动作）在调用处单独处理。
         sccs.push(comp);
     }
     sccs
 }
 
-fn check_no_zero_cost_cycle() -> HostResult<()> {
-    for comp in strongly_connected_components() {
-        if comp.len() < 2 {
-            continue;
-        }
+/// 一条规则是否"不可能自转"。
+///
+/// 判定口径：状态机**自身**唯一的自动触发途径是 [`Rule::chain`]——应用某条规则
+/// 后自动接着迁移。因此：
+/// - `chain == None`：每走一步都必须有一个**外部**事件到达，机器不会自己喂自己，
+///   构不成自转（哪怕它是 `from == to` 的自环）；
+/// - `chain == Some(..)`：可能自我供料，必须另有阻尼（用户触发或消耗有界预算）。
+///
+/// 当前生产表里 `rule!` 宏把所有规则的 `chain` 都钉成 `None`（见宏定义），
+/// 所以本判定对现有规则全部放行——它的价值在于**拦住未来**引入的链式规则。
+fn rule_cannot_self_feed(r: &Rule) -> bool {
+    r.chain.is_none()
+}
+
+/// 单条规则是否带阻尼（用户触发，或消耗有界预算）。
+fn rule_is_damped(r: &Rule) -> bool {
+    r.event.user_initiated() || r.actions.iter().any(|a| a.consumes_budget())
+}
+
+/// 参数化，便于门禁测试拿**合成规则表**证明本函数真的抓得住坏自环
+/// （否则它就是一段"看起来在检查"的死代码）。
+fn check_no_zero_cost_cycle_in(rules: &'static [Rule]) -> HostResult<()> {
+    for comp in strongly_connected_components_of(rules) {
         let comp_set: HashSet<State> = comp.iter().copied().collect();
-        let ok = TRANSITIONS
+        let in_comp = rules
             .iter()
             .filter(|r| comp_set.contains(&r.from) && comp_set.contains(&r.to))
-            .any(|r| r.event.user_initiated() || r.actions.iter().any(|a| a.consumes_budget()));
+            .collect::<Vec<_>>();
+
+        // ── 自环（from == to）────────────────────────────────────
+        // ⚠️ 此前这里写的是 `if comp.len() < 2 { continue; }`，注释却声称
+        // "自环在调用处单独处理"——而调用处根本没有那段代码。结果是
+        // `ENABLED --HealthOk/DecayRetry--> ENABLED` 这类零耗自环**从未被检查**。
+        // 现在按上面的口径显式判：带阻尼或不可能自转即放行。
+        if comp.len() == 1 {
+            let s = comp[0];
+            for r in in_comp.iter().filter(|r| r.from == s && r.to == s) {
+                if !rule_is_damped(r) && !rule_cannot_self_feed(r) {
+                    return Err(HostError::new(
+                        ErrorCode::E_STATE_INVALID_TRANSITION,
+                        format!(
+                            "零耗自环：{} --{}--> {} 既不消耗预算、又带 chain 可自我供料——可能无限自转（门禁 §8-2）",
+                            s.as_str(),
+                            r.event.as_str(),
+                            s.as_str(),
+                        ),
+                    ));
+                }
+            }
+            continue;
+        }
+
+        let ok = in_comp.iter().any(|r| rule_is_damped(r));
         if !ok {
             let names: Vec<String> = comp.iter().map(|s| s.as_str().to_string()).collect();
             return Err(HostError::new(
@@ -855,33 +897,20 @@ fn check_no_zero_cost_cycle() -> HostResult<()> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// 安全模式三级降级（D25/D28）
+// 安全模式三级降级（D25/D28）——**canonical 在 `tauron-recovery`**
 // ──────────────────────────────────────────────────────────────────────────
-
-/// 宿主（应用级）启动失败状态。**不属于 `PluginState`**——它是进程级计数器，
-/// 由 §4.14 崩溃恢复模块持有；此处仅定义三档语义与判定。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum BootTier {
-    /// 正常启动。
-    Normal,
-    /// 安全模式：仅加载必需插件（宿主/设置/更新），其余标 `disabled-by-safemode`。
-    Safemode,
-    /// 修复模式：零插件最小壳 + 错误报告 + 重装/修复引导。
-    Repair,
-}
-
-/// 判定启动档位：连续 2 次未正常完成启动 → 第 3 次安全模式；
-/// 安全模式下再失败 → 修复模式（D25：堵住永久 boot loop）。
-pub fn boot_tier(consecutive_failures: u32, already_in_safemode: bool) -> BootTier {
-    if already_in_safemode {
-        BootTier::Repair
-    } else if consecutive_failures >= 2 {
-        BootTier::Safemode
-    } else {
-        BootTier::Normal
-    }
-}
+//
+// 本模块**不再**定义启动档位判定。此前这里有一个 `BootTier` 枚举 +
+// `boot_tier()` 函数（`Repair` if 已在安全模式，否则 `Safemode` if 连续失败 ≥ 2），
+// 而真正在跑的判定是 `tauron_recovery::BootCounter::decide_phase()`
+// （连续失败 ≥ `SAFEMODE_THRESHOLD` 且 `safemode_failures` ≥ `REPAIR_THRESHOLD`）。
+// 两处语义**并不等价**，且 `boot_tier()` 在生产代码里零调用点——只有单测在调它。
+// 那是"两套真相 + 一套死代码"的组合：改了恢复引擎的阈值，这里不会跟着变，
+// 而读者会以为它仍然权威。
+//
+// 已删除（见 CHANGELOG）。启动档位的**唯一权威**是
+// `crates/tauron-recovery/src/lib.rs` 的 `BootCounter`（阈值常量也在那里）。
+// 插件侧的状态机（`PluginState` / `TRANSITIONS`）仍在本模块，那是另一回事。
 
 #[cfg(test)]
 mod tests {
@@ -1361,18 +1390,64 @@ mod tests {
         }
     }
 
-    // ── 安全模式三级降级（D25/D28）───────────────────────────────
-
+    /// 门禁的门禁：证明「无零耗环」检查**真的抓得住**坏自环。
+    ///
+    /// 此前 `check_no_zero_cost_cycle` 用 `if comp.len() < 2 { continue; }` 把单状态
+    /// 分量整体跳过，注释却说"自环在调用处单独处理"——而那段代码并不存在。于是
+    /// 一条 `A --系统事件/零耗动作/带 chain--> A` 的规则可以悄悄溜进生产表而不被
+    /// 发现。本用例用**合成规则表**直接喂进去，验证：
+    ///   - 带 `chain` 的零耗自环 → 被拒；
+    ///   - 同样的自环改为 `chain: None`（外部事件驱动）→ 放行；
+    ///   - 生产表 `TRANSITIONS` → 放行（回归保护）。
     #[test]
-    fn boot_tier_three_levels() {
-        assert_eq!(boot_tier(0, false), BootTier::Normal);
-        assert_eq!(boot_tier(1, false), BootTier::Normal);
-        assert_eq!(boot_tier(2, false), BootTier::Safemode);
-        assert_eq!(boot_tier(3, false), BootTier::Safemode);
-        // 安全模式下再失败 → 修复模式（D25：堵住永久 boot loop）。
-        assert_eq!(boot_tier(2, true), BootTier::Repair);
-        assert_eq!(boot_tier(100, true), BootTier::Repair);
+    fn zero_cost_cycle_gate_actually_catches_bad_self_loops() {
+        // 坏自环：系统事件 + 零耗动作 + 可自我供料的 chain。
+        const BAD: &[Rule] = &[Rule {
+            from: State::Enabled,
+            event: Event::ErrorRetryable,
+            guard: Guard::None,
+            to: State::Enabled,
+            actions: &[],
+            chain: Some(Event::ErrorRetryable),
+        }];
+        let err = check_no_zero_cost_cycle_in(BAD).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_STATE_INVALID_TRANSITION);
+        assert!(
+            err.message.contains("零耗自环"),
+            "错误信息应指明是自环，实际：{}",
+            err.message
+        );
+
+        // 同一条规则去掉 chain（每步都需外部事件）→ 构不成自转，放行。
+        const OK_NO_CHAIN: &[Rule] = &[Rule {
+            from: State::Enabled,
+            event: Event::ErrorRetryable,
+            guard: Guard::None,
+            to: State::Enabled,
+            actions: &[],
+            chain: None,
+        }];
+        assert!(check_no_zero_cost_cycle_in(OK_NO_CHAIN).is_ok());
+
+        // 带阻尼（消耗预算）的自环也放行，哪怕带 chain。
+        const OK_DAMPED: &[Rule] = &[Rule {
+            from: State::Enabled,
+            event: Event::ErrorRetryable,
+            guard: Guard::None,
+            to: State::Enabled,
+            actions: &[Action::IncrementRetry],
+            chain: Some(Event::ErrorRetryable),
+        }];
+        assert!(check_no_zero_cost_cycle_in(OK_DAMPED).is_ok());
+
+        // 生产表必须仍然放行（新判定不得误伤现有规则）。
+        assert!(check_no_zero_cost_cycle_in(TRANSITIONS).is_ok());
     }
+
+    // ── 安全模式三级降级（D25/D28）───────────────────────────────
+    //
+    // 档位判定的测试在 `tauron-recovery`（canonical）。本模块不再有 `boot_tier`
+    // 的单测——它测的是一个生产代码不调用的函数。
 
     #[test]
     fn trial_enable_falls_back_on_single_failure() {
@@ -1617,7 +1692,6 @@ mod tests {
     fn state_and_event_serialize_screeaming() {
         assert_eq!(serde_json::to_string(&State::Enabled).unwrap(), "\"ENABLED\"");
         assert_eq!(serde_json::to_string(&Event::RetryOk).unwrap(), "\"RETRY_OK\"");
-        assert_eq!(serde_json::to_string(&BootTier::Safemode).unwrap(), "\"safemode\"");
     }
 
     // ── D24：语义矛盾消除验证 ────────────────────────────────────
