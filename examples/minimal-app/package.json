@@ -14,7 +14,7 @@
     "@tauron/host": "workspace:*",
     "@tauron/plugin-sdk": "workspace:*",
     "@tauron/ui": "workspace:*",
-    "@tauri-apps/api": "^2.5.0"
+    "@tauri-apps/api": "^2.11.1"
   },
   "devDependencies": {
     "typescript": "^5.8.0",

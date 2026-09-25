@@ -1,7 +1,7 @@
 //! §4.2 manifest 与权限词表。
 //!
 //! 职责：解析、schema 校验、字段规范化、`framework` range 兼容判定；
-//! 发版时导出 `permissions.index.json`（含 `risk` 元数据）。
+//! 随框架发版携带 `permissions.index.json`（含 `risk` 元数据）。
 //!
 //! 关键约束（计划 §4.2）：
 //! - **未知字段拒绝**（`deny_unknown_fields`，防拼写漂移）；
@@ -12,10 +12,14 @@
 //!
 //! 前序审查修复对照：
 //! - R3：manifest 示例中的权限字符串全部不是 Tauri 真实标识 → 词表必须来自
-//!   机器生成的 `permissions.index.json`；
+//!   随框架发版的 `permissions.index.json`；
 //! - T13：词表每项带 `risk: low|elevated|high`；
 //! - T17：`framework` 为 semver range，A/D 类另加 `abi` 指纹；
 //! - D13：`abi` 字段的消费落点（加载期校验）在 §4.7/§4.8，本模块只负责声明与解析。
+//!
+//! **诚实边界**：词表目前是**手工维护**的，仓库内**没有生成器**——本模块只做
+//! 加载与校验（见 [`PermissionIndex`] 与下方 `real_permissions_index_loads_and_is_well_formed`
+//! 门禁），不产出该文件。别把它当生成产物引用。
 
 use crate::error::{ErrorCode, HostError, HostResult};
 use serde::{Deserialize, Serialize};
@@ -218,12 +222,12 @@ pub struct PermissionEntry {
     pub scoped: bool,
 }
 
-/// 权限词表（机器生成，随框架发版锁版）。
+/// 权限词表（**手工维护**，随框架发版锁版；仓库内无生成器，仅由门禁校验）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionIndex {
     /// 词表版本号。
     pub version: u32,
-    /// 生成时间戳。
+    /// 词表最近一次人工修订的日期（**不是**构建产物时间戳；字段名沿用历史线格式）。
     #[serde(default)]
     pub generated_at: Option<String>,
     pub entries: Vec<PermissionEntry>,
@@ -1248,7 +1252,8 @@ mod tests {
 
     #[test]
     fn real_permissions_index_loads_and_is_well_formed() {
-        // 门禁：随框架发版的机器生成词表必须可解析、字段完备、无重复。
+        // 门禁：随框架发版的手工维护词表必须可解析、字段完备、无重复。
+        // （本测试只校验，不生成——仓库内没有词表生成器，见模块头「诚实边界」。）
         let idx = PermissionIndex::load(SCHEMA_PATH)
             .expect("schema/permissions.index.json 必须存在且可解析");
         assert_eq!(idx.version, 1);

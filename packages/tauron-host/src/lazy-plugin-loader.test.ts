@@ -72,6 +72,91 @@ describe('LazyPluginLoader', () => {
     });
   });
 
+  describe('并发加载（同一插件只初始化一次）', () => {
+    it('concurrent load reuses a single in-flight promise', async () => {
+      // 回归判据：`_doLoad` 是排进队列之后才跑的，所以在「已排队、尚未开始」
+      // 的窗口里 status 仍是 pending。修复前两个并发调用会各排一次 `_doLoad`，
+      // 导致 entry() 被调用两次、插件被初始化两遍。
+      let entryCalls = 0;
+      const entry = vi.fn().mockImplementation(async () => {
+        entryCalls += 1;
+        await new Promise((r) => setTimeout(r, 20));
+        return { call: entryCalls };
+      });
+      loader.register({ id: 'p.concurrent', entry });
+
+      const [a, b] = await Promise.all([
+        loader.load('p.concurrent'),
+        loader.load('p.concurrent'),
+      ]);
+
+      expect(entryCalls).toBe(1);
+      expect(entry).toHaveBeenCalledTimes(1);
+      expect(a).toBe(b); // 同一个实例，不是两次加载的两个副本
+      expect(loader.getStatus('p.concurrent')).toBe('loaded');
+    });
+
+    it('concurrent load 在失败时两个调用方都收到同一错误', async () => {
+      const entry = vi.fn().mockImplementation(async () => {
+        await new Promise((r) => setTimeout(r, 10));
+        throw new Error('boom');
+      });
+      loader.register({ id: 'p.fail', entry, maxRetries: 0 });
+
+      const results = await Promise.allSettled([
+        loader.load('p.fail'),
+        loader.load('p.fail'),
+      ]);
+
+      expect(results.map((r) => r.status)).toEqual(['rejected', 'rejected']);
+      // maxRetries: 0 → 只尝试一次，并发不应把 attempts 吃掉两格
+      expect(entry).toHaveBeenCalledTimes(1);
+      expect(loader.getStatus('p.fail')).toBe('failed');
+    });
+
+    it('并发后重试预算仍然可用（inflight 清理不吞掉重试）', async () => {
+      // 语义澄清：重试发生在 `_doLoad` **内部**，一次 `load()` 就会把预算用满。
+      // 这里要证明的是「并发调用不会额外消耗 attempts」——修复前两个并发调用
+      // 各跑一次 `_doLoad`，attempts 会被多吃一格，使重试提前耗尽。
+      let attempt = 0;
+      const entry = vi.fn().mockImplementation(async () => {
+        attempt += 1;
+        await new Promise((r) => setTimeout(r, 5));
+        if (attempt === 1) throw new Error('first fails');
+        return { attempt };
+      });
+      loader.register({ id: 'p.retry', entry, maxRetries: 1 });
+
+      const [a, b] = await Promise.all([
+        loader.load('p.retry'),
+        loader.load('p.retry'),
+      ]);
+
+      expect(a).toEqual({ attempt: 2 });
+      expect(b).toEqual({ attempt: 2 });
+      // 首次失败 + 一次重试 = 2 次；并发没有多算
+      expect(entry).toHaveBeenCalledTimes(2);
+      expect(loader.getStatus('p.retry')).toBe('loaded');
+    });
+
+    it('clear() 丢弃在途加载记录', async () => {
+      const entry = vi.fn().mockImplementation(async () => {
+        await new Promise((r) => setTimeout(r, 10));
+        return { ok: true };
+      });
+      loader.register({ id: 'p.clear', entry });
+
+      const p = loader.load('p.clear');
+      loader.clear();
+      await p; // 旧的在途 promise 仍会 settle，不应抛异常
+
+      // 清空后重新注册再加载，应是一次全新的加载
+      loader.register({ id: 'p.clear', entry });
+      await loader.load('p.clear');
+      expect(entry).toHaveBeenCalledTimes(2);
+    });
+  });
+
   describe('失败处理', () => {
     it('加载失败记录错误', async () => {
       const entry = vi.fn().mockRejectedValue(new Error('load failed'));

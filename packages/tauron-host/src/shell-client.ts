@@ -338,6 +338,21 @@ export interface RuntimeAbiFingerprint {
   interfaceHash: string;
 }
 
+/**
+ * 宿主当前支持的 sidecar ABI 契约。
+ *
+ * **必须用它填 `RuntimeSpawnProfile.abi`**：`host_runtime_spawn` 会把宿主契约与
+ * 你声明的 `abi` **逐维比对**，不符 → `E_ABI_MISMATCH`（拒绝启动，且**不会**拉起
+ * sidecar、不留租约）。这样前端不必猜版本串——协议改动时两边同步改这一处常量
+ * （Rust 侧：`tauron_proc::SIDECAR_ABI_RUST_VERSION` / `SIDECAR_ABI_INTERFACE_HASH`）。
+ *
+ * **不随框架发版变动**：`/1` 只在 sidecar 协议本身发生**不兼容**改动时递增。
+ */
+export const SIDECAR_ABI_CONTRACT: Readonly<RuntimeAbiFingerprint> = Object.freeze({
+  rustVersion: 'tauron-proc-abi/1',
+  interfaceHash: 'tauron-sidecar-rpc/1',
+});
+
 /** `host_runtime_spawn` 的 `profile` 载荷（与 Rust `RuntimeSpawnProfile` 同构）。 */
 export interface RuntimeSpawnProfile {
   /** 缺省用 manifests 里声明的 sidecar 路径。 */
@@ -722,7 +737,9 @@ export class ShellClient {
    * 若都按「尚无租约」判定就会起两个进程而租约只指向其一 → 孤儿 PID）。
    *
    * 失败方向：插件类型不是 `process` → `E_PLUGIN_TYPE_NO_RUNTIME`（**不伪造 pid**）；
-   * 签名 / ABI / hash 不合格 → `E_ABI_MISMATCH` / `E_INSTALL_FAILED`。
+   * ABI 契约不符 → `E_ABI_MISMATCH`（用 `SIDECAR_ABI_CONTRACT` 填 `profile.abi` 即可避免，
+   * 且拒绝发生在**启动面之前**——不会拉起 sidecar）；
+   * 签名 / hash 不合格 → `E_INSTALL_FAILED`。
    */
   async runtimeSpawn(pluginId: string, profile: RuntimeSpawnProfile): Promise<RuntimeHandle> {
     return this.call<RuntimeHandle>('host_runtime_spawn', { pluginId, profile });

@@ -50,7 +50,7 @@ use tauron_i18n::{I18nEngine, ResourceBundle};
 use tauron_notify::{dispatch, DispatchSink, NotifyEntry, NotifyKind, NotifyStore};
 use tauron_proc::{
     AbiFingerprint as ProcAbiFingerprint, BinarySignature, CrashLimit, CrashTracker, ProcError,
-    ProcSpawner, SpawnConfig, validate_spawn_config,
+    ProcSpawner, SpawnConfig, current_abi_contract, validate_abi, validate_spawn_config,
 };
 use tauron_recovery::{BootContextEntry, BootPhase, PluginState as RecoveryPluginState, RecoveryEngine};
 use tauron_settings::{Migration, SettingsError, SettingsStore};
@@ -1655,6 +1655,18 @@ pub fn cmd_runtime_spawn(
         // 不合格的载荷连"是否已有租约"都不该被它探测到（也就不会伪造出幂等假象）。
         validate_spawn_config(&cfg).map_err(proc_error_to_host)?;
 
+        // ABI 契约比对（`tauron_proc::validate_abi` 的生产调用点）：
+        // expected = 宿主当前支持的 sidecar ABI 契约（框架常量；前端可从
+        // `@tauron/host` 的 `SIDECAR_ABI_CONTRACT` 取到同一份值）；
+        // actual   = 调用方在 `profile.abi` 里声明的指纹。
+        // 不符 → `E_ABI_MISMATCH`（**不是** `E_INSTALL_FAILED`：ABI 不匹配是版本
+        // 兼容问题，调用方该升级插件/宿主，而不是重装）。
+        //
+        // 诚实边界：`profile.abi` 是调用方自报的，本校验挡的是"配置错配 / 前端用了
+        // 旧模板"，不是"恶意调用方伪造 ABI"——后者需要 sidecar 在 RPC 握手时自报
+        // 指纹（尚未实现）。与 `validate_spawn_config` 同属"配置一致性"层。
+        validate_abi(&current_abi_contract(), &cfg.abi).map_err(proc_error_to_host)?;
+
         // 预算门（只拦"需要启动新进程"的调用；已有活租约是纯查询语义）。
         // 状态侧已由上面的可用性门覆盖（`ERRORED_USER_CONFIRM` 也不 active）。
         if state.registry.runtime_needs_restart(&id) && state.proc_runtime.is_crash_exceeded(plugin_id)
@@ -1867,7 +1879,9 @@ fn deliver_runtime_crash(state: &PluginRuntimeState, plugin_id: &str) {
 /// **映射是粗的**（错误码只有两位数的粒度），但方向是确定的，且 `message` 保留
 /// 原始原因：
 /// - 配置不合格 → `E_INVALID_MANIFEST`（调用方改载荷即可）；
-/// - 信任链失败（验签 / hash / ABI）→ `E_INSTALL_FAILED`（与 `install()` 同类）；
+/// - **ABI 契约不匹配 → `E_ABI_MISMATCH`**（独立成码，不与安装失败合并：这是
+///   版本兼容问题，调用方该升级插件/宿主，而不是重装——前端据此才能给出正确提示）；
+/// - 验签 / hash 失败 → `E_INSTALL_FAILED`（与 `install()` 同类）；
 /// - 崩溃预算耗尽 → `E_PLUGIN_DISABLED`（与 D28「回落 disabled」同义）；
 /// - 其余（启动失败 / 超时 / 心跳丢失 / 进程终止）→ `E_INSTALL_FAILED`。
 ///
@@ -1876,9 +1890,9 @@ fn deliver_runtime_crash(state: &PluginRuntimeState, plugin_id: &str) {
 fn proc_error_to_host(e: ProcError) -> HostError {
     let code = match &e {
         ProcError::InvalidSpawnConfig(_) => ErrorCode::E_INVALID_MANIFEST,
+        ProcError::AbiMismatch { .. } => ErrorCode::E_ABI_MISMATCH,
         ProcError::SignatureInvalid
         | ProcError::HashMismatch
-        | ProcError::AbiMismatch { .. }
         | ProcError::SpawnFailed(_)
         | ProcError::ProcessTerminated(_)
         | ProcError::Timeout(_)
@@ -7109,9 +7123,12 @@ mod tests {
                 signer_id: "signer-001".to_string(),
             },
             binary_hash: "a".repeat(64),
+            // 必须是**宿主当前 ABI 契约**（`cmd_runtime_spawn` 会比对，见
+            // `runtime_spawn_rejects_abi_mismatch_before_starting_anything`）——
+            // 不是随便填的占位串，填错会被 `E_ABI_MISMATCH` 挡在启动面之前。
             abi: RuntimeAbiFingerprint {
-                rust_version: "1.98.0".to_string(),
-                interface_hash: "iface".to_string(),
+                rust_version: tauron_proc::SIDECAR_ABI_RUST_VERSION.to_string(),
+                interface_hash: tauron_proc::SIDECAR_ABI_INTERFACE_HASH.to_string(),
             },
         }
     }
@@ -7140,6 +7157,40 @@ mod tests {
         assert!(err.message.contains("process"), "message 必须指出正确类型：{}", err.message);
         assert_eq!(fake.call_count(), 0, "类型不匹配时绝不调用启动面");
         assert_eq!(state.registry.runtime_len(), 0, "拒绝路径不得留下租约");
+    }
+
+    /// ABI 契约不匹配 → `E_ABI_MISMATCH`（**独立于** `E_INSTALL_FAILED`），且
+    /// **启动面一次都不许被调用**：不合格的载荷连"是否已有租约"都不该被它探测到。
+    ///
+    /// 本用例是 `tauron_proc::validate_abi` 的**生产调用点**的证据——它此前只有
+    /// 测试调用，导致 `E_ABI_MISMATCH` 这个线协议码**永不产生**（孤儿码），
+    /// 而 TS 侧 `shell-client.ts` 的文档却在承诺它。
+    #[test]
+    fn runtime_spawn_rejects_abi_mismatch_before_starting_anything() {
+        let (state, fake) = process_state("com.proc", Some("sidecar.exe"));
+        enabled_process_plugin(&state, "com.proc");
+
+        // 1) 接口哈希维度不符 → E_ABI_MISMATCH，启动面零调用、无租约。
+        let mut bad_iface = valid_profile();
+        bad_iface.abi.interface_hash = "tauron-sidecar-rpc/0".to_string();
+        let err = cmd_runtime_spawn(&state, "com.proc", &bad_iface).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_ABI_MISMATCH);
+        assert!(!err.retryable, "ABI 不匹配不可重试——重试还是同一个不匹配");
+        assert_eq!(fake.call_count(), 0, "ABI 不合格绝不调用启动面");
+        assert_eq!(state.registry.runtime_len(), 0, "拒绝路径不得留下租约");
+
+        // 2) 协议版本维度同样受校验（两个维度都查，不是只查一个）。
+        let mut bad_ver = valid_profile();
+        bad_ver.abi.rust_version = "tauron-proc-abi/0".to_string();
+        assert_eq!(
+            cmd_runtime_spawn(&state, "com.proc", &bad_ver).unwrap_err().code,
+            ErrorCode::E_ABI_MISMATCH
+        );
+        assert_eq!(fake.call_count(), 0, "第二个维度被拒时启动面仍为零调用");
+
+        // 3) 契约值正确（`valid_profile()` 即契约值）→ 放行，证明拒因确为 ABI。
+        assert!(cmd_runtime_spawn(&state, "com.proc", &valid_profile()).is_ok());
+        assert_eq!(fake.call_count(), 1, "契约正确才真正拉起 sidecar");
     }
 
     #[test]
@@ -7373,6 +7424,16 @@ mod tests {
         assert_eq!(
             proc_error_to_host(ProcError::HashMismatch).code,
             ErrorCode::E_INSTALL_FAILED
+        );
+        // ABI 不匹配**独立成码**（不并进 E_INSTALL_FAILED）：它是版本兼容问题，
+        // 前端据此提示"升级插件/宿主"而不是"重装"。
+        assert_eq!(
+            proc_error_to_host(ProcError::AbiMismatch {
+                expected: "tauron-proc-abi/1".to_string(),
+                actual: "tauron-proc-abi/0".to_string(),
+            })
+            .code,
+            ErrorCode::E_ABI_MISMATCH
         );
         assert_eq!(
             proc_error_to_host(ProcError::CrashLimitExceeded { plugin_id: "p".to_string() }).code,

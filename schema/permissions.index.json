@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated_at": "2026-09-21",
-  "note": "机器生成的权限词表（计划 §4.2 / R3）。identifier 必须为 Tauri 2.x 真实权限标识；risk 为框架自补元数据（Tauri 官方未提供）。审批 UI 文案与代码共享此单一来源（§4.5）。禁止授予清单见 crates/open-client-host/src/authz.rs::FORBIDDEN_PLAIN。",
+  "note": "权限词表（计划 §4.2 / R3）。identifier 必须为 Tauri 2.x 真实权限标识；risk 为框架自补元数据（Tauri 官方未提供）。审批 UI 文案与代码共享此单一来源（§4.5）。禁止授予清单见 crates/tauron-host/src/authz.rs::FORBIDDEN_PLAIN。诚实边界：本文件当前是**手工维护**的——仓库里没有生成器（`tauron-schema` 的 codegen 产出的是 JSON Schema，与本词表无关），`manifest.rs` 的 `real_permissions_index_loads_and_is_well_formed` 与 `tauron-app-cli doctor` 只做**校验**不做生成。要做到真正的机器生成，需要一个依赖全部目标 Tauri 插件（store/fs/http/shell/…）的 app 以产出完整 `gen/schemas/acl-manifests.json` 作为数据源；在此之前请手工追加，勿声称其为生成产物。",
   "entries": [
     {
       "identifier": "core:default",

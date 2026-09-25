@@ -229,28 +229,35 @@ pub enum Guard {
     RetryBudgetAvailable,
     RetryBudgetExhausted,
     CircuitOpen,
-    CircuitClosed,
     InSafemode,
     /// 安全模式禁用 **且** 试验预算未耗尽（D28 两条件必须同时成立）。
     InSafemodeWithTrialBudget,
     TrialActive,
-    TrialBudgetAvailable,
 }
 
 impl Guard {
+    /// 全部守卫（供门禁遍历：**每个守卫都必须至少被一条迁移规则引用**）。
+    pub const ALL: [Guard; 7] = [
+        Guard::None,
+        Guard::RetryBudgetAvailable,
+        Guard::RetryBudgetExhausted,
+        Guard::CircuitOpen,
+        Guard::InSafemode,
+        Guard::InSafemodeWithTrialBudget,
+        Guard::TrialActive,
+    ];
+
     pub fn holds(&self, s: &PluginState) -> bool {
         match self {
             Guard::None => true,
             Guard::RetryBudgetAvailable => s.retry_count < MAX_RETRY,
             Guard::RetryBudgetExhausted => s.retry_count >= MAX_RETRY,
             Guard::CircuitOpen => s.circuit_open,
-            Guard::CircuitClosed => !s.circuit_open,
             Guard::InSafemode => s.disabled_by_safemode,
             Guard::InSafemodeWithTrialBudget => {
                 s.disabled_by_safemode && s.trial_failures < MAX_TRIAL_ATTEMPTS
             }
             Guard::TrialActive => s.trial_from_safemode,
-            Guard::TrialBudgetAvailable => s.trial_failures < MAX_TRIAL_ATTEMPTS,
         }
     }
 }
@@ -275,7 +282,6 @@ pub enum Action {
     /// 健康窗口衰减：retry_count 与 failure_count 各减 1（饱和于 0）；
     /// 两者同时归零即关断熔断（error-budget 式自动恢复）。
     DecayRetry,
-    SetCircuitOpen,
     SetSafemodeDisabled,
     ClearSafemode,
     SetTrial,
@@ -283,6 +289,20 @@ pub enum Action {
 }
 
 impl Action {
+    /// 全部动作（供门禁遍历：**每个动作都必须至少被一条迁移规则引用**）。
+    pub const ALL: [Action; 10] = [
+        Action::IncrementRetry,
+        Action::IncrementFailure,
+        Action::IncrementTrialFailure,
+        Action::ResetCounters,
+        Action::ResetRuntimeCounters,
+        Action::DecayRetry,
+        Action::SetSafemodeDisabled,
+        Action::ClearSafemode,
+        Action::SetTrial,
+        Action::ClearTrial,
+    ];
+
     /// 是否消耗有界预算（用于"无零耗环"判定）。
     pub const fn consumes_budget(self) -> bool {
         matches!(
@@ -298,6 +318,9 @@ pub fn apply(s: &mut PluginState, action: Action) {
         Action::IncrementRetry => s.retry_count += 1,
         Action::IncrementFailure => {
             s.failure_count += 1;
+            // 熔断的**唯一**打开途径：连续失败到阈值。没有独立的"置熔断"动作
+            // ——显式动作会与这里的副作用构成两条真相（`TRANSITIONS` 门禁也要求
+            // 每个动作都有规则引用，而它没有自然归属的规则）。
             if s.failure_count >= CIRCUIT_THRESHOLD {
                 s.circuit_open = true;
             }
@@ -323,7 +346,6 @@ pub fn apply(s: &mut PluginState, action: Action) {
                 s.circuit_open = false;
             }
         }
-        Action::SetCircuitOpen => s.circuit_open = true,
         Action::SetSafemodeDisabled => s.disabled_by_safemode = true,
         Action::ClearSafemode => s.disabled_by_safemode = false,
         Action::SetTrial => s.trial_from_safemode = true,
@@ -388,6 +410,12 @@ pub static TRANSITIONS: &[Rule] = &[
     // 单独计失败，不累入应用级启动计数。必须先于宽泛错误规则。
     rule!(State::Enabled, Event::ErrorRetryable, Guard::TrialActive, State::Disabled, &[Action::IncrementTrialFailure, Action::SetSafemodeDisabled, Action::ClearTrial]),
     rule!(State::Enabled, Event::ErrorFatal, Guard::TrialActive, State::Disabled, &[Action::IncrementTrialFailure, Action::SetSafemodeDisabled, Action::ClearTrial]),
+    // 熔断已打开 → **不再自动重试**，直接交人工确认。这是 `Guard::CircuitOpen`
+    // 的归属规则：`IncrementFailure` 把 `failure_count` 累积到 `CIRCUIT_THRESHOLD`
+    // 会置 `circuit_open`，若此处仍按预算放行自动重试，熔断器就成了只写不读的
+    // 死标志（本仓曾如此——`circuit_open` 无任何生产读取点）。
+    // 必须声明在 `RetryBudgetAvailable` 之前：表内顺序即匹配优先级。
+    rule!(State::Enabled, Event::ErrorRetryable, Guard::CircuitOpen, State::ErroredUserConfirm, &[Action::IncrementFailure]),
     // 自动重试预算内 → 可重试档；预算耗尽 → 直接升级为需用户确认。
     rule!(State::Enabled, Event::ErrorRetryable, Guard::RetryBudgetAvailable, State::ErroredRetryable, &[Action::IncrementRetry]),
     rule!(State::Enabled, Event::ErrorRetryable, Guard::RetryBudgetExhausted, State::ErroredUserConfirm, &[Action::IncrementFailure]),
@@ -408,6 +436,8 @@ pub static TRANSITIONS: &[Rule] = &[
     // ── RUNNING ─────────────────────────────────────────────────
     rule!(State::Running, Event::ErrorRetryable, Guard::TrialActive, State::Disabled, &[Action::IncrementTrialFailure, Action::SetSafemodeDisabled, Action::ClearTrial]),
     rule!(State::Running, Event::ErrorFatal, Guard::TrialActive, State::Disabled, &[Action::IncrementTrialFailure, Action::SetSafemodeDisabled, Action::ClearTrial]),
+    // 熔断已打开 → 不再自动重试（与 ENABLED 同形，理由见该段注释）。
+    rule!(State::Running, Event::ErrorRetryable, Guard::CircuitOpen, State::ErroredUserConfirm, &[Action::IncrementFailure]),
     rule!(State::Running, Event::ErrorRetryable, Guard::RetryBudgetAvailable, State::ErroredRetryable, &[Action::IncrementRetry]),
     rule!(State::Running, Event::ErrorRetryable, Guard::RetryBudgetExhausted, State::ErroredUserConfirm, &[Action::IncrementFailure]),
     // D3：补全出边 RUNNING → ERRORED（sidecar 意外退出等运行期崩溃）。
@@ -1262,7 +1292,9 @@ mod tests {
         transition(&mut s, Event::InstallStart);
         transition(&mut s, Event::InstallOk);
         transition(&mut s, Event::Enable);
-        apply(&mut s, Action::SetCircuitOpen);
+        // 直接置位（熔断的唯一生产打开途径是 `IncrementFailure` 到阈值；
+        // 本用例只关心"衰减何时关断它"，故不走那条路）。
+        s.circuit_open = true;
         s.failure_count = 2;
         assert!(s.circuit_open);
         let o = transition(&mut s, Event::HealthOk);
@@ -1271,6 +1303,62 @@ mod tests {
         let o = transition(&mut s, Event::HealthOk);
         assert!(o.actions.contains(&Action::DecayRetry));
         assert!(!s.circuit_open, "计数全归零后熔断应自动关闭");
+    }
+
+    /// 熔断打开 → `ErrorRetryable` **不再**自动重试，直接交人工确认。
+    ///
+    /// 这是熔断器的意义所在：`circuit_open` 若不参与迁移判定，它就是个只写不读的
+    /// 死标志（本仓曾如此）。用 `retry_count = 0`（预算充足）证明拦住它的是熔断、
+    /// 不是预算耗尽。
+    #[test]
+    fn open_circuit_short_circuits_automatic_retry() {
+        for start in [State::Enabled, State::Running] {
+            let mut s = PluginState::default();
+            s.state = start;
+            s.circuit_open = true;
+            s.retry_count = 0; // 预算充足——被拒只能是因为熔断
+            let o = transition(&mut s, Event::ErrorRetryable);
+            assert!(!o.illegal, "熔断短路必须有匹配规则");
+            assert_eq!(o.to, State::ErroredUserConfirm, "{start:?} 熔断后应直接交人工");
+            assert_eq!(s.state, State::ErroredUserConfirm);
+        }
+    }
+
+    /// 熔断关闭时行为不变（回归保护：新规则不得吃掉原来的预算分支）。
+    #[test]
+    fn closed_circuit_keeps_retry_budget_path() {
+        let mut s = PluginState::default();
+        s.state = State::Enabled;
+        s.circuit_open = false;
+        s.retry_count = 0;
+        let o = transition(&mut s, Event::ErrorRetryable);
+        assert_eq!(o.to, State::ErroredRetryable, "熔断关闭时预算内仍走自动重试");
+    }
+
+    /// 门禁：每个守卫 / 动作都必须至少被一条迁移规则引用。
+    ///
+    /// 本仓反复出现的缺陷类型是「有类型、有求值实现、有测试、**没有入口**」：
+    /// `Guard::CircuitOpen` 曾如此（`circuit_open` 被写入但无规则读取），
+    /// `Guard::CircuitClosed` / `TrialBudgetAvailable` / `Action::SetCircuitOpen`
+    /// 也曾是无引用的死代码。本用例把它们钉死，防止回归。
+    #[test]
+    fn every_guard_and_action_is_referenced_by_a_rule() {
+        let used_guards: HashSet<Guard> = TRANSITIONS.iter().map(|r| r.guard).collect();
+        let used_actions: HashSet<Action> = TRANSITIONS
+            .iter()
+            .flat_map(|r| r.actions.iter().copied())
+            .collect();
+
+        for g in Guard::ALL {
+            // `Guard::None` 是"无守卫"的默认值，`rule!` 宏不显式写它。
+            if g == Guard::None {
+                continue;
+            }
+            assert!(used_guards.contains(&g), "守卫 {g:?} 无任何规则引用（死代码）");
+        }
+        for a in Action::ALL {
+            assert!(used_actions.contains(&a), "动作 {a:?} 无任何规则引用（死代码）");
+        }
     }
 
     // ── 安全模式三级降级（D25/D28）───────────────────────────────
@@ -1451,7 +1539,6 @@ mod tests {
             Action::ResetCounters,
             Action::ResetRuntimeCounters,
             Action::DecayRetry,
-            Action::SetCircuitOpen,
             Action::SetSafemodeDisabled,
             Action::ClearSafemode,
             Action::SetTrial,

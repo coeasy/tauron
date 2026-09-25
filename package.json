@@ -1,8 +1,8 @@
 {
-  "name": "open-client-workspace",
+  "name": "tauron-workspace",
   "private": true,
   "version": "0.1.0",
-  "description": "Tauri 客户端基础框架 monorepo（开发计划 v1.2-draft §3 工程形态）",
+  "description": "tauron — Tauri 2 之上的插件化桌面客户端基础设施 monorepo",
   "type": "module",
   "packageManager": "pnpm@11.7.0",
   "engines": {
@@ -21,7 +21,7 @@
     "verify": "pnpm -r build && pnpm -r --no-bail typecheck && pnpm -r --no-bail test"
   },
   "devDependencies": {
-    "@tauri-apps/api": "2.5.0",
+    "@tauri-apps/api": "2.11.1",
     "eslint": "^10.11.0",
     "globals": "^17.12.0",
     "prettier": "^3.9.9",

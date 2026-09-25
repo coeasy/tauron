@@ -1,7 +1,7 @@
 // shell-client.ts 测试（P1 补齐：孤儿命令接通）
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ShellClient } from './shell-client.js';
+import { ShellClient, SIDECAR_ABI_CONTRACT } from './shell-client.js';
 import type { RecoveryOutcome } from './shell-client.js';
 import { MockBackend } from './backend.js';
 
@@ -396,12 +396,14 @@ describe('ShellClient', () => {
   // ── 进程插件运行时（P0-2）──
 
   describe('runtimeSpawn / runtimeHealth', () => {
+    // `abi` 用宿主契约——真实调用方就该这么填；填错会被 `E_ABI_MISMATCH` 拒
+    // （校验在 Rust 侧，本用例只验证线形透传，故 mock 不参与判定）。
     const profile = {
       args: ['--port', '0'],
       env: { RUST_LOG: 'info' },
       signature: { algorithm: 'ed25519', signature: 'sig', signerId: 'acme' },
       binaryHash: 'sha256:abc',
-      abi: { rustVersion: '1.83', interfaceHash: 'iface' },
+      abi: { ...SIDECAR_ABI_CONTRACT },
     };
 
     it('spawn 传顶层 pluginId + profile（线形与 Rust 两个顶层参数对齐）', async () => {
@@ -410,12 +412,15 @@ describe('ShellClient', () => {
       // 顶层两个键——若包成 `req`，Tauri 会因缺 `plugin_id` 反序列化失败。
       expect(Object.keys(inv!.args as object).sort()).toEqual(['pluginId', 'profile']);
       expect((inv!.args as any).pluginId).toBe('com.example.sidecar');
-      expect((inv!.args as any).profile.abi).toEqual({
-        rustVersion: '1.83',
-        interfaceHash: 'iface',
-      });
+      expect((inv!.args as any).profile.abi).toEqual(SIDECAR_ABI_CONTRACT);
       // 不得偷偷补 generatedAt：校验时刻由宿主时钟决定。
       expect(JSON.stringify(inv!.args)).not.toContain('generatedAt');
+    });
+
+    it('SIDECAR_ABI_CONTRACT 是冻结常量（调用方不该就地改它）', () => {
+      expect(Object.isFrozen(SIDECAR_ABI_CONTRACT)).toBe(true);
+      expect(SIDECAR_ABI_CONTRACT.rustVersion).not.toBe('');
+      expect(SIDECAR_ABI_CONTRACT.interfaceHash).not.toBe('');
     });
 
     it('health 只传 lease（不传 pluginId——租约才是句柄）', async () => {

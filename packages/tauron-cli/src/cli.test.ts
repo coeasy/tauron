@@ -110,6 +110,52 @@ describe('runCli', () => {
     expect(again.message).toContain('--force');
   });
 
+  // 轮 19：`--template` 此前**从未被解析**——`createCommand` 把 template 硬编码成
+  // 'vanilla'，于是 `tauron create app --template react` 静默产出 vanilla 工程。
+  // 与上一轮修掉的 `--type` 属同一类缺陷（帮助文本宣传了、实现里没有）。
+  it('create --template react（空格写法）真的产出 React 骨架', async () => {
+    const cwd = mkTmp();
+    const result = await runCli(['create', 'web-app', '--template', 'react'], opts(cwd));
+    expect(result.success).toBe(true);
+    // React 入口含 JSX，必须落在 .tsx
+    expect(existsSync(join(cwd, 'web-app', 'src', 'index.tsx'))).toBe(true);
+    expect(existsSync(join(cwd, 'web-app', 'src', 'App.tsx'))).toBe(true);
+    // 默认（vanilla）不该出现
+    expect(existsSync(join(cwd, 'web-app', 'src', 'index.ts'))).toBe(false);
+  });
+
+  it('create --template=react（等号写法）同样生效', async () => {
+    const cwd = mkTmp();
+    const result = await runCli(['create', 'web-app2', '--template=react'], opts(cwd));
+    expect(result.success).toBe(true);
+    expect(existsSync(join(cwd, 'web-app2', 'src', 'index.tsx'))).toBe(true);
+  });
+
+  it('create 不带 --template 时默认 vanilla', async () => {
+    const cwd = mkTmp();
+    const result = await runCli(['create', 'plain'], opts(cwd));
+    expect(result.success).toBe(true);
+    expect(existsSync(join(cwd, 'plain', 'src', 'index.ts'))).toBe(true);
+    expect(existsSync(join(cwd, 'plain', 'src', 'index.tsx'))).toBe(false);
+  });
+
+  it('create --template vue：已声明但未实现 → 如实失败，不静默降级成 vanilla', async () => {
+    const cwd = mkTmp();
+    const result = await runCli(['create', 'v', '--template', 'vue'], opts(cwd));
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('not implemented');
+    expect(existsSync(join(cwd, 'v'))).toBe(false);
+  });
+
+  it('create --template 非法值：如实失败并列出可选值', async () => {
+    const cwd = mkTmp();
+    const result = await runCli(['create', 'x', '--template', 'angular'], opts(cwd));
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('Unknown template');
+    expect(result.message).toContain('vanilla');
+    expect(existsSync(join(cwd, 'x'))).toBe(false);
+  });
+
   it('returns error for unknown command', async () => {
     const result = await runCli(['unknown']);
     expect(result.success).toBe(false);

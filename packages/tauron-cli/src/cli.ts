@@ -13,7 +13,7 @@
  */
 
 import { runDoctor, formatDoctorReport } from './doctor.js';
-import { createApp } from './scaffold.js';
+import { createApp, IMPLEMENTED_TEMPLATES } from './scaffold.js';
 import { pluginNew } from './plugin.js';
 import { pluginDev, pluginTest, pluginPack, pluginSign, pluginPublish } from './plugin-lifecycle.js';
 import { writeGeneratedFiles } from './scaffold-writer.js';
@@ -23,6 +23,41 @@ export interface CliResult {
   success: boolean;
   message: string;
   data?: unknown;
+}
+
+/**
+ * 全部**已声明**的模板（`AppConfig.template` 的联合类型）。
+ * 其中只有 `IMPLEMENTED_TEMPLATES` 有骨架实现，其余如实失败而不是静默降级。
+ */
+const DECLARED_TEMPLATES = ['vanilla', 'react', 'vue', 'svelte'] as const;
+
+/**
+ * 解析 `create` 的 `--template`。
+ *
+ * 两种写法都支持（帮助文本写的是空格形式 `--template react`，但历史实现
+ * 连 `--template=react` 都没解析——`template` 被硬编码成 `'vanilla'`，
+ * 于是 `--template react` 静默产出 vanilla 工程）。非法值**如实失败**。
+ */
+function parseTemplate(args: string[]): { template: AppConfig['template'] } | { error: string } {
+  const eq = args.find((a) => a.startsWith('--template='));
+  const spaced = args.indexOf('--template');
+  const raw = eq ? eq.slice('--template='.length) : spaced >= 0 ? args[spaced + 1] : undefined;
+
+  if (raw === undefined) return { template: 'vanilla' };
+
+  if (!(DECLARED_TEMPLATES as readonly string[]).includes(raw)) {
+    return { error: `Unknown template: ${raw}. Use one of: ${DECLARED_TEMPLATES.join(' | ')}` };
+  }
+
+  // 已声明但尚无骨架实现：**不**悄悄退回 vanilla（那会让用户拿到一个
+  // 与所填模板不符的工程，且编译时才发现）。
+  if (!(IMPLEMENTED_TEMPLATES as readonly string[]).includes(raw)) {
+    return {
+      error: `Template '${raw}' is declared but not implemented yet. Use one of: ${IMPLEMENTED_TEMPLATES.join(' | ')}`,
+    };
+  }
+
+  return { template: raw as AppConfig['template'] };
 }
 
 /**
@@ -39,7 +74,7 @@ export async function runCli(args: string[], options: CliOptions = { verbose: fa
     case 'doctor':
       return runDoctorCommand(options);
     case 'create':
-      return createCommand(args[1], options);
+      return createCommand(args.slice(1), options);
     case 'plugin':
       return pluginCommand(args[1], args.slice(2), options);
     case 'help':
@@ -66,14 +101,20 @@ function runDoctorCommand(options: CliOptions): CliResult {
 /**
  * create 命令
  */
-function createCommand(name: string | undefined, options: CliOptions): CliResult {
-  if (!name) {
-    return { success: false, message: 'Usage: tauron create <app-name> [--template vanilla|react|vue|svelte]' };
+function createCommand(args: string[], options: CliOptions): CliResult {
+  const name = args[0];
+  if (!name || name.startsWith('-')) {
+    return { success: false, message: 'Usage: tauron create <app-name> [--template vanilla|react]' };
+  }
+
+  const parsed = parseTemplate(args);
+  if ('error' in parsed) {
+    return { success: false, message: parsed.error };
   }
 
   const config: AppConfig = {
     name,
-    template: 'vanilla',
+    template: parsed.template,
     pluginTypes: ['js'],
   };
 
@@ -184,10 +225,12 @@ function pluginNewCommand(args: string[], options: CliOptions): CliResult {
     return { success: false, message: parsed.error };
   }
 
+  // 不在这里写死权限：默认值由 `plugin.ts` 的 `DEFAULT_MANIFEST_PERMISSIONS` 给出，
+  // 且必须是 `schema/permissions.index.json` 里的标识符（框架 ACL 的 `store:read`
+  // 那种词表不在 index 里，写进清单会被宿主 validate() 拒掉）。
   const config: PluginConfig = {
     name,
     type: parsed.type,
-    permissions: ['store:read', 'http:fetch'],
   };
 
   const result = pluginNew(config, options);
@@ -206,7 +249,9 @@ Usage:
 Commands:
   doctor              Environment diagnostics
   create <name>       Create a new tauron app
+                      --template vanilla|react（vue/svelte 已声明但尚未实现）
   plugin new <name>   Create a new plugin
+                      --type js|process|wasm
   plugin dev          Start plugin dev server
   plugin test         Run plugin tests
   plugin pack         Pack plugin for distribution

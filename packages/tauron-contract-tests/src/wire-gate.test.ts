@@ -232,7 +232,7 @@ describe('门禁：应用层宿主错误码 TS ↔ Rust 一致', () => {
     );
   }
 
-  it('线名逐项同序一致（Rust 16 码 ↔ TS HOST_ERROR_CODES）', () => {
+  it('线名逐项同序一致（Rust 18 码 ↔ TS HOST_ERROR_CODES）', () => {
     const rustCodes = [...variantToCode().values()];
     expect(rustCodes, 'Rust 侧应解析出全部变体').toEqual([...HOST_ERROR_CODES]);
     expect(HOST_ERROR_CODES).toHaveLength(18);
@@ -266,6 +266,50 @@ describe('门禁：应用层宿主错误码 TS ↔ Rust 一致', () => {
     // 文本转储会丢掉 message 字段，前端只能靠正则从转储里反抠错误码。
     const tauri = read('crates/tauron-adapter/src/tauri.rs');
     expect(tauri).not.toContain('format!("{:?}", e)');
+  });
+});
+
+describe('门禁：sidecar ABI 契约 TS ↔ Rust 同值', () => {
+  // `host_runtime_spawn` 会比对宿主 ABI 契约与调用方声明的 `profile.abi`，不符即
+  // `E_ABI_MISMATCH`。前端必须能拿到**同一份**契约值，否则每次 spawn 都被拒——这正是
+  // 「文档承诺了码、实现却不产生」那类断链的镜像：常量漂移会让码变得不可达。
+  const procSrc = read('crates/tauron-proc/src/lib.rs');
+  const tsSrc = read('packages/tauron-host/src/shell-client.ts');
+
+  const rustConst = (name: string): string => {
+    const m = procSrc.match(new RegExp(`pub const ${name}: &str = "([^"]+)"`));
+    expect(m, `Rust 常量 ${name} 必须存在`).not.toBeNull();
+    return m![1]!;
+  };
+
+  it('rust_version 维度同值', () => {
+    expect(tsSrc).toContain(`rustVersion: '${rustConst('SIDECAR_ABI_RUST_VERSION')}'`);
+  });
+
+  it('interface_hash 维度同值', () => {
+    expect(tsSrc).toContain(`interfaceHash: '${rustConst('SIDECAR_ABI_INTERFACE_HASH')}'`);
+  });
+
+  it('契约指纹由两个常量构造（不散落硬编码）', () => {
+    expect(procSrc).toContain('pub fn current_abi_contract()');
+    expect(procSrc).toMatch(
+      /AbiFingerprint::now\(SIDECAR_ABI_RUST_VERSION, SIDECAR_ABI_INTERFACE_HASH\)/,
+    );
+  });
+
+  it('spawn 前真的调用了 validate_abi（否则 E_ABI_MISMATCH 永不产生 = 孤儿码）', () => {
+    const adapterSrc = read('crates/tauron-adapter/src/lib.rs');
+    expect(adapterSrc).toMatch(
+      /validate_abi\(&current_abi_contract\(\), &cfg\.abi\)\.map_err\(proc_error_to_host\)\?;/,
+    );
+    // 映射必须独立成码，不得并进 E_INSTALL_FAILED（否则前端分不出"版本不兼容"）。
+    expect(adapterSrc).toMatch(
+      /ProcError::AbiMismatch \{ \.\. \} => ErrorCode::E_ABI_MISMATCH/,
+    );
+  });
+
+  it('E_ABI_MISMATCH 在 TS 码表里（前端能识别）', () => {
+    expect([...HOST_ERROR_CODES]).toContain('E_ABI_MISMATCH');
   });
 });
 

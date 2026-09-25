@@ -23,9 +23,10 @@ export interface PluginPermissionGrant {
  *
  * 这是**内层（框架 ACL）**的描述词表：`PluginPermissionGrant` 的 permissions、
  * 审批 UI 文案与 `isValidPermission` 都用它。注意与应用层 manifest 权限区分——
- * 插件 manifest 的 `permissions` 只能取自机器生成的
+ * 插件 manifest 的 `permissions` 只能取自随框架发版的
  * `schema/permissions.index.json`（Tauri 标识符，如 `store:allow-get`），
  * 表外即安装失败（Rust `manifest.validate` 强制）。两套词表分层且互不通用。
+ * 该 index 目前是**手工维护**的（仓库内无生成器），仅有门禁做校验。
  */
 export const PERMISSION_GRANULARITY: Readonly<Record<string, string>> = {
   // 存储

@@ -41,7 +41,7 @@ export type { AuthTier, Capability, CapabilityCommand, Consumer } from './capabi
 export { HostClient, AdminClient, FrameSink } from './host.js';
 export type { HostClientOptions, PluginCallRequest, ContributeEntryInput } from './host.js';
 
-export { ShellClient } from './shell-client.js';
+export { ShellClient, SIDECAR_ABI_CONTRACT } from './shell-client.js';
 export type {
   ShellClientOptions,
   WindowActionResult,

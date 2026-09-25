@@ -32,7 +32,7 @@
     "@tauron/types": "workspace:*"
   },
   "peerDependencies": {
-    "@tauri-apps/api": "^2.5.0"
+    "@tauri-apps/api": "^2.11.1"
   },
   "peerDependenciesMeta": {
     "@tauri-apps/api": {
@@ -40,7 +40,7 @@
     }
   },
   "devDependencies": {
-    "@tauri-apps/api": "2.5.0",
+    "@tauri-apps/api": "2.11.1",
     "typescript": "^5.8.0",
     "vitest": "^3.0.0"
   }

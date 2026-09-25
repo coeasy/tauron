@@ -11,7 +11,7 @@
 | [canonical-owners.md](./canonical-owners.md) | canonical 归属表：哪些实现是唯一事实源、哪些是已冻结的 legacy 门面 | 架构决策——改这张表等于改架构 |
 | [multi-plugin-substrate-roadmap.md](./multi-plugin-substrate-roadmap.md) | 0.3 优化改进方案：成熟度记分卡、残差清单、S/M/X 改进项、轮次编排 | **唯一的前瞻计划** |
 | [../integration/incremental-adoption.md](../integration/incremental-adoption.md) | 三档装配指南：只取底座 / 底座 + 插件运行时 / 完整客户端 | 集成方入口 |
-| [../api/plugin-development-guide.md](../api/plugin-development-guide.md) | 插件开发指南：类型、清单、权限、CLI 的真实边界 | 插件作者入口 |
+| [../api/plugin-development-guide.md](../api/plugin-development-guide.md) | 插件开发指南：类型、清单、权限词表、宿主命令面、错误码、生命周期状态机、sidecar ABI、CLI 的真实边界 | 插件作者入口 |
 | [../competitive-analysis/competitive-analysis.md](../competitive-analysis/competitive-analysis.md) | 竞品全景图、功能对比矩阵、头条特性兑现度标记 | 定位参考（带快照日期） |
 
 ## 关于已清理的历史文档

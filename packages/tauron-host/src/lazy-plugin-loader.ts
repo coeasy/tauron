@@ -64,13 +64,27 @@ export class LazyPluginLoader {
   private _plugins: Map<string, LazyPluginDescriptor> = new Map();
   private _cache: Map<string, PluginCacheEntry> = new Map();
   private _loadQueue: Promise<unknown> = Promise.resolve();
+  /**
+   * 每个插件**在途**的加载 promise。
+   *
+   * 为什么必须单独存一份、而不能只靠 `entry.status === 'loading'` 判断：
+   * `_doLoad` 是**排进队列之后**才执行的（`this._loadQueue.then(() => ...)`），
+   * 所以在「已排队、尚未开始」这段窗口里 `entry.status` 仍是 `pending`。
+   * 两个并发调用都会看到 `pending`，各自往队列里排一次 `_doLoad`，
+   * 结果是 `entry()` 被调用两次、插件被初始化两遍（副作用重复、attempts 被多吃一格）。
+   * 判据见 `concurrent load reuses a single in-flight promise` 测试。
+   */
+  private _inflight: Map<string, Promise<unknown>> = new Map();
   private _subscribers: Set<(pluginId: string, status: PluginLoadStatus) => void> = new Set();
 
   /**
    * 注册一个懒加载插件。
+   *
+   * 重复注册同一 id 会**替换**描述符并把状态重置为 `pending`（含丢弃在途加载记录）。
    */
   register(descriptor: LazyPluginDescriptor): void {
     this._plugins.set(descriptor.id, descriptor);
+    this._inflight.delete(descriptor.id);
     this._cache.set(descriptor.id, {
       status: 'pending',
       attempts: 0,
@@ -110,9 +124,10 @@ export class LazyPluginLoader {
   /**
    * 加载插件（首次调用时触发初始化）。
    *
-   * 如果插件已加载，直接返回缓存实例。
-   * 如果插件正在加载，等待加载完成。
-   * 如果插件加载失败，根据 maxRetries 决定是否重试。
+   * - 已加载 → 直接返回缓存实例；
+   * - **已有在途加载 → 复用同一个 promise**（同一插件只初始化一次）；
+   * - 上次失败且重试预算耗尽 → 如实抛出上次的错误；
+   * - 否则排队执行加载（队列串行化，但失败不阻塞后续加载）。
    */
   async load(pluginId: string): Promise<unknown> {
     const descriptor = this._plugins.get(pluginId);
@@ -130,10 +145,13 @@ export class LazyPluginLoader {
       return entry.instance;
     }
 
-    // 正在加载，等待加载队列完成
-    if (entry.status === 'loading') {
-      await this._loadQueue;
-      return this.load(pluginId);
+    // 已有在途加载：复用，**不再**排第二次 `_doLoad`。
+    // 这一步同时取代了旧的 `status === 'loading'` 分支——后者漏掉了
+    // 「已排队但尚未开始」（status 仍为 pending）的窗口，且靠递归重入，
+    // 理论上可无限递归。
+    const inflight = this._inflight.get(pluginId);
+    if (inflight) {
+      return inflight;
     }
 
     // 检查重试次数（attempts 是已尝试次数，maxRetries 是允许重试次数）
@@ -144,8 +162,17 @@ export class LazyPluginLoader {
 
     // 执行加载（队列串行化，但失败不阻塞后续加载）
     const loadPromise = this._loadQueue.then(() => this._doLoad(descriptor, entry));
+    this._inflight.set(pluginId, loadPromise);
     this._loadQueue = loadPromise.catch(() => {}); // 失败不阻塞后续
-    return loadPromise;
+
+    try {
+      return await loadPromise;
+    } finally {
+      // 只清理「仍属于本次」的那条：`reset()` 可能已经把它换成新的了。
+      if (this._inflight.get(pluginId) === loadPromise) {
+        this._inflight.delete(pluginId);
+      }
+    }
   }
 
   /**
@@ -216,8 +243,14 @@ export class LazyPluginLoader {
 
   /**
    * 重置插件状态（允许重新加载）。
+   *
+   * 会丢弃该插件的在途加载记录，使下一次 `load()` 重新排队。
+   * 注意：若旧的在途加载**尚未结束**，它完成后仍会把状态写回
+   * `loaded`/`failed`（本类不做代际取消）。重置的语义是「不再复用旧结果」，
+   * 不是「取消已发出的加载」。
    */
   reset(pluginId: string): void {
+    this._inflight.delete(pluginId);
     const entry = this._cache.get(pluginId);
     if (entry) {
       entry.status = 'pending';
@@ -274,6 +307,7 @@ export class LazyPluginLoader {
   clear(): void {
     this._plugins.clear();
     this._cache.clear();
+    this._inflight.clear();
     this._subscribers.clear();
   }
 

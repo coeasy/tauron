@@ -293,7 +293,9 @@ export interface HostRpc {
 
   `profile` 走 camelCase：`{ binaryPath?, args, env, signature{algorithm,signature,signerId}, binaryHash, abi{rustVersion,interfaceHash} }`；
   **不含 `generatedAt`**——校验时刻由宿主时钟决定，前端给的时间戳不可信
-  （字段同构由门禁逐个锁定）。
+  （字段同构由门禁逐个锁定）。`abi` 的两个维度**必须等于宿主 ABI 契约**
+  （`@tauron/host` 导出的 `SIDECAR_ABI_CONTRACT`），否则见下"失败码"的
+  `E_ABI_MISMATCH`。
 
   语义（都是"两边不一致就会出事"的那类）：
 
@@ -307,6 +309,9 @@ export interface HostRpc {
     （`attempts` / `terminated` / `alreadyGone` / `failures` / `lastError`）；
     未注入终止器也按失败记账（漏注入表现为计数器增长，而非"看起来一切正常"）。
   - **失败码**：非 `process` 类型 → `E_PLUGIN_TYPE_NO_RUNTIME`（不伪造 pid）；
+    ABI 契约不符 → `E_ABI_MISMATCH`（**不是** `E_INSTALL_FAILED`：ABI 不匹配是**版本
+    兼容**问题，调用方该升级插件/宿主而不是重装；拒绝发生在**启动面之前**，不会拉起
+    sidecar、不留租约；前端用 `SIDECAR_ABI_CONTRACT` 填 `profile.abi` 即可避免）；
     未知/失效租约 → `E_LEASE_EXPIRED`（**不是** `E_CALL_NOT_FOUND`：调用方下一步是
     重新 spawn，而不是放弃一次 pending 调用）。
   - **崩溃预算**：`CrashTracker` 窗口内超限（缺省 3 次 / 5min）→ 复用
@@ -458,9 +463,10 @@ capability/ACL 强制（生产客户端应采用——把 3 条特权命令只�
   TS `@tauron/types` `PERMISSION_GRANULARITY` 为描述词表；框架层
   `check_plugin_permission`（Rust）/ `getMissingPermissions`（TS）是
   **嵌入式扩展点**，默认分发主链不调用。
-- **外层（应用层 manifest，静态声明）**：只能取自机器生成的
+- **外层（应用层 manifest，静态声明）**：只能取自随框架发版的
   `schema/permissions.index.json`（Tauri 标识符，如 `store:allow-get`），
-  表外即安装失败（`manifest.validate` 强制）。
+  表外即安装失败（`manifest.validate` 强制）。该 index 目前是**手工维护**的
+  （仓库内没有生成器，只有门禁校验其可解析与无重复）。
 
 ## 7. 错误契约（结构化穿越，不是文本转储）
 

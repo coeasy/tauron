@@ -39,7 +39,7 @@
     "@tauron/types": "workspace:*"
   },
   "peerDependencies": {
-    "@tauri-apps/api": "^2.5.0"
+    "@tauri-apps/api": "^2.11.1"
   },
   "peerDependenciesMeta": {
     "@tauri-apps/api": {
@@ -47,7 +47,7 @@
     }
   },
   "devDependencies": {
-    "@tauri-apps/api": "2.5.0",
+    "@tauri-apps/api": "2.11.1",
     "@types/node": "^22.13.5",
     "happy-dom": "^17.0.0",
     "rimraf": "^6.0.0",

@@ -68,6 +68,26 @@ impl AbiFingerprint {
     }
 }
 
+/// 宿主当前支持的 sidecar ABI 契约——`rust_version` 维度。
+///
+/// **是协议版本串，不是 crate 版本号**：crate 版本每次发版都变，前端无法硬编码；
+/// 这里只在 **sidecar 协议本身发生不兼容改动**时递增（`/1` → `/2`），因此它可以在
+/// TS 侧被镜像成同名常量（`@tauron/host` 的 `SIDECAR_ABI_CONTRACT`）。
+pub const SIDECAR_ABI_RUST_VERSION: &str = "tauron-proc-abi/1";
+
+/// 宿主当前支持的 sidecar ABI 契约——`interface_hash` 维度（JSON-RPC 帧格式标识）。
+///
+/// 帧格式（`maxFrameBytes` / 长度前缀 / 分帧规则）改动即改此串。
+pub const SIDECAR_ABI_INTERFACE_HASH: &str = "tauron-sidecar-rpc/1";
+
+/// 宿主当前支持的 sidecar ABI 契约指纹。
+///
+/// `generated_at` 用宿主时钟（[`AbiFingerprint::now`] 的约定）；[`validate_abi`] 只
+/// 比对 `rust_version` 与 `interface_hash` 两维，时间戳不参与判定。
+pub fn current_abi_contract() -> AbiFingerprint {
+    AbiFingerprint::now(SIDECAR_ABI_RUST_VERSION, SIDECAR_ABI_INTERFACE_HASH)
+}
+
 /// JSON-RPC 协议配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcConfig {
@@ -581,6 +601,19 @@ impl HeartbeatTracker {
 // ──────────────────────────────────────────────────────────────────────────
 
 /// 验证 ABI 指纹。
+///
+/// **比对两个维度**：`rust_version`（协议版本串）与 `interface_hash`（帧格式标识）。
+/// `generated_at` 不参与——它记录的是"何时校验过"，两边必然不同。
+///
+/// 生产调用点：`tauron-adapter` 的 `cmd_runtime_spawn` 在 spawn 前用它比对
+/// [`current_abi_contract`]（宿主契约）与调用方声明的 `SpawnConfig.abi`；不符 →
+/// `ErrorCode::E_ABI_MISMATCH`（**不是** `E_INSTALL_FAILED`：ABI 不匹配是版本兼容
+/// 问题，调用方该升级插件/宿主，而不是重装）。
+///
+/// **诚实边界**：`SpawnConfig.abi` 是调用方**自报**的，因此本函数挡的是
+/// "配置错配 / 前端用了旧模板"，**不是**"恶意调用方伪造 ABI"——真正的可信校验
+/// 需要 sidecar 在 RPC 握手时自报指纹（尚未实现）。它与 `validate_spawn_config`
+/// 的签名/哈希检查同属"配置一致性"层，不是安全边界。
 pub fn validate_abi(
     expected: &AbiFingerprint,
     actual: &AbiFingerprint,

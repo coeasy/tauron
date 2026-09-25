@@ -9,8 +9,8 @@ importers:
   .:
     devDependencies:
       '@tauri-apps/api':
-        specifier: 2.5.0
-        version: 2.5.0
+        specifier: 2.11.1
+        version: 2.11.1
       eslint:
         specifier: ^10.11.0
         version: 10.11.0
@@ -30,7 +30,7 @@ importers:
   examples/minimal-app:
     dependencies:
       '@tauri-apps/api':
-        specifier: ^2.5.0
+        specifier: ^2.11.1
         version: 2.11.1
       '@tauron/core':
         specifier: workspace:*
@@ -216,8 +216,8 @@ importers:
         version: link:../types
     devDependencies:
       '@tauri-apps/api':
-        specifier: 2.5.0
-        version: 2.5.0
+        specifier: 2.11.1
+        version: 2.11.1
       typescript:
         specifier: ^5.8.0
         version: 5.8.2
@@ -266,8 +266,8 @@ importers:
         version: link:../types
     devDependencies:
       '@tauri-apps/api':
-        specifier: 2.5.0
-        version: 2.5.0
+        specifier: 2.11.1
+        version: 2.11.1
       '@types/node':
         specifier: ^22.13.5
         version: 22.20.4
@@ -836,9 +836,6 @@ packages:
 
   '@tauri-apps/api@2.11.1':
     resolution: {integrity: sha512-M2FPuYND2m+wh5hfW9ZpSdxMPdEJovPBWwoHJmwUpysTYNHaOkVFN419m/K0LIgjb/7KU2vBgsUepJWugQCvAA==}
-
-  '@tauri-apps/api@2.5.0':
-    resolution: {integrity: sha512-Ldux4ip+HGAcPUmuLT8EIkk6yafl5vK0P0c0byzAKzxJh7vxelVtdPONjfgTm96PbN24yjZNESY8CKo8qniluA==}
 
   '@testing-library/dom@10.4.2':
     resolution: {integrity: sha512-yzr2S9HyAIdhz2/6qHgbs665Q7PKVcDF05vsOlHPxG1mo36gKVesdYVeDLnXgfjJ03CrKRk08knc6+E/9m8v2Q==}
@@ -1957,8 +1954,6 @@ snapshots:
     optional: true
 
   '@tauri-apps/api@2.11.1': {}
-
-  '@tauri-apps/api@2.5.0': {}
 
   '@testing-library/dom@10.4.2':
     dependencies:

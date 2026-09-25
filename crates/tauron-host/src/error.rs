@@ -30,7 +30,16 @@ pub enum ErrorCode {
     E_CALL_TIMEOUT,
     /// 申请了"禁止授予清单"内的权限（§2.1）。
     E_FORBIDDEN_PERMISSION,
-    /// A/D 类 `abi` 指纹不匹配（D13：加载期硬拒）。
+    /// ABI 指纹不匹配。
+    ///
+    /// **真实产生点**：`host_runtime_spawn` 在 spawn 前比对宿主 ABI 契约
+    /// （`tauron_proc::current_abi_contract`）与调用方声明的 `profile.abi`，
+    /// 不符即拒（映射在 `tauron-adapter` 的 `proc_error_to_host`）。
+    ///
+    /// **与 `E_INVALID_MANIFEST` 的分工**：清单里 `abi` 字段**缺失或非法**
+    /// （D13 加载期硬校验）报 `E_INVALID_MANIFEST`；**两份都合法但彼此不符**才报本码。
+    /// 独立于 `E_INSTALL_FAILED`：ABI 不匹配是**版本兼容**问题，调用方该升级
+    /// 插件/宿主，而不是重装。
     E_ABI_MISMATCH,
     /// 插件已禁用——`enabled` 标志做即时拒绝（ADR-05）。
     E_PLUGIN_DISABLED,

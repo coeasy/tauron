@@ -35,7 +35,7 @@
 **应用层**
 
 - `host_*` 命令族共 54 条（底座 38 + 插件运行时 16）
-- 生命周期状态机：10 态 / 18 事件 / 9 守卫，表驱动 `TRANSITIONS`（表内顺序即优先级），
+- 生命周期状态机：10 态 / 18 事件 / 7 守卫，表驱动 `TRANSITIONS`（表内顺序即优先级），
   `MAX_CHAIN_DEPTH = 2`
 - 三档授权 `AuthTier{Self_, ScopedRead, Privileged}`；`self` 档的 pluginId 只从
   webview label（`plugin-<id>`）解析，**忽略调用方入参**（防冒充）
@@ -105,6 +105,47 @@
 - **`plugin new --type` 只实现了 `--type=x` 一种写法**，与帮助文本写的
   `[--type js|process|wasm]`（空格形式）不符，且非法值被 `as any` 静默降级。
   现在两种写法都生效，非法值**如实失败**并列出可选值。
+- **`LazyPluginLoader` 的并发加载 bug**：`load()` 靠 `entry.status === 'loading'`
+  判重，但 `_doLoad` 是**排进队列之后**才执行的——在「已排队、尚未开始」的窗口里
+  状态仍是 `pending`，两个并发调用会各排一次 `_doLoad`，导致 `entry()` 被调用两次、
+  插件被初始化两遍（副作用重复、attempts 被多吃一格）。改为用 `_inflight` Map 复用
+  同一 promise，并补 4 个并发回归测试（原测试**完全没有并发覆盖**）。
+- **`plugin new` 不产 `tauron.plugin.json`**：只写了 `package.json`，而生命周期命令
+  （`dev/test/pack/sign/publish`）读的是前者——于是新插件跑任何生命周期命令都得到
+  「no tauron.plugin.json found」。现在两个清单都生成（职责见开发指南）。
+- **脚手架产出物不可编译**（5 类缺陷，均经 `tsc --noEmit` 实证）：引用了
+  `@tauron/core` **不存在**的 `TauronClient` / `defineConfig`；React 模板的 JSX 写在
+  `.ts` 里且引用不生成的 `./App`；`package.json` 无 react 依赖也**不生成
+  `index.html` / `vite.config.ts`**（而 scripts 宣传 `dev: vite`）；tsconfig 缺
+  `lib: ['DOM']` 与 `jsx`。vanilla / react 两模板现在都能 `tsc --noEmit` 通过。
+- **`derivePluginId` 把 `.` 也替换掉**：`com.acme.formatter` 会退化成
+  `com.example.com-acme-formatter`（丢段分隔语义）。改为保留 `.` 并合并连续分隔符。
+- **wasm 脚手架引用不存在的 `tauron_wasm::plugin` 宏**：骨架 `cargo check` 必失败。
+  改为可编译的 cdylib 骨架，并附 `#[cfg(test)]`（实测 `cargo check` + `cargo test` 通过）。
+- **`tauron.plugin.json` 的 `package.json` 模板把 `type` 写成插件形态**：应为 npm 的
+  `'module'`，否则 ESM 入口被按 CJS 解析。
+- **`@tauri-apps/api` 与 `tauri` crate 的 minor 版本不匹配 → `tauri build` 直接失败**。
+  npm 侧锁的是 `2.5.0`，而 `src-tauri/Cargo.toml` 的 `tauri = "2"` 解析到 `2.11.6`；
+  Tauri CLI 会在打包前做 major/minor 一致性检查，于是
+  `Found version mismatched Tauri packages: tauri (v2.11.6) : @tauri-apps/api (v2.5.0)`
+  并中止。**CI 的 `release.yml` 同样会红**（`tauri-action@v0` 走同一条检查）。
+  已把 4 处声明统一升到 `^2.11.1` / `2.11.1`（根 `package.json`、`@tauron/core`、
+  `@tauron/host` 的 peer + devDep、示例工程）。
+- **`E_ABI_MISMATCH` 是一条三段式断链（孤儿错误码）**：`tauron_proc::validate_abi`
+  在生产代码里**零调用点**（只有测试），`ProcError::AbiMismatch` 因此不可达，
+  `ErrorCode::E_ABI_MISMATCH` 便**永不产生**——而 TS 侧 `shell-client.ts` 的文档却在
+  承诺它。修复：在 `cmd_runtime_spawn` 的 spawn 前校验里接上 `validate_abi`（比对
+  宿主 ABI 契约 `current_abi_contract()` 与调用方声明的 `profile.abi`），把
+  `AbiMismatch` 从「并入 `E_INSTALL_FAILED`」改为**独立成码**，并导出两端同值的
+  `SIDECAR_ABI_CONTRACT`（TS）/ `SIDECAR_ABI_RUST_VERSION` + `SIDECAR_ABI_INTERFACE_HASH`
+  （Rust），由 wire-gate 门禁锁死同值。
+- **熔断器只写不读（`circuit_open` 无任何生产读取点）**：`IncrementFailure` 会把
+  `failure_count` 累积到 `CIRCUIT_THRESHOLD` 并置 `circuit_open`，但**没有任何迁移
+  规则读它**——熔断打开后照样按预算自动重试。修复：为 `ENABLED` / `RUNNING` 的
+  `ErrorRetryable` 补 `Guard::CircuitOpen` 规则（熔断打开 → 直接 `ERRORED_USER_CONFIRM`，
+  不再自动重试）。同时删除 3 个**无任何规则引用**的死代码（`Guard::CircuitClosed` /
+  `TrialBudgetAvailable` / `Action::SetCircuitOpen`），并补门禁
+  `every_guard_and_action_is_referenced_by_a_rule` 防止再出现「有实现、没入口」。
 
 ### 文档
 
@@ -131,6 +172,17 @@
 - `README.md`：文档表与项目结构树与实际文件对齐（补上此前漏列的
   `shell-events` / `ui-primitives` / `plugin-context-contract` 三个包）；「快速开始」
   与「CLI 工具」两节不再给出装不上的 `pnpm add @tauron/...` / `npx tauron`。
+- **重写 `docs/api/plugin-development-guide.md`**（171 → 512 行）。原文档有两处
+  **内容错误**：① 权限表列的 `store:read` / `http:fetch` / `clipboard:read` 等
+  **全部不在真实词表** `schema/permissions.index.json` 内（会被宿主
+  `PluginManifest::validate` 拒绝）；② `package.json` 示例写 `"type": "js"` 并塞入
+  `permissions`（应为 `type: module`，权限在宿主清单里）。另补齐此前缺失的章节：
+  `tauron.plugin.json` 清单字段表、宿主命令面（16 条档位表 + 底座命令说明）、
+  两套错误码表（`SC-xxxx` 14 个 / `E_*` 18 个）、生命周期状态机（10 态 / 18 事件 /
+  3 个预算）、sidecar ABI 契约。
+- **修正 `docs/architecture/app-layer-wire.md`** 的 `host_runtime_spawn` 失败码清单：
+  补 `E_ABI_MISMATCH`（原文只列了 `E_PLUGIN_TYPE_NO_RUNTIME` 与 `E_LEASE_EXPIRED`），
+  并说明它独立于 `E_INSTALL_FAILED` 的理由。
 
 ### 已知债务
 
@@ -192,6 +244,17 @@ host 命令面缺 menu / tray / fs / http 四域。
 `@testing-library/react-hooks@8` 声明 `react ^16.9 || ^17`，实际装的是 react 18；
 `@testing-library/react@16` 缺 `react-dom` peer。属既有状态，不影响测试通过
 （`pnpm peers check` 可复现）。
+
+**11. sidecar ABI 校验的「实际值」无可信来源**
+
+`host_runtime_spawn` 现在会比对宿主 ABI 契约与调用方声明的 `profile.abi`（不符 →
+`E_ABI_MISMATCH`），但 `profile.abi` 是**调用方自报**的——这道校验挡的是「配置错配 /
+前端用了旧模板」，**不是**「恶意调用方伪造 ABI」。真正的可信校验需要 sidecar 在
+RPC 握手时自报指纹（**尚未实现**：`tauron-proc` 的 RPC 帧循环未接线）。同一性质：
+`validate_spawn_config` 的签名 / 哈希检查也只做**格式**校验（非空 / 长度 64），
+不做真实验签——`ProcError::SignatureInvalid` / `HashMismatch` 目前同样无生产产生点
+（只有映射表与测试引用它们）。这两条**不构成安全边界**，发布公告里不要写成
+「已实现进程插件验签 / ABI 校验」。
 
 ---
 
