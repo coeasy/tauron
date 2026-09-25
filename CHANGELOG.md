@@ -80,6 +80,19 @@
   `tauri build` 与 `收集产物` 均被 skip（同一提交的 linux/macOS 三腿全部成功）。
   该步骤固定 `shell: bash` 并加注释说明为什么不能删；同时把 Windows 腿的 bundle
   显式钉成 `--bundles nsis`（理由见「已知债务」第 11 条）
+- 修 `release.yml` 的 Release 作业：`files` 原先写 `artifacts/**/*`，而
+  `download-artifact` 会把 macOS 的 `Tauron Minimal App.app` 整棵目录树摊进
+  `artifacts/`，宽 glob 会把 `.app` 内部的 `Info.plist` / `icon.icns` /
+  `Contents/MacOS` 里的可执行文件都当成独立 release asset 上传（两个 macOS
+  架构的同名内部文件还会互相覆盖）。改为按扩展名挑安装包
+  （exe / msi / dmg / deb / rpm / AppImage）。另加一步用带 token 的 `gh` 打印
+  该 tag 的 Release 状态（含草稿）——未认证的 `GET /releases` 看不到草稿，
+  外部查不出「上次失败有没有留下草稿」，而 action 在已有草稿时会**复用**它
+  并走 PATCH 资产那条路
+- **v0.1.0 首次 Release 的最终结果**：`版本号一致性` + 四平台构建 +
+  `创建 GitHub Release` 六个作业**全绿**（总 287s），产出 linux
+  deb/rpm/AppImage、macOS arm64+x64 的 dmg、Windows NSIS 安装包，并落成一个
+  **草稿** Release（`draft: true`，需人工过一眼再点发布）
 - `rustfmt.toml` / `clippy.toml` / `eslint.config.js` / `.prettierrc.json`
 - 本文件
 
