@@ -232,11 +232,38 @@ jobs:
           merge-multiple: true
 
       - name: 列出待发布文件
-        run: find artifacts -type f | sort
+        run: |
+          echo "── download-artifact 摊平后的全部文件 ──"
+          find artifacts -type f | sort
+          echo "── 其中会被上传为 release asset 的安装包 ──"
+          find artifacts -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \) | sort
+
+      # 未认证的 `GET /releases` 看不到草稿，所以「有没有草稿」在外部查不出来。
+      # 这一步用带 token 的 gh 把状态打到日志里：重跑时若已有草稿，action 会
+      # **复用**它（而不是新建），配合默认的 overwrite_files=true 走 PATCH
+      # 资产那条路——正是 v0.1.0 第二次 Release 报的那个
+      # `Not Found .../releases/assets#update-a-release-asset`。先看清楚再动手。
+      - name: 查看该 tag 是否已有 Release（含草稿）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,isDraft,assets 2>&1 || echo "（该 tag 尚无任何 Release）"
 
       - uses: softprops/action-gh-release@v2
         with:
           # draft：产物先落成草稿，人工过一眼再点发布。
           draft: true
           generate_release_notes: true
-          files: artifacts/**/*
+          # 只上传真正的安装包，**不要**写 `artifacts/**/*`。
+          # `download-artifact` 会把 macOS 的 `Tauron Minimal App.app` 整棵目录树
+          # 摊进 artifacts/，宽 glob 会把 .app 内部的 Info.plist / icon.icns /
+          # Contents/MacOS 里的可执行文件都当成一个个独立 release asset 上传；
+          # 两个 macOS 架构的同名内部文件还会互相覆盖。按扩展名挑才只留安装包。
+          files: |
+            artifacts/**/*.exe
+            artifacts/**/*.msi
+            artifacts/**/*.dmg
+            artifacts/**/*.deb
+            artifacts/**/*.rpm
+            artifacts/**/*.AppImage
