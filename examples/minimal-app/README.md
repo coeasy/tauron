@@ -23,6 +23,7 @@ pnpm tauri dev
 minimal-app/
 ├── index.html                 # 宿主主窗（入口 src/main.ts）
 ├── plugin.html                # 沙箱 iframe 插件页（入口 src/plugin/first.ts）
+├── app-icon.svg               # 图标矢量源（tauri icon 的输入，1024×1024）
 ├── vite.config.ts             # 双入口 rollup 配置
 ├── src/
 │   ├── main.ts                # 宿主侧全部接线（4 条链路）
@@ -31,10 +32,20 @@ minimal-app/
 │   ├── src/main.rs            # root 注册 45 条命令 + state_init
 │   ├── Cargo.toml
 │   ├── build.rs               # tauri-build
-│   ├── tauri.conf.json
-│   └── icons/icon.ico         # Windows 资源所需占位图标
+│   ├── tauri.conf.json        # 含 bundle.icon 声明
+│   └── icons/                 # 由 app-icon.svg 生成（png / icns / ico + MSIX Logo）
 └── package.json
 ```
+
+图标由矢量源生成，改动后重新生成即可（在 `examples/minimal-app/` 下执行）：
+
+```bash
+pnpm dlx @tauri-apps/cli@2 icon app-icon.svg
+```
+
+它会覆写 `src-tauri/icons/`，并额外产出 `android/`、`ios/` 两棵移动端目录——
+本示例是桌面应用，生成后可删掉这两个目录。`tauri.conf.json` 的 `bundle.icon`
+只列桌面端用到的那几个文件。
 
 ## 四条演示链路
 

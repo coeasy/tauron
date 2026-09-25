@@ -17,5 +17,19 @@
     "security": {
       "csp": null
     }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "Tauron plugin substrate minimal example",
+    "longDescription": "Minimal Tauri 2 application built on the tauron plugin substrate. Reference assembly of the tauron crates and @tauron packages.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
   }
 }

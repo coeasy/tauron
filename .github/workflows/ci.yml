@@ -144,8 +144,9 @@ jobs:
   # 单独装配」。
   #
   # ⚠️ advisory（continue-on-error）：该工程被 workspace `exclude`，是独立
-  # 依赖树，且 `bundle.icon` 目前只有 `icon.ico`（Linux 打包需要 png）。
-  # 首次 CI 跑通、图标补齐之后再转硬门禁。
+  # 依赖树（自带 Cargo.lock，需单独缓存与 `--locked` 校验）。图标已补齐
+  # （见 examples/minimal-app/app-icon.svg 与 tauri.conf.json 的 bundle.icon），
+  # 不再是 advisory 的理由；待该 job 首次跑通后再转硬门禁。
   # ══════════════════════════════════════════════════════════════════
   example-substrate-only:
     name: 示例工程 substrate-only（advisory）

@@ -65,6 +65,13 @@
   那个应用，它掉队就会产出「tag 是 v0.2.0、安装包写 0.1.0」），并在 `tauri build`
   前加一步 `cargo metadata --locked` 硬校验示例工程的锁文件（`tauri build` 没有
   `--locked` 选项，`-- --locked` 透传属未文档化行为，不能当可复现性保证）
+- 示例工程补齐跨平台打包图标：新增矢量源 `examples/minimal-app/app-icon.svg`
+  （1024×1024），经 `tauri icon` 生成 `32x32.png` / `64x64.png` / `128x128.png` /
+  `128x128@2x.png` / `icon.png` / `icon.icns` / `icon.ico` 及 MSIX 用的
+  `Square*Logo` / `StoreLogo`，并在 `tauri.conf.json` 显式声明 `bundle.icon`
+  ——此前 `bundle` 段整体缺失，Linux 的 `deb`/`AppImage` 与 macOS 的 `.app`
+  都没有图标来源。Windows NSIS 已重测出包；Linux / macOS **仍未实测**
+  （见「已知债务」第 7 条）
 - `rustfmt.toml` / `clippy.toml` / `eslint.config.js` / `.prettierrc.json`
 - 本文件
 
@@ -310,12 +317,20 @@ cargo clippy --workspace --all-targets -- -D warnings   # 从未运行
 
 20 个 `packages/*/package.json` 均为 `private`，无法 `npm publish`。
 
-**7. 示例工程的打包图标不全（Windows 已实测可打包，Linux/macOS 未验证）**
+**7. 示例工程打包图标：配置已补齐，但仅 Windows 实测过**
 
-`examples/minimal-app/src-tauri/icons/` 只有 `icon.ico`（16×16）。**已实测**：
-Windows 上 `tauri build` 不带 `bundle` 段也能出 NSIS 安装包（Tauri v2 用默认值）
-——`tauri.conf.json` 缺 `bundle` 不是缺口。但 `deb` / `AppImage` / `.app` 需要
-png / icns，本仓库**没有在 Linux / macOS 上实测过**，发布前必须补图标或验证。
+原先 `icons/` 只有 16×16 `icon.ico`，且 `tauri.conf.json` 完全没有 `bundle` 段
+——Linux 的 `deb` / `AppImage` 要 png、macOS 的 `.app` 要 icns，两头都没有来源。
+
+现已补齐：矢量源 `examples/minimal-app/app-icon.svg`（1024×1024，经
+`tauri icon` 生成全平台图标集），`icons/` 含 `32x32.png` / `64x64.png` /
+`128x128.png` / `128x128@2x.png` / `icon.png` / `icon.icns` / `icon.ico`，
+外加 MSIX 用的 `Square*Logo` / `StoreLogo`；`tauri.conf.json` 显式声明了
+`bundle.icon`（此前 `bundle` 段整体缺失）。
+
+**已实测**：Windows 上 `tauri build --bundles nsis` 出包成功。**仍未实测**：
+`deb` / `AppImage` / `.app` / `.dmg` 没有在任何 Linux / macOS 机器上跑过。
+图标与配置现在是「就绪」，不等于「验证过」——发布公告里不要写成跨平台已验证。
 
 **8. 命令面缺口**
 

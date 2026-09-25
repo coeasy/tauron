@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="Tauron">
+  <title>Tauron</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4F46E5"/>
+      <stop offset="0.55" stop-color="#6D4AE0"/>
+      <stop offset="1" stop-color="#8B5CF6"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.22"/>
+      <stop offset="0.6" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- app tile: 7% transparent margin so macOS / Linux bundlers have breathing room -->
+  <rect x="72" y="72" width="880" height="880" rx="196" fill="url(#tile)"/>
+  <rect x="72" y="72" width="880" height="880" rx="196" fill="url(#gloss)"/>
+
+  <!-- mark: a bold T, readable down to 16px -->
+  <g fill="#FFFFFF">
+    <!-- crossbar -->
+    <rect x="296" y="312" width="432" height="136" rx="68"/>
+    <!-- stem -->
+    <rect x="444" y="380" width="136" height="388" rx="68"/>
+  </g>
+
+  <!-- plugin node: the one accent that survives downscaling, reads as a module docking onto the host -->
+  <circle cx="716" cy="716" r="78" fill="#22D3EE"/>
+  <circle cx="716" cy="716" r="78" fill="none" stroke="#0B1020" stroke-opacity="0.14" stroke-width="10"/>
+</svg>
