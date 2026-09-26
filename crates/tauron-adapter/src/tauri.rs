@@ -49,7 +49,7 @@ pub use tauron_host::{ErrorCode, HostError, HostResult};
 
 use crate::{AdapterConfig, CommandState, PluginRuntimeState, StreamOpened, SubstrateState};
 use crate::ProviderResult;
-use tauron_host::stream::{StreamFrame, StreamKind, StreamSink};
+use tauron_host::stream::{StreamFrame, StreamSink};
 
 /// Transport-provided caller context. Core handlers receive only the validated [`crate::Caller`].
 pub trait CallerSource {
