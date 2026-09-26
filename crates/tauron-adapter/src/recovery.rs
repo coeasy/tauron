@@ -135,12 +135,7 @@ impl RecoveryStore {
 
     /// 在宿主数据目录下启用持久化。
     pub fn new(dir: PathBuf) -> Self {
-        Self {
-            dir: Some(dir),
-            in_flight: false,
-            last_error: None,
-            last_context: Vec::new(),
-        }
+        Self { dir: Some(dir), in_flight: false, last_error: None, last_context: Vec::new() }
     }
 
     /// 持久化是否启用。
@@ -241,11 +236,7 @@ impl RecoveryStore {
             self.last_error = Some(err);
         }
 
-        BootRecord {
-            engine,
-            previous_in_flight,
-            source,
-        }
+        BootRecord { engine, previous_in_flight, source }
     }
 
     /// 原子落盘（先写临时文件，再 `rename` 覆盖）。
@@ -285,8 +276,7 @@ impl RecoveryStore {
             "engine": engine,
         });
         // payload 由 json! 构造，序列化不可能失败。
-        let text = serde_json::to_string(&payload)
-            .expect("json! 构造的 Value 序列化不会失败");
+        let text = serde_json::to_string(&payload).expect("json! 构造的 Value 序列化不会失败");
 
         let tmp = dir.join(RECOVERY_TMP_FILE);
         let target = dir.join(RECOVERY_FILE);
@@ -321,15 +311,10 @@ fn parse(text: &str) -> std::result::Result<(RecoveryEngine, bool, Vec<BootConte
     if version != RECOVERY_STORE_VERSION {
         return Err(format!("不支持的标记版本：{version}"));
     }
-    let engine = v
-        .get("engine")
-        .ok_or_else(|| "缺少 engine 字段".to_string())?;
+    let engine = v.get("engine").ok_or_else(|| "缺少 engine 字段".to_string())?;
     let engine = RecoveryEngine::from_json(engine).map_err(|e| e.to_string())?;
     // 字段缺失时按「上一次未干净结束」处理（安全方向）。
-    let in_flight = v
-        .get("bootInFlight")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
+    let in_flight = v.get("bootInFlight").and_then(serde_json::Value::as_bool).unwrap_or(true);
     // `lastContext` 缺失/损坏 → 视为无 context，**不**把整份标记判为损坏。
     // 顶层没有时退回引擎快照里那份（两者同源，兼容只写了其中一份的标记）。
     let last_context = v
@@ -408,10 +393,7 @@ mod tests {
 
         // 文件里必须已经写着 bootInFlight=true，否则本轮崩溃检测不到。
         let text = fs::read_to_string(store.path().unwrap()).unwrap();
-        assert!(
-            text.contains("\"bootInFlight\":true"),
-            "落盘内容：{text}"
-        );
+        assert!(text.contains("\"bootInFlight\":true"), "落盘内容：{text}");
     }
 
     #[test]
@@ -427,14 +409,9 @@ mod tests {
             // 不调用 save，直接「进程死亡」。
         }
 
-        let text = fs::read_to_string(
-            RecoveryStore::new(t.path().to_path_buf()).path().unwrap(),
-        )
-        .unwrap();
-        assert!(
-            text.contains("\"bootInFlight\":true"),
-            "load 自己没落盘：{text}"
-        );
+        let text =
+            fs::read_to_string(RecoveryStore::new(t.path().to_path_buf()).path().unwrap()).unwrap();
+        assert!(text.contains("\"bootInFlight\":true"), "load 自己没落盘：{text}");
 
         // 下一次启动必须能识别出这次崩溃。
         let mut store = store_in(&t);
@@ -557,11 +534,7 @@ mod tests {
             "bootInFlight": false,
             "engine": RecoveryEngine::new(HashSet::new()).to_json(),
         });
-        fs::write(
-            t.path().join(RECOVERY_FILE),
-            serde_json::to_string(&payload).unwrap(),
-        )
-        .unwrap();
+        fs::write(t.path().join(RECOVERY_FILE), serde_json::to_string(&payload).unwrap()).unwrap();
 
         let mut store = store_in(&t);
         let r = store.load(HashSet::new());
@@ -575,11 +548,7 @@ mod tests {
             "version": RECOVERY_STORE_VERSION,
             "engine": RecoveryEngine::new(HashSet::new()).to_json(),
         });
-        fs::write(
-            t.path().join(RECOVERY_FILE),
-            serde_json::to_string(&payload).unwrap(),
-        )
-        .unwrap();
+        fs::write(t.path().join(RECOVERY_FILE), serde_json::to_string(&payload).unwrap()).unwrap();
 
         let mut store = store_in(&t);
         let r = store.load(HashSet::new());
@@ -636,11 +605,7 @@ mod tests {
         let mut store = store_in(&t);
         let r = store.load(HashSet::new());
         assert!(!store.save(&r.engine));
-        assert!(store
-            .last_error
-            .as_ref()
-            .unwrap()
-            .contains("落盘失败"));
+        assert!(store.last_error.as_ref().unwrap().contains("落盘失败"));
     }
 
     // ── 关键事件上下文（R7：崩溃后留诊断上下文）────────────────────
@@ -690,11 +655,7 @@ mod tests {
         let mut store = store_in(&t);
         let r = store.load(HashSet::new());
         assert!(r.previous_in_flight, "上一次崩溃必须被识别");
-        assert_eq!(
-            r.engine.counter().consecutive_failures,
-            2,
-            "上一轮那次失败 + 本轮识别到的崩溃"
-        );
+        assert_eq!(r.engine.counter().consecutive_failures, 2, "上一轮那次失败 + 本轮识别到的崩溃");
         assert_eq!(store.last_context.len(), 2, "历史 + 本次崩溃各一条");
         assert_eq!(store.last_context[0].ts, 111, "最旧的是上一轮那条");
         assert_eq!(store.last_context[0].plugin_id.as_deref(), Some("p.audio"));
@@ -721,11 +682,7 @@ mod tests {
             "lastContext": "这不是数组",
             "engine": RecoveryEngine::new(HashSet::new()).to_json(),
         });
-        fs::write(
-            t.path().join(RECOVERY_FILE),
-            serde_json::to_string(&payload).unwrap(),
-        )
-        .unwrap();
+        fs::write(t.path().join(RECOVERY_FILE), serde_json::to_string(&payload).unwrap()).unwrap();
 
         let mut store = store_in(&t);
         let r = store.load(HashSet::new());
@@ -747,11 +704,7 @@ mod tests {
             "bootInFlight": false,
             "engine": engine.to_json(),
         });
-        fs::write(
-            t.path().join(RECOVERY_FILE),
-            serde_json::to_string(&payload).unwrap(),
-        )
-        .unwrap();
+        fs::write(t.path().join(RECOVERY_FILE), serde_json::to_string(&payload).unwrap()).unwrap();
 
         let mut store = store_in(&t);
         store.load(HashSet::new());
@@ -806,7 +759,8 @@ mod tests {
     }
 
     #[test]
-    fn disabled_plugins_do_not_include_removed_one() {        let mut e = RecoveryEngine::new(HashSet::new());
+    fn disabled_plugins_do_not_include_removed_one() {
+        let mut e = RecoveryEngine::new(HashSet::new());
         e.set_required_plugins(HashSet::new());
         e.register_plugin("p.audio");
         e.record_boot_failure(None);

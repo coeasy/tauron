@@ -86,10 +86,7 @@ pub fn generate(named: &[Def], root: &Def, title: &str) -> SchemaResult<Value> {
         ("title".to_string(), Value::String(title.to_string())),
         (
             "properties".to_string(),
-            Value::Object(Map::from_iter([(
-                "value".to_string(),
-                render(root, named, false)?,
-            )])),
+            Value::Object(Map::from_iter([("value".to_string(), render(root, named, false)?)])),
         ),
         ("type".to_string(), Value::String("object".to_string())),
     ]);
@@ -172,16 +169,10 @@ fn render_body(d: &Def, named: &[Def]) -> SchemaResult<Value> {
                     if let Some(p) = payload {
                         props.insert("value".to_string(), render(p, named, true)?);
                     }
-                    Ok::<Value, SchemaError>(obj(&[(
-                        "properties",
-                        Value::Object(props),
-                    )]))
+                    Ok::<Value, SchemaError>(obj(&[("properties", Value::Object(props))]))
                 })
                 .collect::<SchemaResult<Vec<_>>>()?;
-            Ok(Value::Object(Map::from_iter([(
-                "oneOf".to_string(),
-                Value::Array(branches),
-            )])))
+            Ok(Value::Object(Map::from_iter([("oneOf".to_string(), Value::Array(branches))])))
         }
         _ => Err(SchemaError::Structure("render_body 只接受 Struct / Enum".into())),
     }
@@ -224,8 +215,12 @@ mod tests {
 
     #[test]
     fn option_of_named_type_uses_a_ref() {
-        let named = vec![Def::Struct { name: "N".into(), fields: vec![("a".into(), Def::Str, true)] }];
-        let d = Def::Opt(Box::new(Def::Struct { name: "N".into(), fields: vec![("a".into(), Def::Str, true)] }));
+        let named =
+            vec![Def::Struct { name: "N".into(), fields: vec![("a".into(), Def::Str, true)] }];
+        let d = Def::Opt(Box::new(Def::Struct {
+            name: "N".into(),
+            fields: vec![("a".into(), Def::Str, true)],
+        }));
         let v = render(&d, &named, true).unwrap();
         assert_eq!(v["anyOf"][0], json!({"$ref":"#/$defs/N"}));
     }
@@ -289,10 +284,7 @@ mod tests {
     fn generate_emits_schema_defs_title_and_inlined_root() {
         let named = vec![Def::Struct {
             name: "Sound".into(),
-            fields: vec![
-                ("volume".into(), Def::Int, true),
-                ("muted".into(), Def::Bool, false),
-            ],
+            fields: vec![("volume".into(), Def::Int, true), ("muted".into(), Def::Bool, false)],
         }];
         let root = Def::Struct {
             name: "Settings".into(),
@@ -309,7 +301,10 @@ mod tests {
         assert_eq!(doc["$defs"]["Sound"]["required"], json!(["volume"]));
         // 根内联，且字段引用命名类型走 $ref。
         assert_eq!(doc["type"], "object");
-        assert_eq!(doc["properties"]["value"]["properties"]["sound"], json!({"$ref":"#/$defs/Sound"}));
+        assert_eq!(
+            doc["properties"]["value"]["properties"]["sound"],
+            json!({"$ref":"#/$defs/Sound"})
+        );
         assert_eq!(doc["properties"]["value"]["properties"]["lang"], json!({"type":"string"}));
     }
 
@@ -329,7 +324,8 @@ mod tests {
     #[test]
     fn generated_output_is_not_flat_until_compiled() {
         // 生成侧的产物**必然**含 $ref / oneOf——这正是管线的输入。
-        let named = vec![Def::Struct { name: "S".into(), fields: vec![("a".into(), Def::Str, true)] }];
+        let named =
+            vec![Def::Struct { name: "S".into(), fields: vec![("a".into(), Def::Str, true)] }];
         let root = Def::Enum {
             name: "E".into(),
             variants: vec![("A".into(), Some(Def::List(Box::new(Def::Int)))), ("B".into(), None)],
@@ -342,14 +338,24 @@ mod tests {
         // 规范化后才变平面。
         assert!(compiled.schema.get("$defs").is_none());
         assert_eq!(compiled.schema["properties"]["value"]["oneOf"][0]["type"], "object");
-        assert_eq!(compiled.schema["properties"]["value"]["oneOf"][0]["properties"]["value"], json!({"type":"array","items":{"type":"integer"}}));
+        assert_eq!(
+            compiled.schema["properties"]["value"]["oneOf"][0]["properties"]["value"],
+            json!({"type":"array","items":{"type":"integer"}})
+        );
     }
 
     #[test]
     fn nested_struct_produces_chained_refs_and_survives_compilation() {
         let named = vec![
             Def::Struct { name: "Inner".into(), fields: vec![("x".into(), Def::Str, true)] },
-            Def::Struct { name: "Outer".into(), fields: vec![("inner".into(), Def::Struct { name: "Inner".into(), fields: vec![] }, true)] },
+            Def::Struct {
+                name: "Outer".into(),
+                fields: vec![(
+                    "inner".into(),
+                    Def::Struct { name: "Inner".into(), fields: vec![] },
+                    true,
+                )],
+            },
         ];
         let root = Def::Opt(Box::new(Def::Struct { name: "Outer".into(), fields: vec![] }));
         let raw = generate(&named, &root, "t").unwrap();
@@ -365,8 +371,14 @@ mod tests {
     #[test]
     fn snapshot_shape_is_stable_across_runs() {
         // 快照稳定性：同输入两次生成必须逐字节相等（serde_json::Map 是 BTreeMap）。
-        let named = vec![Def::Struct { name: "S".into(), fields: vec![("b".into(), Def::Bool, true), ("a".into(), Def::Str, true)] }];
-        let root = Def::Struct { name: "R".into(), fields: vec![("s".into(), Def::Struct { name: "S".into(), fields: vec![] }, true)] };
+        let named = vec![Def::Struct {
+            name: "S".into(),
+            fields: vec![("b".into(), Def::Bool, true), ("a".into(), Def::Str, true)],
+        }];
+        let root = Def::Struct {
+            name: "R".into(),
+            fields: vec![("s".into(), Def::Struct { name: "S".into(), fields: vec![] }, true)],
+        };
         let a = generate(&named, &root, "t").unwrap();
         let b = generate(&named, &root, "t").unwrap();
         assert_eq!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap());
@@ -379,7 +391,8 @@ mod tests {
     #[test]
     fn generated_enum_can_carry_ui_extensions_through_the_pipeline() {
         // 生成侧不带扩展，但管线要能吃"生成 + 手工补扩展"的组合输入。
-        let root = Def::Enum { name: "E".into(), variants: vec![("A".into(), None), ("B".into(), None)] };
+        let root =
+            Def::Enum { name: "E".into(), variants: vec![("A".into(), None), ("B".into(), None)] };
         let mut raw = generate(&[], &root, "t").unwrap();
         raw["properties"]["value"]["x-tauron"] = json!({"version":1,"label":"选择"});
         let c = compile(&raw).unwrap();

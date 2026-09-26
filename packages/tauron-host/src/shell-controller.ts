@@ -32,6 +32,7 @@ import {
   SHELL_EVENTS,
   type PluginToggleEventDetail,
   type PluginUninstallEventDetail,
+  type PluginInstallEventDetail,
 } from '@tauron/shell-events';
 import { ShellClient } from './shell-client.js';
 import { AdminClient } from './host.js';
@@ -147,6 +148,10 @@ export class ShellController {
           .catch(this._fail('plugin.uninstall'));
       }
     });
+    this._listen(elements, SHELL_EVENTS.pluginInstall, (e) => {
+      const detail = (e as CustomEvent<PluginInstallEventDetail>).detail;
+      if (detail?.packagePath) void this._installPlugin(detail.packagePath);
+    });
   }
 
   /**
@@ -163,6 +168,29 @@ export class ShellController {
     for (const el of targets) {
       el.addEventListener(type, fn);
       this.listeners.push({ el, type, fn });
+    }
+  }
+
+  private async _installPlugin(packagePath: string): Promise<void> {
+    try {
+      const preview = await this.admin.registryInstallPreview(packagePath);
+      const approved: string[] = [];
+      for (const permission of preview.permissions) {
+        const allow = window.confirm(`${preview.pluginName} (${preview.version})\n\n${permission.permission}\n${permission.risk}: ${permission.description}\n\n是否授予此权限？`);
+        if (!allow) return;
+        approved.push(permission.permission);
+      }
+      const installed = await this.admin.registryInstall(packagePath, approved);
+      await this.admin.registryAdmin({ op: 'enable', id: installed.pluginId });
+      const outcome = await this.client.windowCreate(installed.pluginId);
+      if (!outcome.created) {
+        this._onError(new Error(outcome.reason ?? '插件页面启动失败'), 'plugin.launch');
+        window.alert('插件已安装并启用，但宿主未能启动插件页面。');
+        return;
+      }
+      window.alert('插件已安装、启用并启动。');
+    } catch (error) {
+      this._onError(error, 'plugin.install');
     }
   }
 }

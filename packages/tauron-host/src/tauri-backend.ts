@@ -9,7 +9,7 @@ import { invoke, Channel } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 
-import type { Backend, ChannelPort, Principal } from './backend.js';
+import type { ChannelPort, HostTransport, Principal } from './backend.js';
 
 /** 插件 webview 的 label 前缀，与 Rust 侧 `IDENTITY_LABEL_PREFIX` 必须一致。 */
 export const IDENTITY_LABEL_PREFIX = 'plugin-';
@@ -65,6 +65,10 @@ const FRAMEWORK_COMMANDS = [
   'host_plugin_call',
   'host_call_end',
   'host_cancel',
+  // 跨主体调用（0.4-A1）：发起 / 执行方回填 / 发起方取件，三命令成组。
+  'host_call_plugin',
+  'host_call_result',
+  'host_call_take',
   'host_lifecycle_report',
   'host_contributes_register',
   'host_events_publish',
@@ -80,6 +84,7 @@ const FRAMEWORK_COMMANDS = [
   // 进程插件运行时（P0-2）：spawn + 健康/租约查询配对。
   'host_runtime_spawn',
   'host_runtime_health',
+  'host_resource_stats',
   // 注册表（主窗）
   'host_registry_list_all',
   // 设置
@@ -102,6 +107,7 @@ const FRAMEWORK_COMMANDS = [
   'host_market_download',
   'host_market_install',
   'host_brand_info',
+  'host_capabilities',
   // i18n
   'host_i18n_t',
   'host_i18n_t_params',
@@ -135,7 +141,29 @@ const FRAMEWORK_COMMANDS = [
   'host_dialog_confirm',
 ] as const;
 
-export type FrameworkCommand = (typeof FRAMEWORK_COMMANDS)[number];
+/**
+ * **可选**命令面：Rust 侧是 feature-gated 的，默认构建**不注册**。
+ *
+ * 这是 0.4-A2 修的断链：`host_registry_install*` 在 `crates/tauron-adapter` 里
+ * 挂在 `#[cfg(feature = "plugin-install")]` 下，而 `Cargo.toml` 的 `default = []`，
+ * 于是默认装配的宿主根本注册不了这两条命令。此前它们被混在
+ * {@link FRAMEWORK_COMMANDS} 里无条件列出，导致 `capabilities()` 对它们
+ * **误报已注册**——调用方按能力表判断"能不能装插件"得到 `true`，直到真正
+ * `invoke` 才以 `command not found` 失败。
+ *
+ * 处置：这两条**不进**静态全集，只能由运行期真相开门——宿主调
+ * `host_capabilities` 拿到真实命令集后调 {@link TauriBackend.adoptCapabilities}
+ * （或 `HostClient.refreshCapabilities()`）把它们并进来。
+ * 能力表只能由运行时真相推导，不得硬编码（0.4 不变量 §10.1-8）。
+ */
+export const OPTIONAL_FRAMEWORK_COMMANDS = [
+  'host_registry_install',
+  'host_registry_install_preview',
+] as const;
+
+export type FrameworkCommand =
+  | (typeof FRAMEWORK_COMMANDS)[number]
+  | (typeof OPTIONAL_FRAMEWORK_COMMANDS)[number];
 
 /**
  * 真实 Tauri 后端。
@@ -143,15 +171,36 @@ export type FrameworkCommand = (typeof FRAMEWORK_COMMANDS)[number];
  * `commandPrefix` 默认 `'plugin:tauron|'`——Tauri 的命令级 ACL 通常以
  * `plugin:<name>|<cmd>` 形式注册。若宿主把命令注册在根命名空间，传 `''`。
  */
-export class TauriBackend implements Backend {
+export class TauriBackend implements HostTransport {
   private readonly prefix: string;
-  private readonly caps: ReadonlySet<string>;
+  private caps: ReadonlySet<string>;
 
   constructor(options: { commandPrefix?: string } = {}) {
     this.prefix = options.commandPrefix ?? 'plugin:tauron|';
     // Tauri 不提供命令注册表自省 API，这里报"壳声明注册"的全集。
     // 命令未注册的实际失败会在 invoke 时以结构化错误暴露（见 normalizeError）。
+    //
+    // 注意这里**不含** {@link OPTIONAL_FRAMEWORK_COMMANDS}：那两条是 Rust 侧
+    // feature-gated 的，默认构建不注册，无条件列出就是对调用方撒谎。
     this.caps = new Set<string>(FRAMEWORK_COMMANDS);
+  }
+
+  /**
+   * 用**运行期真相**替换能力集（0.4-A2）。
+   *
+   * 传入 `host_capabilities` 返回的 `commands`：它是在 Rust 侧由实际注册的
+   * handler 集合与 `cfg!(feature = ...)` 推导出来的，因此天然包含/排除可选命令。
+   * 传空数组或解析不出命令集会抛错——宁可显式失败，也不退化成"什么都支持"。
+   */
+  adoptCapabilities(commands: Iterable<string>): void {
+    const next = new Set(commands);
+    if (next.size === 0) {
+      throw new TypeError(
+        'adoptCapabilities: 命令集为空（host_capabilities 未返回 commands）——' +
+          '拒绝采纳，否则能力探测会退化成"什么都不支持"的假阴性',
+      );
+    }
+    this.caps = next;
   }
 
   private full(cmd: string): string {

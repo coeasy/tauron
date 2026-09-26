@@ -14,6 +14,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
+import { deflateRawSync, inflateRawSync } from 'node:zlib';
 
 import { sign as marketSign, verify as marketVerify } from '@tauron/market';
 
@@ -65,6 +66,7 @@ export interface PackConfig {
   compress?: boolean;
   files: PluginFileInfo[];
   pluginConfig?: PluginConfig;
+  pluginManifest?: Record<string, unknown>;
 }
 
 /** 已应用默认值并通过校验的打包配置。 */
@@ -73,6 +75,37 @@ export interface ResolvedPackConfig extends PackConfig {
   includeSource: boolean;
   compress: boolean;
   pluginConfig: PluginConfig;
+}
+
+export interface NativePluginManifest {
+  id: string;
+  name: string;
+  version: string;
+  type: PluginConfig['pluginType'];
+  framework: string;
+  entry: { js?: string; sidecar?: string; wasm?: string };
+  permissions: string[];
+  platforms: string[];
+}
+
+/** Emit the strict manifest consumed by tauron-host and include it in the archive. */
+export function createNativePluginManifest(config: PluginConfig): NativePluginManifest {
+  const entry: NativePluginManifest['entry'] = {};
+  switch (config.pluginType) {
+    case 'js': entry.js = 'src/index.js'; break;
+    case 'process': entry.sidecar = `bin/${config.id.replace(/[^a-zA-Z0-9]/g, '_')}.exe`; break;
+    case 'wasm': entry.wasm = 'dist/plugin.wasm'; break;
+  }
+  return {
+    id: config.id,
+    name: config.name,
+    version: config.version,
+    type: config.pluginType,
+    framework: '^0.1.0',
+    entry,
+    permissions: [...config.permissions],
+    platforms: ['win', 'mac', 'linux'],
+  };
 }
 
 export interface PackResult {
@@ -142,6 +175,7 @@ export interface PublishResult {
 export const SUPPORTED_SIGN_ALGORITHMS: readonly SignAlgorithm[] = ['ed25519', 'rsa-2048', 'rsa-4096'];
 export const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 export const MAX_FILE_COUNT = 2000;
+export const MAX_TOTAL_SIZE = 512 * 1024 * 1024; // 512MB unpacked per package
 
 // ── 验证函数 ──
 
@@ -177,12 +211,22 @@ export function validateFiles(files: PluginFileInfo[]): PluginFileInfo[] {
   if (files.length > MAX_FILE_COUNT) {
     throw new Error(`文件数 ${files.length} 超过上限 ${MAX_FILE_COUNT}`);
   }
+  const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+  if (totalSize > MAX_TOTAL_SIZE) throw new Error(`解包总大小超过上限 ${MAX_TOTAL_SIZE}`);
   for (const file of files) {
     if (!file.path || file.path.trim() === '') {
       throw new Error('文件路径不能为空');
     }
-    if (file.path.includes('..')) {
-      throw new Error(`文件路径包含 ..：${file.path}`);
+    if (
+      file.path.includes('\\') || file.path.includes('\0') || file.path.includes(':') ||
+      file.path.startsWith('/') || /^[a-zA-Z]:/.test(file.path) ||
+      path.posix.normalize(file.path) !== file.path ||
+      file.path.split('/').some((part) =>
+        part === '..' || part === '.' || part === '' || /[<>"|?*\x00-\x1f]/.test(part) ||
+        /[ .]$/.test(part) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)
+      )
+    ) {
+      throw new Error(`文件路径不是安全的相对路径：${file.path}`);
     }
     if (path.isAbsolute(file.path)) {
       throw new Error(`文件路径为绝对路径：${file.path}`);
@@ -269,7 +313,7 @@ export function validatePackConfig(config: PackConfig): ResolvedPackConfig {
   }
   return {
     dir: config.dir,
-    outputPath: config.outputPath ?? `${config.dir}/dist/${config.pluginConfig.id}.zip`,
+    outputPath: config.outputPath ?? `${config.dir}/dist/${config.pluginConfig.id}.tpkg`,
     includeSource: config.includeSource ?? false,
     compress: config.compress ?? true,
     files: config.files,
@@ -341,8 +385,9 @@ const SKIPPED_DIRS: readonly string[] = ['node_modules', '.git'];
  * 用于 `plugin pack` / `plugin sign` 生成文件清单；扫描结果同样受
  * {@link validateFiles} 的约束（文件数 / 单文件大小 / 路径合法性）。
  */
-export function collectPluginFiles(dir: string): PluginScanResult {
+export function collectPluginFiles(dir: string, excludePaths: string[] = []): PluginScanResult {
   const root = path.resolve(dir);
+  const excluded = new Set(excludePaths.map((item) => path.resolve(item)));
   if (!fs.existsSync(root)) {
     return { ok: false, files: [], error: `目录不存在：${dir}` };
   }
@@ -355,7 +400,7 @@ export function collectPluginFiles(dir: string): PluginScanResult {
         if (!SKIPPED_DIRS.includes(entry.name)) walk(abs);
         continue;
       }
-      if (!entry.isFile()) continue;
+      if (!entry.isFile() || excluded.has(path.resolve(abs)) || /\.tpkg(?:\.sig)?$/i.test(entry.name)) continue;
       const content = fs.readFileSync(abs);
       files.push({
         path: path.relative(root, abs).split(path.sep).join('/'),
@@ -389,6 +434,185 @@ export function pluginPack(config: PackConfig): PackResult {
       error: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+const crcTable = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(data: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of data) crc = (crcTable[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+/** 生成标准 ZIP 包；写入前重新核对每个文件的大小与 SHA-256，避免打包期间内容漂移。 */
+export function createPluginArchive(config: ResolvedPackConfig): Buffer {
+  const sourceFiles = config.files.filter((file) => file.path !== 'manifest.json');
+  const files = sourceFiles.length === 0 ? [] : validateFiles(sourceFiles);
+  const sourceManifest = config.pluginManifest ?? createNativePluginManifest(config.pluginConfig);
+  const manifestBytes = Buffer.from(`${JSON.stringify({
+    ...sourceManifest,
+    id: config.pluginConfig.id,
+    name: config.pluginConfig.name,
+    version: config.pluginConfig.version,
+    type: config.pluginConfig.pluginType,
+    permissions: [...config.pluginConfig.permissions],
+  }, null, 2)}\n`, 'utf8');
+  files.unshift({
+    path: 'manifest.json',
+    size: manifestBytes.byteLength,
+    hash: crypto.createHash('sha256').update(manifestBytes).digest('hex'),
+  });
+  const entries = files.map((file) => {
+    if (file.path === 'manifest.json') {
+      const data = manifestBytes;
+      const name = Buffer.from(file.path, 'utf8');
+      const compressed = config.compress ? deflateRawSync(data) : data;
+      return { name, data, compressed, crc: crc32(data), method: config.compress ? 8 : 0 };
+    }
+    const abs = path.resolve(config.dir, ...file.path.split('/'));
+    const root = path.resolve(config.dir) + path.sep;
+    if (!abs.startsWith(root)) throw new Error(`文件路径越出插件目录：${file.path}`);
+    const data = fs.readFileSync(abs);
+    if (data.byteLength !== file.size || crypto.createHash('sha256').update(data).digest('hex') !== file.hash) {
+      throw new Error(`文件在扫描后发生变化：${file.path}`);
+    }
+    const name = Buffer.from(file.path, 'utf8');
+    const compressed = config.compress ? deflateRawSync(data) : data;
+    return { name, data, compressed, crc: crc32(data), method: config.compress ? 8 : 0 };
+  });
+
+  const local: Buffer[] = [];
+  const central: Buffer[] = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const header = Buffer.alloc(30 + entry.name.length);
+    header.writeUInt32LE(0x04034b50, 0);
+    header.writeUInt16LE(20, 4);
+    header.writeUInt16LE(0x0800, 6);
+    header.writeUInt16LE(entry.method, 8);
+    header.writeUInt32LE(entry.crc, 14);
+    header.writeUInt32LE(entry.compressed.length, 18);
+    header.writeUInt32LE(entry.data.length, 22);
+    header.writeUInt16LE(entry.name.length, 26);
+    entry.name.copy(header, 30);
+    local.push(header, entry.compressed);
+
+    const dir = Buffer.alloc(46 + entry.name.length);
+    dir.writeUInt32LE(0x02014b50, 0);
+    dir.writeUInt16LE(20, 4);
+    dir.writeUInt16LE(20, 6);
+    dir.writeUInt16LE(0x0800, 8);
+    dir.writeUInt16LE(entry.method, 10);
+    dir.writeUInt32LE(entry.crc, 16);
+    dir.writeUInt32LE(entry.compressed.length, 20);
+    dir.writeUInt32LE(entry.data.length, 24);
+    dir.writeUInt16LE(entry.name.length, 28);
+    dir.writeUInt32LE(offset, 42);
+    entry.name.copy(dir, 46);
+    central.push(dir);
+    offset += header.length + entry.compressed.length;
+  }
+  const directory = Buffer.concat(central);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...local, directory, end]);
+}
+
+/** 从 `.tpkg` 读取并校验文件清单；只接受无加密、无 ZIP64 的受限 ZIP 子集。 */
+export function readPluginArchive(archive: Buffer): PluginFileInfo[] {
+  if (archive.length < 22) throw new Error('安装包 ZIP 目录损坏');
+  const minEnd = Math.max(0, archive.length - 22 - 0xffff);
+  let endOffset = -1;
+  for (let i = archive.length - 22; i >= minEnd; i--) {
+    if (archive.readUInt32LE(i) === 0x06054b50) { endOffset = i; break; }
+  }
+  if (endOffset < 0) throw new Error('安装包 ZIP 目录损坏');
+  if (archive.readUInt16LE(endOffset + 4) !== 0 || archive.readUInt16LE(endOffset + 6) !== 0) {
+    throw new Error('不支持多卷 ZIP 安装包');
+  }
+  const count = archive.readUInt16LE(endOffset + 10);
+  if (archive.readUInt16LE(endOffset + 8) !== count) throw new Error('安装包 ZIP 条目计数不匹配');
+  if (count === 0 || count > MAX_FILE_COUNT) throw new Error(`安装包文件数无效：${count}`);
+  const centralSize = archive.readUInt32LE(endOffset + 12);
+  const centralOffset = archive.readUInt32LE(endOffset + 16);
+  let cursor = centralOffset;
+  const centralEnd = cursor + centralSize;
+  const commentLength = archive.readUInt16LE(endOffset + 20);
+  if (endOffset + 22 + commentLength !== archive.length || centralEnd !== endOffset) throw new Error('安装包 ZIP 目录边界错误');
+  const files: PluginFileInfo[] = [];
+  const names = new Set<string>();
+  const ranges: Array<[number, number]> = [];
+  let totalSize = 0;
+  for (let i = 0; i < count; i++) {
+    if (cursor + 46 > centralEnd || archive.readUInt32LE(cursor) !== 0x02014b50) throw new Error('安装包中央目录损坏');
+    const flags = archive.readUInt16LE(cursor + 8);
+    const method = archive.readUInt16LE(cursor + 10);
+    const expectedCrc = archive.readUInt32LE(cursor + 16);
+    const compressedSize = archive.readUInt32LE(cursor + 20);
+    const size = archive.readUInt32LE(cursor + 24);
+    const nameLength = archive.readUInt16LE(cursor + 28);
+    const extraLength = archive.readUInt16LE(cursor + 30);
+    const commentLength = archive.readUInt16LE(cursor + 32);
+    const localOffset = archive.readUInt32LE(cursor + 42);
+    if (archive.readUInt16LE(cursor + 34) !== 0) throw new Error('不支持多卷 ZIP 安装包');
+    const rawName = archive.subarray(cursor + 46, cursor + 46 + nameLength);
+    let name: string;
+    try { name = new TextDecoder('utf-8', { fatal: true }).decode(rawName); }
+    catch { throw new Error('安装包包含无效 UTF-8 路径'); }
+    validateFiles([{ path: name, size, hash: '0'.repeat(64) }]);
+    const collisionKey = name.toLowerCase();
+    if (names.has(collisionKey)) throw new Error(`安装包包含重复或大小写冲突路径：${name}`);
+    names.add(collisionKey);
+    if ((flags & ~0x0800) !== 0 || (method !== 0 && method !== 8)) throw new Error(`安装包使用不支持的 ZIP 标志或压缩方式：${name}`);
+    const madeBy = archive.readUInt16LE(cursor + 4);
+    const externalAttributes = archive.readUInt32LE(cursor + 38);
+    if ((madeBy >>> 8) === 3) {
+      const fileType = (externalAttributes >>> 16) & 0xf000;
+      if (fileType !== 0 && fileType !== 0x8000) throw new Error(`安装包包含非普通文件：${name}`);
+    }
+    totalSize += size;
+    if (totalSize > MAX_TOTAL_SIZE) throw new Error(`解包总大小超过上限 ${MAX_TOTAL_SIZE}`);
+    if (localOffset + 30 > centralOffset || archive.readUInt32LE(localOffset) !== 0x04034b50) throw new Error(`安装包本地条目损坏：${name}`);
+    const localFlags = archive.readUInt16LE(localOffset + 6);
+    const localMethod = archive.readUInt16LE(localOffset + 8);
+    const localCrc = archive.readUInt32LE(localOffset + 14);
+    const localCompressed = archive.readUInt32LE(localOffset + 18);
+    const localSize = archive.readUInt32LE(localOffset + 22);
+    const localNameLength = archive.readUInt16LE(localOffset + 26);
+    const localExtraLength = archive.readUInt16LE(localOffset + 28);
+    if (
+      localFlags !== flags || localMethod !== method || localCrc !== expectedCrc ||
+      localCompressed !== compressedSize || localSize !== size ||
+      !archive.subarray(localOffset + 30, localOffset + 30 + localNameLength).equals(rawName)
+    ) throw new Error(`安装包条目头不匹配：${name}`);
+    const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
+    const dataEnd = dataOffset + compressedSize;
+    if (dataEnd > centralOffset) throw new Error(`安装包条目越界：${name}`);
+    ranges.push([localOffset, dataEnd]);
+    const compressed = archive.subarray(dataOffset, dataEnd);
+    const data = method === 8 ? inflateRawSync(compressed, { maxOutputLength: MAX_TOTAL_SIZE }) : Buffer.from(compressed);
+    if (data.length !== size || crc32(data) !== expectedCrc) throw new Error(`安装包条目校验失败：${name}`);
+    files.push({ path: name, size, hash: crypto.createHash('sha256').update(data).digest('hex') });
+    cursor += 46 + nameLength + extraLength + commentLength;
+  }
+  if (cursor !== centralEnd) throw new Error('安装包中央目录长度不匹配');
+  ranges.sort((left, right) => left[0] - right[0]);
+  for (let i = 1; i < ranges.length; i++) {
+    if ((ranges[i]?.[0] ?? 0) < (ranges[i - 1]?.[1] ?? 0)) throw new Error('安装包 ZIP 条目范围重叠');
+  }
+  return validateFiles(files);
 }
 
 export function generatePackManifest(config: ResolvedPackConfig): string {

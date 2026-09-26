@@ -23,21 +23,21 @@ pub mod registry;
 pub mod commands;
 
 // ---- 错误 ----
-pub use error::{PluginErrorCode, PluginError, TauronResult};
+pub use error::{PluginError, PluginErrorCode, TauronResult};
 
 // ---- 宿主命令核心（§2.1）----
-pub use dispatch::{EventSink, EVENT_TOPIC_PREFIX, HostState, NullEventSink, PluginDispatcher};
+pub use dispatch::{EventSink, HostState, NullEventSink, PluginDispatcher, EVENT_TOPIC_PREFIX};
 
 // ---- 信封 ----
 pub use envelope::{
-    generate_call_id, PluginCancelRequest, PluginInvokeRequest, PluginInvokeResponse,
-    PluginErrorBody, ProgressEvent,
+    generate_call_id, PluginCancelRequest, PluginErrorBody, PluginInvokeRequest,
+    PluginInvokeResponse, ProgressEvent,
 };
 
 // ---- ACL ----
 pub use acl::{
-    check_plugin_permission, grant_permissions, revoke_permissions, PluginPermissionGrant,
-    GrantType, PermissionGrants,
+    check_plugin_permission, grant_permissions, revoke_permissions, GrantType, PermissionGrants,
+    PluginPermissionGrant,
 };
 
 // ---- 注册表 ----

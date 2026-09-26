@@ -50,18 +50,14 @@ pub fn transitions(state: PluginState) -> &'static [PluginState] {
         PluginState::Installing => &[PluginState::Installed, PluginState::Errored],
         PluginState::Installed => &[PluginState::Enabling, PluginState::Uninstalling],
         PluginState::Enabling => &[PluginState::Enabled, PluginState::Errored],
-        PluginState::Enabled => &[
-            PluginState::Disabling,
-            PluginState::Errored,
-            PluginState::Upgrading,
-        ],
+        PluginState::Enabled => {
+            &[PluginState::Disabling, PluginState::Errored, PluginState::Upgrading]
+        }
         PluginState::Disabling => &[PluginState::Disabled],
         PluginState::Disabled => &[PluginState::Enabling, PluginState::Uninstalling],
-        PluginState::Errored => &[
-            PluginState::Enabling,
-            PluginState::Uninstalling,
-            PluginState::Upgrading,
-        ],
+        PluginState::Errored => {
+            &[PluginState::Enabling, PluginState::Uninstalling, PluginState::Upgrading]
+        }
         PluginState::Uninstalling => &[],
         PluginState::Upgrading => &[PluginState::Installed, PluginState::Errored],
     }
@@ -80,9 +76,7 @@ pub struct PluginRegistry {
 impl PluginRegistry {
     /// 创建空注册表
     pub fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-        }
+        Self { entries: HashMap::new() }
     }
 
     /// 注册插件
@@ -97,12 +91,7 @@ impl PluginRegistry {
         }
         self.entries.insert(
             plugin_id.clone(),
-            RegistryEntry {
-                plugin_id,
-                state: PluginState::Discovered,
-                plugin_type,
-                manifest,
-            },
+            RegistryEntry { plugin_id, state: PluginState::Discovered, plugin_type, manifest },
         );
         true
     }
@@ -290,7 +279,11 @@ mod tests {
             if *state == PluginState::Uninstalling {
                 assert!(transitions(*state).is_empty());
             } else {
-                assert!(!transitions(*state).is_empty(), "State {:?} should have transitions", state);
+                assert!(
+                    !transitions(*state).is_empty(),
+                    "State {:?} should have transitions",
+                    state
+                );
             }
         }
     }
@@ -302,4 +295,3 @@ mod tests {
         assert!(is_valid_transition(PluginState::Enabled, PluginState::Disabling));
     }
 }
-

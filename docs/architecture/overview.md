@@ -25,7 +25,7 @@
 ├──────────────────────────────────────────────────────────────────────────┤
 │                  Tauri 命令适配层（薄包装，feature = "tauri"）              │
 │   tauron-shell: plugin_invoke / plugin_cancel / plugin_emit (3 条信封命令) │
-│   tauron-adapter: host_* 命令族（应用层，54 条 = 底座 38 + 插件运行时 16）  │
+│   tauron-adapter: host_* 命令族（应用层，59 条 = 底座 39 + 插件运行时 20；install 2 条 feature-gated 另计）  │
 ├──────────────────────────────────────────────────────────────────────────┤
 │          Rust 壳层                        TS 插件 SDK 层                   │
 │  ┌──────────────────────────┐      ┌──────────────────────────────────┐  │
@@ -69,7 +69,7 @@ tauron 由**框架层**与**应用层**组成。两层共享同一套类型与�
 | **面向** | 第三方客户端集成 | 完整客户端交付 |
 | **npm** | `@tauron/types` `core` `plugin-sdk` `dual-world` `adapter-*` `market` `shell-matrix` `cli` `contract-tests` | `@tauron/host` `framework` `ui` `app-cli` `app-plugin-sdk` `app-contract-kit` |
 | **Rust** | `tauron-shell` | `tauron-host` `tauron-adapter` |
-| **命令族** | `plugin_invoke` / `plugin_cancel` / `plugin_emit` | `host_*`（54 条） |
+| **命令族** | `plugin_invoke` / `plugin_cancel` / `plugin_emit` | `host_*`（59 条，默认构建） |
 | **入口** | `tauron_shell::commands::init()` 或零配置 `state_init()` + `tauron_generate_handler![]` | `tauron_adapter::tauri::init()` 或 `state_init()` + `tauron_generate_handler![]` |
 
 > 应用层**复用**框架层的类型与协议，不修改框架层契约。两层之间的命令名与
@@ -160,10 +160,10 @@ tauron-*       ← 全部 Rust crate
 > | ✅ **已接线** | `tauron-host` / `tauron-i18n` / `tauron-notify` / `tauron-recovery` | 适配层直接依赖并调用其引擎 |
 > | ✅ **已接线** | `tauron-settings` | 设置走 `SettingsStore`（R7-2 激活孤儿 crate），不是适配层内建裸 KV；`host_settings_*` 的 schema 校验与版本迁移都在它里面 |
 > | ✅ **已接线** | `tauron-proc` | 进程插件用 `CommandSpawner` / `CrashTracker` / `validate_spawn_config`（P0-2 激活孤儿 crate）；崩溃窗口计数**唯一**来源是 `tauron_proc::CrashTracker` |
-> | ⚠️ **未接线** | `tauron-market` / `tauron-brand` | `host_market_*` / `host_brand_info` 为内联桩，恒返回可消费的空形状 |
+> | ⚠️ **未接线** | `tauron-market` / `tauron-brand` | market 仍为 `simulated: true`；`host_brand_info` 返回 `UnsupportedBody`，不伪装成空品牌数据 |
 > | ⚠️ **未接线** | `tauron-theme` / `tauron-wasm` / `tauron-distribute` | **独立组件库**——自带全绿测试，集成点已定义但尚未接入适配层运行时 |
 >
-> 未接线的部分接入时只需替换对应命令体 / 新增命令，**不需要改动线协议**。
+> 对话框与 OS 深链接缺 provider 时返回 `UnsupportedBody`；剪贴板保留进程内回退并在结果中标明。未接线的部分不应被描述为可用能力。
 
 ## 模块间依赖关系
 

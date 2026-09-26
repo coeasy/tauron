@@ -60,7 +60,23 @@ export function createPluginContext(
   // 溢满报错）。订阅建立后由本泵周期取回并分发——缺了它，subscribe 侧看似
   // 成功、投递侧永远断链。单拍失败不打断泵（下一拍重试），断一拍就是
   // 永久断链。
+  //
+  // 0.4-A1：本泵同时是**跨主体调用的执行泵**——宿主投给本插件的调用帧
+  // （topic `plugin:<id>:__call`，经 request 通道直达队列、不走订阅）也由
+  // 这里取回，按帧上的 `cmd` 找到已注册命令自动执行，并经
+  // `host_report_call_result` 回填结果。因此**注册命令即开泵**：没有泵，
+  // 别人调你永远是「已受理、永不回帧」。
   const PUMP_INTERVAL_MS = 100;
+  /** 入站调用 topic 后缀（与 Rust `call_delivery::CALL_TOPIC_SUFFIX` 对齐）。 */
+  const CALL_TOPIC_SUFFIX = ':__call';
+  /**
+   * 执行方侧失败码（0.4-A1）：命令不存在 / handler 抛异常时回填给发起方。
+   *
+   * 应用层约定码（不是框架 `E_*` 枚举成员）：执行方对自己「能不能执行」负责，
+   * 发起方据此知道失败来自执行方而不是宿主投递。
+   */
+  const CALL_EXEC_FAILED = 'E_CALL_EXEC_FAILED';
+
   let pumpTimer: ReturnType<typeof setTimeout> | null = null;
   let pumpActive = false;
 
@@ -72,9 +88,48 @@ export function createPluginContext(
     }
   };
 
-  /** 没有任何在途/存量宿主订阅时收泵（退订干净后不再空转 IPC）。 */
+  /** 没有任何在途/存量宿主订阅、也没有可执行命令时收泵（不再空转 IPC）。 */
   const stopPumpIfIdle = (): void => {
-    if (eventTokens.size === 0 && subscribing.size === 0) stopPump();
+    if (eventTokens.size === 0 && subscribing.size === 0 && commands.size === 0) stopPump();
+  };
+
+  /**
+   * 处理一帧入站调用：找命令 → 执行 → 回填结果。
+   *
+   * **失败也必须回填**（静默 = 发起方等到 TTL 超时）：命令不存在、handler
+   * 抛异常都按 `E_CALL_EXEC_FAILED` 如实上报。回填失败只吞掉——结果通道
+   * 的故障由发起方的取件超时兜底，不得反杀执行泵。
+   */
+  const handleCallFrame = (payload: unknown): void => {
+    const p = (typeof payload === 'object' && payload !== null ? payload : {}) as {
+      callId?: unknown;
+      cmd?: unknown;
+      args?: unknown;
+    };
+    if (typeof p.callId !== 'string' || typeof p.cmd !== 'string') return; // 非调用帧
+    const callId = p.callId;
+    const handler = commands.get(p.cmd);
+    if (!handler) {
+      void host
+        .reportCallResult({ callId, ok: false, errorCode: CALL_EXEC_FAILED })
+        .catch(() => undefined);
+      return;
+    }
+    void (async () => {
+      try {
+        const result = await handler(p.args, ctx);
+        await host.reportCallResult({
+          callId,
+          ok: true,
+          ...(result !== undefined ? { result: result as JsonValue } : {}),
+        });
+      } catch (err) {
+        ctx.log.warn(`命令 "${p.cmd}" 执行失败（已回填发起方）`, err);
+        await host
+          .reportCallResult({ callId, ok: false, errorCode: CALL_EXEC_FAILED })
+          .catch(() => undefined);
+      }
+    })();
   };
 
   const runPump = async (): Promise<void> => {
@@ -82,7 +137,7 @@ export function createPluginContext(
     if (!pumpActive) return;
     try {
       // 发布走可靠通道（`host_events_publish` → request），深链等框架投递走
-      // event 通道——两路都取，取回即按 topic 分发给本地订阅者。
+      // event 通道，跨主体调用帧也走 request——两路都取，取回即按 topic 分发。
       const batches = await Promise.all([
         host.eventsDrain('request').catch(() => undefined),
         host.eventsDrain('event').catch(() => undefined),
@@ -90,6 +145,11 @@ export function createPluginContext(
       if (!pumpActive) return;
       for (const frames of batches) {
         for (const frame of frames ?? []) {
+          if (frame.topic.endsWith(CALL_TOPIC_SUFFIX)) {
+            // 入站调用帧：自动执行 + 回填（不进事件订阅者——它不是事件）。
+            handleCallFrame(frame.payload);
+            continue;
+          }
           ctx.dispatchEvent(frame.topic, frame.payload);
         }
       }
@@ -164,11 +224,16 @@ export function createPluginContext(
           return { ok: false, error: `命令 "${id}" 已存在` };
         }
         commands.set(id, handler as CommandHandler);
+        // 0.4-A1：注册命令即开泵——本插件由此成为可被跨主体调用的执行方。
+        // 没有泵，调用帧只会在宿主队列里沉到 TTL（「受理了但永不回帧」）。
+        startPump();
         return { ok: true };
       },
 
       unregister(id: string): boolean {
-        return commands.delete(id);
+        const removed = commands.delete(id);
+        if (removed) stopPumpIfIdle();
+        return removed;
       },
 
       has(id: string): boolean {

@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>formatter plugin window (app-plugin-sdk)</title>
+  </head>
+  <body style="font-family: system-ui, sans-serif; padding: 1rem">
+    <!-- 插件面板窗口页（0.4-A2）：由 host_window_create 依 manifest 的 entry.ui
+         加载进 label = plugin-<id> 的 webview。执行泵与宿主 RPC 都跑在这里。 -->
+    <h3>Formatter 插件面板</h3>
+    <p id="status" style="color:#666">激活中…</p>
+    <script type="module" src="/src/plugin/first.ts"></script>
+  </body>
+</html>

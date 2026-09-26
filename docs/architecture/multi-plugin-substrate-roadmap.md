@@ -1,6 +1,6 @@
 # tauron 0.3 优化改进方案：多插件框架 × 任意宿主底座
 
-> **状态**：设计稿（待执行）
+> **状态**：分轮实施中；尚未达到 0.3 验收条件，不得据此宣称可发布。
 > **目标版本**：tauron 0.3
 > **前置**：底座重构 R1–R8（轮 7–12 **已完成并收口**）。原始方案文档已清理，
 > 结论沉淀在 [overview.md](./overview.md) 的「架构演进」与
@@ -25,7 +25,7 @@
 | Rust 测试 | **1221 / 0 failed**（15 crate） | 轮 12 收口 |
 | TS 测试 | **1571 / 0 failed**（97 文件，21 包） | 轮 12 收口 |
 | 跨语言门禁 wire-gate | **125 / 125**（当轮计数口径，见下方口径注） | `packages/tauron-contract-tests/src/wire-gate.test.ts` |
-| 命令面 | **54 = 底座 38 + 插件运行时 16** | `tauron_substrate_handler!` / `tauron_plugin_handler!` |
+| 命令面（本方案新增 `host_capabilities` 后） | **59 = 底座 39 + 插件运行时 20**（0.4 实测复核，含 0.4-A1 三命令；`plugin-install` feature 另注册 2 条） | `tauron_substrate_handler!` / `tauron_plugin_handler!` |
 | 能力表 | 16（13 插件面 + 3 特权） | `authz::COMMANDS` / `capabilities.ts` |
 | 底座独立装配 | ✅ 有编译证据 + 功能证据 | `substrate-only` feature + `substrate_only_host_is_functionally_complete` |
 
@@ -37,6 +37,25 @@
 > wire-gate **110**（`vitest run src/wire-gate.test.ts` 实跑；基线表的 125 是更早的计数
 > 口径，那个口径下同一文件曾按包含 `contract.test.ts` 的整包计）。
 > 本节只陈述口径，不再回头改基线表的数字。
+
+### 当前执行快照（2026-09-26）
+
+本表记录实现状态，不替代下文各项验收条件；只有“完成”且满足对应门禁才可关闭路线项。
+
+| 项 | 状态 | 当前证据 / 剩余工作 |
+|---|---|---|
+| S3 桩命令 `Unsupported` | 部分完成 | `UnsupportedBody` 与部分命令降级已接线；全域降级分支仍需逐条核对并完成门禁。 |
+| S4 孤儿归置 | 部分完成 | `canonical-owners.md` 已登记七个 crate；ACL 与 market 有可选安装 feature 的接线，但宿主生产配置与其余孤儿 crate 归置仍缺。 |
+| S6 能力协商 | 部分完成 | `host_capabilities` 返回当前 handler 命令集与不支持域；provider 命令和运行时装配尚未实现。 |
+| S1 传输层 | 部分完成 | TS `MemoryTransport` 可驱动 `ShellClient`；Rust `ChannelSink` 与 Tauri 传输仍未抽成可替换帧接口。 |
+| M2 资源配额 | 基本完成 | 通知 / pending / 流 / 订阅均有插件与全局上限；通知溢出优先裁剪占用最多插件的最旧条目。需继续核实所有配额门禁与统计字段。 |
+| M8 可观测性 | 部分完成 | 主窗 `host_resource_stats` 暴露占用和配额，通知淘汰数可见；调用量、失败量、平均时长、pending 峰值和队列深度未实现。 |
+| M5 SDK 收敛 | 部分完成 | `PluginJsRuntime` 已从 `@tauron/host` 公共入口移除；legacy / 主推 SDK 入口定位与全链路收敛尚未完成。 |
+| M7 更新 | 部分完成 | `simulated` 不会在 UI 冒充可用更新；真实 HTTP 下载、验签、替换与回滚未实现。 |
+| M1 安装链路 | 部分完成 | CLI `.tpkg` 签名协议、Rust 验签/manifest 校验、feature-gated 安装、权限审批 UI、原子目录落盘已接线；本轮增加受限只读 Tauri 插件资源协议、安装后启用/开窗、卸载事务回滚和路径越界测试。仍缺生产密钥安全存储/注入（示例仅提供环境变量入口且默认无密钥）、插件页面真实 SDK 调用/响应的端到端证据、卸载失败后暂存物清理保证。 |
+| S2 / S5 / M3 / M4 / M6 / X1 | 未完成 | Provider 命令、权限文件生成、各插件形态执行/拒绝契约、contributes 对账和 UI 派发、跨插件双向声明、完整诚实性门禁仍需实现。 |
+
+截至本快照，未修改版本号、未提交、未创建发布 tag。发布条件以 §5 全部验收项为准。
 
 **已达成的硬不变量**（不得回退，本方案所有改动都必须保持）：
 
@@ -88,6 +107,24 @@
 
 ## 2. 残差清单（实测，逐条带证据）
 
+> ⚠️ **本节是 2026-09-24 口径的快照，已被 2026-09-26 全仓重测部分推翻**（轮 19 复核）。
+> 逐条复核结论：
+>
+> | 条目 | 本节原判 | 2026-09-26 实测 |
+> |---|---|---|
+> | M-1 无 install 入口 | 🔴 | **已实现**：`host_registry_install` / `_preview` 存在（`tauri.rs:2389-2392`），但挂在 `#[cfg(feature = "plugin-install")]` 下且 `default = []` → **默认构建不可达**；TS 侧能力表曾无条件列出（误报已注册），已由 0.4-A2 修 |
+> | M-2 无任何 per-plugin 配额 | 🔴 | **已接线 4 类**：pending 100/插件（`registry.rs:33`）、stream 32/插件（`stream.rs:113`）、订阅 256/插件（`eventbus.rs:52`）、通知 64/插件（`tauron-notify/src/lib.rs:161`） |
+> | S-6 无能力协商 | 🟠 | **已实现** `host_capabilities`（`lib.rs:382`），但 `families` / `unsupported` 域名仍硬编码（`lib.rs:396-415`） |
+> | S-3 桩命令谎报 | 🔴 | **已修**：dialog / clipboard / brand / market 全部返回有类型的 `UnsupportedBody` / `simulated`，无裸成功 |
+> | S-4 剪贴板 | 🟠 | 保持（进程内回退，已诚实标注 `fallback: in-process-buffer`） |
+> | S-1 传输层 | 🔴 | `MemoryTransport` 已有但**不完整**（无流式内核、无取件泵）→ S1 验收条件实际未达成 |
+> | S-2 命令面缺 5 域 | 🔴 | **未变**：menu / tray / fs / http / updater 仍全仓 0 命中 |
+> | S-7 / S-8 / M-3~M-10 | — | **未变** |
+>
+> **新发现的断链不在本节**（调用投递不存在、框架层链路死、进程插件不能通信等），
+> 统一登记在 [capability-closure-plan.md](./capability-closure-plan.md) §6。
+> 本节保留作为历史口径，不再作为选型依据。
+
 ### 2.1 任意宿主底座线
 
 | # | 残差 | 证据 | 档 |
@@ -106,8 +143,8 @@
 
 | # | 残差 | 证据 | 档 |
 |---|---|---|---|
-| M-1 | **无 install 入口**：`RegistryAdminOp` 四值无 Install；TS 无 `host_registry_install`；UI 无安装入口 | `authz.rs:235`、`plugin-manager.ts:73` | 🔴 |
-| M-2 | **无任何 per-plugin 配额**：通知环全局 256、pending 全局 1000、流句柄无上限、订阅表全局 4096 | `lib.rs:872`、`config.rs:37`、`stream.rs:128`、`eventbus.rs:49` | 🔴 |
+| M-1 | ~~**无 install 入口**~~ → **已实现但默认不可达**（2026-09-26 改判）：`host_registry_install` / `_preview` 已存在并注册，但挂 `#[cfg(feature = "plugin-install")]` 且 `default = []`；TS 侧能力表原无条件列出（误报已注册），已由 0.4-A2 改为运行期 `host_capabilities` 开门 | `tauri.rs:2389-2392`、`Cargo.toml:12`；修正在 `capability-closure-plan.md` A2 | 🟠 |
+| M-2 | ~~**无任何 per-plugin 配额**~~ → **已接线 4 类**（2026-09-26 改判）：pending 100/插件、stream 32/插件 + 256 全局、订阅 256/插件 + 4096 全局、通知 64/插件 + 512 全局。**剩余缺口**：通知环仍是全局单实例（逐插件只是裁剪）、无内存/CPU 配额 | `registry.rs:33`、`stream.rs:113/122`、`eventbus.rs:49/52`、`tauron-notify/src/lib.rs:129/161` | 🟡 |
 | M-3 | **Js 型插件无执行器**：`entry.js` 零消费点；真实路径是「宿主开窗 + 插件自举」，但文档没这么写 | `manifest.rs:344-350` | 🔴 |
 | M-4 | **Rust 型插件完全无落点**：`PluginType::Rust` 仅出现在 manifest 校验与 1 个测试；插件开发指南的形态表**缺 Rust 整行** | `manifest.rs:335/392/732`、`registry.rs:1874`；`docs/api/plugin-development-guide.md:24-29` | 🔴 |
 | M-5 | **四套插件开发体验并存**：legacy `PluginContext`(iframe) / `createContractContext`(沙箱，缺取件泵) / app-plugin-sdk(webview，有泵) / `PluginJsRuntime`(无生产调用点) | `plugin-context.ts:103`、`contract-context.ts:111`、`context.ts:47`、`plugin-js.ts` | 🟠 |
@@ -163,7 +200,7 @@ Rust 侧配套：把 `ChannelSink` 的 `tauri::Wry` 换成 `trait FrameSink`（`
 - 「`tauri::Wry` 只允许出现在 `ChannelSink` 实现块内」
 - 「非 Tauri 传输必须存在一个可编译的替代实现」（新增 `MemoryTransport` 参考实现 + 编译期断言）
 
-**验证**：用 `MemoryTransport`（进程内直通，无 Tauri）跑通档 1 底座 38 条命令的等价路径；
+**验证**：用 `MemoryTransport`（进程内直通，无 Tauri）跑通档 1 底座 39 条命令的等价路径；
 `HostClient` 在 Tauri 与 Memory 两种传输下行为逐项相等。
 
 **影响**：Electron / 纯 Web / 移动 WebView / Node CLI 宿主只需实现 6 个方法即可接入整个底座，
@@ -320,7 +357,7 @@ TS 侧 `Backend.capabilities()` 已有字段，改为**启动时拉取一次并�
 
 **门禁**：「`host_capabilities` 的 `commands` 集合 == 两个 handler 宏的并集（按当前装配形态）」。
 
-**验证**：档 1 装配返回 38 条且 `pluginRuntime: false`；档 3 返回 54 条且 `true`；
+**验证**：档 1 装配返回 39 条且 `pluginRuntime: false`；档 3 返回 55 条且 `true`；
 注入/不注入 provider 时 `unsupported` 相应变化。
 
 **影响**：底座宿主第一次能"自述能力"，UI 可按底座形态自适应。**量级：小（0.5 轮）**。
@@ -547,9 +584,10 @@ legacy SDK 的行为与文档标注一致。
 **问题**：没有 per-plugin 指标。多插件场景下"哪个插件慢/哪个在报错/哪个占满了队列"
 完全靠猜——M2 的配额如果不可观测，超限就只是"莫名其妙失败"。
 
-**设计**：在注册表里挂 per-plugin 计数器（调用数 / 失败数 / 平均耗时 / pending 峰值 / 队列深度 /
-通知占用 / 流句柄数），经 `host_registry_list` 的扩展字段或独立 `host_registry_stats` 暴露。
-`oc-plugin-manager` 展示关键指标。
+**设计**：只读暴露每个插件的 pending 调用 / 流句柄 / 订阅 / 通知占用及其配额，
+并记录通知容量淘汰数。当前由主窗专属 `host_resource_stats` 返回全局和逐插件快照；
+调用失败率、平均耗时和 pending 峰值仍是后续指标，不得描述为已实现。`oc-plugin-manager`
+可消费该快照展示关键指标。
 
 **不变量**：指标**只读**，不得影响判定逻辑（判定用真实状态，不用计数器的派生值）。
 

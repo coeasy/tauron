@@ -92,6 +92,8 @@ export {
 
 export {
   pluginPack,
+  createPluginArchive,
+  readPluginArchive,
   pluginSign,
   pluginPublish,
   validatePackConfig,
@@ -113,6 +115,7 @@ export {
   SUPPORTED_SIGN_ALGORITHMS,
   MAX_FILE_SIZE,
   MAX_FILE_COUNT,
+  MAX_TOTAL_SIZE,
   type SignAlgorithm,
   type PluginFileInfo,
   type PluginScanResult,

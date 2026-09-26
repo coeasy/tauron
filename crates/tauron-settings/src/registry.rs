@@ -55,9 +55,7 @@ impl SchemaRegistry {
         raw: &Value,
     ) -> SettingsResult<()> {
         if plugin_id.is_empty() || schema_version.is_empty() {
-            return Err(SettingsError::InvalidPath(
-                "plugin_id 与 schema_version 不能为空".into(),
-            ));
+            return Err(SettingsError::InvalidPath("plugin_id 与 schema_version 不能为空".into()));
         }
 
         // 门禁 1：编译 + 平面断言。
@@ -238,7 +236,9 @@ mod tests {
         let bad = json!({"type":"object","properties":{"a":{"type":"string","x-tauron":{"version":1,"lbel":"x"}}}});
         let mut r = SchemaRegistry::new();
         let e = r.register("p.bad", "1.0.0", &bad).unwrap_err();
-        assert!(matches!(e, SettingsError::SchemaCompile(m) if m.contains("UnknownExtension") || m.contains("lbel") || m.contains("未知")));
+        assert!(
+            matches!(e, SettingsError::SchemaCompile(m) if m.contains("UnknownExtension") || m.contains("lbel") || m.contains("未知"))
+        );
     }
 
     #[test]
@@ -263,7 +263,8 @@ mod tests {
         let props = (0..=FIELD_LIMIT)
             .map(|i| (format!("f{i}"), json!({"type": "string"})))
             .collect::<serde_json::Map<_, _>>();
-        let e = r.register("p.41", "1.0.0", &json!({"type":"object","properties":props})).unwrap_err();
+        let e =
+            r.register("p.41", "1.0.0", &json!({"type":"object","properties":props})).unwrap_err();
         match e {
             SettingsError::FieldLimitExceeded { fields, limit, .. } => {
                 assert_eq!(fields, 41);
@@ -313,7 +314,10 @@ mod tests {
 
         for same_or_lower in ["1.0.0", "1.0.0", "0.9.9", "1.0"] {
             let e = r.register("p", same_or_lower, &simple_schema()).unwrap_err();
-            assert!(matches!(e, SettingsError::SchemaCompile(ref m) if m.contains("递增")), "{same_or_lower}: {e}");
+            assert!(
+                matches!(e, SettingsError::SchemaCompile(ref m) if m.contains("递增")),
+                "{same_or_lower}: {e}"
+            );
         }
     }
 
@@ -321,7 +325,9 @@ mod tests {
     fn re_register_with_higher_version_replaces() {
         let mut r = SchemaRegistry::new();
         r.register("p", "1.0.0", &simple_schema()).unwrap();
-        let props = (0..5).map(|i| (format!("f{i}"), json!({"type":"string"}))).collect::<serde_json::Map<_, _>>();
+        let props = (0..5)
+            .map(|i| (format!("f{i}"), json!({"type":"string"})))
+            .collect::<serde_json::Map<_, _>>();
         r.register("p", "1.1.0", &json!({"type":"object","properties":props})).unwrap();
         assert_eq!(r.get("p").unwrap().schema_version, "1.1.0");
         assert_eq!(r.get("p").unwrap().field_count, 5);

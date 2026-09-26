@@ -66,10 +66,7 @@ impl GrantSet {
 
     /// 转成权限字符串切片，便于喂给 `tauron_host::authz::check_grants`。
     pub fn permissions(&self) -> Vec<Permission> {
-        self.grants
-            .iter()
-            .map(|g| Permission::new(g.permission.as_str()))
-            .collect()
+        self.grants.iter().map(|g| Permission::new(g.permission.as_str())).collect()
     }
 }
 
@@ -89,24 +86,17 @@ pub struct SignedGrantSet {
 /// 验签就会随机失败，整个防篡改机制就废了。
 pub fn canonical_bytes(grant_set: &GrantSet) -> HostResult<Vec<u8>> {
     serde_json::to_vec(grant_set).map_err(|e| {
-        HostError::new(
-            ErrorCode::E_INVALID_MANIFEST,
-            format!("授予集序列化失败：{e}"),
-        )
+        HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("授予集序列化失败：{e}"))
     })
 }
 
 pub fn sign(grant_set: &GrantSet, key: &[u8]) -> HostResult<String> {
     if key.is_empty() {
-        return Err(HostError::new(
-            ErrorCode::E_INVALID_MANIFEST,
-            "签名密钥不可为空",
-        ));
+        return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "签名密钥不可为空"));
     }
     let bytes = canonical_bytes(grant_set)?;
-    let mut mac = HmacSha256::new_from_slice(key).map_err(|e| {
-        HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("签名密钥无效：{e}"))
-    })?;
+    let mut mac = HmacSha256::new_from_slice(key)
+        .map_err(|e| HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("签名密钥无效：{e}")))?;
     mac.update(&bytes);
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
@@ -116,17 +106,13 @@ pub fn sign(grant_set: &GrantSet, key: &[u8]) -> HostResult<String> {
 /// - 签名与内容不符（**被篡改**）→ [`ErrorCode::E_FORBIDDEN_PERMISSION`]
 pub fn verify(signed: &SignedGrantSet, key: &[u8]) -> HostResult<()> {
     let bytes = canonical_bytes(&signed.grant_set)?;
-    let mut mac = HmacSha256::new_from_slice(key).map_err(|e| {
-        HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("签名密钥无效：{e}"))
-    })?;
+    let mut mac = HmacSha256::new_from_slice(key)
+        .map_err(|e| HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("签名密钥无效：{e}")))?;
     mac.update(&bytes);
     let expected = hex::encode(mac.finalize().into_bytes());
 
     if signed.signature.is_empty() {
-        return Err(HostError::new(
-            ErrorCode::E_INVALID_MANIFEST,
-            "授予集缺少签名",
-        ));
+        return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "授予集缺少签名"));
     }
     if !constant_time_eq(signed.signature.as_bytes(), expected.as_bytes()) {
         return Err(HostError::new(
@@ -184,18 +170,13 @@ impl AclStore {
             ));
         }
         if grant_set.grants.is_empty() {
-            return Err(HostError::new(
-                ErrorCode::E_INVALID_MANIFEST,
-                "授予集不可为空",
-            ));
+            return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "授予集不可为空"));
         }
         // 禁止授予清单在授予路径上硬拒（§2.1）。
         tauron_host::authz::check_grants(&grant_set.scopes, &grant_set.permissions())?;
 
-        let signed = SignedGrantSet {
-            grant_set: grant_set.clone(),
-            signature: sign(grant_set, &self.key)?,
-        };
+        let signed =
+            SignedGrantSet { grant_set: grant_set.clone(), signature: sign(grant_set, &self.key)? };
         let bytes = serde_json::to_vec_pretty(&signed).map_err(|e| {
             HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("授予集序列化失败：{e}"))
         })?;
@@ -258,10 +239,7 @@ impl AclStore {
             )
         })?;
         serde_json::from_slice(&bytes).map(Some).map_err(|e| {
-            HostError::new(
-                ErrorCode::E_INVALID_MANIFEST,
-                format!("授予集 JSON 解析失败：{e}"),
-            )
+            HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("授予集 JSON 解析失败：{e}"))
         })
     }
 
@@ -302,7 +280,10 @@ mod tests {
 
     fn gs(revision: u32) -> GrantSet {
         let mut scopes = Map::new();
-        scopes.insert("http:allow-fetch".to_string(), Value::Array(vec![Value::String("https://api.example.com/**".into())]));
+        scopes.insert(
+            "http:allow-fetch".to_string(),
+            Value::Array(vec![Value::String("https://api.example.com/**".into())]),
+        );
         GrantSet {
             schema_version: GRANT_SET_SCHEMA_VERSION,
             revision,
@@ -474,10 +455,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = AclStore::new(dir.path(), KEY.to_vec());
         let mut g = gs(1);
-        g.scopes.insert(
-            "http:allow-fetch".to_string(),
-            Value::Array(vec![Value::String("*".into())]),
-        );
+        g.scopes
+            .insert("http:allow-fetch".to_string(), Value::Array(vec![Value::String("*".into())]));
         let e = store.save(&g).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_FORBIDDEN_PERMISSION);
         assert!(e.message.contains("通配") || e.message.contains("全量"));

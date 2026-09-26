@@ -89,6 +89,33 @@ export interface Backend {
   capabilities(): ReadonlySet<string>;
 }
 
+/** 与具体 UI 框架无关的底座传输契约。Tauri、进程内宿主或外部 RPC 均可实现。 */
+export interface HostTransport extends Backend {}
+
+/**
+ * 把**运行期协商到的真实命令集**回填给传输层（0.4-A2）。
+ *
+ * 为什么需要它：Rust 侧有一部分命令是 feature-gated 的（当前是
+ * `host_registry_install*`，挂 `#[cfg(feature = "plugin-install")]`），默认构建
+ * 不注册。静态能力表无法知道宿主构建时开了哪个 feature，所以只能由
+ * `host_capabilities` 的返回值（Rust 侧由实际 handler 集合 + `cfg!` 推导）来开门。
+ *
+ * 返回 `false` 表示该传输层不支持回填（如 {@link MockBackend}）——调用方应当
+ * 把它当作「能力集保持静态」而不是失败；静默 `{@code void}` 会让"刷新没生效"
+ * 与"刷新成功但宿主确实没开 feature"混成一个值。
+ */
+export function adoptRuntimeCapabilities(
+  backend: Backend,
+  commands: Iterable<string>,
+): boolean {
+  const target = backend as Backend & {
+    adoptCapabilities?: (cmds: Iterable<string>) => void;
+  };
+  if (typeof target.adoptCapabilities !== 'function') return false;
+  target.adoptCapabilities(commands);
+  return true;
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // 契约测试用 mock（不进入交付产物）
 // ──────────────────────────────────────────────────────────────────────────

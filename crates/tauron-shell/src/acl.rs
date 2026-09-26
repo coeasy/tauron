@@ -47,9 +47,7 @@ pub fn check_plugin_permission(
     required_perms: &[String],
     grants: &PermissionGrants,
 ) -> Result<(), crate::PluginErrorCode> {
-    let grant = grants
-        .get(plugin_id)
-        .ok_or(crate::PluginErrorCode::PluginNotFound)?;
+    let grant = grants.get(plugin_id).ok_or(crate::PluginErrorCode::PluginNotFound)?;
 
     for perm in required_perms {
         if !grant.permissions.contains(perm) {
@@ -135,16 +133,8 @@ mod tests {
     #[test]
     fn test_check_permission_plugin_not_found() {
         let grants = make_grants();
-        let result = check_plugin_permission(
-            "com.unknown.test",
-            "format",
-            &[],
-            &grants,
-        );
-        assert_eq!(
-            result.unwrap_err(),
-            crate::PluginErrorCode::PluginNotFound
-        );
+        let result = check_plugin_permission("com.unknown.test", "format", &[], &grants);
+        assert_eq!(result.unwrap_err(), crate::PluginErrorCode::PluginNotFound);
     }
 
     #[test]
@@ -156,10 +146,7 @@ mod tests {
             &["clipboard:read".to_string()],
             &grants,
         );
-        assert_eq!(
-            result.unwrap_err(),
-            crate::PluginErrorCode::PluginPermissionDenied
-        );
+        assert_eq!(result.unwrap_err(), crate::PluginErrorCode::PluginPermissionDenied);
     }
 
     #[test]
@@ -172,12 +159,7 @@ mod tests {
     #[test]
     fn test_grant_permissions_merge() {
         let mut grants = PermissionGrants::new();
-        grant_permissions(
-            &mut grants,
-            "test",
-            vec!["store:read".to_string()],
-            GrantType::Install,
-        );
+        grant_permissions(&mut grants, "test", vec!["store:read".to_string()], GrantType::Install);
         grant_permissions(
             &mut grants,
             "test",
@@ -232,4 +214,3 @@ mod tests {
         assert_eq!(back.granted_by, GrantType::User);
     }
 }
-

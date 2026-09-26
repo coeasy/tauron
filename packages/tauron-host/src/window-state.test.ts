@@ -7,7 +7,16 @@ import { MockBackend } from './backend.js';
 
 describe('WindowState', () => {
   beforeEach(() => {
-    localStorage.clear();
+    const data = new Map<string, string>();
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: (key: string) => data.get(key) ?? null,
+        setItem: (key: string, value: string) => data.set(key, String(value)),
+        removeItem: (key: string) => data.delete(key),
+        clear: () => data.clear(),
+      },
+    });
   });
 
   describe('基本功能', () => {
@@ -63,7 +72,7 @@ describe('WindowState', () => {
     });
 
     it('localStorage 损坏时使用默认值', () => {
-      localStorage.setItem('test.window3', 'invalid json');
+      window.localStorage.setItem('test.window3', 'invalid json');
       const ws = new WindowState({ storageKey: 'test.window3' });
       expect(ws.currentState.width).toBe(1200);
       expect(ws.currentState.height).toBe(800);

@@ -19,25 +19,11 @@ use crate::error::{SchemaError, SchemaResult};
 pub const XOC_VERSION: u32 = 1;
 
 /// 已登记的扩展键。数组常量，供 CI 遍历（与门禁 §8-14 同一模式）。
-pub const KNOWN_KEYS: &[&str] = &[
-    "version",
-    "label",
-    "description",
-    "order",
-    "widget",
-    "placeholder",
-    "visibleIf",
-];
+pub const KNOWN_KEYS: &[&str] =
+    &["version", "label", "description", "order", "widget", "placeholder", "visibleIf"];
 
 /// 支持的 widget 集合——即 WC 渲染器的 6 控件（架构 §5.2 / §6.2）。
-pub const ALL_WIDGETS: &[&str] = &[
-    "textbox",
-    "checkbox",
-    "select",
-    "slider",
-    "switch",
-    "keybind",
-];
+pub const ALL_WIDGETS: &[&str] = &["textbox", "checkbox", "select", "slider", "switch", "keybind"];
 
 /// 扩展在 schema 文档中的键名。
 pub const EXT_KEY: &str = "x-tauron";
@@ -64,9 +50,14 @@ pub struct Extension {
 impl Extension {
     /// 从原始 JSON 解析。`path` 是出错位置（JSON Pointer），用于报错定位。
     pub fn parse(path: &str, raw: &Value) -> SchemaResult<Self> {
-        let obj = raw
-            .as_object()
-            .ok_or_else(|| SchemaError::ExtensionType("".into(), "object".into(), value_kind(raw).into(), path.to_string()))?;
+        let obj = raw.as_object().ok_or_else(|| {
+            SchemaError::ExtensionType(
+                "".into(),
+                "object".into(),
+                value_kind(raw).into(),
+                path.to_string(),
+            )
+        })?;
 
         for key in obj.keys() {
             if !KNOWN_KEYS.contains(&key.as_str()) {
@@ -76,12 +67,33 @@ impl Extension {
 
         let version = match obj.get("version") {
             None => XOC_VERSION, // 缺省视为当前版本（生成器总会写，手写 schema 容错）
-            Some(Value::Number(n)) => n.as_u64().ok_or_else(|| {
-                SchemaError::ExtensionType("version".into(), "u32".into(), value_kind(raw).into(), path.to_string())
-            })?.try_into().map_err(|_| {
-                SchemaError::ExtensionType("version".into(), "u32".into(), value_kind(raw).into(), path.to_string())
-            })?,
-            Some(other) => return Err(SchemaError::ExtensionType("version".into(), "u32".into(), value_kind(other).into(), path.to_string())),
+            Some(Value::Number(n)) => n
+                .as_u64()
+                .ok_or_else(|| {
+                    SchemaError::ExtensionType(
+                        "version".into(),
+                        "u32".into(),
+                        value_kind(raw).into(),
+                        path.to_string(),
+                    )
+                })?
+                .try_into()
+                .map_err(|_| {
+                    SchemaError::ExtensionType(
+                        "version".into(),
+                        "u32".into(),
+                        value_kind(raw).into(),
+                        path.to_string(),
+                    )
+                })?,
+            Some(other) => {
+                return Err(SchemaError::ExtensionType(
+                    "version".into(),
+                    "u32".into(),
+                    value_kind(other).into(),
+                    path.to_string(),
+                ))
+            }
         };
         if version != XOC_VERSION {
             return Err(SchemaError::UnsupportedVersion(version, XOC_VERSION, path.to_string()));
@@ -95,13 +107,25 @@ impl Extension {
                 .get("order")
                 .map(|v| {
                     v.as_i64().ok_or_else(|| {
-                        SchemaError::ExtensionType("order".into(), "i32".into(), value_kind(v).into(), path.to_string())
+                        SchemaError::ExtensionType(
+                            "order".into(),
+                            "i32".into(),
+                            value_kind(v).into(),
+                            path.to_string(),
+                        )
                     })
                 })
                 .transpose()?
                 .map(|n| n.try_into())
                 .transpose()
-                .map_err(|_| SchemaError::ExtensionType("order".into(), "i32".into(), "out-of-range".into(), path.to_string()))?,
+                .map_err(|_| {
+                    SchemaError::ExtensionType(
+                        "order".into(),
+                        "i32".into(),
+                        "out-of-range".into(),
+                        path.to_string(),
+                    )
+                })?,
             widget: opt_string(obj.get("widget"), "widget", path)?,
             placeholder: opt_string(obj.get("placeholder"), "placeholder", path)?,
             visible_if: obj.get("visibleIf").cloned(),
@@ -111,8 +135,8 @@ impl Extension {
             if !ALL_WIDGETS.contains(&w.as_str()) {
                 return Err(SchemaError::ExtensionType(
                     "widget".into(),
-                    format!("one of {}", ALL_WIDGETS.join("|")).into(),
-                    w.clone().into(),
+                    format!("one of {}", ALL_WIDGETS.join("|")),
+                    w.clone(),
                     path.to_string(),
                 ));
             }
@@ -165,7 +189,13 @@ fn value_kind(v: &Value) -> &'static str {
         Value::Object(_) => "object",
         Value::Array(_) => "array",
         Value::String(_) => "string",
-        Value::Number(n) => if n.is_i64() || n.is_u64() { "integer" } else { "number" },
+        Value::Number(n) => {
+            if n.is_i64() || n.is_u64() {
+                "integer"
+            } else {
+                "number"
+            }
+        }
         Value::Bool(_) => "boolean",
         Value::Null => "null",
     }
@@ -181,7 +211,9 @@ mod tests {
 
     #[test]
     fn parses_a_full_extension() {
-        let raw = j(r#"{"version":1,"label":"音量","description":"系统音量百分比","order":2,"widget":"slider","placeholder":"50","visibleIf":{"prop":"enable","value":true}}"#);
+        let raw = j(
+            r#"{"version":1,"label":"音量","description":"系统音量百分比","order":2,"widget":"slider","placeholder":"50","visibleIf":{"prop":"enable","value":true}}"#,
+        );
         let e = Extension::parse("/properties/volume", &raw).unwrap();
         assert_eq!(e.version, 1);
         assert_eq!(e.label.as_deref(), Some("音量"));
@@ -217,7 +249,8 @@ mod tests {
     #[test]
     fn unknown_key_order_is_checked_exhaustively() {
         for bad in ["lbel", "ordr", "widgt", "plceholder", "visibleif", "descripion"] {
-            let raw = Value::Object(Map::from_iter(vec![(bad.to_string(), Value::String("x".into()))]));
+            let raw =
+                Value::Object(Map::from_iter(vec![(bad.to_string(), Value::String("x".into()))]));
             assert!(Extension::parse("/", &raw).is_err(), "键 `{bad}` 必须报错");
         }
     }
@@ -242,7 +275,9 @@ mod tests {
         let err = Extension::parse("/", &j(r#"{"version":1,"widget":"datepicker"}"#)).unwrap_err();
         assert!(matches!(err, SchemaError::ExtensionType(k, _, _, _) if k == "widget"));
         for w in ALL_WIDGETS {
-            assert!(Extension::parse("/", &j(&format!(r#"{{"version":1,"widget":"{w}"}}"#))).is_ok());
+            assert!(
+                Extension::parse("/", &j(&format!(r#"{{"version":1,"widget":"{w}"}}"#))).is_ok()
+            );
         }
     }
 
@@ -268,14 +303,15 @@ mod tests {
 
     #[test]
     fn order_out_of_i32_range_is_rejected() {
-        let err = Extension::parse("/", &j(r#"{"version":1,"order":9999999999999999999}"#)).unwrap_err();
+        let err =
+            Extension::parse("/", &j(r#"{"version":1,"order":9999999999999999999}"#)).unwrap_err();
         assert!(matches!(err, SchemaError::ExtensionType(k, _, _, _) if k == "order"));
     }
 
     #[test]
     fn non_object_extension_is_rejected() {
         let err = Extension::parse("/", &Value::Array(Vec::new())).unwrap_err();
-        assert!(matches!(err, SchemaError::ExtensionType(k, _, _, _) if k == ""));
+        assert!(matches!(err, SchemaError::ExtensionType(k, _, _, _) if k.is_empty()));
     }
 
     #[test]
@@ -310,7 +346,8 @@ mod tests {
 
     #[test]
     fn visible_if_uses_camel_case_field_name() {
-        let e = Extension::parse("/", &j(r#"{"version":1,"visibleIf":{"prop":"a","value":1}}"#)).unwrap();
+        let e = Extension::parse("/", &j(r#"{"version":1,"visibleIf":{"prop":"a","value":1}}"#))
+            .unwrap();
         assert!(e.visible_if.is_some());
         assert!(serde_json::to_string(&e).unwrap().contains("\"visibleIf\""));
     }

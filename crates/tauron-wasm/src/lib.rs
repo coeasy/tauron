@@ -24,7 +24,9 @@ pub mod error;
 pub mod execute;
 
 pub use error::{WasmError, WasmResult};
-pub use execute::{WasmEngine, WasmEngineConfig, ExecutionResult, HostFnCallRecord, WasmPluginStats, HostFnHandler};
+pub use execute::{
+    ExecutionResult, HostFnCallRecord, HostFnHandler, WasmEngine, WasmEngineConfig, WasmPluginStats,
+};
 
 // ──────────────────────────────────────────────────────────────────────────
 // 配置类型
@@ -53,7 +55,7 @@ pub struct MemoryConfig {
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
-            max_pages: 1024, // 64 MB
+            max_pages: 1024,   // 64 MB
             initial_pages: 16, // 1 MB
         }
     }
@@ -239,24 +241,16 @@ pub fn validate_plugin_config(config: &WasmPluginConfig) -> WasmResult<()> {
 }
 
 /// 验证 host_fn 是否在白名单中。
-pub fn validate_host_fn(
-    fn_name: &str,
-    whitelist: &HostFnWhitelist,
-) -> WasmResult<()> {
+pub fn validate_host_fn(fn_name: &str, whitelist: &HostFnWhitelist) -> WasmResult<()> {
     if whitelist.allowed_fns.contains(&fn_name.to_string()) {
         Ok(())
     } else {
-        Err(WasmError::HostFnNotAllowed {
-            fn_name: fn_name.to_string(),
-        })
+        Err(WasmError::HostFnNotAllowed { fn_name: fn_name.to_string() })
     }
 }
 
 /// 验证 ABI 指纹。
-pub fn validate_abi(
-    expected: &WasmAbiFingerprint,
-    actual: &WasmAbiFingerprint,
-) -> WasmResult<()> {
+pub fn validate_abi(expected: &WasmAbiFingerprint, actual: &WasmAbiFingerprint) -> WasmResult<()> {
     if expected.interface_hash != actual.interface_hash {
         return Err(WasmError::AbiMismatch {
             expected: expected.interface_hash.clone(),
@@ -309,12 +303,7 @@ pub struct InstancePool {
 impl InstancePool {
     /// 创建新的实例池。
     pub fn new(config: InstancePoolConfig) -> Self {
-        Self {
-            config,
-            instances: HashMap::new(),
-            order: Vec::new(),
-            next_instance_id: 1,
-        }
+        Self { config, instances: HashMap::new(), order: Vec::new(), next_instance_id: 1 }
     }
 
     /// 获取当前配置。
@@ -330,17 +319,13 @@ impl InstancePool {
     /// 尝试创建实例。
     pub fn try_create_instance(&mut self, plugin_id: &str) -> WasmResult<WasmInstance> {
         if !self.config.enable_pool {
-            return Err(WasmError::InstancePoolFull {
-                plugin_id: plugin_id.to_string(),
-            });
+            return Err(WasmError::InstancePoolFull { plugin_id: plugin_id.to_string() });
         }
 
         if self.instances.len() >= self.config.max_instances {
             // 尝试驱逐最旧的空闲实例
             if self.evict_lru().is_none() {
-                return Err(WasmError::InstancePoolFull {
-                    plugin_id: plugin_id.to_string(),
-                });
+                return Err(WasmError::InstancePoolFull { plugin_id: plugin_id.to_string() });
             }
         }
 
@@ -481,11 +466,7 @@ pub struct ModuleCache {
 impl ModuleCache {
     /// 创建新的模块缓存。
     pub fn new(config: ModuleCacheConfig) -> Self {
-        Self {
-            config,
-            cache: HashMap::new(),
-            order: Vec::new(),
-        }
+        Self { config, cache: HashMap::new(), order: Vec::new() }
     }
 
     /// 获取当前配置。
@@ -511,9 +492,7 @@ impl ModuleCache {
                 self.cache.remove(&evicted_id);
                 self.order.remove(0);
             } else {
-                return Err(WasmError::ModuleCacheFull {
-                    plugin_id: module.plugin_id.clone(),
-                });
+                return Err(WasmError::ModuleCacheFull { plugin_id: module.plugin_id.clone() });
             }
         }
 
@@ -590,10 +569,7 @@ pub struct WasmCrashTracker {
 impl WasmCrashTracker {
     /// 创建新的崩溃追踪器。
     pub fn new(limit: CrashLimitConfig) -> Self {
-        Self {
-            records: HashMap::new(),
-            limit,
-        }
+        Self { records: HashMap::new(), limit }
     }
 
     /// 使用默认限制创建。
@@ -615,10 +591,7 @@ impl WasmCrashTracker {
         records.retain(|r| r.timestamp >= window_start);
 
         // 记录新崩溃
-        records.push(WasmCrashRecord {
-            timestamp: now,
-            plugin_id: plugin_id.to_string(),
-        });
+        records.push(WasmCrashRecord { timestamp: now, plugin_id: plugin_id.to_string() });
 
         // 检查是否超限
         records.len() as u32 <= self.limit.max_crashes
@@ -630,11 +603,10 @@ impl WasmCrashTracker {
         let window_start = now - chrono::Duration::seconds(self.limit.window_secs as i64);
 
         match self.records.get(plugin_id) {
-            Some(records) => records
-                .iter()
-                .filter(|r| r.timestamp >= window_start)
-                .count() as u32
-                > self.limit.max_crashes,
+            Some(records) => {
+                records.iter().filter(|r| r.timestamp >= window_start).count() as u32
+                    > self.limit.max_crashes
+            }
             None => false,
         }
     }
@@ -651,12 +623,7 @@ impl WasmCrashTracker {
 
         self.records
             .get(plugin_id)
-            .map(|records| {
-                records
-                    .iter()
-                    .filter(|r| r.timestamp >= window_start)
-                    .count() as u32
-            })
+            .map(|records| records.iter().filter(|r| r.timestamp >= window_start).count() as u32)
             .unwrap_or(0)
     }
 }
@@ -700,16 +667,13 @@ mod tests {
 
     #[test]
     fn test_validate_memory_config_zero_max_pages() {
-        let mut config = MemoryConfig::default();
-        config.max_pages = 0;
+        let config = MemoryConfig { max_pages: 0, ..MemoryConfig::default() };
         assert!(validate_memory_config(&config).is_err());
     }
 
     #[test]
     fn test_validate_memory_config_initial_exceeds_max() {
-        let mut config = MemoryConfig::default();
-        config.initial_pages = 2048;
-        config.max_pages = 1024;
+        let config = MemoryConfig { initial_pages: 2048, max_pages: 1024 };
         assert!(validate_memory_config(&config).is_err());
     }
 
@@ -721,8 +685,7 @@ mod tests {
 
     #[test]
     fn test_validate_host_fn_whitelist_zero_timeout() {
-        let mut config = HostFnWhitelist::default();
-        config.call_timeout_ms = 0;
+        let config = HostFnWhitelist { call_timeout_ms: 0, ..HostFnWhitelist::default() };
         assert!(validate_host_fn_whitelist(&config).is_err());
     }
 
@@ -734,8 +697,7 @@ mod tests {
 
     #[test]
     fn test_validate_instance_pool_config_zero_max() {
-        let mut config = InstancePoolConfig::default();
-        config.max_instances = 0;
+        let config = InstancePoolConfig { max_instances: 0, ..InstancePoolConfig::default() };
         assert!(validate_instance_pool_config(&config).is_err());
     }
 
@@ -747,8 +709,7 @@ mod tests {
 
     #[test]
     fn test_validate_module_cache_config_zero_max() {
-        let mut config = ModuleCacheConfig::default();
-        config.max_cached_modules = 0;
+        let config = ModuleCacheConfig { max_cached_modules: 0, ..ModuleCacheConfig::default() };
         assert!(validate_module_cache_config(&config).is_err());
     }
 
@@ -760,8 +721,7 @@ mod tests {
 
     #[test]
     fn test_validate_crash_limit_config_zero_window() {
-        let mut config = CrashLimitConfig::default();
-        config.window_secs = 0;
+        let config = CrashLimitConfig { window_secs: 0, ..CrashLimitConfig::default() };
         assert!(validate_crash_limit_config(&config).is_err());
     }
 
@@ -808,10 +768,7 @@ mod tests {
 
     #[test]
     fn test_validate_host_fn_empty_list() {
-        let whitelist = HostFnWhitelist {
-            allowed_fns: vec![],
-            call_timeout_ms: 5000,
-        };
+        let whitelist = HostFnWhitelist { allowed_fns: vec![], call_timeout_ms: 5000 };
         assert!(validate_host_fn("any_fn", &whitelist).is_err());
     }
 
@@ -837,11 +794,8 @@ mod tests {
 
     #[test]
     fn test_instance_pool_create() {
-        let config = InstancePoolConfig {
-            max_instances: 2,
-            idle_timeout_ms: 300000,
-            enable_pool: true,
-        };
+        let config =
+            InstancePoolConfig { max_instances: 2, idle_timeout_ms: 300000, enable_pool: true };
         let mut pool = InstancePool::new(config);
 
         let instance = pool.try_create_instance("test.plugin").unwrap();
@@ -851,11 +805,8 @@ mod tests {
 
     #[test]
     fn test_instance_pool_full() {
-        let config = InstancePoolConfig {
-            max_instances: 1,
-            idle_timeout_ms: 300000,
-            enable_pool: true,
-        };
+        let config =
+            InstancePoolConfig { max_instances: 1, idle_timeout_ms: 300000, enable_pool: true };
         let mut pool = InstancePool::new(config);
 
         pool.try_create_instance("test.plugin").unwrap();
@@ -866,11 +817,8 @@ mod tests {
 
     #[test]
     fn test_instance_pool_evict_lru() {
-        let config = InstancePoolConfig {
-            max_instances: 1,
-            idle_timeout_ms: 300000,
-            enable_pool: true,
-        };
+        let config =
+            InstancePoolConfig { max_instances: 1, idle_timeout_ms: 300000, enable_pool: true };
         let mut pool = InstancePool::new(config);
 
         let instance = pool.try_create_instance("test.plugin").unwrap();
@@ -911,10 +859,7 @@ mod tests {
 
     #[test]
     fn test_instance_pool_disabled() {
-        let config = InstancePoolConfig {
-            enable_pool: false,
-            ..Default::default()
-        };
+        let config = InstancePoolConfig { enable_pool: false, ..Default::default() };
         let mut pool = InstancePool::new(config);
         let result = pool.try_create_instance("test.plugin");
         assert!(result.is_err());
@@ -957,10 +902,7 @@ mod tests {
 
     #[test]
     fn test_module_cache_evict() {
-        let config = ModuleCacheConfig {
-            max_cached_modules: 1,
-            cache_ttl_secs: 3600,
-        };
+        let config = ModuleCacheConfig { max_cached_modules: 1, cache_ttl_secs: 3600 };
         let mut cache = ModuleCache::new(config);
 
         let module1 = CachedModule {
@@ -1032,10 +974,7 @@ mod tests {
 
     #[test]
     fn test_wasm_crash_tracker_exceed_limit() {
-        let limit = CrashLimitConfig {
-            window_secs: 300,
-            max_crashes: 3,
-        };
+        let limit = CrashLimitConfig { window_secs: 300, max_crashes: 3 };
         let mut tracker = WasmCrashTracker::new(limit);
 
         // 记录 3 次崩溃

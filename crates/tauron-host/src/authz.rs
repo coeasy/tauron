@@ -74,7 +74,8 @@ pub struct CommandAuth {
     pub description: &'static str,
 }
 
-/// 插件侧宿主命令面（§2.1 定稿 9 条 + R7 收口补登记 4 条 = 13 条）。
+/// 插件侧宿主命令面（§2.1 定稿 9 条 + R7 收口补登记 4 条 + 0.4 审计补登记 1 条
+/// + 0.4-A1 调用投递 3 条 = 17 条）。
 pub static COMMANDS: &[CommandAuth] = &[
     CommandAuth {
         command: "host_plugin_call",
@@ -165,6 +166,38 @@ pub static COMMANDS: &[CommandAuth] = &[
         consumer: "plugin-sdk（流式收尾）",
         description: "发终帧并使句柄失效（self 档）",
     },
+    // ── 0.4 审计补登记：与 `host_registry_list` 同族的 scoped-read 只读命令 ──
+    //
+    // `ShellClient.contributesList()` 一直在调它，且它注册在 handler 宏里任何
+    // webview 都可触达，却不在本表也不在 `ADMIN_COMMANDS`——「未登记命令被 CI
+    // 拦」的缺口（R7 收口同类）。实现是纯只读（列贡献表，无身份写入面），
+    // 档位与 `host_registry_list` 同为 `ScopedRead`。置于 R7 块之后、0.4-A1
+    // 块之前：R7 的四连块与 A1 的表末三连块各自保持连续（镜像表按序比对）。
+    CommandAuth {
+        command: "host_contributes_list",
+        tier: AuthTier::ScopedRead,
+        consumer: "ShellClient.contributesList / 应用设置中心",
+        description: "列出贡献表（commands/menus/panels/settings，纯只读）",
+    },
+    // ── 0.4-A1 调用投递闭环 ──────────────────────────────────────
+    CommandAuth {
+        command: "host_call_plugin",
+        tier: AuthTier::Self_,
+        consumer: "宿主主窗 / plugin-sdk（插件→插件）",
+        description: "跨主体调用：宿主调插件或插件调插件（caller/target 显式）",
+    },
+    CommandAuth {
+        command: "host_call_result",
+        tier: AuthTier::Self_,
+        consumer: "plugin-sdk（执行方回填）",
+        description: "执行方回填一次调用的结果（仅 target 可回填）",
+    },
+    CommandAuth {
+        command: "host_call_take",
+        tier: AuthTier::Self_,
+        consumer: "宿主主窗 / plugin-sdk（发起方取件）",
+        description: "发起方取走一次已结算的结果（仅 caller 可取）",
+    },
 ];
 
 /// 主窗特权命令（D15：不是插件命令面）。
@@ -227,6 +260,12 @@ pub static ADMIN_COMMANDS: &[CommandAuth] = &[
         consumer: "宿主 UI 主窗（插件生命周期监管）",
         description: "按租约查询 sidecar 健康（pid/崩溃窗口计数；暴露 PID 故同属特权）",
     },
+    CommandAuth {
+        command: "host_resource_stats",
+        tier: AuthTier::Privileged,
+        consumer: "宿主 UI 主窗（资源配额诊断）",
+        description: "读取全局与逐插件资源配额占用",
+    },
 ];
 
 /// 管理操作枚举（D15 定稿）。
@@ -241,21 +280,13 @@ pub enum RegistryAdminOp {
 
 impl RegistryAdminOp {
     pub fn all() -> &'static [RegistryAdminOp] {
-        &[
-            Self::Disable,
-            Self::Enable,
-            Self::Uninstall,
-            Self::Purge,
-        ]
+        &[Self::Disable, Self::Enable, Self::Uninstall, Self::Purge]
     }
 }
 
 /// 按命令名解析档位。未登记返回 `None`。
 pub fn resolve(command: &str) -> Option<&'static CommandAuth> {
-    COMMANDS
-        .iter()
-        .chain(ADMIN_COMMANDS.iter())
-        .find(|c| c.command == command)
+    COMMANDS.iter().chain(ADMIN_COMMANDS.iter()).find(|c| c.command == command)
 }
 
 /// 未登记命令硬失败（§8-17 自查入口）。
@@ -293,7 +324,10 @@ pub fn validate_commands<'a>(
         if let Some(prev) = seen.insert(c.command, c) {
             return Err(HostError::new(
                 ErrorCode::E_AUTH_DENIED,
-                format!("命令 `{}` 重复登记（{} vs {}）", c.command, prev.description, c.description),
+                format!(
+                    "命令 `{}` 重复登记（{} vs {}）",
+                    c.command, prev.description, c.description
+                ),
             ));
         }
     }
@@ -310,16 +344,14 @@ pub const IDENTITY_LABEL_PREFIX: &str = "plugin-";
 
 /// 从 label 解析插件 id。
 pub fn label_to_plugin_id(label: &str) -> HostResult<crate::manifest::PluginId> {
-    let id = label
-        .strip_prefix(IDENTITY_LABEL_PREFIX)
-        .ok_or_else(|| {
-            HostError::new(
-                ErrorCode::E_AUTH_DENIED,
-                format!(
-                    "webview label `{label}` 不以 `{IDENTITY_LABEL_PREFIX}` 开头，不是插件身份单元"
-                ),
-            )
-        })?;
+    let id = label.strip_prefix(IDENTITY_LABEL_PREFIX).ok_or_else(|| {
+        HostError::new(
+            ErrorCode::E_AUTH_DENIED,
+            format!(
+                "webview label `{label}` 不以 `{IDENTITY_LABEL_PREFIX}` 开头，不是插件身份单元"
+            ),
+        )
+    })?;
     crate::manifest::PluginId::new(id).map_err(|_| {
         HostError::new(
             ErrorCode::E_AUTH_DENIED,
@@ -490,9 +522,7 @@ pub fn origin_allowed(allowlist: &[String], origin: &str) -> bool {
         return false;
     }
     let target = normalize_origin(origin);
-    allowlist
-        .iter()
-        .any(|entry| normalize_origin(entry) == target)
+    allowlist.iter().any(|entry| normalize_origin(entry) == target)
 }
 
 #[cfg(test)]
@@ -575,10 +605,9 @@ pub fn approval_hints(index: &PermissionIndex, perms: &[Permission]) -> Vec<Appr
 
 fn scope_strings(scopes: &Map<String, serde_json::Value>, key: &str) -> Vec<String> {
     match scopes.get(key) {
-        Some(serde_json::Value::Array(items)) => items
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect(),
+        Some(serde_json::Value::Array(items)) => {
+            items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()
+        }
         Some(serde_json::Value::String(s)) => vec![s.clone()],
         _ => Vec::new(),
     }
@@ -591,7 +620,10 @@ fn scope_strings(scopes: &Map<String, serde_json::Value>, key: &str) -> Vec<Stri
 /// 2. `fs:allow-app-write-recursive` 配 `scope: ["$APPCONFIG/**"]` —— 拒绝；
 /// 3. `fs` 指向 `app_data_dir` 之外的通配根 —— 拒绝；
 /// 4. `http:allow-fetch` 配 `scope: ["*"]` —— 拒绝。
-pub fn check_grants(scopes: &Map<String, serde_json::Value>, perms: &[Permission]) -> HostResult<()> {
+pub fn check_grants(
+    scopes: &Map<String, serde_json::Value>,
+    perms: &[Permission],
+) -> HostResult<()> {
     for p in perms {
         let s = p.as_str();
 
@@ -690,10 +722,7 @@ mod tests {
         assert_eq!(AuthTier::Self_.as_str(), "self");
         assert_eq!(AuthTier::ScopedRead.as_str(), "scoped-read");
         assert_eq!(AuthTier::Privileged.as_str(), "privileged");
-        assert_eq!(
-            serde_json::to_string(&AuthTier::ScopedRead).unwrap(),
-            "\"scoped-read\""
-        );
+        assert_eq!(serde_json::to_string(&AuthTier::ScopedRead).unwrap(), "\"scoped-read\"");
     }
 
     #[test]
@@ -705,16 +734,15 @@ mod tests {
     #[test]
     fn all_registered_commands_have_consumers() {
         for c in COMMANDS.iter().chain(ADMIN_COMMANDS.iter()) {
-            assert!(
-                !c.consumer.is_empty(),
-                "{} 缺 consumer 登记",
-                c.command
-            );
+            assert!(!c.consumer.is_empty(), "{} 缺 consumer 登记", c.command);
         }
-        assert_eq!(COMMANDS.len(), 13, "§2.1 定稿 9 条 + R7 收口补登记 4 条");
-        // P0-2 后为 3 条：`host_registry_admin` + `host_runtime_spawn` / `host_runtime_health`
-        // （后两条会按调用方给的 `plugin_id` 启动外部可执行文件，与注册表管理同级）。
-        assert_eq!(ADMIN_COMMANDS.len(), 3, "D15 + P0-2：主窗特权命令 3 条");
+        assert_eq!(COMMANDS.len(), 17, "§2.1 定稿 9 条 + R7 收口补登记 4 条 + 0.4-A1 跨主体调用 3 条 + 0.4 审计补登记 host_contributes_list 1 条");
+        // 主窗面包含注册表管理、sidecar 管理与 M8 配额诊断四条特权命令。
+        assert_eq!(
+            ADMIN_COMMANDS.len(),
+            4,
+            "核心注册的主窗特权命令 4 条；adapter 可按 feature 扩展"
+        );
     }
 
     /// R7 收口：这 4 条是 `HostClient` 实际调用、且此前**完全未登记**的命令。
@@ -722,22 +750,24 @@ mod tests {
     /// 失去自档语义）或调换顺序（TS 侧镜像表按顺序逐条比对）。
     #[test]
     fn r7_backfilled_plugin_commands_are_self_tier_and_in_order() {
-        let backfilled = [
-            "host_events_drain",
-            "host_stream_open",
-            "host_stream_write",
-            "host_stream_close",
-        ];
+        let backfilled =
+            ["host_events_drain", "host_stream_open", "host_stream_write", "host_stream_close"];
         // 紧接 `host_registry_list` 之后，顺序固定。
         let start = COMMANDS
             .iter()
             .position(|c| c.command == "host_registry_list")
             .expect("host_registry_list 必须在表内");
-        let actual: Vec<&str> = COMMANDS[start + 1..]
-            .iter()
-            .map(|c| c.command)
-            .collect();
+        let actual: Vec<&str> =
+            COMMANDS[start + 1..start + 1 + backfilled.len()].iter().map(|c| c.command).collect();
         assert_eq!(actual, backfilled, "补登记的命令必须紧接 host_registry_list 且按序");
+        // 0.4-A1：跨主体调用三命令**追加在表末尾**（追加语义；TS 侧能力镜像
+        // 按序逐条比对，中间插入会整体错位）。
+        let a1: Vec<&str> = COMMANDS[COMMANDS.len() - 3..].iter().map(|c| c.command).collect();
+        assert_eq!(
+            a1,
+            ["host_call_plugin", "host_call_result", "host_call_take"],
+            "0.4-A1 三命令必须按序追加在表末尾"
+        );
         for name in backfilled {
             let c = resolve(name).unwrap_or_else(|| panic!("{name} 未登记档位"));
             assert_eq!(c.tier, AuthTier::Self_, "{name} 必须是 self 档");
@@ -752,25 +782,14 @@ mod tests {
     #[test]
     fn resolve_known_commands() {
         assert_eq!(resolve("host_plugin_call").unwrap().tier, AuthTier::Self_);
-        assert_eq!(
-            resolve("host_registry_list").unwrap().tier,
-            AuthTier::ScopedRead
-        );
-        assert_eq!(
-            resolve("host_registry_admin").unwrap().tier,
-            AuthTier::Privileged
-        );
+        assert_eq!(resolve("host_registry_list").unwrap().tier, AuthTier::ScopedRead);
+        assert_eq!(resolve("host_registry_admin").unwrap().tier, AuthTier::Privileged);
         // P0-2：运行时命令**必须是特权档**——`host_runtime_spawn` 会按入参
         // `pluginId` 启动一个可执行文件；若登记成 self 档，任何插件 webview 都能
         // 启动别的插件的 sidecar（越权执行原语）。
-        assert_eq!(
-            resolve("host_runtime_spawn").unwrap().tier,
-            AuthTier::Privileged
-        );
-        assert_eq!(
-            resolve("host_runtime_health").unwrap().tier,
-            AuthTier::Privileged
-        );
+        assert_eq!(resolve("host_runtime_spawn").unwrap().tier, AuthTier::Privileged);
+        assert_eq!(resolve("host_runtime_health").unwrap().tier, AuthTier::Privileged);
+        assert_eq!(resolve("host_resource_stats").unwrap().tier, AuthTier::Privileged);
     }
 
     #[test]
@@ -810,8 +829,7 @@ mod tests {
     #[test]
     fn spoofed_plugin_id_is_rejected() {
         // §4.1 测试点："伪造 pluginId 的上报被拒"。
-        let e =
-            resolve_self_identity("plugin-com.example.x", Some("com.attacker.y")).unwrap_err();
+        let e = resolve_self_identity("plugin-com.example.x", Some("com.attacker.y")).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_AUTH_DENIED);
         assert!(e.message.contains("com.attacker.y"));
         assert!(e.message.contains("仅认身份"));
@@ -827,11 +845,7 @@ mod tests {
     #[test]
     fn fs_appconfig_recursive_write_is_forbidden() {
         let s = scopes(&[("fs:allow-app-write-recursive", "$APPCONFIG/**")]);
-        let e = check_grants(
-            &s,
-            &[Permission::new("fs:allow-app-write-recursive")],
-        )
-        .unwrap_err();
+        let e = check_grants(&s, &[Permission::new("fs:allow-app-write-recursive")]).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_FORBIDDEN_PERMISSION);
     }
 
@@ -840,8 +854,7 @@ mod tests {
         // 绝对路径或裸通配 → 拒绝。
         for bad in ["C:\\Users\\*", "*", "/tmp/**", "~/"] {
             let s = scopes(&[("fs:allow-app-read", bad)]);
-            let e =
-                check_grants(&s, &[Permission::new("fs:allow-app-read")]).unwrap_err();
+            let e = check_grants(&s, &[Permission::new("fs:allow-app-read")]).unwrap_err();
             assert_eq!(e.code, ErrorCode::E_FORBIDDEN_PERMISSION, "scope `{bad}`");
             assert!(e.message.contains(bad));
         }
@@ -890,11 +903,7 @@ mod tests {
         assert_eq!(hints[0].description, "读取 store 键值");
         assert_eq!(hints[1].risk, Risk::Elevated);
         // 表外权限不出现在提示里（安装期已拒）。
-        assert!(ApprovalHint::of(
-            &i,
-            &Permission::new("nope:allow-x")
-        )
-        .is_none());
+        assert!(ApprovalHint::of(&i, &Permission::new("nope:allow-x")).is_none());
     }
 
     #[test]
@@ -907,19 +916,17 @@ mod tests {
     #[test]
     fn validate_catches_empty_fields() {
         // 直接调用真实校验内核，验证空字段被拦截（而非复制一份逻辑自测）。
-        let bad = CommandAuth {
-            command: "x",
-            tier: AuthTier::Self_,
-            consumer: "",
-            description: "d",
-        };
+        let bad =
+            CommandAuth { command: "x", tier: AuthTier::Self_, consumer: "", description: "d" };
         let e = validate_commands(std::iter::once(&bad)).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_AUTH_DENIED);
         assert!(e.message.contains("字段缺失"));
         assert!(e.message.contains("x"));
 
-        for field in [&CommandAuth { command: "", tier: AuthTier::Self_, consumer: "c", description: "d" },
-                      &CommandAuth { command: "x", tier: AuthTier::Self_, consumer: "c", description: "" }] {
+        for field in [
+            &CommandAuth { command: "", tier: AuthTier::Self_, consumer: "c", description: "d" },
+            &CommandAuth { command: "x", tier: AuthTier::Self_, consumer: "c", description: "" },
+        ] {
             let e = validate_commands(std::iter::once(field)).unwrap_err();
             assert!(e.message.contains("字段缺失"));
         }
@@ -927,8 +934,18 @@ mod tests {
 
     #[test]
     fn validate_catches_duplicate_commands() {
-        let a = CommandAuth { command: "dup", tier: AuthTier::Self_, consumer: "c", description: "first" };
-        let b = CommandAuth { command: "dup", tier: AuthTier::ScopedRead, consumer: "c", description: "second" };
+        let a = CommandAuth {
+            command: "dup",
+            tier: AuthTier::Self_,
+            consumer: "c",
+            description: "first",
+        };
+        let b = CommandAuth {
+            command: "dup",
+            tier: AuthTier::ScopedRead,
+            consumer: "c",
+            description: "second",
+        };
         let e = validate_commands([&a, &b]).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_AUTH_DENIED);
         assert!(e.message.contains("重复"));
@@ -937,8 +954,14 @@ mod tests {
 
     #[test]
     fn validate_accepts_well_formed_table() {
-        let a = CommandAuth { command: "a", tier: AuthTier::Self_, consumer: "c", description: "d" };
-        let b = CommandAuth { command: "b", tier: AuthTier::Privileged, consumer: "c", description: "d" };
+        let a =
+            CommandAuth { command: "a", tier: AuthTier::Self_, consumer: "c", description: "d" };
+        let b = CommandAuth {
+            command: "b",
+            tier: AuthTier::Privileged,
+            consumer: "c",
+            description: "d",
+        };
         assert!(validate_commands([&a, &b]).is_ok());
     }
 }

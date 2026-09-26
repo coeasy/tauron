@@ -24,7 +24,9 @@ use std::sync::Arc;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use serde_json::Value;
 
-use crate::envelope::{PluginCancelRequest, PluginErrorBody, PluginInvokeRequest, PluginInvokeResponse};
+use crate::envelope::{
+    PluginCancelRequest, PluginErrorBody, PluginInvokeRequest, PluginInvokeResponse,
+};
 use crate::error::PluginErrorCode;
 use crate::eventbus::{Event, EventBus, EventSubscriber};
 use crate::registry::{PluginRegistry, PluginState};
@@ -125,9 +127,7 @@ impl HostState {
     pub fn subscribe(&self, topic: &str, subscriber: Box<dyn EventSubscriber>) -> bool {
         match parse_topic(topic) {
             Some((plugin_id, event_name)) => {
-                self.events
-                    .write()
-                    .subscribe(&plugin_id, &event_name, subscriber);
+                self.events.write().subscribe(&plugin_id, &event_name, subscriber);
                 true
             }
             None => false,
@@ -224,14 +224,11 @@ impl HostState {
         };
 
         // 1. 内部总线（Rust 侧订阅者，背压隔离）
-        self.events
-            .write()
-            .emit(event.clone())
-            .map_err(|err| PluginErrorBody {
-                code: format!("{}", PluginErrorCode::Internal),
-                message: format!("event bus rejected event: {err:?}"),
-                retryable: false,
-            })?;
+        self.events.write().emit(event.clone()).map_err(|err| PluginErrorBody {
+            code: format!("{}", PluginErrorCode::Internal),
+            message: format!("event bus rejected event: {err:?}"),
+            retryable: false,
+        })?;
 
         // 2. 出站投递（前端监听 `plugin:<id>:<event>`）
         //
@@ -254,9 +251,7 @@ impl Default for HostState {
 /// 插件 ID 本身可以含 `.`、`-`、`_`，但**不含 `:`**，因此按 `:` 分割恰好 3 段。
 fn parse_topic(topic: &str) -> Option<(String, String)> {
     let rest = topic.strip_prefix(EVENT_TOPIC_PREFIX)?;
-    let mut parts = rest.splitn(2, ':');
-    let plugin_id = parts.next()?;
-    let event_name = parts.next()?;
+    let (plugin_id, event_name) = rest.split_once(':')?;
     if plugin_id.is_empty() || event_name.is_empty() {
         return None;
     }
@@ -266,8 +261,8 @@ fn parse_topic(topic: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::PluginType;
     use crate::envelope::generate_call_id;
+    use crate::registry::PluginType;
 
     /// 记录调用的测试分发器。
     struct EchoDispatcher {
@@ -276,9 +271,7 @@ mod tests {
 
     impl EchoDispatcher {
         fn new() -> Self {
-            Self {
-                cancelled: RwLock::new(Vec::new()),
-            }
+            Self { cancelled: RwLock::new(Vec::new()) }
         }
     }
 
@@ -405,22 +398,16 @@ mod tests {
         let d = Arc::new(EchoDispatcher::new());
         state.set_dispatcher(d.clone());
 
-        assert!(state.handle_cancel(PluginCancelRequest {
-            call_id: "c1".to_string()
-        }));
+        assert!(state.handle_cancel(PluginCancelRequest { call_id: "c1".to_string() }));
         // 未知调用同样不报错（幂等）
-        assert!(state.handle_cancel(PluginCancelRequest {
-            call_id: "unknown".to_string()
-        }));
+        assert!(state.handle_cancel(PluginCancelRequest { call_id: "unknown".to_string() }));
         assert_eq!(d.cancelled.read().len(), 2);
     }
 
     #[test]
     fn cancel_without_dispatcher_is_false_not_error() {
         let state = HostState::new();
-        assert!(!state.handle_cancel(PluginCancelRequest {
-            call_id: "c1".to_string()
-        }));
+        assert!(!state.handle_cancel(PluginCancelRequest { call_id: "c1".to_string() }));
     }
 
     #[test]
@@ -449,9 +436,7 @@ mod tests {
     fn emit_rejects_malformed_topic() {
         let state = HostState::new();
         for bad in ["", "changed", "plugin:", "plugin:only-id", "other:a:b"] {
-            let err = state
-                .handle_emit(bad, serde_json::json!({}))
-                .expect_err("should reject");
+            let err = state.handle_emit(bad, serde_json::json!({})).expect_err("should reject");
             assert_eq!(err.code, format!("{}", PluginErrorCode::InvalidPayload), "topic={bad}");
         }
     }
@@ -463,20 +448,14 @@ mod tests {
             Some(("com.example.my-plugin".to_string(), "data-changed".to_string()))
         );
         // event 名里允许出现 ':'（只在第一个 ':' 处分割）
-        assert_eq!(
-            parse_topic("plugin:p:a:b"),
-            Some(("p".to_string(), "a:b".to_string()))
-        );
+        assert_eq!(parse_topic("plugin:p:a:b"), Some(("p".to_string(), "a:b".to_string())));
     }
 
     /// 记录出站投递的收集器（模拟前端监听）。
     struct RecordingSink(std::sync::Mutex<Vec<(String, String)>>);
     impl EventSink for RecordingSink {
         fn deliver(&self, topic: &str, event: &Event) {
-            self.0
-                .lock()
-                .unwrap()
-                .push((topic.to_string(), event.event_name.clone()));
+            self.0.lock().unwrap().push((topic.to_string(), event.event_name.clone()));
         }
     }
 
@@ -529,9 +508,8 @@ mod tests {
         let sink = Arc::new(RecordingSink(std::sync::Mutex::new(Vec::new())));
         state.set_event_sink(sink.clone());
 
-        let err = state
-            .handle_emit("not-a-topic", serde_json::json!({}))
-            .expect_err("should reject");
+        let err =
+            state.handle_emit("not-a-topic", serde_json::json!({})).expect_err("should reject");
 
         assert_eq!(err.code, format!("{}", PluginErrorCode::InvalidPayload));
         assert!(sink.0.lock().unwrap().is_empty());

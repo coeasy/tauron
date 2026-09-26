@@ -11,12 +11,14 @@
 // `SpawnedProc` 是唯一输出）。
 
 use std::collections::HashMap;
-use std::process::{Child, Command, Stdio};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::{ProcError, ProcResult, SpawnConfig, validate_spawn_config};
+use crate::{validate_spawn_config, ProcError, ProcResult, SpawnConfig};
 
 /// 一次成功启动的产物。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,18 +73,64 @@ pub trait ProcSpawner: Send + Sync {
     /// 做不到的实现必须返回 `Err`，上层会把它计入留痕，但**不会**因此让
     /// 卸载整体失败。
     fn kill(&self, pid: u32) -> ProcResult<KillOutcome>;
+
+    /// 写入一帧到 sidecar 的 stdin（JSON-RPC 行帧，以 `\n` 结尾）。
+    ///
+    /// 缺省返回 `Err`：**没有 stdin 写入能力的实现不得假装能写**——否则宿主侧的
+    /// 投递会静默落到黑洞（调用方以为已送达，sidecar 其实没收到）。
+    fn write_frame(&self, _pid: u32, _frame: &[u8]) -> std::io::Result<()> {
+        let _ = (_pid, _frame);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "该启动器不支持写入 sidecar stdin",
+        ))
+    }
+
+    /// 注册一个 stdout 帧接收器：sidecar 每写一帧（JSON-RPC 响应 / 事件）到 stdout，
+    /// 启动器就把该行帧交给 `sink.on_frame`。
+    ///
+    /// 返回 `false` 表示该启动器不支撑 stdout 帧路由（如模拟启动器）——调用方应
+    /// 据此知道"投递了也没人回帧"。缺省实现返回 `false`。
+    fn register_frame_sink(&self, _pid: u32, _sink: Arc<dyn ProcessFrameSink>) -> bool {
+        let _ = (_pid, _sink);
+        false
+    }
+}
+
+/// sidecar stdout 帧接收器（§4.7 JSON-RPC 回路的宿主侧终点）。
+///
+/// `CommandSpawner` 的读线程持续排空 sidecar 的 stdout，每读到一行协议帧就调用
+/// 一次 `on_frame`。宿主借此把 sidecar 的回帧（含 `callId`）路由回注册表的
+/// `settle_call`，闭合「宿主 → sidecar → 回帧 → 结算」这条此前断在 `Stdio::null()`
+/// 的链路。
+pub trait ProcessFrameSink: Send + Sync {
+    /// 收到一帧（已是去尾换行的原始字节）。
+    fn on_frame(&self, pid: u32, frame: &[u8]);
+
+    /// stdout 关闭（进程退出 / 管道 EOF）时调用一次，便于上层清理；缺省空实现。
+    fn on_eof(&self, _pid: u32) {}
 }
 
 /// 生产实现：`std::process::Command`。
 ///
-/// 只做三件事——**真启动**（`Command::spawn`）、**真探测**（`Child::try_wait`）、
-/// **真终止**（`Child::kill` + `wait` 回收）。不再多做，也不假装多做：
+/// 做四件事——**真启动**（`Command::spawn`）、**真探测**（`Child::try_wait`）、
+/// **真终止**（`Child::kill` + `wait` 回收）、**真帧回路**（stdin 写请求 /
+/// stdout 读线程回帧）。不再多做，也不假装多做：
+///
+/// **诚实边界（0.4-A1 已接线部分）**
+/// - §4.7 的 JSON-RPC 帧回路**已接线**：stdin/stdout 走 `Stdio::piped()`，且
+///   每条 sidecar 进程在 `spawn` 时**单独起一个读线程**持续排空 stdout——这就
+///   化解了此前"接管道却没人读 → sidecar 写满缓冲区被阻塞死"的风险（见下面
+///   「未验证」里剩下的真实 sidecar 端到端缺口）。
+/// - 读线程每读到一行协议帧就交给该 pid 注册的 [`ProcessFrameSink`]；无 sink 时
+///   静默丢弃（调用方尚未注册；sidecar 不应在收到请求前自发帧）。
 ///
 /// **未验证部分（诚实标注）**
-/// - §4.7 的 JSON-RPC 帧回路（stdin/stdout）**未接线**：stdout 走 `Stdio::null()`，
-///   因为把 stdout 接成管道却没人读，会在 sidecar 写满管道缓冲区时把它**阻塞死**
-///   （比丢弃更糟）。因此当前 sidecar 收不到请求、也回不了帧——被验证的只有
-///   「进程真的起来了 / 真的死了 / 终止调用真的发出去了」，这正是 P0-2 的范围。
+/// - **真实 sidecar 端到端**：本仓**没有**可执行的 sidecar 二进制，测试也明确
+///   **不起真进程**（CI flaky / 平台差异）。因此"sidecar 真的收到帧、真的回帧、
+///   宿主真的据此结算"这一整条链路**没有运行期证据**——验证的是帧格式、
+///   `write_frame`/`register_frame_sink` 的契约、以及读线程排空逻辑（用 mock
+///   spawner + 内存管道单测）。带真 sidecar 的 E2E 需另起集成测试环境。
 /// - 不能保证跨平台「已退出」判定时机一致（`try_wait` 在子进程退出后返回
 ///   `Some(status)`）；僵尸进程的回收依赖本类型仍持有 `Child`。
 /// - 本类型被**丢弃**时不会 `wait`/`kill`（`Child` 的 `Drop` 不做这两件事）：
@@ -95,8 +143,18 @@ pub trait ProcSpawner: Send + Sync {
 #[derive(Default)]
 pub struct CommandSpawner {
     /// pid → `Child`。持有句柄是 `try_wait` 的前提（否则只能靠平台 API 探测，
-    /// 那会引入平台分支与 unsafe）。
+    /// 那会引入平台分支与 unsafe）。stdin/stdout 已在 `spawn` 时 `take` 出去，
+    /// 因此这里不再持有（不影响 `try_wait`/`kill`）。
     children: Mutex<HashMap<u32, Child>>,
+    /// pid → sidecar stdin 写句柄（宿主写 JSON-RPC 行帧用）。封 `Arc` 以便 `spawn`
+    /// 时把同一张表克隆给读线程共享。
+    stdin_writers: Arc<Mutex<HashMap<u32, ChildStdin>>>,
+    /// pid → stdout 帧接收器（读线程把 sidecar 回帧路由给它）。封 `Arc` 共享。
+    sinks: Arc<Mutex<HashMap<u32, Arc<dyn ProcessFrameSink>>>>,
+    /// 已退出（读线程 EOF）的 pid 集合。`register_frame_sink` 用它挡住"进程已
+    /// 退出后才来注册"的迟到登记——那种登记永远不会被读线程清理（线程已退），
+    /// 不挡就是无界泄漏（0.4 审计修复）。
+    closed: Arc<Mutex<std::collections::HashSet<u32>>>,
 }
 
 impl CommandSpawner {
@@ -117,21 +175,68 @@ impl ProcSpawner for CommandSpawner {
         // 都**不得**启动。校验在启动之前，因此不合格的配置连 syscall 都到不了。
         validate_spawn_config(cfg)?;
 
-        let child = Command::new(&cfg.binary_path)
+        let mut child = Command::new(&cfg.binary_path)
             .args(&cfg.args)
             .envs(&cfg.env)
             // stderr 承载日志（§4.7：日志走 stderr），继承宿主 stderr 即可，
             // 不需要管道（也就没有管道写满阻塞的风险）。
             .stderr(Stdio::inherit())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            // stdin/stdout 必须接管道：宿主经 stdin 写 JSON-RPC 请求帧，sidecar
+            // 经 stdout 回帧。stdout 由下方读线程**持续排空**，否则 sidecar 写满
+            // 管道缓冲区会被阻塞死（比丢弃更糟）。
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .spawn()
-            .map_err(|e| {
-                ProcError::SpawnFailed(format!("启动 `{}` 失败：{e}", cfg.binary_path))
-            })?;
+            .map_err(|e| ProcError::SpawnFailed(format!("启动 `{}` 失败：{e}", cfg.binary_path)))?;
 
         let pid = child.id();
+        // 取出 stdin 写句柄（宿主写帧用）与 stdout（交给读线程排空）。
+        // **任一失败都要回收子进程**：直接 `Err` 返回会把 `Child` 一丢了之——
+        // 句柄 drop 不 kill/wait，进程留成无人跟踪的孤儿（0.4 审计修复）。
+        let (stdin, stdout) = match (child.stdin.take(), child.stdout.take()) {
+            (Some(stdin), Some(stdout)) => (stdin, stdout),
+            (stdin, stdout) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = (stdin, stdout); // 管道句柄随作用域关闭
+                return Err(ProcError::SpawnFailed(
+                    "sidecar stdin/stdout 管道未就绪（已回收子进程）".into(),
+                ));
+            }
+        };
         self.children.lock().insert(pid, child);
+        self.stdin_writers.lock().insert(pid, stdin);
+
+        // 读线程：持续排空 sidecar 的 stdout，逐行交给该 pid 注册的 sink。
+        // 读到 EOF（进程退出）即退出线程并清理该 pid 的 stdin/sink 登记，
+        // 并把 pid 记入 `closed`——挡住此后迟到的 `register_frame_sink`。
+        let sinks = self.sinks.clone();
+        let writers = self.stdin_writers.clone();
+        let closed = self.closed.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                match line {
+                    Ok(l) => {
+                        let trimmed = l.trim();
+                        if trimmed.is_empty() {
+                            continue; // 空行跳过（sidecar 的分帧留白）
+                        }
+                        let sink = sinks.lock().get(&pid).cloned();
+                        if let Some(s) = sink {
+                            s.on_frame(pid, trimmed.as_bytes());
+                        }
+                        // 无 sink：静默丢弃（调用方尚未注册；sidecar 不应自发帧）。
+                    }
+                    Err(_) => break, // 读错误 / EOF → 退出读线程
+                }
+            }
+            // EOF：清理该 pid 的 stdin 与 sink 登记，并标记已关闭。
+            sinks.lock().remove(&pid);
+            writers.lock().remove(&pid);
+            closed.lock().insert(pid);
+        });
+
         Ok(SpawnedProc { pid })
     }
 
@@ -185,6 +290,38 @@ impl ProcSpawner for CommandSpawner {
                 ))),
             },
         }
+    }
+
+    /// 写入一帧到 sidecar stdin（JSON-RPC 行帧，自带 `\n` 结尾）。
+    ///
+    /// 该 pid 必须此前由本启动器 `spawn` 过且尚未退出（stdin 句柄仍在登记表）；
+    /// 否则返回 `NotFound`（调用方据此知道"投递落空"，而不是静默丢失）。
+    fn write_frame(&self, pid: u32, frame: &[u8]) -> std::io::Result<()> {
+        let mut writers = self.stdin_writers.lock();
+        match writers.get_mut(&pid) {
+            Some(stdin) => {
+                stdin.write_all(frame)?;
+                stdin.write_all(b"\n")?;
+                stdin.flush()
+            }
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("pid {pid} 没有可用的 stdin 管道（进程可能尚未启动或已退出）"),
+            )),
+        }
+    }
+
+    /// 注册一个 stdout 帧接收器（sidecar 回帧经此路由回宿主）。返回 `true` 表示已登记。
+    ///
+    /// **迟到登记拒绝**：读线程 EOF 时会把 pid 记入 `closed` 并清掉登记；此后再来的
+    /// `register_frame_sink` 返回 `false`（拒绝）——否则条目永远不会被清理
+    /// （读线程已退，没人回收它），反复"崩溃→重启"就无界累积。
+    fn register_frame_sink(&self, pid: u32, sink: Arc<dyn ProcessFrameSink>) -> bool {
+        if self.closed.lock().contains(&pid) {
+            return false;
+        }
+        self.sinks.lock().insert(pid, sink);
+        true
     }
 }
 
@@ -255,9 +392,7 @@ mod tests {
                 Ok(SpawnedProc { pid: 42 })
             }
             fn kill(&self, pid: u32) -> ProcResult<KillOutcome> {
-                Err(ProcError::ProcessTerminated(format!(
-                    "该实现不提供终止能力（pid {pid}）"
-                )))
+                Err(ProcError::ProcessTerminated(format!("该实现不提供终止能力（pid {pid}）")))
             }
         }
         assert!(NoProbe.is_alive(42));

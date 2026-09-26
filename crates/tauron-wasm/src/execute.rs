@@ -16,9 +16,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CachedModule, CrashLimitConfig, InstancePool, InstancePoolConfig, ModuleCache,
-    ModuleCacheConfig, WasmCrashTracker, WasmError, WasmPluginConfig, WasmResult, validate_host_fn,
-    validate_plugin_config,
+    validate_host_fn, validate_plugin_config, CachedModule, CrashLimitConfig, InstancePool,
+    InstancePoolConfig, ModuleCache, ModuleCacheConfig, WasmCrashTracker, WasmError,
+    WasmPluginConfig, WasmResult,
 };
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ pub struct HostFnCallRecord {
 pub type HostFnHandler = Box<dyn Fn(String, String) -> Result<String, String> + Send + Sync>;
 
 /// WASM 引擎配置。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WasmEngineConfig {
     /// 实例池配置。
@@ -78,16 +78,6 @@ pub struct WasmEngineConfig {
     pub module_cache: ModuleCacheConfig,
     /// 崩溃限制配置。
     pub crash_limit: CrashLimitConfig,
-}
-
-impl Default for WasmEngineConfig {
-    fn default() -> Self {
-        Self {
-            instance_pool: InstancePoolConfig::default(),
-            module_cache: ModuleCacheConfig::default(),
-            crash_limit: CrashLimitConfig::default(),
-        }
-    }
 }
 
 /// WASM 引擎。
@@ -169,7 +159,12 @@ impl WasmEngine {
     }
 
     /// 加载模块到缓存。
-    pub fn load_module(&mut self, plugin_id: &str, module_hash: &str, size_bytes: u64) -> WasmResult<()> {
+    pub fn load_module(
+        &mut self,
+        plugin_id: &str,
+        module_hash: &str,
+        size_bytes: u64,
+    ) -> WasmResult<()> {
         let module = CachedModule {
             plugin_id: plugin_id.to_string(),
             module_hash: module_hash.to_string(),
@@ -298,7 +293,9 @@ impl WasmEngine {
                 // 失败，记录崩溃并回收实例
                 self.crash_tracker.record_crash(&plugin_config.plugin_id);
                 // 尝试回收实例（如果存在）
-                if let Some(instance_id) = self.pool.get_instance(&plugin_config.plugin_id).map(|i| i.instance_id.clone()) {
+                if let Some(instance_id) =
+                    self.pool.get_instance(&plugin_config.plugin_id).map(|i| i.instance_id.clone())
+                {
                     self.pool.reclaim_instance(&instance_id);
                 }
                 Err(e)
@@ -327,11 +324,7 @@ impl WasmEngine {
     pub fn plugin_stats(&self, plugin_id: &str) -> WasmPluginStats {
         WasmPluginStats {
             plugin_id: plugin_id.to_string(),
-            instance_count: self
-                .pool
-                .get_instance(plugin_id)
-                .map(|_| 1)
-                .unwrap_or(0),
+            instance_count: self.pool.get_instance(plugin_id).map(|_| 1).unwrap_or(0),
             cache_hit: self.cache.get(plugin_id).is_some() as u32,
             crash_count: self.crash_tracker.crash_count(plugin_id),
             is_crash_exceeded: self.crash_tracker.is_exceeded(plugin_id),
@@ -489,7 +482,7 @@ mod tests {
         assert!(result.is_ok());
         let exec = result.unwrap();
         assert!(exec.host_fn_calls > 0);
-        assert!(engine.host_fn_calls().len() > 0);
+        assert!(!engine.host_fn_calls().is_empty());
     }
 
     #[test]
@@ -513,10 +506,7 @@ mod tests {
 
         let result = engine.execute(&config, "main", "{}");
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            WasmError::CrashLimitExceeded { .. }
-        ));
+        assert!(matches!(result.unwrap_err(), WasmError::CrashLimitExceeded { .. }));
     }
 
     // ── 清理测试 ──

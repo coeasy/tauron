@@ -14,6 +14,7 @@ import type {
   ShortcutChangeEventDetail,
   PluginToggleEventDetail,
   PluginUninstallEventDetail,
+  PluginInstallEventDetail,
 } from '@tauron/shell-events';
 import { ShortcutRecorderStore, type ShortcutRecorderState, type ModifierKey } from './shortcut-recorder.js';
 
@@ -25,6 +26,7 @@ export type {
   ShortcutChangeEventDetail,
   PluginToggleEventDetail,
   PluginUninstallEventDetail,
+  PluginInstallEventDetail,
 };
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -458,13 +460,25 @@ export class OcPluginManager extends LitElement {
     .toggle-switch.enabled .toggle-knob { left: 18px; }
     .uninstall-btn { padding: 6px 12px; font-size: 12px; border-radius: 6px; cursor: pointer; border: 1px solid var(--oc-danger-color, #dc3545); background: transparent; color: var(--oc-danger-color, #dc3545); }
     .uninstall-btn:hover { background: var(--oc-danger-color, #dc3545); color: white; }
+    .install-btn { padding: 8px 14px; border-radius: 6px; cursor: pointer; border: 0; background: var(--oc-primary-color, #2563eb); color: white; }
     .empty-state { text-align: center; padding: 32px; color: var(--oc-text-secondary, #868e96); }
+    .install-row { display: flex; gap: 8px; margin: 0 0 16px; }
+    .install-path { flex: 1; min-width: 0; padding: 8px; }
   `;
 
   private _plugins: PluginInfo[] = [];
+  private _packagePath = '';
 
   get plugins(): PluginInfo[] { return this._plugins; }
   set plugins(v: PluginInfo[]) { this._plugins = v; this.requestUpdate(); }
+
+  private _requestInstall(): void {
+    const packagePath = this._packagePath.trim();
+    if (!packagePath) return;
+    this.dispatchEvent(new CustomEvent(SHELL_EVENTS.pluginInstall, {
+      bubbles: true, composed: true, detail: { packagePath } satisfies PluginInstallEventDetail,
+    }));
+  }
 
   /**
    * 请求切换插件启用状态（派发 `oc-plugin-toggle`）。
@@ -496,13 +510,14 @@ export class OcPluginManager extends LitElement {
 
   protected override render() {
     if (this._plugins.length === 0) {
-      return html`<div class="empty-state">暂无插件</div>`;
+      return html`<div class="manager-header"><h2 class="manager-title">插件管理</h2></div>${this._installForm()}<div class="empty-state">暂无插件</div>`;
     }
     return html`
       <div class="manager-header">
         <h2 class="manager-title">插件管理</h2>
         <span>${this._plugins.filter(p => p.enabled).length}/${this._plugins.length} 已启用</span>
       </div>
+      ${this._installForm()}
       <div class="plugin-list">
         ${this._plugins.map((plugin) => html`
           <div class="plugin-item">
@@ -523,6 +538,14 @@ export class OcPluginManager extends LitElement {
         `)}
       </div>
     `;
+  }
+
+  private _installForm() {
+    return html`<div class="install-row">
+      <input class="install-path" aria-label="插件安装包路径" placeholder="本地 .tpkg 文件路径"
+        .value=${this._packagePath} @input=${(event: Event) => { this._packagePath = (event.target as HTMLInputElement).value; }} />
+      <button class="install-btn" @click=${() => this._requestInstall()}>安装插件</button>
+    </div>`;
   }
 }
 
@@ -578,5 +601,6 @@ declare global {
     'oc-plugin-toggle': CustomEvent<PluginToggleEventDetail>;
     /** `<oc-plugin-manager>` 请求卸载插件。 */
     'oc-plugin-uninstall': CustomEvent<PluginUninstallEventDetail>;
+    'oc-plugin-install': CustomEvent<PluginInstallEventDetail>;
   }
 }

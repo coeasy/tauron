@@ -58,8 +58,6 @@ mod tests {
 
     #[test]
     fn error_messages_are_specific() {
-        assert!(RecoveryError::TrialExhausted("p.x".into())
-            .to_string()
-            .contains("p.x"));
+        assert!(RecoveryError::TrialExhausted("p.x".into()).to_string().contains("p.x"));
     }
 }

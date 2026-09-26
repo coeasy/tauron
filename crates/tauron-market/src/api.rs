@@ -37,13 +37,7 @@ pub struct SearchRequest {
 
 impl Default for SearchRequest {
     fn default() -> Self {
-        Self {
-            query: String::new(),
-            category: None,
-            sort: None,
-            page: Some(1),
-            per_page: Some(20),
-        }
+        Self { query: String::new(), category: None, sort: None, page: Some(1), per_page: Some(20) }
     }
 }
 
@@ -305,12 +299,7 @@ impl MarketplaceApi {
             },
         ];
 
-        Ok(SearchResponse {
-            plugins,
-            total: 2,
-            page: 1,
-            per_page: 20,
-        })
+        Ok(SearchResponse { plugins, total: 2, page: 1, per_page: 20 })
     }
 
     /// 获取插件详情。
@@ -353,10 +342,7 @@ impl MarketplaceApi {
     }
 
     /// 检查插件更新。
-    pub fn check_updates(
-        &self,
-        request: &UpdateCheckRequest,
-    ) -> MarketResult<UpdateCheckResponse> {
+    pub fn check_updates(&self, request: &UpdateCheckRequest) -> MarketResult<UpdateCheckResponse> {
         let mut results = Vec::new();
 
         for (plugin_id, current_version) in &request.plugins {
@@ -383,8 +369,8 @@ impl MarketplaceApi {
     /// 安装插件。
     pub fn install(&mut self, request: &InstallRequest) -> MarketResult<InstallResponse> {
         // 检查是否被吊销（遍历所有 kid 检查该插件是否被吊销）
-        let revoked = self.revocation_list.revoked.values()
-            .any(|m| m.contains_key(&request.plugin_id));
+        let revoked =
+            self.revocation_list.revoked.values().any(|m| m.contains_key(&request.plugin_id));
         if revoked {
             return Err(MarketError::Revoked {
                 plugin: request.plugin_id.clone(),
@@ -393,10 +379,7 @@ impl MarketplaceApi {
         }
 
         // 模拟安装（实际实现会下载、验证、解压）
-        let version = request
-            .version
-            .clone()
-            .unwrap_or_else(|| "1.0.0".to_string());
+        let version = request.version.clone().unwrap_or_else(|| "1.0.0".to_string());
 
         // 记录审计日志
         self.audit_log.append(
@@ -429,18 +412,13 @@ impl MarketplaceApi {
             None,
         );
 
-        Ok(UninstallResponse {
-            success: true,
-            plugin_id: request.plugin_id.clone(),
-            error: None,
-        })
+        Ok(UninstallResponse { success: true, plugin_id: request.plugin_id.clone(), error: None })
     }
 
     /// 吊销插件。
     pub fn revoke(&mut self, request: &RevokeRequest) -> MarketResult<RevokeResponse> {
         // 记录吊销
-        self.revocation_list
-            .revoke(&request.kid, &request.plugin_id, 0);
+        self.revocation_list.revoke(&request.kid, &request.plugin_id, 0);
 
         // 记录审计日志
         self.audit_log.append(
@@ -451,11 +429,7 @@ impl MarketplaceApi {
             None,
         );
 
-        Ok(RevokeResponse {
-            success: true,
-            plugin_id: request.plugin_id.clone(),
-            revoked_at: 0,
-        })
+        Ok(RevokeResponse { success: true, plugin_id: request.plugin_id.clone(), revoked_at: 0 })
     }
 
     /// 获取审计日志。
@@ -475,10 +449,7 @@ impl MarketplaceApi {
 
     /// 检查插件是否被吊销。
     pub fn is_plugin_revoked(&self, plugin_id: &str) -> bool {
-        self.revocation_list
-            .revoked
-            .values()
-            .any(|m| m.contains_key(plugin_id))
+        self.revocation_list.revoked.values().any(|m| m.contains_key(plugin_id))
     }
 }
 
@@ -519,7 +490,7 @@ mod tests {
         let result = api.search(&request);
         assert!(result.is_ok());
         let response = result.unwrap();
-        assert!(response.plugins.len() > 0);
+        assert!(!response.plugins.is_empty());
         assert_eq!(response.page, 1);
     }
 
@@ -528,7 +499,7 @@ mod tests {
         let api = create_default_marketplace_api();
         let request = SearchRequest::default();
         let response = api.search(&request).unwrap();
-        assert!(response.plugins.len() > 0);
+        assert!(!response.plugins.is_empty());
         assert!(response.total > 0);
         assert!(response.per_page > 0);
     }
@@ -542,7 +513,7 @@ mod tests {
         assert!(result.is_ok());
         let detail = result.unwrap();
         assert!(!detail.summary.id.is_empty());
-        assert!(detail.versions.len() > 0);
+        assert!(!detail.versions.is_empty());
     }
 
     #[test]
@@ -596,10 +567,8 @@ mod tests {
     #[test]
     fn test_install() {
         let mut api = create_default_marketplace_api();
-        let request = InstallRequest {
-            plugin_id: "com.example.plugin-a".to_string(),
-            version: None,
-        };
+        let request =
+            InstallRequest { plugin_id: "com.example.plugin-a".to_string(), version: None };
         let result = api.install(&request);
         assert!(result.is_ok());
         let response = result.unwrap();
@@ -628,13 +597,12 @@ mod tests {
             plugin_id: "com.example.plugin-a".to_string(),
             kid: "key-1".to_string(),
             reason: Some("Test revocation".to_string()),
-        }).unwrap();
+        })
+        .unwrap();
 
         // 尝试安装已吊销插件
-        let request = InstallRequest {
-            plugin_id: "com.example.plugin-a".to_string(),
-            version: None,
-        };
+        let request =
+            InstallRequest { plugin_id: "com.example.plugin-a".to_string(), version: None };
         let result = api.install(&request);
         assert!(result.is_err());
     }
@@ -644,9 +612,7 @@ mod tests {
     #[test]
     fn test_uninstall() {
         let mut api = create_default_marketplace_api();
-        let request = UninstallRequest {
-            plugin_id: "com.example.plugin-a".to_string(),
-        };
+        let request = UninstallRequest { plugin_id: "com.example.plugin-a".to_string() };
         let result = api.uninstall(&request);
         assert!(result.is_ok());
         let response = result.unwrap();
@@ -678,7 +644,8 @@ mod tests {
             plugin_id: "com.example.plugin-a".to_string(),
             kid: "key-1".to_string(),
             reason: None,
-        }).unwrap();
+        })
+        .unwrap();
 
         assert!(api.is_plugin_revoked("com.example.plugin-a"));
     }
@@ -693,12 +660,11 @@ mod tests {
         api.install(&InstallRequest {
             plugin_id: "com.example.plugin-a".to_string(),
             version: None,
-        }).unwrap();
+        })
+        .unwrap();
 
         // 卸载
-        api.uninstall(&UninstallRequest {
-            plugin_id: "com.example.plugin-a".to_string(),
-        }).unwrap();
+        api.uninstall(&UninstallRequest { plugin_id: "com.example.plugin-a".to_string() }).unwrap();
 
         let audit = api.audit_log();
         assert!(audit.len() >= 2);
@@ -711,7 +677,8 @@ mod tests {
         api.install(&InstallRequest {
             plugin_id: "com.example.plugin-a".to_string(),
             version: None,
-        }).unwrap();
+        })
+        .unwrap();
 
         assert!(api.verify_audit_integrity());
     }
@@ -726,7 +693,8 @@ mod tests {
             plugin_id: "com.example.plugin-a".to_string(),
             kid: "key-1".to_string(),
             reason: None,
-        }).unwrap();
+        })
+        .unwrap();
 
         let revocation = api.revocation_list();
         assert!(revocation.has_key("key-1"));

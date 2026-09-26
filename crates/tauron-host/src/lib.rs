@@ -13,6 +13,7 @@
 //! "IPC 接线"分开验证。
 
 pub mod authz;
+pub mod call_delivery;
 pub mod config;
 pub mod error;
 pub mod eventbus;
@@ -22,19 +23,19 @@ pub mod registry;
 pub mod runtime;
 pub mod stream;
 
-pub use error::{ErrorCode, HostError, HostResult, guard};
+pub use authz::{AuthTier, CommandAuth, ADMIN_COMMANDS, COMMANDS};
+pub use config::{ClientConfig, RegistryConfigOverride};
+pub use error::{guard, ErrorCode, HostError, HostResult};
 pub use eventbus::{
-    BusStats, ChannelKind, EventBus, Frame, PublishResult, QueueStats, SubscribeOutcome,
-    MAX_QUEUE, OVERFLOW_STREAK_LIMIT,
+    BusStats, ChannelKind, EventBus, Frame, PublishResult, QueueStats, SubscribeOutcome, MAX_QUEUE,
+    OVERFLOW_STREAK_LIMIT,
 };
-pub use lifecycle::{Event, Guard, State, TransitionOutcome, PluginState, TRANSITIONS, MAX_RETRY};
+pub use lifecycle::{Event, Guard, PluginState, State, TransitionOutcome, MAX_RETRY, TRANSITIONS};
 pub use manifest::{
     AbiFingerprint, CommandContribute, Contributes, EntrySpec, EventDecl, EventsDecl,
-    MenuContribute, PanelContribute, Permission, PermissionEntry, PermissionIndex,
-    PluginIdentity, PluginId, PluginManifest, PluginType, Risk, SettingsTabContribute,
-    ShortcutContribute, SUPPORTED_PLATFORMS,
+    MenuContribute, PanelContribute, Permission, PermissionEntry, PermissionIndex, PluginId,
+    PluginIdentity, PluginManifest, PluginType, Risk, SettingsTabContribute, ShortcutContribute,
+    SUPPORTED_PLATFORMS,
 };
-pub use authz::{ADMIN_COMMANDS, COMMANDS, AuthTier, CommandAuth};
 pub use registry::{PendingCall, PluginEntry, PluginFilter, Registry, RegistryConfig};
 pub use runtime::{LeaseReaper, ReapOutcome, ReapStats, RuntimeHandle, RuntimeLease, RuntimeTable};
-pub use config::{ClientConfig, RegistryConfigOverride};

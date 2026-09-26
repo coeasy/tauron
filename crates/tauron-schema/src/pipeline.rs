@@ -82,13 +82,15 @@ fn inline(
 
     // ── `$ref` 展开 ────────────────────────────────────────────────
     if let Some(r) = m.get("$ref") {
-        let ptr = r.as_str().ok_or_else(|| SchemaError::Structure(format!("`{path}/$ref` 不是字符串")))?;
+        let ptr = r
+            .as_str()
+            .ok_or_else(|| SchemaError::Structure(format!("`{path}/$ref` 不是字符串")))?;
         let target = resolve_pointer(doc, ptr)?;
         if depth + 1 > MAX_REF_DEPTH || stack.contains(&ptr.to_string()) {
             return Err(SchemaError::RefCycle(ptr.to_string()));
         }
         stack.push(ptr.to_string());
-        let expanded = inline(&target, doc, stack, refs, depth + 1, path, ui_path, in_combo)?;
+        let expanded = inline(target, doc, stack, refs, depth + 1, path, ui_path, in_combo)?;
         stack.pop();
 
         // 与 `$ref` 并列的扩展属于当前位置，不是被引用节点。
@@ -185,7 +187,16 @@ fn inline(
                             let child_ui = push(ui_path, format!("[{i}]"));
                             arr.insert(
                                 i.to_string(),
-                                inline(sub, doc, stack, refs, depth, &child_path, &child_ui, in_combo)?,
+                                inline(
+                                    sub,
+                                    doc,
+                                    stack,
+                                    refs,
+                                    depth,
+                                    &child_path,
+                                    &child_ui,
+                                    in_combo,
+                                )?,
                             );
                         }
                         Value::Object(arr)
@@ -227,7 +238,8 @@ fn collapse_any_of_null(members: &[Value]) -> Option<Value> {
     if !types.contains(&Value::String("null".into())) {
         types.push(Value::String("null".into()));
     }
-    let value = if types.len() == 1 { types.into_iter().next().unwrap() } else { Value::Array(types) };
+    let value =
+        if types.len() == 1 { types.into_iter().next().unwrap() } else { Value::Array(types) };
     obj.insert("type".into(), value);
     Some(Value::Object(obj))
 }
@@ -432,12 +444,16 @@ mod tests {
                 format!("D{i}"),
                 Value::Object(Map::from_iter([
                     ("type".into(), Value::String("object".into())),
-                    ("properties".into(), Value::Object(Map::from_iter([(
-                        "next".into(),
-                        Value::Object(Map::from_iter([("$ref".into(), Value::String(
-                            format!("#/$defs/D{}", i + 1),
-                        ))])),
-                    )]))),
+                    (
+                        "properties".into(),
+                        Value::Object(Map::from_iter([(
+                            "next".into(),
+                            Value::Object(Map::from_iter([(
+                                "$ref".into(),
+                                Value::String(format!("#/$defs/D{}", i + 1)),
+                            )])),
+                        )])),
+                    ),
                 ])),
             );
         }
@@ -516,7 +532,9 @@ mod tests {
 
     #[test]
     fn collapses_option_deep_in_properties() {
-        let c = compile_ok(json!({"type":"object","properties":{"opt":{"anyOf":[{"type":"integer"},{"type":"null"}]}}}));
+        let c = compile_ok(
+            json!({"type":"object","properties":{"opt":{"anyOf":[{"type":"integer"},{"type":"null"}]}}}),
+        );
         assert_eq!(c.schema["properties"]["opt"], json!({"type":["integer","null"]}));
     }
 
@@ -611,7 +629,9 @@ mod tests {
 
     #[test]
     fn root_extension_is_at_ui_root() {
-        let c = compile_ok(json!({"type":"object","x-tauron":{"version":1,"label":"设置"},"properties":{}}));
+        let c = compile_ok(
+            json!({"type":"object","x-tauron":{"version":1,"label":"设置"},"properties":{}}),
+        );
         assert_eq!(c.ui_schema["ui:label"], "设置");
     }
 
@@ -646,7 +666,9 @@ mod tests {
     #[test]
     fn extension_inside_items_is_at_the_container_path() {
         // JSON Schema 2020-12 的 `items` 是对象，路径不增加段。
-        let c = compile_ok(json!({"type":"array","items":{"type":"string","x-tauron":{"version":1,"label":"项"}}}));
+        let c = compile_ok(
+            json!({"type":"array","items":{"type":"string","x-tauron":{"version":1,"label":"项"}}}),
+        );
         assert_eq!(c.ui_schema["ui:label"], "项");
     }
 
@@ -748,7 +770,8 @@ mod tests {
 
     #[test]
     fn compile_to_doc_shape() {
-        let doc = compile_to_doc(&json!({"type":"object","x-tauron":{"version":1,"label":"根"}})).unwrap();
+        let doc = compile_to_doc(&json!({"type":"object","x-tauron":{"version":1,"label":"根"}}))
+            .unwrap();
         assert!(doc.get("schema").is_some());
         assert!(doc.get("uiSchema").is_some());
         assert_eq!(doc["uiSchema"]["ui:label"], "根");

@@ -37,4 +37,4 @@ pub use error::{SchemaError, SchemaResult};
 pub use gate::{assert_flat, report, ShapeReport};
 pub use pipeline::{compile, compile_to_doc, Compiled, MAX_REF_DEPTH};
 pub use validate::{into_schema_error, validate, ValidationError};
-pub use xoc::{ALL_WIDGETS, EXT_KEY, KNOWN_KEYS, XOC_VERSION, Extension};
+pub use xoc::{Extension, ALL_WIDGETS, EXT_KEY, KNOWN_KEYS, XOC_VERSION};

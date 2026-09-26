@@ -1,7 +1,7 @@
 # Minimal App Example — tauron 应用层贯通示例
 
 可运行的集成示例：宿主主窗 + **iframe 沙箱插件**（握手/调用全协议）+
-**54 条 `host_*` 命令族**（底座 38 + 插件运行时 16）+ `@tauron/ui` Web Components。
+**59 条 `host_*` 命令族**（底座 39 + 插件运行时 20；`plugin-install` feature 另注册 2 条）+ `@tauron/ui` Web Components。
 
 ## 安装包获取与运行
 
@@ -34,12 +34,15 @@ pnpm tauri dev
 ```
 minimal-app/
 ├── index.html                 # 宿主主窗（入口 src/main.ts）
-├── plugin.html                # 沙箱 iframe 插件页（入口 src/plugin/first.ts）
+├── plugin.html                # 沙箱 iframe 插件页（legacy 对照，入口 src/plugin/legacy-first.ts）
+├── plugin-window.html         # 插件面板窗口页（0.4-A2 主推，入口 src/plugin/first.ts）
 ├── app-icon.svg               # 图标矢量源（tauri icon 的输入，1024×1024）
-├── vite.config.ts             # 双入口 rollup 配置
+├── vite.config.ts             # 三入口 rollup 配置
 ├── src/
-│   ├── main.ts                # 宿主侧全部接线（4 条链路）
-│   └── plugin/first.ts        # registerPlugin 声明式插件
+│   ├── main.ts                # 宿主侧全部接线（5 条链路）
+│   └── plugin/
+│       ├── first.ts           # @tauron/app-plugin-sdk 插件（createPlugin + 执行泵）
+│       └── legacy-first.ts    # legacy iframe 插件（deprecated，仅对照）
 ├── src-tauri/
 │   ├── src/main.rs            # root 注册 54 条命令 + state_init
 │   ├── Cargo.toml
@@ -59,11 +62,12 @@ pnpm dlx @tauri-apps/cli@2 icon app-icon.svg
 本示例是桌面应用，生成后可删掉这两个目录。`tauri.conf.json` 的 `bundle.icon`
 只列桌面端用到的那几个文件。
 
-## 四条演示链路
+## 五条演示链路
 
 | 链路 | 前端 | Rust |
 |---|---|---|
-| 沙箱插件 | `PluginBridge.createIframe('plugin.html')` → 握手 token 经 URL hash 注入 → `callPluginMethod(bridge,'format',…)` | 无（postMessage 协议） |
+| 沙箱插件（legacy） | `PluginBridge.createIframe('plugin.html')` → 握手 token 经 URL hash 注入 → `callPluginMethod(bridge,'format',…)` | 无（postMessage 协议） |
+| 跨主体调用（0.4-A1/A2 主推） | `ShellClient.windowCreate('com.example.formatter')` 开插件 webview（页面内 `@tauron/app-plugin-sdk` 的 `createPlugin` 注册命令即开执行泵）→ `ShellClient.callPlugin(…)` 投递 → 轮询 `callTakeResult` 取件 | `host_window_create` → `host_call_plugin`（JsCallDelivery 经事件总线投帧）→ `host_call_result`（插件泵回填）→ `host_call_take` |
 | 窗口控制 | `ShellClient.windowMinimize()` | `host_window_minimize` → `window.minimize()` 真实操作 |
 | 系统能力 | `DialogClient.clipboardRead()` / `AutoUpdateClient.checkUpdate()` | `host_clipboard_read`（进程内）/ `host_market_check`（模拟响应，带 `simulated:true`） |
 | UI | `<oc-toast>.push(…)` | — |
@@ -79,10 +83,13 @@ pnpm dlx @tauri-apps/cli@2 icon app-icon.svg
      前端用默认前缀 `plugin:tauron|`。**必须**为 `tauron` 插件配置
      capability/permission 授予所需命令——Tauri v2 对 `plugin:*` 命令强制 ACL，
      未授予会被运行时拒绝（"not allowed by ACL"）。
-2. **握手 token 通道**：宿主 `PluginBridge.createIframe` 把 token 注入
-   iframe URL hash（`#tauron-token=…`）；插件侧 `registerPlugin` →
+2. **握手 token 通道（legacy iframe 链路）**：宿主 `PluginBridge.createIframe`
+   把 token 注入 iframe URL hash（`#tauron-token=…`）；插件侧 `registerPlugin` →
    `createPluginContext` 从 hash 读回。插件页必须与真实 bridge 同宿主窗口
-   协作（见 `src/plugin/first.ts` 零配置即通）。
+   协作（见 `src/plugin/legacy-first.ts` 零配置即通）。
+   **0.4-A2 起 主推路径是 `@tauron/app-plugin-sdk`**（`src/plugin/first.ts`）：
+   插件跑在 `plugin-<id>` webview 里，经事件总线 + 调用投递与宿主通信，
+   无需宿主侧写桥接 handler。
 3. **深链接（可选生产件）**：接 `tauri-plugin-deep-link` 后，在
    `RunEvent::NewDeepLinkRequest` 回调里调用
    `tauron_adapter::tauri::deliver_deep_link(app, &url)`——双管道投递

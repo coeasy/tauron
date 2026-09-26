@@ -20,25 +20,30 @@
 #[cfg(feature = "tauri")]
 pub mod tauri;
 
+/// 进程插件投递实现（0.4-A1：Process 形态的 `CallDelivery` + sidecar 回帧接收器）。
+pub mod process_delivery;
+
 /// 启动恢复的持久化与崩溃检测（平台无关，纯 std）。
 mod recovery;
 
 pub use recovery::{BootRecord, LoadSource, RecoveryStore};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
 use tauron_host::{
+    call_delivery::{CallDelivery, DeliveryKind, JsCallDelivery, select_delivery},
     eventbus::{ChannelKind, EventBus, Frame, PublishResult, SubscribeOutcome},
+    guard,
     lifecycle::{Event, State as LifecycleStateName, TransitionOutcome},
     manifest::{EventDecl, PluginId, PluginManifest, PluginType},
     registry::{PluginSummary, Registry, RegistryConfig},
     runtime::{LeaseReaper, ReapOutcome, ReapStats, RuntimeHandle},
     stream::{StreamFrame, StreamKind},
-    guard, PendingCall,
+    PendingCall,
 };
 // R8 §2：装配器宏的**消费者**要在自己的函数签名里命名这些类型（返回 `HostResult`、
 // 匹配 `ErrorCode`），而 `tauron_plugin_as_host_command!` 展开时引用的
@@ -54,11 +59,16 @@ pub use tauron_host::config::ClientConfig;
 use tauron_i18n::{I18nEngine, ResourceBundle};
 use tauron_notify::{dispatch, DispatchSink, NotifyEntry, NotifyKind, NotifyStore};
 use tauron_proc::{
+    current_abi_contract, validate_abi, validate_spawn_config,
     AbiFingerprint as ProcAbiFingerprint, BinarySignature, CrashLimit, CrashTracker, ProcError,
-    ProcSpawner, SpawnConfig, current_abi_contract, validate_abi, validate_spawn_config,
+    ProcSpawner, SpawnConfig,
 };
-use tauron_recovery::{BootContextEntry, BootPhase, PluginState as RecoveryPluginState, RecoveryEngine};
+use tauron_recovery::{
+    BootContextEntry, BootPhase, PluginState as RecoveryPluginState, RecoveryEngine,
+};
 use tauron_settings::{Migration, SettingsError, SettingsStore};
+
+use crate::process_delivery::ProcessCallDelivery;
 
 /// 贡献注册条目（命令/菜单/面板/设置Tab）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -98,9 +108,7 @@ impl ContributesRegistry {
         if self.entries.len() >= MAX_CONTRIBUTES {
             return Err(tauron_host::HostError::new(
                 ErrorCode::E_REGISTRY_FULL,
-                format!(
-                    "贡献表已达上限 {MAX_CONTRIBUTES}；先 `clear_plugin` 或卸载插件再注册"
-                ),
+                format!("贡献表已达上限 {MAX_CONTRIBUTES}；先 `clear_plugin` 或卸载插件再注册"),
             ));
         }
         self.entries.push(entry);
@@ -149,10 +157,7 @@ impl AdapterConfig {
     ///
     /// `log_level` 不由本函数消费：日志初始化属于宿主进程的事（`tracing` 订阅者
     /// 在宿主侧装配），调用方可自行 `cfg.log_level()` 取用。
-    pub fn from_client_config(
-        cfg: &ClientConfig,
-        fallback_data_dir: Option<PathBuf>,
-    ) -> Self {
+    pub fn from_client_config(cfg: &ClientConfig, fallback_data_dir: Option<PathBuf>) -> Self {
         let recovery_data_dir = cfg
             .data_dir
             .as_deref()
@@ -166,7 +171,27 @@ impl AdapterConfig {
             recovery_data_dir,
             required_plugins: HashSet::new(),
             origin_allowlist: Vec::new(),
+            #[cfg(feature = "plugin-install")]
+            plugin_install_dir: None,
+            #[cfg(feature = "plugin-install")]
+            plugin_signing_keys: std::collections::BTreeMap::new(),
+            #[cfg(feature = "plugin-install")]
+            acl_signing_key: None,
         }
+    }
+
+    /// Configure signed package installation with host-owned trust material.
+    #[cfg(feature = "plugin-install")]
+    pub fn with_plugin_install(
+        mut self,
+        root: PathBuf,
+        signing_keys: std::collections::BTreeMap<String, Vec<u8>>,
+        acl_signing_key: Vec<u8>,
+    ) -> Self {
+        self.plugin_install_dir = Some(root);
+        self.plugin_signing_keys = signing_keys;
+        self.acl_signing_key = Some(acl_signing_key);
+        self
     }
 }
 
@@ -198,7 +223,299 @@ pub struct AdapterConfig {
     /// 比较前会去掉首尾空白与尾随 `/`。这是多宿主/混淆代理场景的防线：把非官方
     /// origin 的窗口挡在特权命令之外。
     pub origin_allowlist: Vec<String>,
+    /// Package installation root. Installation remains unavailable when unset.
+    #[cfg(feature = "plugin-install")]
+    pub plugin_install_dir: Option<PathBuf>,
+    /// Explicit trusted signer keys, keyed by the sidecar `kid`.
+    #[cfg(feature = "plugin-install")]
+    pub plugin_signing_keys: std::collections::BTreeMap<String, Vec<u8>>,
+    /// Host-provided ACL HMAC key. Never generated from a public constant.
+    #[cfg(feature = "plugin-install")]
+    pub acl_signing_key: Option<Vec<u8>>,
 }
+
+/// Result for a committed signed plugin installation.
+#[cfg(feature = "plugin-install")]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallResult {
+    pub plugin_id: String,
+    pub version: String,
+    pub install_path: String,
+    pub approved_permissions: Vec<String>,
+}
+
+/// Validated filesystem location for an installed JS plugin's entry page.
+#[cfg(feature = "plugin-install")]
+#[derive(Debug, Clone)]
+pub struct InstalledPluginUi {
+    pub plugin_id: String,
+    pub entry: PathBuf,
+}
+
+/// Resolve an enabled plugin's UI entry while constraining every path beneath the install root.
+#[cfg(feature = "plugin-install")]
+pub fn installed_plugin_ui(
+    state: &PluginRuntimeState,
+    plugin_id: &str,
+) -> HostResult<InstalledPluginUi> {
+    let config = state.install_config.as_ref().ok_or_else(|| {
+        HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "plugin-install 未配置安装目录（拒绝加载插件页面）",
+        )
+    })?;
+    let id = tauron_host::manifest::PluginId::new(plugin_id)?;
+    let registered = state.registry.find(&id).ok_or_else(|| {
+        HostError::new(ErrorCode::E_UNKNOWN_PLUGIN, format!("插件 `{plugin_id}` 不存在"))
+    })?;
+    if !matches!(
+        registered.state.state,
+        tauron_host::lifecycle::State::Enabled | tauron_host::lifecycle::State::Running
+    ) {
+        return Err(HostError::new(
+            ErrorCode::E_PLUGIN_DISABLED,
+            format!("插件 `{plugin_id}` 未启用"),
+        ));
+    }
+    let relative =
+        registered.manifest.entry.ui.as_deref().ok_or_else(|| {
+            HostError::new(ErrorCode::E_INVALID_MANIFEST, "JS 插件未声明 entry.ui")
+        })?;
+    let relative = PathBuf::from(relative);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "插件 UI 路径非法"));
+    }
+    let install_root = config.root.canonicalize().map_err(|e| {
+        HostError::new(ErrorCode::E_INSTALL_FAILED, format!("插件安装根目录不可用：{e}"))
+    })?;
+    let root = install_root
+        .join(plugin_id)
+        .canonicalize()
+        .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("插件目录不可用：{e}")))?;
+    if !root.starts_with(&install_root) {
+        return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "插件目录符号链接越出安装根目录"));
+    }
+    let entry = root.join(relative).canonicalize().map_err(|e| {
+        HostError::new(ErrorCode::E_INSTALL_FAILED, format!("插件 UI 文件不可用：{e}"))
+    })?;
+    if !entry.starts_with(&root) || !entry.is_file() {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "插件 UI 文件越出安装目录或不是普通文件",
+        ));
+    }
+    Ok(InstalledPluginUi { plugin_id: plugin_id.to_string(), entry })
+}
+
+#[cfg(feature = "plugin-install")]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPermissionReview {
+    pub permission: String,
+    pub risk: String,
+    pub description: String,
+    pub default_checked: bool,
+}
+
+#[cfg(feature = "plugin-install")]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallPreview {
+    pub plugin_id: String,
+    pub plugin_name: String,
+    pub version: String,
+    pub permissions: Vec<PluginPermissionReview>,
+}
+
+/// 可选能力未装配时的明确说明。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UnsupportedDomain {
+    pub domain: String,
+    pub reason: String,
+}
+
+/// 平台能力未装配时的线协议结果；不能把空值伪装成用户取消或成功。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UnsupportedBody {
+    pub supported: bool,
+    pub reason: String,
+    pub fallback: Option<String>,
+}
+
+/// 提供者结果：成功时保留原线形，缺少平台提供者时显式返回 UnsupportedBody。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum ProviderResult<T> {
+    Value(T),
+    Unsupported(UnsupportedBody),
+}
+
+/// 运行了明确降级路径并保留其结果（例如进程内剪贴板缓冲区）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DegradedValue<T> {
+    pub supported: bool,
+    pub reason: String,
+    pub fallback: String,
+    pub value: T,
+}
+
+fn unsupported_body(reason: &str, fallback: Option<&str>) -> UnsupportedBody {
+    UnsupportedBody {
+        supported: false,
+        reason: reason.to_string(),
+        fallback: fallback.map(str::to_string),
+    }
+}
+
+/// 宿主当前实际装配的命令面与未实现能力。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CapabilitiesBody {
+    pub families: Vec<String>,
+    pub commands: Vec<String>,
+    pub unsupported: Vec<UnsupportedDomain>,
+    pub plugin_runtime: bool,
+}
+
+/// 返回当前装配形态能力快照。能力列表与 handler 宏由 wire-gate 锁定一致。
+pub fn cmd_host_capabilities(state: &SubstrateState) -> HostResult<CapabilitiesBody> {
+    guard("host_capabilities", || {
+        let plugin_runtime = state.plugin_flags.get().is_some();
+        let mut commands = SUBSTRATE_COMMANDS.to_vec();
+        if plugin_runtime {
+            commands.extend_from_slice(PLUGIN_RUNTIME_COMMANDS);
+            #[cfg(feature = "plugin-install")]
+            commands.extend_from_slice(PLUGIN_INSTALL_COMMANDS);
+        }
+        Ok(CapabilitiesBody {
+            families: vec![
+                "shell".into(),
+                "ipc".into(),
+                "settings".into(),
+                "i18n".into(),
+                "notify".into(),
+                "recovery".into(),
+            ],
+            commands: commands.into_iter().map(str::to_string).collect(),
+            unsupported: [
+                "dialog",
+                "clipboard",
+                "deep-link-os",
+                "brand",
+                "market-update",
+                "fs",
+                "http",
+                "menu",
+                "tray",
+                "updater",
+            ]
+            .into_iter()
+            .map(|domain| UnsupportedDomain {
+                domain: domain.into(),
+                reason: format!("{domain} provider is not configured"),
+            })
+            .collect(),
+            plugin_runtime,
+        })
+    })?
+}
+
+/// 底座 handler 的命令面；wire-gate 与 `tauron_substrate_handler!` 比对。
+pub const SUBSTRATE_COMMANDS: &[&str] = &[
+    "host_window_minimize",
+    "host_window_maximize",
+    "host_window_restore",
+    "host_window_close",
+    "host_window_quit",
+    "host_window_relaunch",
+    "host_window_set_position",
+    "host_window_set_size",
+    "host_clipboard_write",
+    "host_clipboard_read",
+    "host_deep_link_register",
+    "host_dialog_open",
+    "host_dialog_save",
+    "host_dialog_message",
+    "host_dialog_confirm",
+    "host_market_check",
+    "host_market_download",
+    "host_market_install",
+    "host_events_publish",
+    "host_events_subscribe",
+    "host_events_unsubscribe",
+    "host_events_drain",
+    "host_i18n_t",
+    "host_i18n_t_params",
+    "host_i18n_set_locale",
+    "host_i18n_load",
+    "host_i18n_stats",
+    "host_i18n_cleanup_plugin",
+    "host_notify",
+    "host_notifications_list",
+    "host_notifications_read",
+    "host_settings_get",
+    "host_settings_set",
+    "host_settings_adopt_legacy",
+    "host_settings_migrate",
+    "host_recover_boot",
+    "host_recover_report",
+    "host_brand_info",
+    "host_capabilities",
+];
+
+/// 插件运行时 handler 相对底座增加的命令面；wire-gate 与 handler 宏比对。
+pub const PLUGIN_RUNTIME_COMMANDS: &[&str] = &[
+    "host_lifecycle_report",
+    "host_plugin_call",
+    "host_call_end",
+    "host_cancel",
+    "host_registry_list",
+    "host_registry_list_all",
+    "host_registry_admin",
+    "host_contributes_register",
+    "host_contributes_list",
+    "host_recover_trial_enable",
+    "host_stream_open",
+    "host_stream_write",
+    "host_stream_close",
+    "host_runtime_spawn",
+    "host_runtime_health",
+    "host_resource_stats",
+    "host_window_create",
+    // 0.4-A1 调用投递闭环：跨主体调用 / 结果回填 / 结果取件。
+    "host_call_plugin",
+    "host_call_result",
+    "host_call_take",
+];
+
+#[cfg(feature = "plugin-install")]
+pub const PLUGIN_INSTALL_COMMANDS: &[&str] =
+    &["host_registry_install", "host_registry_install_preview"];
+
+/// Feature-gated privileged command auth entries owned by this adapter. The core
+/// `tauron-host::authz` table intentionally knows nothing about optional domains.
+#[cfg(feature = "plugin-install")]
+pub const PLUGIN_INSTALL_AUTH: &[tauron_host::authz::CommandAuth] = &[
+    tauron_host::authz::CommandAuth {
+        command: "host_registry_install",
+        tier: tauron_host::authz::AuthTier::Privileged,
+        consumer: "宿主 UI 主窗（插件安装与权限审批）",
+        description: "安装经过签名验证的本地插件包并写入精确授权集",
+    },
+    tauron_host::authz::CommandAuth {
+        command: "host_registry_install_preview",
+        tier: tauron_host::authz::AuthTier::Privileged,
+        consumer: "宿主 UI 主窗（插件安装与权限审批）",
+        description: "验证签名插件包并返回安装前权限审批摘要",
+    },
+];
 
 /// 命令状态：宿主进程生命周期内的共享状态。
 ///
@@ -338,11 +655,7 @@ impl MemoryWindowSink {
         if ops.len() >= MAX_WINDOW_OPS {
             ops.remove(0);
         }
-        ops.push(WindowOpRecord {
-            op,
-            label: label.map(str::to_string),
-            detail,
-        });
+        ops.push(WindowOpRecord { op, label: label.map(str::to_string), detail });
     }
 
     /// 已记录的操作（按发生顺序）。
@@ -408,11 +721,14 @@ impl WindowSink for MemoryWindowSink {
 /// **对话框能力**（平台部分）。
 ///
 /// 四个方法与既有命令面对齐（`host_dialog_open` / `save` / `message` /
-/// `confirm`）。返回 `Ok(None)` / `Ok(false)` 一律表示**用户取消**（安全降级），
-/// 而**不是**"对话框弹过了、用户取消了"。真正的原生对话框需要
-/// `tauri-plugin-dialog`——**不在依赖闭包内**，因此本仓的 Tauri 实现
-/// （[`crate::tauri::TauriDialogSink`]）也是降级路径（见其文档注释）。
+/// `confirm`）。`native_supported() == false` 时命令返回 `UnsupportedBody`，
+/// 不把缺少 UI 伪装成用户取消。真正的原生对话框需要 provider；本仓 Tauri sink
+/// 当前也未接入该 provider。
 pub trait DialogSink: Send + Sync {
+    /// 对话框能力是否真实可用；默认缺省实现不支持。
+    fn native_supported(&self) -> bool {
+        false
+    }
     /// 打开文件（`directory = true` 时选目录）。`Ok(None)` = 取消。
     ///
     /// `multiple` 的**多选结果如何回传**当前无法表达：线形（`host_dialog_open`）
@@ -430,15 +746,8 @@ pub trait DialogSink: Send + Sync {
 
 /// 对话框 sink 的**降级**实现：没有任何原生 UI（缺省实现）。
 ///
-/// 语义与 R8 之前的桩逐字一致：
-/// - `open_file` / `save_file` → `Ok(None)`（= 用户取消）；
-/// - `confirm` → `Ok(false)`（= 取消；**既不是"用户点了否"，也不是"用户点了是"**）；
-/// - `message` → 什么都不弹。
-///
-/// ⚠️ **这不是"实现了对话框"**：依赖闭包内没有 `tauri-plugin-dialog`，也没有
-/// 任何原生对话框 API。"返回取消"是**安全**的降级（调用方按取消处理不会有破坏性
-/// 后果），而谎报"用户选了某个文件 / 点了确定"会让上层按伪造的用户意图行事——
-/// 那是安全缺陷，不是功能缺失。
+/// 方法体只提供默认内部值；命令层先检查 `native_supported()` 并对外返回
+/// `UnsupportedBody`，所以这些内部值不会被误认为用户操作结果。
 #[derive(Debug, Default)]
 pub struct NoopDialogSink;
 
@@ -785,11 +1094,7 @@ impl ProcRuntime {
     /// "崩溃预算形同虚设"的成因（缺省参数写错一次，门就永远不会关上）。
     pub fn new(spawner: Arc<dyn ProcSpawner>) -> Self {
         let limit = CrashLimit::default();
-        Self {
-            spawner,
-            crashes: Mutex::new(CrashTracker::new(limit.clone())),
-            limit,
-        }
+        Self { spawner, crashes: Mutex::new(CrashTracker::new(limit.clone())), limit }
     }
 
     /// 启动面（生产 = `std::process::Command`）。
@@ -873,6 +1178,22 @@ pub struct PluginRuntimeState {
     /// 进程细节（`std::process::Command`、存活探测）与崩溃窗口计数都在这一侧，
     /// 不进 `tauron-host`；核心只持有**租约**（`Registry` 的 `runtime` 表）。
     pub proc_runtime: Arc<ProcRuntime>,
+    /// 调用投递实现表（0.4-A1）：按插件形态选 `CallDelivery`。
+    ///
+    /// 未登记的类型（Rust/Wasm 在 A4 之前、或任何无实现者）落到
+    /// [`select_delivery`] 的 `UnwiredDelivery`，返回有类型的 `Unsupported`
+    /// 而非假装成功——这是「未装配 delivery」负向测试的落地点。
+    pub deliveries: Arc<HashMap<DeliveryKind, Box<dyn CallDelivery>>>,
+    #[cfg(feature = "plugin-install")]
+    install_config: Option<InstallRuntimeConfig>,
+}
+
+#[cfg(feature = "plugin-install")]
+#[derive(Clone)]
+struct InstallRuntimeConfig {
+    root: PathBuf,
+    signing_keys: std::collections::BTreeMap<String, Vec<u8>>,
+    acl_signing_key: Option<Vec<u8>>,
 }
 
 impl core::ops::Deref for PluginRuntimeState {
@@ -880,6 +1201,14 @@ impl core::ops::Deref for PluginRuntimeState {
 
     fn deref(&self) -> &SubstrateState {
         &self.substrate
+    }
+}
+
+#[cfg(feature = "plugin-install")]
+impl PluginRuntimeState {
+    /// Install root used by the host's read-only plugin asset protocol.
+    pub fn install_config_root(&self) -> Option<&PathBuf> {
+        self.install_config.as_ref().map(|config| &config.root)
     }
 }
 
@@ -944,7 +1273,7 @@ impl SubstrateState {
     /// **不消费 `cfg.registry`**：注册表属插件运行时（[`PluginRuntimeState`]），
     /// 底座装配不该顺带建一份——那正是 R1 要拆掉的东西。
     pub fn with_adapter_config(cfg: &AdapterConfig) -> Self {
-        let notify_store = NotifyStore::new(256).expect("NotifyStore::new(256) should succeed");
+        let notify_store = NotifyStore::new(512).expect("NotifyStore::new(512) should succeed");
 
         let mut store = match cfg.recovery_data_dir.clone() {
             Some(dir) => RecoveryStore::new(dir),
@@ -965,10 +1294,7 @@ impl SubstrateState {
 
         // 设置落盘：与恢复标记共用数据目录。读不回来（首次启动 / 文件损坏）时
         // 保留空文档并**如实记录**——不静默吞掉，也不因为一个坏文件拒绝启动。
-        let settings_path = cfg
-            .recovery_data_dir
-            .as_ref()
-            .map(|d| d.join(HOST_SETTINGS_FILE));
+        let settings_path = cfg.recovery_data_dir.as_ref().map(|d| d.join(HOST_SETTINGS_FILE));
         if let Some(path) = settings_path.as_ref() {
             match load_settings_doc(path) {
                 Ok(Some(entries)) => settings.restore(&entries),
@@ -1039,7 +1365,11 @@ impl PluginRuntimeState {
     /// 进程执行器用生产启动面（`std::process::Command`）。**测试请用**
     /// [`Self::with_spawner`]，否则会在 CI 上真起进程。
     pub fn with_substrate(substrate: Arc<SubstrateState>, cfg: AdapterConfig) -> Self {
-        Self::with_substrate_and_spawner(substrate, cfg, Arc::new(tauron_proc::CommandSpawner::new()))
+        Self::with_substrate_and_spawner(
+            substrate,
+            cfg,
+            Arc::new(tauron_proc::CommandSpawner::new()),
+        )
     }
 
     /// [`Self::with_substrate`] 的可注入变体：进程启动面由调用方给出。
@@ -1066,9 +1396,7 @@ impl PluginRuntimeState {
         // 的误用，静默吞掉会让故障表现为「对账写到了看不见的地方」。
         if substrate
             .plugin_flags
-            .set(Arc::new(RegistryFlagSink {
-                registry: registry.clone(),
-            }))
+            .set(Arc::new(RegistryFlagSink { registry: registry.clone() }))
             .is_err()
         {
             eprintln!(
@@ -1076,11 +1404,78 @@ impl PluginRuntimeState {
                  同一底座不应装配两个插件运行时。"
             );
         }
+        let proc_runtime = Arc::new(ProcRuntime::new(spawner));
+        let deliveries = Self::default_deliveries(&substrate, &registry, &proc_runtime);
         Self {
             substrate,
             registry,
             contributes: Arc::new(Mutex::new(ContributesRegistry::default())),
-            proc_runtime: Arc::new(ProcRuntime::new(spawner)),
+            proc_runtime,
+            deliveries: Arc::new(deliveries),
+            #[cfg(feature = "plugin-install")]
+            install_config: cfg.plugin_install_dir.map(|root| InstallRuntimeConfig {
+                root,
+                signing_keys: cfg.plugin_signing_keys,
+                acl_signing_key: cfg.acl_signing_key,
+            }),
+        }
+    }
+
+    /// 构建默认投递实现表（0.4-A1）。
+    ///
+    /// - `Js`：复用事件总线 request 通道（`JsCallDelivery`）。
+    /// - `Process`：经 sidecar stdin/stdout 帧回路（`ProcessCallDelivery`）；sidecar
+    ///   必须在 `cmd_runtime_spawn` 后处于运行中，`live_pid_of` 才能解析出 pid。
+    /// - `Rust` / `Wasm`：A4 之前无执行器，保持 unwired（落 `UnwiredDelivery`，
+    ///   诚实返回 `Unsupported`，不假装能调起）。
+    pub fn default_deliveries(
+        substrate: &Arc<SubstrateState>,
+        registry: &Arc<Registry>,
+        proc_runtime: &Arc<ProcRuntime>,
+    ) -> HashMap<DeliveryKind, Box<dyn CallDelivery>> {
+        let mut map: HashMap<DeliveryKind, Box<dyn CallDelivery>> = HashMap::new();
+        map.insert(
+            DeliveryKind::Js,
+            Box::new(JsCallDelivery::new(substrate.bus.clone(), registry.clone())),
+        );
+        map.insert(
+            DeliveryKind::Process,
+            Box::new(ProcessCallDelivery::new(proc_runtime.clone(), registry.clone())),
+        );
+        map
+    }
+
+    /// 按目标插件形态选投递实现并投递（0.4-A1）。
+    ///
+    /// 返回 `ProviderResult::Value(call)` = 已投递待应答；`ProviderResult::Unsupported`
+    /// = 未装配投递（无通路）。投递传输错误（队列满等）以 `Err` 透传。
+    pub fn deliver_call(&self, call: &PendingCall) -> HostResult<ProviderResult<PendingCall>> {
+        let target = match PluginId::new(&call.target) {
+            Ok(id) => id,
+            Err(_) => {
+                return Ok(ProviderResult::Unsupported(UnsupportedBody {
+                    supported: false,
+                    reason: format!("调用目标 `{}` 不是合法插件 id", call.target),
+                    fallback: None,
+                }));
+            }
+        };
+        let entry = self.registry.require(&target)?;
+        let kind = match entry.manifest.plugin_type {
+            PluginType::Js => DeliveryKind::Js,
+            PluginType::Process => DeliveryKind::Process,
+            PluginType::Rust => DeliveryKind::Native,
+            PluginType::Wasm => DeliveryKind::Wasm,
+        };
+        let delivery = select_delivery(kind, &self.deliveries);
+        let receipt = delivery.deliver(call)?;
+        if receipt.delivered {
+            Ok(ProviderResult::Value(call.clone()))
+        } else {
+            Ok(ProviderResult::Unsupported(unsupported_body(
+                &receipt.reason.unwrap_or_else(|| "无可用调用投递通路".into()),
+                None,
+            )))
         }
     }
 
@@ -1101,22 +1496,14 @@ struct RegistryFlagSink {
 
 impl PluginFlagSink for RegistryFlagSink {
     fn flag_snapshots(&self) -> Vec<(String, bool)> {
-        self.registry
-            .list_all()
-            .into_iter()
-            .map(|p| (p.id, p.disabled_by_safemode))
-            .collect()
+        self.registry.list_all().into_iter().map(|p| (p.id, p.disabled_by_safemode)).collect()
     }
 
     fn report_flag_event(&self, plugin_id: &str, enter_safemode: bool) -> Option<bool> {
         // 快照阶段已成功解析过同一个 id（确定性），这里再解析一次不会失败；
         // 真失败就当作注册表拒绝（计数 ignored），不 panic。
         let id = PluginId::new(plugin_id).ok()?;
-        let event = if enter_safemode {
-            Event::SafemodeEnter
-        } else {
-            Event::SafemodeExit
-        };
+        let event = if enter_safemode { Event::SafemodeEnter } else { Event::SafemodeExit };
         self.registry.report_event(&id, event).ok().map(|o| o.illegal)
     }
 }
@@ -1150,20 +1537,14 @@ mod substrate_only_tests {
         assert!(cmd_i18n_stats(&state).is_ok());
 
         // 插件侧写回口未注入 → 对账无事可做（空结果，而不是 panic 或静默失败）。
-        assert!(
-            state.plugin_flags.get().is_none(),
-            "底座-only 装配不得注入插件侧写回口"
-        );
+        assert!(state.plugin_flags.get().is_none(), "底座-only 装配不得注入插件侧写回口");
     }
 
     /// 插件运行时装配会注入写回口，且**共享同一份底座**（不是两份状态）。
     #[test]
     fn plugin_runtime_shares_one_substrate_and_injects_sink() {
         let plugin = PluginRuntimeState::new();
-        assert!(
-            plugin.substrate.plugin_flags.get().is_some(),
-            "多插件装配必须注入恢复对账写回口"
-        );
+        assert!(plugin.substrate.plugin_flags.get().is_some(), "多插件装配必须注入恢复对账写回口");
         // Deref：从底座侧写入，插件运行时侧立刻可见——同一份状态，不是拷贝。
         // 设置走 `SettingsStore`（R7-2），故这里用 Store 的 API 而不是裸 map。
         plugin.substrate.settings.lock().set_layer(
@@ -1172,11 +1553,7 @@ mod substrate_only_tests {
             serde_json::json!({"probe": 1}),
         );
         assert_eq!(
-            plugin
-                .settings
-                .lock()
-                .get_key(HOST_SETTINGS_NAMESPACE, "probe")
-                .unwrap(),
+            plugin.settings.lock().get_key(HOST_SETTINGS_NAMESPACE, "probe").unwrap(),
             Some(serde_json::json!(1)),
             "插件运行时与底座必须是同一份状态（同一 Arc，不是拷贝）"
         );
@@ -1387,18 +1764,12 @@ pub fn cmd_registry_list(
     subscribed_topics: &[String],
 ) -> HostResult<Vec<PluginSummary>> {
     let caller_id = caller.map(PluginId::new).transpose()?;
-    Ok(guard("registry_list", || {
-        state.registry.list_visible(caller_id.as_ref(), subscribed_topics)
-    })?)
+    guard("registry_list", || state.registry.list_visible(caller_id.as_ref(), subscribed_topics))
 }
 
 /// `host_registry_list_all`：全量列表（privileged 档 / 主窗 UI）。
-pub fn cmd_registry_list_all(
-    state: &PluginRuntimeState,
-) -> HostResult<Vec<PluginSummary>> {
-    Ok(guard("registry_list_all", || {
-        state.registry.list_all()
-    })?)
+pub fn cmd_registry_list_all(state: &PluginRuntimeState) -> HostResult<Vec<PluginSummary>> {
+    guard("registry_list_all", || state.registry.list_all())
 }
 
 /// `host_registry_list_all` 的**带身份判定**版本（wire 层转调的就是它）。
@@ -1453,14 +1824,14 @@ pub fn install_plugin_from_json(
             if let Some(id) = recovered_id {
                 // 已经装过就不覆盖（`record_install_failure` 会返回 E_PLUGIN_EXISTS）。
                 // 结果要进文案：留痕失败时不能宣称"已记入 INSTALL_FAILED"。
-                let recorded = state
-                    .registry
-                    .record_install_failure(id.clone(), reason.clone())
-                    .is_ok();
+                let recorded =
+                    state.registry.record_install_failure(id.clone(), reason.clone()).is_ok();
                 let tail = if recorded {
                     format!("插件 `{id}` 已记入 INSTALL_FAILED，可卸载")
                 } else {
-                    format!("插件 `{id}` **未**记入 INSTALL_FAILED（同 id 已在注册表，或注册表已满）")
+                    format!(
+                        "插件 `{id}` **未**记入 INSTALL_FAILED（同 id 已在注册表，或注册表已满）"
+                    )
                 };
                 return Err(HostError::new(
                     ErrorCode::E_INVALID_MANIFEST,
@@ -1476,16 +1847,314 @@ pub fn install_plugin_from_json(
     }
 }
 
+/// Install a signed local `.tpkg`; every trust input comes from host configuration or the
+/// explicit main-window approval. Unsupported runtime types fail before any side effect.
+#[cfg(feature = "plugin-install")]
+pub fn cmd_registry_install_as(
+    caller: &Caller,
+    state: &PluginRuntimeState,
+    package_path: &str,
+    approved_permissions: &[String],
+) -> HostResult<PluginInstallResult> {
+    require_main_window(caller, "host_registry_install")?;
+    guard("registry_install", || registry_install_inner(state, package_path, approved_permissions))?
+}
+
+#[cfg(feature = "plugin-install")]
+pub fn cmd_registry_install_preview_as(
+    caller: &Caller,
+    state: &PluginRuntimeState,
+    package_path: &str,
+) -> HostResult<PluginInstallPreview> {
+    require_main_window(caller, "host_registry_install_preview")?;
+    if package_path.trim().is_empty() {
+        return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "安装包路径不能为空"));
+    }
+    guard("registry_install_preview", || registry_install_preview_inner(state, package_path))?
+}
+
+#[cfg(feature = "plugin-install")]
+fn registry_install_preview_inner(
+    state: &PluginRuntimeState,
+    package_path: &str,
+) -> HostResult<PluginInstallPreview> {
+    use tauron_host::manifest::{embedded_permission_index, PluginType};
+    let (manifest, _signature) = read_verified_package(state, package_path)?;
+    if manifest.plugin_type != PluginType::Js {
+        return Err(HostError::new(ErrorCode::E_PLUGIN_TYPE_NO_RUNTIME, "当前仅支持 JS 插件安装"));
+    }
+    let index = embedded_permission_index();
+    let rows = tauron_acl::draft_grant_set(
+        manifest.id.as_str(),
+        &manifest.version.to_string(),
+        &manifest.framework.to_string(),
+        &manifest.permissions,
+        &manifest.scopes,
+        &index,
+        "preview",
+        unix_time_seconds(),
+        1,
+    )?;
+    Ok(PluginInstallPreview {
+        plugin_id: manifest.id.to_string(),
+        plugin_name: manifest.name,
+        version: manifest.version.to_string(),
+        permissions: rows
+            .grants
+            .into_iter()
+            .map(|grant| PluginPermissionReview {
+                permission: grant.permission,
+                risk: grant.risk.as_str().to_string(),
+                description: grant.description,
+                default_checked: grant.risk != tauron_host::manifest::Risk::High,
+            })
+            .collect(),
+    })
+}
+
+#[cfg(feature = "plugin-install")]
+fn registry_install_inner(
+    state: &PluginRuntimeState,
+    package_path: &str,
+    approved_permissions: &[String],
+) -> HostResult<PluginInstallResult> {
+    use std::collections::BTreeSet;
+    use tauron_acl::{draft_grant_set, validate_grants, AclStore};
+    use tauron_host::manifest::{embedded_permission_index, PluginType};
+
+    let config = state.install_config.as_ref().ok_or_else(|| {
+        HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "plugin-install 未配置安装目录、可信密钥与 ACL 密钥（拒绝安装）",
+        )
+    })?;
+    if config.acl_signing_key.as_ref().is_none_or(|key| key.len() < 32) {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "ACL HMAC key 未配置或少于 32 字节",
+        ));
+    }
+    let (manifest, archive) = read_verified_package(state, package_path)?;
+    if manifest.plugin_type != PluginType::Js {
+        return Err(HostError::new(
+            ErrorCode::E_PLUGIN_TYPE_NO_RUNTIME,
+            format!(
+                "本宿主当前仅接受具备 WebView runtime 的 JS 插件，拒绝 {:?}",
+                manifest.plugin_type
+            ),
+        ));
+    }
+    let declared: BTreeSet<String> =
+        manifest.permissions.iter().map(|p| p.as_str().to_string()).collect();
+    let approved: BTreeSet<String> = approved_permissions.iter().cloned().collect();
+    if declared != approved {
+        return Err(HostError::new(
+            ErrorCode::E_FORBIDDEN_PERMISSION,
+            "审批确认必须精确覆盖 manifest 权限集；扩权或缺项均拒绝",
+        ));
+    }
+    let index = embedded_permission_index();
+    let grants = draft_grant_set(
+        manifest.id.as_str(),
+        &manifest.version.to_string(),
+        &manifest.framework.to_string(),
+        &manifest.permissions,
+        &manifest.scopes,
+        &index,
+        "main-window",
+        unix_time_seconds(),
+        1,
+    )?;
+    validate_grants(&grants, &index)?;
+
+    let root = &config.root;
+    std::fs::create_dir_all(root).map_err(|e| {
+        HostError::new(ErrorCode::E_INSTALL_FAILED, format!("创建插件目录失败：{e}"))
+    })?;
+    let id = manifest.id.to_string();
+    let final_dir = root.join(&id);
+    let plugin_id = manifest.id.clone();
+    if state.registry.find(&plugin_id).is_some() {
+        return Err(HostError::new(
+            ErrorCode::E_PLUGIN_EXISTS,
+            format!("插件 `{id}` 已存在于注册表"),
+        ));
+    }
+    if final_dir.exists() {
+        return Err(HostError::new(
+            ErrorCode::E_PLUGIN_EXISTS,
+            format!("插件 `{id}` 已有安装目录"),
+        ));
+    }
+    let temp_dir = root.join(format!(".{id}.install-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&temp_dir).map_err(|e| {
+        HostError::new(ErrorCode::E_INSTALL_FAILED, format!("创建临时安装目录失败：{e}"))
+    })?;
+    let unpack_result = (|| -> HostResult<()> {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&archive))
+            .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("打开包失败：{e}")))?;
+        for i in 0..zip.len() {
+            let mut entry = zip
+                .by_index(i)
+                .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, e.to_string()))?;
+            let relative = PathBuf::from(entry.name());
+            if relative.as_os_str().is_empty()
+                || relative.is_absolute()
+                || relative.components().any(|c| !matches!(c, std::path::Component::Normal(_)))
+            {
+                return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "解包路径非法"));
+            }
+            let output = temp_dir.join(&relative);
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, e.to_string()))?;
+            }
+            if output.exists() {
+                return Err(HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("ZIP 路径重复：{}", relative.display()),
+                ));
+            }
+            let mut file = std::fs::File::create(&output)
+                .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, e.to_string()))?;
+            std::io::copy(&mut entry, &mut file)
+                .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, e.to_string()))?;
+        }
+        let js_entry = manifest
+            .entry
+            .js
+            .as_ref()
+            .ok_or_else(|| HostError::new(ErrorCode::E_INVALID_MANIFEST, "JS entry 缺失"))?;
+        if !temp_dir.join(js_entry).is_file() {
+            return Err(HostError::new(
+                ErrorCode::E_INSTALL_FAILED,
+                format!("包缺少 manifest entry `{js_entry}`"),
+            ));
+        }
+        Ok(())
+    })();
+    if let Err(error) = unpack_result {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(error);
+    }
+    std::fs::rename(&temp_dir, &final_dir).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        HostError::new(ErrorCode::E_INSTALL_FAILED, format!("安装目录原子提交失败：{e}"))
+    })?;
+
+    let acl_store =
+        AclStore::new(root.join(".acl"), config.acl_signing_key.clone().unwrap_or_default());
+    let mut acl_saved = false;
+    let result = (|| -> HostResult<()> {
+        state.registry.install(&index, manifest.clone())?;
+        match acl_store.save(&grants) {
+            Ok(_) => acl_saved = true,
+            Err(error) => {
+                let _ = state.registry.admin_op(&plugin_id, RegistryAdminOp::Purge);
+                return Err(error);
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if acl_saved {
+            let _ = std::fs::remove_file(acl_store.path_for(&id));
+        }
+        let _ = std::fs::remove_dir_all(&final_dir);
+        return Err(error);
+    }
+    Ok(PluginInstallResult {
+        plugin_id: id,
+        version: manifest.version.to_string(),
+        install_path: final_dir.to_string_lossy().into_owned(),
+        approved_permissions: approved.into_iter().collect(),
+    })
+}
+
+#[cfg(feature = "plugin-install")]
+fn unix_time_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "plugin-install")]
+fn read_verified_package(
+    state: &PluginRuntimeState,
+    package_path: &str,
+) -> HostResult<(PluginManifest, Vec<u8>)> {
+    let config = state.install_config.as_ref().ok_or_else(|| {
+        HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "plugin-install 未配置安装目录、可信密钥与 ACL 密钥（拒绝操作）",
+        )
+    })?;
+    if config.acl_signing_key.as_ref().is_none_or(|key| key.len() < 32) {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "ACL HMAC key 未配置或少于 32 字节",
+        ));
+    }
+    let source = PathBuf::from(package_path);
+    if source.extension().and_then(|e| e.to_str()) != Some("tpkg") {
+        return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "仅支持本地 .tpkg 安装"));
+    }
+    let sidecar_path = PathBuf::from(format!("{package_path}.sig"));
+    let archive = std::fs::read(&source)
+        .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("读取安装包失败：{e}")))?;
+    let sidecar = std::fs::read_to_string(&sidecar_path).map_err(|e| {
+        HostError::new(ErrorCode::E_INSTALL_FAILED, format!("读取签名 sidecar 失败：{e}"))
+    })?;
+    let envelope: tauron_market::package_signature::PackageSignature =
+        serde_json::from_str(&sidecar).map_err(|e| {
+            HostError::new(ErrorCode::E_INSTALL_FAILED, format!("sidecar 无效：{e}"))
+        })?;
+    let public_key = config.signing_keys.get(&envelope.kid).ok_or_else(|| {
+        HostError::new(ErrorCode::E_INSTALL_FAILED, format!("未信任的签名 kid `{}`", envelope.kid))
+    })?;
+    let (verified, manifest) =
+        tauron_market::package_signature::verify_tpkg(&archive, &sidecar, public_key)
+            .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, e.to_string()))?;
+    if verified.kid != envelope.kid {
+        return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "验签 kid 不一致"));
+    }
+    Ok((manifest, archive))
+}
+
 pub fn cmd_registry_admin(
     state: &PluginRuntimeState,
     plugin_id: &str,
     op: RegistryAdminOp,
 ) -> HostResult<TransitionOutcome> {
     let id = PluginId::new(plugin_id)?;
+    #[cfg(feature = "plugin-install")]
+    let staged_cleanup = stage_install_cleanup(state, id.as_str(), op)?;
     // `guard` 只负责把 panic 转成 `E_HOST_PANIC`，返回 `HostResult<T>`；
     // 这里 T 是注册表操作自身的 `HostResult<TransitionOutcome>`，故需双重 `?`：
     // 外层解 guard（panic 层），内层解操作结果。
-    let out = guard("registry_admin", || state.registry.admin_op(&id, op))??;
+    let out = match guard("registry_admin", || state.registry.admin_op(&id, op))? {
+        Ok(out) => out,
+        Err(error) => {
+            #[cfg(feature = "plugin-install")]
+            if let Some(stage) = staged_cleanup {
+                stage.restore()?;
+            }
+            return Err(error);
+        }
+    };
+
+    #[cfg(feature = "plugin-install")]
+    let cleanup_commit = if let Some(stage) = staged_cleanup {
+        if out.illegal || out.from == out.to {
+            stage.restore()?;
+            None
+        } else {
+            Some(stage)
+        }
+    } else {
+        None
+    };
 
     // 卸载/清除成功后，**所有按插件 id 为键的旁路状态**必须一起回收——它们不随
     // 注册表条目一起消失，不回收就是缓慢泄漏（卸载→重装循环会持续累积）：
@@ -1502,9 +2171,16 @@ pub fn cmd_registry_admin(
         && out.from != out.to
         && matches!(op, RegistryAdminOp::Uninstall | RegistryAdminOp::Purge)
     {
-        let bus = state.bus.lock();
-        bus.dispose_publisher(plugin_id);
-        bus.dispose_subscriber(plugin_id);
+        // 锁纪律：bus 锁**只**覆盖两个 dispose 调用，随后立即释放——不持着
+        // bus 锁去取 subscription_groups / contributes / i18n / notify / recovery
+        // 五把锁（此前整块共享一个 bus guard，形成一组未声明的嵌套序；虽然
+        // 全仓没有反向获取路径、不构成死锁环，但任何一方未来持这些锁取 bus
+        // 即成 ABBA）。各旁路状态的回收彼此独立，无需同持。
+        {
+            let bus = state.bus.lock();
+            bus.dispose_publisher(plugin_id);
+            bus.dispose_subscriber(plugin_id);
+        }
         prune_subscription_groups(state, plugin_id);
         state.contributes.lock().clear_plugin(plugin_id);
         state.i18n.lock().cleanup_plugin(plugin_id);
@@ -1534,6 +2210,11 @@ pub fn cmd_registry_admin(
     // 让安全模式失去意义。
     reconcile_recovery_phase(state);
 
+    #[cfg(feature = "plugin-install")]
+    if let Some(stage) = cleanup_commit {
+        stage.commit()?;
+    }
+
     Ok(out)
 }
 
@@ -1549,6 +2230,206 @@ pub fn cmd_registry_admin_as(
 ) -> HostResult<TransitionOutcome> {
     require_main_window(caller, "host_registry_admin")?;
     cmd_registry_admin(state, plugin_id, op)
+}
+
+#[cfg(feature = "plugin-install")]
+struct InstallCleanupStage {
+    plugin_path: PathBuf,
+    plugin_backup: Option<PathBuf>,
+    acl_path: PathBuf,
+    acl_backup: Option<PathBuf>,
+}
+
+#[cfg(feature = "plugin-install")]
+impl InstallCleanupStage {
+    fn restore(self) -> HostResult<()> {
+        if let Some(backup) = self.plugin_backup {
+            std::fs::rename(&backup, &self.plugin_path).map_err(|error| {
+                HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("恢复插件安装目录失败 `{}`：{error}", self.plugin_path.display()),
+                )
+            })?;
+        }
+        if let Some(backup) = self.acl_backup {
+            std::fs::rename(&backup, &self.acl_path).map_err(|error| {
+                HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("恢复插件 ACL 授予失败 `{}`：{error}", self.acl_path.display()),
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn commit(self) -> HostResult<()> {
+        let mut first_error = None;
+        if let Some(backup) = self.plugin_backup {
+            if let Err(error) = std::fs::remove_dir_all(&backup) {
+                first_error =
+                    Some(format!("清理已卸载插件目录 `{}` 失败：{error}", backup.display()));
+            }
+        }
+        if let Some(backup) = self.acl_backup {
+            if let Err(error) = std::fs::remove_file(&backup) {
+                first_error.get_or_insert_with(|| {
+                    format!("清理已卸载插件 ACL `{}` 失败：{error}", backup.display())
+                });
+            }
+        }
+        if let Some(message) = first_error {
+            return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, message));
+        }
+        Ok(())
+    }
+}
+
+/// Atomically hide installed files and grants before changing registry state. This keeps
+/// failed/illegal lifecycle transitions from leaving a registry/filesystem split-brain.
+#[cfg(feature = "plugin-install")]
+fn stage_install_cleanup(
+    state: &PluginRuntimeState,
+    plugin_id: &str,
+    op: RegistryAdminOp,
+) -> HostResult<Option<InstallCleanupStage>> {
+    if !matches!(op, RegistryAdminOp::Uninstall | RegistryAdminOp::Purge) {
+        return Ok(None);
+    }
+    let Some(config) = state.install_config.as_ref() else {
+        return Ok(None);
+    };
+    let Ok(root) = config.root.canonicalize() else {
+        return Ok(None);
+    };
+    let plugin_path = root.join(plugin_id);
+    let acl_dir = root.join(".acl");
+    let acl_path = acl_dir.join(format!("{plugin_id}.acl.json"));
+    let suffix = uuid::Uuid::new_v4();
+    let plugin_backup = root.join(format!(".{plugin_id}.uninstall-{suffix}"));
+    let acl_backup = acl_dir.join(format!(".{plugin_id}.uninstall-{suffix}.acl.json"));
+
+    let mut plugin_staged = false;
+    let mut acl_staged = false;
+    match std::fs::symlink_metadata(&plugin_path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return Err(HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    "插件安装路径不是安全的普通目录；拒绝卸载以避免越界删除",
+                ));
+            }
+            let canonical = plugin_path.canonicalize().map_err(|error| {
+                HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("解析插件安装路径失败：{error}"),
+                )
+            })?;
+            if !canonical.starts_with(&root) || canonical == root {
+                return Err(HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    "插件安装路径越出安装根目录；拒绝卸载",
+                ));
+            }
+            std::fs::rename(&plugin_path, &plugin_backup).map_err(|error| {
+                HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("暂存插件安装目录失败：{error}"),
+                )
+            })?;
+            plugin_staged = true;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(HostError::new(
+                ErrorCode::E_INSTALL_FAILED,
+                format!("检查插件安装目录失败：{error}"),
+            ))
+        }
+    }
+
+    match std::fs::symlink_metadata(&acl_dir) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                if plugin_staged {
+                    let _ = std::fs::rename(&plugin_backup, &plugin_path);
+                }
+                return Err(HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    "ACL 目录不是安全的普通目录；拒绝卸载",
+                ));
+            }
+            let canonical_acl_dir = match acl_dir.canonicalize() {
+                Ok(path) => path,
+                Err(error) => {
+                    if plugin_staged {
+                        let _ = std::fs::rename(&plugin_backup, &plugin_path);
+                    }
+                    return Err(HostError::new(
+                        ErrorCode::E_INSTALL_FAILED,
+                        format!("解析 ACL 目录失败：{error}"),
+                    ));
+                }
+            };
+            if !canonical_acl_dir.starts_with(&root) || canonical_acl_dir == root {
+                if plugin_staged {
+                    let _ = std::fs::rename(&plugin_backup, &plugin_path);
+                }
+                return Err(HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    "ACL 目录越出安装根目录；拒绝卸载",
+                ));
+            }
+            match std::fs::symlink_metadata(&acl_path) {
+                Ok(meta) => {
+                    if meta.file_type().is_symlink() || !meta.is_file() {
+                        if plugin_staged {
+                            let _ = std::fs::rename(&plugin_backup, &plugin_path);
+                        }
+                        return Err(HostError::new(
+                            ErrorCode::E_INSTALL_FAILED,
+                            "ACL 授予路径不是普通文件；拒绝卸载",
+                        ));
+                    }
+                    if let Err(error) = std::fs::rename(&acl_path, &acl_backup) {
+                        if plugin_staged {
+                            let _ = std::fs::rename(&plugin_backup, &plugin_path);
+                        }
+                        return Err(HostError::new(
+                            ErrorCode::E_INSTALL_FAILED,
+                            format!("暂存 ACL 授予失败：{error}"),
+                        ));
+                    }
+                    acl_staged = true;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    if plugin_staged {
+                        let _ = std::fs::rename(&plugin_backup, &plugin_path);
+                    }
+                    return Err(HostError::new(
+                        ErrorCode::E_INSTALL_FAILED,
+                        format!("检查 ACL 授予失败：{error}"),
+                    ));
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            if plugin_staged {
+                let _ = std::fs::rename(&plugin_backup, &plugin_path);
+            }
+            return Err(HostError::new(
+                ErrorCode::E_INSTALL_FAILED,
+                format!("检查 ACL 目录失败：{error}"),
+            ));
+        }
+    }
+    Ok(Some(InstallCleanupStage {
+        plugin_path,
+        plugin_backup: plugin_staged.then_some(plugin_backup),
+        acl_path,
+        acl_backup: acl_staged.then_some(acl_backup),
+    }))
 }
 
 /// `host_lifecycle_report`：上报生命周期事件（self 档）。
@@ -1575,10 +2456,7 @@ pub fn cmd_lifecycle_report(
     // 「插件报错 → 标志被清 → 插件重入」的往返抖动，且两套试验预算各自为
     // 政。这里把试验失败同步进引擎，对账立即静默、预算保持同向。
     // 只补这一条动作：其余动作（重试预算等）引擎不建模，注册表自己闭环。
-    if out
-        .actions
-        .contains(&tauron_host::lifecycle::Action::IncrementTrialFailure)
-    {
+    if out.actions.contains(&tauron_host::lifecycle::Action::IncrementTrialFailure) {
         if let Ok(id) = tauron_host::authz::resolve_self_identity(webview_label, claimed_id) {
             state.recovery.lock().record_trial_failure(id.as_str());
         }
@@ -1598,28 +2476,121 @@ pub fn cmd_plugin_call(
 ) -> HostResult<PendingCall> {
     guard("plugin_call", || {
         let id = tauron_host::authz::resolve_self_identity(webview_label, claimed_id)?;
-        state.registry.call_begin(&id, cmd, args)
+        let call = state.registry.call_begin(&id, cmd, args)?;
+        // A1 投递：把请求送到真正能执行它的一端（Js → 事件总线 request 通道）。
+        // 未装配投递（Rust/Wasm 在 A4 之前、或 Process 在 A3 之前）落到 unwired，
+        // 返回诚实的 `E_PLUGIN_TYPE_NO_RUNTIME` 而非假装成功。
+        match state.deliver_call(&call)? {
+            ProviderResult::Value(_) => Ok(call),
+            ProviderResult::Unsupported(b) => Err(HostError::new(
+                ErrorCode::E_PLUGIN_TYPE_NO_RUNTIME,
+                b.reason,
+            )),
+        }
+    })?
+}
+
+/// `host_call_plugin`：跨主体调用（0.4-A1）。宿主主窗与插件→插件共用。
+///
+/// `caller` 是发起主体（`"main"` 或插件 id），**配额记在它名下**；`target` 是执行主体。
+/// 返回 [`ProviderResult`]：`Value(call)` = 已投递待应答；`Unsupported` = 未装配投递
+/// （无通路）——不假装成功，前端据此读到 `reason` 而不是拿到一个永不结束的 pending。
+pub fn cmd_call_plugin(
+    state: &PluginRuntimeState,
+    caller: &str,
+    target: &str,
+    cmd: &str,
+    args: serde_json::Value,
+) -> HostResult<ProviderResult<PendingCall>> {
+    guard("call_plugin", || {
+        let call = state
+            .registry
+            .call_begin_cross(caller, target, caller, cmd, args)?;
+        state.deliver_call(&call)
+    })?
+}
+
+/// `host_call_result`：执行方回填一次调用的结果（0.4-A1 的结算入口）。
+///
+/// 只有执行方（call.target）能回填：身份必须 == target，否则伪造结果被拒。
+/// 结算后条目**保留**，等待发起方 [`cmd_call_take`] 取走。
+pub fn cmd_call_result(
+    state: &PluginRuntimeState,
+    webview_label: &str,
+    claimed_id: Option<&str>,
+    call_id: &str,
+    ok: bool,
+    result: Option<serde_json::Value>,
+    error_code: Option<String>,
+) -> HostResult<PendingCall> {
+    guard("call_result", || {
+        let id = tauron_host::authz::resolve_self_identity(webview_label, claimed_id)?;
+        // 只有执行方能回填：身份必须 == 该 call 的 target。
+        let target = state.registry.call_target(call_id)?;
+        if target != id.as_str() {
+            return Err(HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                format!(
+                    "插件 `{id}` 不是调用 `{call_id}` 的执行方（target=`{target}`），不得回填结果"
+                ),
+            ));
+        }
+        state.registry.settle_call(
+            call_id,
+            tauron_host::call_delivery::CallOutcome { ok, result, error_code },
+        )
+    })?
+}
+
+/// `host_call_take`：发起方取走一次已结算的结果（0.4-A1 的回执取件）。
+///
+/// 只有发起方（call.caller）能取：插件身份必须 == caller，或主窗取自己发起的调用。
+/// `Settled` 取走即删；`Pending` 返回副本、保留（调用方据此知道「还没好」）。
+pub fn cmd_call_take(
+    state: &PluginRuntimeState,
+    webview_label: &str,
+    // `claimed_id` 故意不使用：self 档命令的身份只从 webview label 派生
+    // （防冒充），与 `host_call_result` 不同——后者用 `claimed_id` 是因为
+    // `resolve_self_identity` 同时需要 label 与 claimed 来做插件身份校验。
+    // 这里 caller 既可能是插件也可能是主窗，直接用 `resolve_principal` 即可。
+    _claimed_id: Option<&str>,
+    call_id: &str,
+) -> HostResult<PendingCall> {
+    guard("call_take", || {
+        let principal = tauron_host::authz::resolve_principal(webview_label);
+        let caller = match &principal {
+            tauron_host::authz::Principal::Plugin(id) => id.as_str().to_string(),
+            tauron_host::authz::Principal::MainWindow => "main".to_string(),
+            tauron_host::authz::Principal::Invalid(_) => {
+                return Err(HostError::new(
+                    ErrorCode::E_AUTH_DENIED,
+                    "非法身份主体，不得取走调用结果",
+                ));
+            }
+        };
+        // 只有发起方能取：caller 必须 == 该 call 的 caller。
+        let pending = state.registry.peek_call(call_id)?;
+        if pending.caller != caller {
+            return Err(HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                format!(
+                    "主体 `{caller}` 不是调用 `{call_id}` 的发起方（caller=`{}`），不得取走结果",
+                    pending.caller
+                ),
+            ));
+        }
+        state.registry.take_call(call_id)
     })?
 }
 
 /// `host_call_end`：stream 终帧确认（self 档）。
-pub fn cmd_call_end(
-    state: &PluginRuntimeState,
-    call_id: &str,
-) -> HostResult<PendingCall> {
-    guard("call_end", || {
-        state.registry.call_end(call_id)
-    })?
+pub fn cmd_call_end(state: &PluginRuntimeState, call_id: &str) -> HostResult<PendingCall> {
+    guard("call_end", || state.registry.call_end(call_id))?
 }
 
 /// `host_cancel`：取消 pending call（self 档）。
-pub fn cmd_cancel(
-    state: &PluginRuntimeState,
-    call_id: &str,
-) -> HostResult<()> {
-    guard("cancel", || {
-        state.registry.call_cancel(call_id)
-    })?
+pub fn cmd_cancel(state: &PluginRuntimeState, call_id: &str) -> HostResult<()> {
+    guard("cancel", || state.registry.call_cancel(call_id))?
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -1650,10 +2621,7 @@ pub fn cmd_stream_open(
 ) -> HostResult<StreamOpened> {
     guard("stream_open", || {
         let stream_id = state.registry.stream_open(call_id, subscriber)?;
-        Ok(StreamOpened {
-            stream_id,
-            call_id: call_id.to_string(),
-        })
+        Ok(StreamOpened { stream_id, call_id: call_id.to_string() })
     })?
 }
 
@@ -1669,9 +2637,7 @@ pub fn cmd_stream_write(
     args_raw: Option<Vec<u8>>,
 ) -> HostResult<StreamFrame> {
     guard("stream_write", || {
-        state
-            .registry
-            .stream_write(stream_id, subscriber, args_json, args_raw)
+        state.registry.stream_write(stream_id, subscriber, args_json, args_raw)
     })?
 }
 
@@ -1691,9 +2657,7 @@ pub fn cmd_stream_close(
             format!("未知帧种类 `{kind}`（合法值：data | end | error）"),
         )
     })?;
-    guard("stream_close", || {
-        state.registry.stream_close(stream_id, subscriber, parsed)
-    })?
+    guard("stream_close", || state.registry.stream_close(stream_id, subscriber, parsed))?
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -1837,7 +2801,8 @@ pub fn cmd_runtime_spawn(
 
         // 预算门（只拦"需要启动新进程"的调用；已有活租约是纯查询语义）。
         // 状态侧已由上面的可用性门覆盖（`ERRORED_USER_CONFIRM` 也不 active）。
-        if state.registry.runtime_needs_restart(&id) && state.proc_runtime.is_crash_exceeded(plugin_id)
+        if state.registry.runtime_needs_restart(&id)
+            && state.proc_runtime.is_crash_exceeded(plugin_id)
         {
             return Err(refuse_exhausted_crash_budget(state, &id, plugin_id));
         }
@@ -1845,15 +2810,22 @@ pub fn cmd_runtime_spawn(
         // `started` 是**锁内**判定出来的"本次真的起了新进程"（幂等返回既有活租约
         // 时为 false），据此决定要不要把状态推到 RUNNING——见 `attach_after_spawn`。
         let (handle, started) = state.registry.runtime_ensure_lease(&id, || {
-            state
-                .proc_runtime
-                .spawner()
-                .spawn(&cfg)
-                .map(|p| p.pid)
-                .map_err(proc_error_to_host)
+            state.proc_runtime.spawner().spawn(&cfg).map(|p| p.pid).map_err(proc_error_to_host)
         })?;
         if started {
             attach_after_spawn(state, &id)?;
+            // 0.4-A1：真起了新进程就注册 stdout 帧接收器，闭合「宿主 → sidecar →
+            // 回帧 → 结算」链路。sidecar 回帧（含 `callId`）经读线程路由到这里，
+            // 由 `ProcessFrameSinkImpl` 调 `settle_call`。幂等：重复注册只是覆盖。
+            // 返回 `false` = 进程在读线程侧已 EOF（注册被拒绝以防泄漏表条目）：
+            // 此时 stdin 登记同样已被清掉，后续 `write_frame` 会以 `NotFound`
+            // 如实失败——无需在此造错误，死亡探测路径会回收租约。立即退出的
+            // sidecar 走这条竞态属正常，不视为错误。
+            let registered = state
+                .proc_runtime
+                .spawner()
+                .register_frame_sink(handle.pid, Arc::new(crate::process_delivery::ProcessFrameSinkImpl::new(state.registry.clone())));
+            let _ = registered; // 迟到 EOF：死亡探测兜底，见上注释
         }
         Ok(handle)
     })?
@@ -1924,8 +2896,9 @@ fn attach_after_spawn(state: &PluginRuntimeState, id: &PluginId) -> HostResult<(
 /// 拒绝）。崩溃预算耗尽正是同一件事的另一条成因，调用方的下一个动作也一样
 /// （去主窗确认/启用，而不是立刻重试）——因此不该造第二个含义相同的码。同时它
 /// **不可重试**（不在 `ErrorCode::retryable()` 里），正好保证框架层不会自动重试
-/// 一个已经明确要求人工介入的失败。`proc_error_to_host` 早就把
-/// `ProcError::CrashLimitExceeded` 映射到这个码，这里与它保持同一选择。
+/// 一个已经明确要求人工介入的失败。0.4 审计后 `ProcError` 不再承载崩溃预算变体
+/// （孤儿 `ProcRunner` 已删），adapter 的 `CrashTracker` 超限**直接**产
+/// `E_PLUGIN_DISABLED`，语义同源。
 ///
 /// **落点复用 `Event::ErrorFatal`**（不新增事件）：既有迁移表里
 /// `ENABLED/RUNNING + ERROR_FATAL → ERRORED_USER_CONFIRM`，语义就是"这个插件坏到
@@ -2013,6 +2986,86 @@ pub fn cmd_runtime_health_as(
     cmd_runtime_health(state, lease)
 }
 
+/// 主窗资源快照：展示每种有界资源的总占用/上限与逐插件占用。
+/// 插件明细取自对应资源表本身，不维护第二份计数状态。
+pub fn cmd_resource_stats(state: &PluginRuntimeState) -> HostResult<serde_json::Value> {
+    guard("resource_stats", || {
+        let plugins = state.registry.list_all();
+        let plugin_ids: Vec<String> = plugins.iter().map(|plugin| plugin.id.to_string()).collect();
+        let pending_used = state.registry.pending_len();
+        let pending_limit = state.registry.config().max_pending_calls;
+        let streams_used = state.registry.stream_active_total();
+        let subscriptions = state.bus.lock();
+        let subscriptions_used = subscriptions.subscription_total();
+        let subscription_usage: std::collections::BTreeMap<String, usize> = plugin_ids
+            .iter()
+            .map(|id| (id.clone(), subscriptions.subscription_count(id)))
+            .collect();
+        drop(subscriptions);
+
+        let notifications = state.notify_store.lock();
+        let notification_usage = notifications.group_counts();
+        let notification_capacity = notifications.capacity();
+        let notification_plugin_capacity = notifications.plugin_capacity();
+        let notification_used = notifications.len();
+        let notification_evictions = notifications.eviction_counts();
+        let notification_evictions_total = notifications.eviction_total();
+        let notification_counts: std::collections::BTreeMap<String, usize> = notification_usage
+            .into_iter()
+            .filter_map(|(key, count)| {
+                key.strip_prefix("plugin:").map(|id| (id.to_string(), count))
+            })
+            .collect();
+        drop(notifications);
+
+        let plugin_rows: Vec<serde_json::Value> = plugin_ids
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "pluginId": id,
+                    "pendingCalls": state.registry.pending_for(id),
+                    "streams": state.registry.stream_active_for(id),
+                    "subscriptions": subscription_usage.get(id).copied().unwrap_or_default(),
+                    "notifications": notification_counts.get(id).copied().unwrap_or_default(),
+                    "notificationEvictions": notification_evictions.get(id).copied().unwrap_or_default(),
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "global": {
+                "pendingCalls": { "used": pending_used, "limit": pending_limit },
+                "streams": { "used": streams_used, "limit": tauron_host::stream::MAX_STREAMS },
+                "subscriptions": {
+                    "used": subscriptions_used,
+                    "limit": tauron_host::eventbus::MAX_SUBSCRIPTIONS
+                },
+                "notifications": {
+                    "used": notification_used,
+                    "limit": notification_capacity,
+                    "perPluginLimit": notification_plugin_capacity,
+                    "evictedTotal": notification_evictions_total
+                }
+            },
+            "perPlugin": {
+                "pendingCallsLimit": tauron_host::registry::MAX_PENDING_PER_PLUGIN,
+                "streamsLimit": tauron_host::stream::MAX_STREAMS_PER_PLUGIN,
+                "subscriptionsLimit": tauron_host::eventbus::MAX_SUBSCRIPTIONS_PER_PLUGIN,
+                "plugins": plugin_rows
+            }
+        }))
+    })?
+}
+
+/// 资源诊断数据只允许主窗读取，避免暴露其他插件的活动量。
+pub fn cmd_resource_stats_as(
+    caller: &Caller,
+    state: &PluginRuntimeState,
+) -> HostResult<serde_json::Value> {
+    require_main_window(caller, "host_resource_stats")?;
+    cmd_resource_stats(state)
+}
+
 /// 崩溃的**投递**（两条既有通道，都不新造计数）：
 ///
 /// 1. `Event::RuntimeCrash` → 注册表状态机（`plugin.state` 的唯一写入者）。
@@ -2049,27 +3102,19 @@ fn deliver_runtime_crash(state: &PluginRuntimeState, plugin_id: &str) {
 /// - 配置不合格 → `E_INVALID_MANIFEST`（调用方改载荷即可）；
 /// - **ABI 契约不匹配 → `E_ABI_MISMATCH`**（独立成码，不与安装失败合并：这是
 ///   版本兼容问题，调用方该升级插件/宿主，而不是重装——前端据此才能给出正确提示）；
-/// - 验签 / hash 失败 → `E_INSTALL_FAILED`（与 `install()` 同类）；
-/// - 崩溃预算耗尽 → `E_PLUGIN_DISABLED`（与 D28「回落 disabled」同义）；
-/// - 其余（启动失败 / 超时 / 心跳丢失 / 进程终止）→ `E_INSTALL_FAILED`。
+/// - 其余（启动失败 / 进程终止）→ `E_INSTALL_FAILED`。
 ///
 /// 未映射成 `E_HOST_PANIC`：那会**谎报**“宿主 panic”并把它标成可重试
 /// （`retryable() == true`），前端会拿一个确定性的启动失败去无限重试。
+///
+/// 0.4 审计：`ProcError` 的孤儿变体（验签/帧上限/心跳/并发/崩溃预算等零产生点）
+/// 已随 `ProcRunner` 模拟器删除；adapter 自己的崩溃预算耗尽**直接**产
+/// `E_PLUGIN_DISABLED`（`cmd_runtime_spawn` 内），不经 `ProcError` 中转。
 fn proc_error_to_host(e: ProcError) -> HostError {
     let code = match &e {
         ProcError::InvalidSpawnConfig(_) => ErrorCode::E_INVALID_MANIFEST,
         ProcError::AbiMismatch { .. } => ErrorCode::E_ABI_MISMATCH,
-        ProcError::SignatureInvalid
-        | ProcError::HashMismatch
-        | ProcError::SpawnFailed(_)
-        | ProcError::ProcessTerminated(_)
-        | ProcError::Timeout(_)
-        | ProcError::HeartbeatLost(_)
-        | ProcError::FrameTooLarge { .. }
-        | ProcError::StdoutPollution(_)
-        | ProcError::ConcurrencyLimit { .. }
-        | ProcError::ConfigParse(_) => ErrorCode::E_INSTALL_FAILED,
-        ProcError::CrashLimitExceeded { .. } => ErrorCode::E_PLUGIN_DISABLED,
+        ProcError::SpawnFailed(_) | ProcError::ProcessTerminated(_) => ErrorCode::E_INSTALL_FAILED,
     };
     HostError::new(code, format!("进程执行器失败：{e}"))
 }
@@ -2110,10 +3155,7 @@ pub fn cmd_events_subscribe(
 }
 
 /// `host_events_unsubscribe`：退订事件（self 档）。
-pub fn cmd_events_unsubscribe(
-    state: &SubstrateState,
-    token: &str,
-) -> HostResult<()> {
+pub fn cmd_events_unsubscribe(state: &SubstrateState, token: &str) -> HostResult<()> {
     guard("events_unsubscribe", || {
         let bus = state.bus.lock();
         bus.unsubscribe(token)
@@ -2129,10 +3171,7 @@ pub fn cmd_events_unsubscribe(
 /// 回收键与 wire 层的建组键同源（`plugin_id_of(label)`），主窗的分组也会
 /// 在主窗销毁时随 label 原样值被回收。
 pub fn prune_subscription_groups(state: &SubstrateState, subscriber: &str) {
-    state
-        .subscription_groups
-        .lock()
-        .retain(|_, g| g.subscriber != subscriber);
+    state.subscription_groups.lock().retain(|_, g| g.subscriber != subscriber);
 }
 
 /// `host_events_drain`：拉取本插件待投递帧（self 档）。
@@ -2190,15 +3229,12 @@ fn load_settings_doc(
             return Err(HostError::new(
                 ErrorCode::E_INVALID_MANIFEST,
                 format!("设置文档读取失败：{e}"),
-            ))
+            ));
         }
     };
-    let entries: Vec<(String, tauron_settings::PluginState)> =
-        serde_json::from_str(&text).map_err(|e| {
-            HostError::new(
-                ErrorCode::E_INVALID_MANIFEST,
-                format!("设置文档 JSON 解析失败：{e}"),
-            )
+    let entries: Vec<(String, tauron_settings::PluginState)> = serde_json::from_str(&text)
+        .map_err(|e| {
+            HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("设置文档 JSON 解析失败：{e}"))
         })?;
     Ok(Some(entries))
 }
@@ -2214,10 +3250,7 @@ fn persist_settings_doc(state: &SubstrateState) -> HostResult<()> {
     };
     let entries = state.settings.lock().snapshot_all();
     let json = serde_json::to_string_pretty(&entries).map_err(|e| {
-        HostError::new(
-            ErrorCode::E_INVALID_MANIFEST,
-            format!("设置文档序列化失败：{e}"),
-        )
+        HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("设置文档序列化失败：{e}"))
     })?;
 
     if let Some(dir) = path.parent() {
@@ -2335,10 +3368,7 @@ fn install_host_settings_schema(store: &mut SettingsStore) {
 /// 复用 `E_INVALID_MANIFEST`，**不新增错误码**（TS 门禁要求两侧错误码同序）；
 /// 这与 `tauron-settings` 自己的约定一致（见该 crate 的模块文档）。
 fn settings_to_host_error(e: SettingsError) -> HostError {
-    HostError::new(
-        ErrorCode::E_INVALID_MANIFEST,
-        format!("设置被拒：{e}"),
-    )
+    HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("设置被拒：{e}"))
 }
 
 /// **接手一份旧版（v1）宿主设置文档**（R7-2：settings 可迁移）。
@@ -2375,34 +3405,24 @@ pub fn host_settings_adopt_legacy(
 /// 返回 `E_INVALID_MANIFEST`（不新增错误码）。
 pub fn host_settings_migrate(state: &SubstrateState) -> HostResult<usize> {
     let mut store = state.settings.lock();
-    store
-        .migrate(HOST_SETTINGS_NAMESPACE, HOST_SETTINGS_SCHEMA_V2)
-        .map_err(settings_to_host_error)
+    store.migrate(HOST_SETTINGS_NAMESPACE, HOST_SETTINGS_SCHEMA_V2).map_err(settings_to_host_error)
 }
 
 /// 当前宿主设置的数据版本（诊断用；`None` = 既无数据也无标注）。
 pub fn host_settings_data_version(state: &SubstrateState) -> Option<String> {
-    state
-        .settings
-        .lock()
-        .data_version(HOST_SETTINGS_NAMESPACE)
-        .map(str::to_string)
+    state.settings.lock().data_version(HOST_SETTINGS_NAMESPACE).map(str::to_string)
 }
 
 /// `host_settings_get`：读取设置。
 ///
 /// **线形不变**（前端契约）：入参 `key: string`，返回任意 JSON；未写过的键
 /// 返回 `Null`（不是报错）。读路径不校验 schema——缺键不是错误。
-pub fn cmd_settings_get(
-    state: &SubstrateState,
-    key: &str,
-) -> HostResult<serde_json::Value> {
+pub fn cmd_settings_get(state: &SubstrateState, key: &str) -> HostResult<serde_json::Value> {
     guard("settings_get", || {
         let path = settings_path(key);
         let store = state.settings.lock();
-        let value = store
-            .get_key(HOST_SETTINGS_NAMESPACE, &path)
-            .map_err(settings_to_host_error)?;
+        let value =
+            store.get_key(HOST_SETTINGS_NAMESPACE, &path).map_err(settings_to_host_error)?;
         Ok(value.unwrap_or(serde_json::Value::Null))
     })?
 }
@@ -2447,10 +3467,7 @@ pub fn cmd_settings_set(
 /// **线形**：入参 `doc: object`（键 = 设置键，值 = 设置值），返回 `()`。
 /// 非对象文档返回 `E_INVALID_MANIFEST`（不静默退化成空文档）。写入后数据版本
 /// 标注为 [`HOST_SETTINGS_SCHEMA_V1`]，[`cmd_settings_migrate`] 才知道起点。
-pub fn cmd_settings_adopt_legacy(
-    state: &SubstrateState,
-    doc: serde_json::Value,
-) -> HostResult<()> {
+pub fn cmd_settings_adopt_legacy(state: &SubstrateState, doc: serde_json::Value) -> HostResult<()> {
     guard("settings_adopt_legacy", || {
         host_settings_adopt_legacy(state, doc)?;
         // 接手旧版文档同样要落盘：只改内存态的话，重启后磁盘上的旧文档又盖回来，
@@ -2654,10 +3671,7 @@ pub fn cmd_notify_as(
 /// 返回**未分页**的可见集合（时间倒序）。分页由调用方在这之后做，原因见
 /// `notifications_list_payload`：反过来先分页再过滤，别人的通知会把窗口占满，
 /// 插件自己那几条反而被 `limit` 挤出去（"过滤了但自己的读不到"）。
-pub fn visible_notifications<'a>(
-    caller: &Caller,
-    store: &'a NotifyStore,
-) -> Vec<&'a NotifyEntry> {
+pub fn visible_notifications<'a>(caller: &Caller, store: &'a NotifyStore) -> Vec<&'a NotifyEntry> {
     // `recent(len)` = 整个环（时间倒序）；不能用 `recent(limit)` 拿到"全部再看"。
     let all = store.recent(store.len());
     match caller.plugin_id() {
@@ -2725,11 +3739,28 @@ fn notifications_list_payload(
                 })
             })
             .collect();
+        let plugin_usage: std::collections::BTreeMap<String, usize> = store
+            .group_counts()
+            .into_iter()
+            .filter_map(|(group, count)| {
+                let plugin_id = group.strip_prefix("plugin:")?;
+                match mine {
+                    None => Some((plugin_id.to_string(), count)),
+                    Some(caller_plugin) if caller_plugin == plugin_id => {
+                        Some((plugin_id.to_string(), count))
+                    }
+                    Some(_) => None,
+                }
+            })
+            .collect();
         Ok(serde_json::json!({
             "unread": unread,
             "total": total,
             "items": items,
             "dispatchLog": dispatch_log,
+            "capacity": store.capacity(),
+            "pluginCapacity": store.plugin_capacity(),
+            "pluginUsage": plugin_usage,
         }))
     })?
 }
@@ -2833,11 +3864,7 @@ pub fn cmd_notifications_read_as(
     // 归属反查只对插件有意义（主窗任意 id / None 都合法，不做多余查询）。
     if caller.plugin_id().is_some() {
         if let Some(nid) = id {
-            let owner = state
-                .notify_store
-                .lock()
-                .get(nid)
-                .map(|e| e.plugin_id.clone());
+            let owner = state.notify_store.lock().get(nid).map(|e| e.plugin_id.clone());
             let Some(owner) = owner else {
                 return Err(HostError::new(
                     ErrorCode::E_AUTH_DENIED,
@@ -2950,9 +3977,7 @@ fn reconcile_recovery_phase(state: &SubstrateState) -> PhaseReconcileOutcome {
                 if engine.plugin_state(id.as_str()).is_none() {
                     engine.register_plugin(id.as_str());
                 }
-                let should_enable = engine
-                    .plugin_state(id.as_str())
-                    .map_or(true, |s| s.is_enabled());
+                let should_enable = engine.plugin_state(id.as_str()).is_none_or(|s| s.is_enabled());
                 Some((id, should_enable, disabled_by_safemode))
             })
             .collect()
@@ -3000,11 +4025,7 @@ fn recovery_boot_payload(state: &SubstrateState) -> serde_json::Value {
         .into_iter()
         .map(|(id, st)| serde_json::json!({ "pluginId": id, "state": st.as_str() }))
         .collect();
-    let required_plugins: Vec<String> = engine
-        .required_plugins()
-        .iter()
-        .map(|s| s.clone())
-        .collect();
+    let required_plugins: Vec<String> = engine.required_plugins().iter().cloned().collect();
 
     let store = state.recovery_store.lock();
     let persistence = serde_json::json!({
@@ -3015,11 +4036,8 @@ fn recovery_boot_payload(state: &SubstrateState) -> serde_json::Value {
     });
     // 崩溃后诊断上下文：`RecoveryStore` 从标记文件读回来的**上一轮**关键事件
     // 摘要（含本次 `load` 识别到的那次崩溃）。锁定在 store 锁内物化。
-    let last_context: Vec<serde_json::Value> = store
-        .last_context
-        .iter()
-        .map(boot_context_entry_wire)
-        .collect();
+    let last_context: Vec<serde_json::Value> =
+        store.last_context.iter().map(boot_context_entry_wire).collect();
 
     serde_json::json!({
         // 线名与 TS `RecoveryBootResult` 消费字段逐字对齐（camelCase）。
@@ -3065,9 +4083,7 @@ fn boot_context_entry_wire(c: &BootContextEntry) -> serde_json::Value {
 /// 阶段判定落到插件侧的唯一途径是 [`reconcile_recovery_phase`]：它把引擎的判定
 /// 补发成 `SafemodeEnter` / `SafemodeExit`，由注册表状态机写入
 /// `disabled_by_safemode`——那才是 `<oc-plugin-manager>` 角标读取的值。
-pub fn cmd_recover_boot(
-    state: &SubstrateState,
-) -> HostResult<serde_json::Value> {
+pub fn cmd_recover_boot(state: &SubstrateState) -> HostResult<serde_json::Value> {
     guard("recover_boot", || Ok(recovery_boot_payload(state)))?
 }
 
@@ -3144,11 +4160,7 @@ pub fn cmd_recover_report(
 
         let payload = recovery_boot_payload(state);
         let mut result = payload.clone();
-        result["outcome"] = serde_json::json!(if is_success {
-            "success"
-        } else {
-            "failure"
-        });
+        result["outcome"] = serde_json::json!(if is_success { "success" } else { "failure" });
         result["engineAction"] = serde_json::json!(engine_action);
         result["suspectedPlugin"] = serde_json::json!(plugin_id);
         result["phaseReconcile"] = serde_json::to_value(phase).unwrap_or_default();
@@ -3301,13 +4313,8 @@ pub fn cmd_recover_trial_enable_as(
 ///
 /// （`host_market_check` 的实现在"壳扩展"一节，与 download/install 放在一起——
 /// R8 把三条商城命令的线形统一成有类型的结构，三个定义不该分散在两处。）
-pub fn cmd_brand_info(
-    _state: &SubstrateState,
-) -> HostResult<serde_json::Value> {
-    // 桩：返回空对象（TS `BrandInfo` 全字段可选，返回 Null 会让
-    // `info.name` 对 null 取属性而崩溃）。委托目标 tauron-brand crate
-    // 尚未接线（见 overview 组件表的接线状态披露）。
-    Ok(serde_json::json!({}))
+pub fn cmd_brand_info(_state: &SubstrateState) -> HostResult<UnsupportedBody> {
+    Ok(unsupported_body("brand provider is not configured", None))
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -3321,10 +4328,7 @@ pub fn cmd_brand_info(
 /// 的语言代码会污染回退链。
 fn validated_locale(raw: &str) -> HostResult<tauron_i18n::Locale> {
     raw.parse::<tauron_i18n::Locale>().map_err(|e| {
-        HostError::new(
-            ErrorCode::E_INVALID_MANIFEST,
-            format!("非法语言代码 `{raw}`：{e}"),
-        )
+        HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("非法语言代码 `{raw}`：{e}"))
     })
 }
 
@@ -3364,10 +4368,7 @@ fn i18n_state_payload(engine: &I18nEngine) -> serde_json::Value {
 /// （`en-US`）。**全部缺失时返回 key 本身**并计入缺失键计数——这是刻意设计：
 /// 让用户看到 `oc.settings.title` 比看到空按钮更能暴露缺失文案，而空串会让
 /// 问题彻底隐形。缺失可观测性见 `host_i18n_stats` 的 `missingTotal`。
-pub fn cmd_i18n_t(
-    state: &SubstrateState,
-    key: &str,
-) -> HostResult<String> {
+pub fn cmd_i18n_t(state: &SubstrateState, key: &str) -> HostResult<String> {
     guard("i18n_t", || {
         validated_key(key)?;
         Ok(state.i18n.lock().t(key))
@@ -3393,7 +4394,8 @@ pub fn cmd_i18n_t_params(
             };
             owned.push((name.clone(), text.to_string()));
         }
-        let pairs: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let pairs: Vec<(&str, &str)> =
+            owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         Ok(state.i18n.lock().t_params(key, &pairs))
     })?
 }
@@ -3430,16 +4432,13 @@ pub fn cmd_i18n_set_locale_as(
 ///
 /// **入口**：wire 层转调 [`cmd_i18n_set_locale_as`]（仅主窗：切的是全局语言），
 /// 本函数是**不过身份**的核心。
-pub fn cmd_i18n_set_locale(
-    state: &SubstrateState,
-    locale: &str,
-) -> HostResult<serde_json::Value> {
+pub fn cmd_i18n_set_locale(state: &SubstrateState, locale: &str) -> HostResult<serde_json::Value> {
     guard("i18n_set_locale", || {
         let validated = validated_locale(locale)?;
         let mut engine = state.i18n.lock();
-        engine
-            .set_locale(validated.as_str())
-            .map_err(|e| HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("切换语言失败：{e}")))?;
+        engine.set_locale(validated.as_str()).map_err(|e| {
+            HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("切换语言失败：{e}"))
+        })?;
         Ok(i18n_state_payload(&engine))
     })?
 }
@@ -3538,9 +4537,7 @@ pub fn cmd_i18n_load_as(
 }
 
 /// `host_i18n_stats`：i18n 状态与缺失键可观测性。
-pub fn cmd_i18n_stats(
-    state: &SubstrateState,
-) -> HostResult<serde_json::Value> {
+pub fn cmd_i18n_stats(state: &SubstrateState) -> HostResult<serde_json::Value> {
     guard("i18n_stats", || Ok(i18n_state_payload(&state.i18n.lock())))?
 }
 
@@ -3651,7 +4648,10 @@ pub fn cmd_window_quit(state: &SubstrateState) -> HostResult<()> {
 ///
 /// **仅主窗**：重启是应用级动作，插件 webview 触发它等于把"重启风暴"的开关交给
 /// 任意插件（而且它同时改写全局恢复阶段判定）。判定在代码层执行（不只是 ACL）。
-pub fn cmd_window_relaunch_as(caller: &Caller, state: &SubstrateState) -> HostResult<WindowRelaunchOutcome> {
+pub fn cmd_window_relaunch_as(
+    caller: &Caller,
+    state: &SubstrateState,
+) -> HostResult<WindowRelaunchOutcome> {
     require_main_window(caller, "host_window_relaunch")?;
     guard("window_relaunch", || {
         // ① **先**对账：把恢复引擎的阶段判定补发到插件侧（顺序不可交换，见文档）。
@@ -3721,10 +4721,7 @@ pub fn cmd_window_create_as(
             label: format!("plugin-{id}"),
             plugin_id: id.as_str().to_string(),
             url,
-            title: req
-                .title
-                .clone()
-                .unwrap_or_else(|| entry.manifest.name.clone()),
+            title: req.title.clone().unwrap_or_else(|| entry.manifest.name.clone()),
             width: req.width.unwrap_or(DEFAULT_WINDOW_WIDTH),
             height: req.height.unwrap_or(DEFAULT_WINDOW_HEIGHT),
         };
@@ -3765,6 +4762,15 @@ pub struct ShellExtState {
     /// **origin 允许清单（R4-D2）**：由 [`AdapterConfig::origin_allowlist`] 装配，
     /// 由 `tauri::origin_gate` 在命令分发入口读取。空 = 不启用。
     pub origin_allowlist: Vec<String>,
+    /// Local plugin package deployment directory (required to enable installation).
+    #[cfg(feature = "plugin-install")]
+    pub plugin_install_dir: Option<PathBuf>,
+    /// Trusted Ed25519 public keys keyed by package signer id.
+    #[cfg(feature = "plugin-install")]
+    pub plugin_signing_keys: std::collections::BTreeMap<String, Vec<u8>>,
+    /// Host-owned ACL HMAC key. Must be backed by host secure storage.
+    #[cfg(feature = "plugin-install")]
+    pub acl_signing_key: Option<Vec<u8>>,
 }
 
 /// `host_window_set_position`：移动调用方窗口到 `(x, y)`（逻辑像素/DIP）。
@@ -3810,23 +4816,26 @@ pub fn cmd_window_set_size(
     })?
 }
 
-/// `host_clipboard_write`：写入进程内剪贴板。
-pub fn cmd_clipboard_write(
-    state: &SubstrateState,
-    text: String,
-) -> HostResult<()> {
+/// 写入进程内缓冲区并明示系统剪贴板不支持。
+pub fn cmd_clipboard_write(state: &SubstrateState, text: String) -> HostResult<UnsupportedBody> {
     guard("clipboard_write", || {
         state.shell_ext.lock().clipboard = text;
-        Ok(())
+        Ok(unsupported_body(
+            "system clipboard provider is not configured",
+            Some("in-process-buffer"),
+        ))
     })?
 }
 
-/// `host_clipboard_read`：读取进程内剪贴板。
-pub fn cmd_clipboard_read(
-    state: &SubstrateState,
-) -> HostResult<String> {
+/// 读取进程内缓冲区并明示系统剪贴板不支持。
+pub fn cmd_clipboard_read(state: &SubstrateState) -> HostResult<DegradedValue<String>> {
     guard("clipboard_read", || {
-        Ok(state.shell_ext.lock().clipboard.clone())
+        Ok(DegradedValue {
+            supported: false,
+            reason: "system clipboard provider is not configured".to_string(),
+            fallback: "in-process-buffer".to_string(),
+            value: state.shell_ext.lock().clipboard.clone(),
+        })
     })?
 }
 
@@ -3858,7 +4867,7 @@ pub fn cmd_deep_link_register_as(
     caller: &Caller,
     state: &SubstrateState,
     protocol: String,
-) -> HostResult<()> {
+) -> HostResult<ProviderResult<()>> {
     require_main_window(caller, "host_deep_link_register")?;
     cmd_deep_link_register(state, protocol)
 }
@@ -3888,7 +4897,7 @@ pub fn cmd_deep_link_register_as(
 pub fn cmd_deep_link_register(
     state: &SubstrateState,
     protocol: String,
-) -> HostResult<()> {
+) -> HostResult<ProviderResult<()>> {
     guard("deep_link_register", || {
         // 空协议不是一个"稍微不对"的协议名，而是一次无意义的 OS 注册请求。
         if protocol.trim().is_empty() {
@@ -3911,14 +4920,19 @@ pub fn cmd_deep_link_register(
             let bus = state.bus.lock();
             bus.declare_topics(
                 DEEP_LINK_PUBLISHER,
-                &[EventDecl {
-                    topic: DEEP_LINK_TOPIC.to_string(),
-                    public: true,
-                }],
+                &[EventDecl { topic: DEEP_LINK_TOPIC.to_string(), public: true }],
             )?;
         }
         // 平台侧注册放在最后：应用层状态与 topic 都到位之后才谈"让 OS 认这个协议"。
-        state.deep_link_sink.register(&protocol)
+        state.deep_link_sink.register(&protocol)?;
+        if state.deep_link_sink.native_supported() {
+            Ok(ProviderResult::Value(()))
+        } else {
+            Ok(ProviderResult::Unsupported(unsupported_body(
+                "OS deep-link provider is not configured",
+                Some("internal-event-routing"),
+            )))
+        }
     })?
 }
 
@@ -3933,10 +4947,7 @@ pub const DEEP_LINK_PUBLISHER: &str = "core.deep-link";
 /// 即在该 URL 上收到（含 parseUrl 结构化解析）。
 ///
 /// 这不是一条新 IPC 命令（JS 不可调用，防伪造）——只供 Rust 侧回调使用。
-pub fn deep_link_delivered(
-    state: &SubstrateState,
-    url: &str,
-) -> HostResult<()> {
+pub fn deep_link_delivered(state: &SubstrateState, url: &str) -> HostResult<()> {
     guard("deep_link_delivered", || {
         let payload = serde_json::json!({
             "url": url,
@@ -4113,23 +5124,37 @@ pub fn cmd_market_install_as(
 
 /// `host_dialog_open`：打开文件/目录对话框。
 ///
-/// 转调 [`SubstrateState::dialog_sink`]。**缺省实现与 Tauri 实现当前都是降级路径**
-/// （无 `tauri-plugin-dialog`）：返回 `Ok(None)` = 取消，见 [`NoopDialogSink`]
-/// 与 `tauri.rs` 的 `TauriDialogSink` 文档注释——那里写清了"没弹原生对话框"。
+/// 缺少原生 provider 时返回 `UnsupportedBody`，有 provider 时 `None` 才表示用户取消。
 pub fn cmd_dialog_open(
     state: &SubstrateState,
     multiple: bool,
     directory: bool,
-) -> HostResult<Option<String>> {
-    guard("dialog_open", || state.dialog_sink.open_file(multiple, directory))?
+) -> HostResult<ProviderResult<Option<String>>> {
+    guard("dialog_open", || {
+        if !state.dialog_sink.native_supported() {
+            return Ok(ProviderResult::Unsupported(unsupported_body(
+                "native dialog provider is not configured",
+                None,
+            )));
+        }
+        state.dialog_sink.open_file(multiple, directory).map(ProviderResult::Value)
+    })?
 }
 
-/// `host_dialog_save`：保存文件对话框（`Ok(None)` = 取消）。
+/// `host_dialog_save`：保存文件对话框；缺少 provider 时返回 `UnsupportedBody`。
 pub fn cmd_dialog_save(
     state: &SubstrateState,
     default_name: Option<&str>,
-) -> HostResult<Option<String>> {
-    guard("dialog_save", || state.dialog_sink.save_file(default_name))?
+) -> HostResult<ProviderResult<Option<String>>> {
+    guard("dialog_save", || {
+        if !state.dialog_sink.native_supported() {
+            return Ok(ProviderResult::Unsupported(unsupported_body(
+                "native dialog provider is not configured",
+                None,
+            )));
+        }
+        state.dialog_sink.save_file(default_name).map(ProviderResult::Value)
+    })?
 }
 
 /// `host_dialog_message`：消息对话框。
@@ -4142,24 +5167,37 @@ pub fn cmd_dialog_message(
     title: &str,
     message: &str,
     kind: Option<&str>,
-) -> HostResult<()> {
+) -> HostResult<ProviderResult<()>> {
     guard("dialog_message", || {
         let kind = validated_dialog_kind(kind)?;
-        state.dialog_sink.message(kind, title, message)
+        if !state.dialog_sink.native_supported() {
+            return Ok(ProviderResult::Unsupported(unsupported_body(
+                "native dialog provider is not configured",
+                None,
+            )));
+        }
+        state.dialog_sink.message(kind, title, message).map(ProviderResult::Value)
     })?
 }
 
 /// `host_dialog_confirm`：确认对话框。
 ///
-/// 转调 [`SubstrateState::dialog_sink`]。降级实现恒 `Ok(false)`：它的语义是
-/// **"没弹过对话框"**，既不是"用户点了否"也不是"用户点了是"——破坏性操作不得用
-/// 它当用户确认（前端 `DialogClient.confirm` 的文档里有同样的话）。
+/// 缺少原生 provider 时返回 `UnsupportedBody`；只有真实 provider 的 `false`
+/// 才表示用户明确拒绝。
 pub fn cmd_dialog_confirm(
     state: &SubstrateState,
     title: &str,
     message: &str,
-) -> HostResult<bool> {
-    guard("dialog_confirm", || state.dialog_sink.confirm(title, message))?
+) -> HostResult<ProviderResult<bool>> {
+    guard("dialog_confirm", || {
+        if !state.dialog_sink.native_supported() {
+            return Ok(ProviderResult::Unsupported(unsupported_body(
+                "native dialog provider is not configured",
+                None,
+            )));
+        }
+        state.dialog_sink.confirm(title, message).map(ProviderResult::Value)
+    })?
 }
 
 /// 对话框 `kind` 的闭集校验（缺省 `info`）。
@@ -4187,7 +5225,7 @@ mod tests {
         ErrorCode,
     };
     // P0-2 测试用具：fake 启动面只实现 trait，不碰真进程。
-    use tauron_proc::{ProcResult, SpawnedProc};
+    use tauron_proc::{ProcessFrameSink, ProcResult, SpawnedProc};
 
     /// R4-D2 装配链路：`AdapterConfig.origin_allowlist` 必须流到 origin 门读取的
     /// `shell_ext` 上；默认装配 = 不启用（兼容既有宿主）。
@@ -4202,21 +5240,41 @@ mod tests {
             vec!["http://127.0.0.1:63896".to_string()]
         );
         assert!(
-            CommandState::new()
-                .shell_ext
-                .lock()
-                .origin_allowlist
-                .is_empty(),
+            CommandState::new().shell_ext.lock().origin_allowlist.is_empty(),
             "默认装配必须不启用 origin 门（缺省放行，兼容既有宿主）"
         );
     }
 
-    fn empty_index() -> PermissionIndex {
-        PermissionIndex {
-            version: 1,
-            generated_at: None,
-            entries: vec![],
+    #[test]
+    fn host_capabilities_matches_base_and_plugin_runtime_assemblies() {
+        let substrate = SubstrateState::with_adapter_config(&AdapterConfig::default());
+        let base = cmd_host_capabilities(&substrate).unwrap();
+        assert!(!base.plugin_runtime);
+        assert_eq!(base.commands.len(), 39);
+        assert!(base.commands.contains(&"host_capabilities".to_string()));
+
+        let plugin_runtime = CommandState::new();
+        let full = cmd_host_capabilities(&plugin_runtime).unwrap();
+        assert!(full.plugin_runtime);
+        #[cfg(feature = "plugin-install")]
+        let expected = 59 + PLUGIN_INSTALL_COMMANDS.len();
+        #[cfg(not(feature = "plugin-install"))]
+        // 59 = 56（0.4-A1 之前）+ host_call_plugin / host_call_result / host_call_take。
+        let expected = 59;
+        assert_eq!(full.commands.len(), expected);
+        assert_eq!(full.commands.iter().collect::<std::collections::HashSet<_>>().len(), expected);
+        for domain in
+            ["fs", "http", "dialog", "clipboard", "deep-link-os", "brand", "market-update"]
+        {
+            assert!(
+                full.unsupported.iter().any(|u| u.domain == domain),
+                "missing unsupported domain {domain}"
+            );
         }
+    }
+
+    fn empty_index() -> PermissionIndex {
+        PermissionIndex { version: 1, generated_at: None, entries: vec![] }
     }
 
     fn test_manifest(id: &str) -> PluginManifest {
@@ -4244,6 +5302,216 @@ mod tests {
             signature: None,
             publisher: None,
         }
+    }
+
+    #[cfg(feature = "plugin-install")]
+    fn signed_install_fixture(
+        dir: &std::path::Path,
+        id: &str,
+    ) -> (std::path::PathBuf, ed25519_dalek::VerifyingKey) {
+        use ed25519_dalek::{Signer, SigningKey};
+        use sha2::{Digest, Sha256};
+        use zip::write::SimpleFileOptions;
+
+        let manifest = serde_json::json!({
+            "id": id,
+            "name": "Install Fixture",
+            "version": "1.0.0",
+            "type": "js",
+            "entry": { "js": "src/index.js", "ui": "index.html" },
+            "permissions": ["store:allow-get"],
+            "framework": ">=0.1.0, <0.2.0"
+        });
+        let files = vec![
+            ("manifest.json", serde_json::to_vec(&manifest).unwrap()),
+            ("src/index.js", b"export const activate = () => true;".to_vec()),
+            ("index.html", b"<!doctype html><html><body>plugin</body></html>".to_vec()),
+        ];
+        let signed_files: Vec<serde_json::Value> = files
+            .iter()
+            .map(|(path, bytes)| {
+                serde_json::json!({
+                    "path": path,
+                    "size": bytes.len(),
+                    "hash": hex::encode(Sha256::digest(bytes)),
+                })
+            })
+            .collect();
+        let payload: Vec<u8> = signed_files
+            .iter()
+            .map(|file| file["hash"].as_str().unwrap().as_bytes().to_vec())
+            .flatten()
+            .collect();
+        let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+        let signature = signing_key.sign(&payload);
+        let sidecar = serde_json::json!({
+            "algorithm": "ed25519", "kid": "fixture-key", "issuedAt": "2026-09-26T00:00:00Z",
+            "signature": hex::encode(signature.to_bytes()), "files": signed_files,
+        });
+
+        let package = dir.join(format!("{id}.tpkg"));
+        let file = std::fs::File::create(&package).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        for (path, bytes) in files {
+            archive.start_file(path, SimpleFileOptions::default()).unwrap();
+            std::io::Write::write_all(&mut archive, &bytes).unwrap();
+        }
+        archive.finish().unwrap();
+        std::fs::write(format!("{}.sig", package.display()), sidecar.to_string()).unwrap();
+        (package, signing_key.verifying_key())
+    }
+
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn signed_package_preview_install_enable_call_and_uninstall_form_one_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("plugins");
+        let (package, verifying_key) = signed_install_fixture(dir.path(), "com.install.e2e");
+        let mut signing_keys = std::collections::BTreeMap::new();
+        signing_keys.insert("fixture-key".to_string(), verifying_key.to_bytes().to_vec());
+        let state = PluginRuntimeState::with_adapter_config(AdapterConfig {
+            plugin_install_dir: Some(install_root.clone()),
+            plugin_signing_keys: signing_keys,
+            acl_signing_key: Some(vec![0x5a; 32]),
+            ..AdapterConfig::default()
+        });
+
+        let preview =
+            cmd_registry_install_preview_as(&Caller::MainWindow, &state, package.to_str().unwrap())
+                .unwrap();
+        assert_eq!(preview.plugin_id, "com.install.e2e");
+        assert_eq!(
+            preview.permissions.iter().map(|p| p.permission.as_str()).collect::<Vec<_>>(),
+            ["store:allow-get"]
+        );
+
+        let denied =
+            cmd_registry_install_as(&Caller::MainWindow, &state, package.to_str().unwrap(), &[])
+                .unwrap_err();
+        assert_eq!(denied.code, ErrorCode::E_FORBIDDEN_PERMISSION);
+        assert!(!install_root.join("com.install.e2e").exists());
+        assert!(state.registry.find(&PluginId::new("com.install.e2e").unwrap()).is_none());
+
+        let installed = cmd_registry_install_as(
+            &Caller::MainWindow,
+            &state,
+            package.to_str().unwrap(),
+            &["store:allow-get".into()],
+        )
+        .unwrap();
+        assert!(std::path::Path::new(&installed.install_path).join("src/index.js").is_file());
+        assert!(std::path::Path::new(&installed.install_path).join("index.html").is_file());
+        assert!(install_root.join(".acl/com.install.e2e.acl.json").is_file());
+
+        cmd_registry_admin_as(
+            &Caller::MainWindow,
+            &state,
+            "com.install.e2e",
+            RegistryAdminOp::Enable,
+        )
+        .unwrap();
+        let pending =
+            cmd_plugin_call(&state, "plugin-com.install.e2e", None, "hello", serde_json::json!({}))
+                .unwrap();
+        assert_eq!(pending.plugin_id, "com.install.e2e");
+        cmd_call_end(&state, &pending.call_id).unwrap();
+
+        let uninstalled = cmd_registry_admin_as(
+            &Caller::MainWindow,
+            &state,
+            "com.install.e2e",
+            RegistryAdminOp::Uninstall,
+        )
+        .unwrap();
+        assert!(!uninstalled.illegal);
+        assert!(!install_root.join("com.install.e2e").exists());
+        assert!(!install_root.join(".acl/com.install.e2e.acl.json").exists());
+        assert!(state.registry.find(&PluginId::new("com.install.e2e").unwrap()).is_none());
+    }
+
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn invalid_package_signature_leaves_no_install_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("plugins");
+        let (package, verifying_key) = signed_install_fixture(dir.path(), "com.install.invalid");
+        let sidecar_path = std::path::PathBuf::from(format!("{}.sig", package.display()));
+        let sidecar = std::fs::read_to_string(&sidecar_path)
+            .unwrap()
+            .replace("\"signature\":\"", "\"signature\":\"00");
+        std::fs::write(sidecar_path, sidecar).unwrap();
+        let mut signing_keys = std::collections::BTreeMap::new();
+        signing_keys.insert("fixture-key".to_string(), verifying_key.to_bytes().to_vec());
+        let state = PluginRuntimeState::with_adapter_config(AdapterConfig {
+            plugin_install_dir: Some(install_root.clone()),
+            plugin_signing_keys: signing_keys,
+            acl_signing_key: Some(vec![0x5a; 32]),
+            ..AdapterConfig::default()
+        });
+        assert!(cmd_registry_install_as(
+            &Caller::MainWindow,
+            &state,
+            package.to_str().unwrap(),
+            &["store:allow-get".into()]
+        )
+        .is_err());
+        assert!(!install_root.join("com.install.invalid").exists());
+        assert!(state.registry.find(&PluginId::new("com.install.invalid").unwrap()).is_none());
+    }
+
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn acl_persistence_failure_rolls_back_package_directory_and_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("plugins");
+        std::fs::create_dir_all(&install_root).unwrap();
+        std::fs::write(install_root.join(".acl"), "not a directory").unwrap();
+        let (package, verifying_key) = signed_install_fixture(dir.path(), "com.install.aclfail");
+        let mut signing_keys = std::collections::BTreeMap::new();
+        signing_keys.insert("fixture-key".to_string(), verifying_key.to_bytes().to_vec());
+        let state = PluginRuntimeState::with_adapter_config(AdapterConfig {
+            plugin_install_dir: Some(install_root.clone()),
+            plugin_signing_keys: signing_keys,
+            acl_signing_key: Some(vec![0x5a; 32]),
+            ..AdapterConfig::default()
+        });
+        assert!(cmd_registry_install_as(
+            &Caller::MainWindow,
+            &state,
+            package.to_str().unwrap(),
+            &["store:allow-get".into()]
+        )
+        .is_err());
+        assert!(!install_root.join("com.install.aclfail").exists());
+        assert!(state.registry.find(&PluginId::new("com.install.aclfail").unwrap()).is_none());
+        assert_eq!(std::fs::read_to_string(install_root.join(".acl")).unwrap(), "not a directory");
+    }
+
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn failed_registry_uninstall_restores_staged_files_and_acl() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("plugins");
+        let plugin_path = install_root.join("com.install.orphan");
+        let acl_path = install_root.join(".acl/com.install.orphan.acl.json");
+        std::fs::create_dir_all(&plugin_path).unwrap();
+        std::fs::create_dir_all(acl_path.parent().unwrap()).unwrap();
+        std::fs::write(plugin_path.join("marker"), "preserve").unwrap();
+        std::fs::write(&acl_path, "grant").unwrap();
+        let state = PluginRuntimeState::with_adapter_config(AdapterConfig {
+            plugin_install_dir: Some(install_root.clone()),
+            ..AdapterConfig::default()
+        });
+        assert!(
+            cmd_registry_admin(&state, "com.install.orphan", RegistryAdminOp::Uninstall).is_err()
+        );
+        assert_eq!(std::fs::read_to_string(plugin_path.join("marker")).unwrap(), "preserve");
+        assert_eq!(std::fs::read_to_string(acl_path).unwrap(), "grant");
+        assert_eq!(
+            std::fs::read_dir(&install_root).unwrap().count(),
+            2,
+            "暂存目录恢复后不得留下隐藏残留"
+        );
     }
 
     #[test]
@@ -4286,12 +5554,7 @@ mod tests {
     #[test]
     fn cmd_lifecycle_report_unknown_label() {
         let state = CommandState::new();
-        let result = cmd_lifecycle_report(
-            &state,
-            "plugin-test.nonexistent",
-            None,
-            Event::Enable,
-        );
+        let result = cmd_lifecycle_report(&state, "plugin-test.nonexistent", None, Event::Enable);
         assert!(result.is_err());
         // label_to_plugin_id 应解析成功，但 registry 中没有该插件
         assert_eq!(result.unwrap_err().code, ErrorCode::E_UNKNOWN_PLUGIN);
@@ -4300,12 +5563,7 @@ mod tests {
     #[test]
     fn cmd_lifecycle_report_forged_identity() {
         let state = CommandState::new();
-        let result = cmd_lifecycle_report(
-            &state,
-            "plugin-p.real",
-            Some("p.fake"),
-            Event::Enable,
-        );
+        let result = cmd_lifecycle_report(&state, "plugin-p.real", Some("p.fake"), Event::Enable);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ErrorCode::E_AUTH_DENIED);
     }
@@ -4330,10 +5588,8 @@ mod tests {
         // 先声明 topic
         {
             let bus = state.bus.lock();
-            let decls = vec![EventDecl {
-                topic: "plugin:p.producer.ready".to_string(),
-                public: true,
-            }];
+            let decls =
+                vec![EventDecl { topic: "plugin:p.producer.ready".to_string(), public: true }];
             bus.declare_topics("p.producer", &decls).unwrap();
         }
         // 再发布
@@ -4355,10 +5611,8 @@ mod tests {
         // 声明 topic（声明者 = p.producer）
         {
             let bus = state.bus.lock();
-            let decls = vec![EventDecl {
-                topic: "plugin:p.producer.ready".to_string(),
-                public: true,
-            }];
+            let decls =
+                vec![EventDecl { topic: "plugin:p.producer.ready".to_string(), public: true }];
             bus.declare_topics("p.producer", &decls).unwrap();
         }
         // 另一个插件尝试发布 → 被丢弃（不报错，但 dropped=true）
@@ -4380,19 +5634,13 @@ mod tests {
         // 声明 public topic
         {
             let bus = state.bus.lock();
-            let decls = vec![EventDecl {
-                topic: "plugin:p.producer.ready".to_string(),
-                public: true,
-            }];
+            let decls =
+                vec![EventDecl { topic: "plugin:p.producer.ready".to_string(), public: true }];
             bus.declare_topics("p.producer", &decls).unwrap();
         }
         // 另一个插件订阅 → 成功（public topic 无需审批）
-        let result = cmd_events_subscribe(
-            &state,
-            "p.consumer",
-            "window-1",
-            "plugin:p.producer.ready",
-        );
+        let result =
+            cmd_events_subscribe(&state, "p.consumer", "window-1", "plugin:p.producer.ready");
         assert!(result.is_ok());
         let outcome = result.unwrap();
         assert!(!outcome.duplicate);
@@ -4404,10 +5652,7 @@ mod tests {
         let state = CommandState::new();
         {
             let bus = state.bus.lock();
-            let decls = vec![EventDecl {
-                topic: "plugin:p.ready".to_string(),
-                public: true,
-            }];
+            let decls = vec![EventDecl { topic: "plugin:p.ready".to_string(), public: true }];
             bus.declare_topics("p", &decls).unwrap();
         }
         // 同 subscriber × window × topic 重复订阅 → 幂等返回同一 token
@@ -4425,10 +5670,8 @@ mod tests {
         let state = CommandState::new();
         {
             let bus = state.bus.lock();
-            let decls = vec![EventDecl {
-                topic: "plugin:p.producer.ready".to_string(),
-                public: true,
-            }];
+            let decls =
+                vec![EventDecl { topic: "plugin:p.producer.ready".to_string(), public: true }];
             bus.declare_topics("p.producer", &decls).unwrap();
         }
 
@@ -4445,8 +5688,8 @@ mod tests {
         assert_eq!(pr.delivered, 1, "publish must enqueue for the subscriber");
 
         // 取件：host_events_publish 走可靠语义（Request 通道）
-        let frames = cmd_events_drain(&state, "p.consumer", "request")
-            .expect("drain should succeed");
+        let frames =
+            cmd_events_drain(&state, "p.consumer", "request").expect("drain should succeed");
         assert_eq!(frames.len(), 1, "drain must return the queued frame");
         assert_eq!(frames[0].topic, "plugin:p.producer.ready");
         assert_eq!(frames[0].payload, serde_json::json!({"v": 1}));
@@ -4488,10 +5731,7 @@ mod tests {
         // 声明私有 topic
         {
             let bus = state.bus.lock();
-            let decls = vec![EventDecl {
-                topic: "plugin:p.private".to_string(),
-                public: false,
-            }];
+            let decls = vec![EventDecl { topic: "plugin:p.private".to_string(), public: false }];
             bus.declare_topics("p", &decls).unwrap();
         }
         // 另一个插件订阅私有 topic → 拒绝
@@ -4513,10 +5753,7 @@ mod tests {
         // 1. 声明 topic
         {
             let bus = state.bus.lock();
-            let decls = vec![EventDecl {
-                topic: "plugin:p.ready".to_string(),
-                public: true,
-            }];
+            let decls = vec![EventDecl { topic: "plugin:p.ready".to_string(), public: true }];
             bus.declare_topics("p.producer", &decls).unwrap();
         }
         // 2. 订阅
@@ -4595,19 +5832,13 @@ mod tests {
         assert_eq!(cmd_notifications_list(&state, None).unwrap()["unread"], 0);
 
         // 未知 id：marked 0，不 panic。
-        assert_eq!(
-            cmd_notifications_read(&state, Some("nope")).unwrap()["marked"],
-            0
-        );
+        assert_eq!(cmd_notifications_read(&state, Some("nope")).unwrap()["marked"], 0);
     }
 
     #[test]
     fn uninstall_recycles_plugin_notifications() {
         let state = CommandState::new();
-        state
-            .registry
-            .install(&empty_index(), test_manifest("com.a"))
-            .unwrap();
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
         cmd_notify(&state, "com.a", "T", "B").unwrap();
         cmd_registry_admin(&state, "com.a", RegistryAdminOp::Uninstall).unwrap();
         let snap = cmd_notifications_list(&state, None).unwrap();
@@ -4639,10 +5870,7 @@ mod tests {
 
     fn installed_state(id: &str) -> CommandState {
         let state = CommandState::new();
-        state
-            .registry
-            .install(&empty_index(), test_manifest(id))
-            .unwrap();
+        state.registry.install(&empty_index(), test_manifest(id)).unwrap();
         // 发起调用前必须处于 Enabled：`call_begin` 对 INSTALLED 直接拒绝
         // （E_PLUGIN_DISABLED），这是生命周期门，不是本轮的流式逻辑。
         cmd_registry_admin(&state, id, RegistryAdminOp::Enable).unwrap();
@@ -4653,15 +5881,13 @@ mod tests {
     #[test]
     fn stream_roundtrip_three_frames_then_end() {
         let state = installed_state("com.a");
-        let call = cmd_plugin_call(&state, "plugin-com.a", Some("com.a"), "format", serde_json::json!({}))
-            .unwrap();
+        let call =
+            cmd_plugin_call(&state, "plugin-com.a", Some("com.a"), "format", serde_json::json!({}))
+                .unwrap();
 
         // wire 层把 channel 转成 sink 后在这里登记（生产路径见 `wire_plugin_call`）。
         let sink = Arc::new(StreamRecorder::default());
-        state
-            .registry
-            .stream_bind(&call.call_id, &call.plugin_id, sink.clone())
-            .unwrap();
+        state.registry.stream_bind(&call.call_id, &call.plugin_id, sink.clone()).unwrap();
 
         let opened = cmd_stream_open(&state, "com.a", &call.call_id).unwrap();
         assert_eq!(opened.call_id, call.call_id);
@@ -4696,13 +5922,11 @@ mod tests {
     #[test]
     fn stream_carries_binary_payload_without_base64() {
         let state = installed_state("com.a");
-        let call = cmd_plugin_call(&state, "plugin-com.a", Some("com.a"), "fmt", serde_json::json!({}))
-            .unwrap();
+        let call =
+            cmd_plugin_call(&state, "plugin-com.a", Some("com.a"), "fmt", serde_json::json!({}))
+                .unwrap();
         let sink = Arc::new(StreamRecorder::default());
-        state
-            .registry
-            .stream_bind(&call.call_id, &call.plugin_id, sink.clone())
-            .unwrap();
+        state.registry.stream_bind(&call.call_id, &call.plugin_id, sink.clone()).unwrap();
         let opened = cmd_stream_open(&state, "com.a", &call.call_id).unwrap();
 
         let bytes = vec![0u8, 159, 146, 150, 255];
@@ -4717,8 +5941,9 @@ mod tests {
     #[test]
     fn stream_open_without_carrier_is_rejected() {
         let state = installed_state("com.a");
-        let call = cmd_plugin_call(&state, "plugin-com.a", Some("com.a"), "fmt", serde_json::json!({}))
-            .unwrap();
+        let call =
+            cmd_plugin_call(&state, "plugin-com.a", Some("com.a"), "fmt", serde_json::json!({}))
+                .unwrap();
         let err = cmd_stream_open(&state, "com.a", &call.call_id).unwrap_err();
         assert_eq!(err.code, ErrorCode::E_CALL_NOT_FOUND);
         assert!(err.message.contains("没有帧载体"), "message={}", err.message);
@@ -4728,17 +5953,12 @@ mod tests {
     #[test]
     fn stream_write_from_another_plugin_is_denied() {
         let state = installed_state("com.a");
-        state
-            .registry
-            .install(&empty_index(), test_manifest("com.b"))
-            .unwrap();
-        let call = cmd_plugin_call(&state, "plugin-com.a", Some("com.a"), "fmt", serde_json::json!({}))
-            .unwrap();
+        state.registry.install(&empty_index(), test_manifest("com.b")).unwrap();
+        let call =
+            cmd_plugin_call(&state, "plugin-com.a", Some("com.a"), "fmt", serde_json::json!({}))
+                .unwrap();
         let sink = Arc::new(StreamRecorder::default());
-        state
-            .registry
-            .stream_bind(&call.call_id, &call.plugin_id, sink.clone())
-            .unwrap();
+        state.registry.stream_bind(&call.call_id, &call.plugin_id, sink.clone()).unwrap();
         let opened = cmd_stream_open(&state, "com.a", &call.call_id).unwrap();
 
         let err = cmd_stream_write(&state, "com.b", &opened.stream_id, None, None).unwrap_err();
@@ -4750,13 +5970,11 @@ mod tests {
     #[test]
     fn stream_close_rejects_non_terminal_or_unknown_kind() {
         let state = installed_state("com.a");
-        let call = cmd_plugin_call(&state, "plugin-com.a", Some("com.a"), "fmt", serde_json::json!({}))
-            .unwrap();
+        let call =
+            cmd_plugin_call(&state, "plugin-com.a", Some("com.a"), "fmt", serde_json::json!({}))
+                .unwrap();
         let sink = Arc::new(StreamRecorder::default());
-        state
-            .registry
-            .stream_bind(&call.call_id, &call.plugin_id, sink)
-            .unwrap();
+        state.registry.stream_bind(&call.call_id, &call.plugin_id, sink).unwrap();
         let opened = cmd_stream_open(&state, "com.a", &call.call_id).unwrap();
 
         let err = cmd_stream_close(&state, "com.a", &opened.stream_id, "data").unwrap_err();
@@ -4800,8 +6018,10 @@ mod tests {
             assert_eq!(r["outcome"], "failure");
         }
         assert_eq!(cmd_recover_boot(&state).unwrap()["phase"], "safemode");
-        assert!(find_summary(&state, "com.a").unwrap().disabled_by_safemode,
-            "安全模式下非必需插件必须被标记");
+        assert!(
+            find_summary(&state, "com.a").unwrap().disabled_by_safemode,
+            "安全模式下非必需插件必须被标记"
+        );
         // 上报即结论明确：bootInFlight 必须清零，否则下次启动会重复计数。
         assert_eq!(
             cmd_recover_boot(&state).unwrap()["persistence"]["bootInFlight"],
@@ -4812,8 +6032,10 @@ mod tests {
         let r = cmd_recover_report(&state, "success", None).unwrap();
         assert_eq!(r["engineAction"], "bootSuccess");
         assert_eq!(r["phase"], "normal");
-        assert!(!find_summary(&state, "com.a").unwrap().disabled_by_safemode,
-            "恢复正常后禁用标记必须清除");
+        assert!(
+            !find_summary(&state, "com.a").unwrap().disabled_by_safemode,
+            "恢复正常后禁用标记必须清除"
+        );
     }
 
     #[test]
@@ -4878,10 +6100,7 @@ mod tests {
     #[test]
     fn cmd_recover_trial_enable_drives_registry_trial_state() {
         let state = CommandState::new();
-        state
-            .registry
-            .install(&empty_index(), test_manifest("com.a"))
-            .unwrap();
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
 
         // 两次失败 → 安全模式，对账把 com.a 标进注册表（DISABLED + 标志）。
         for _ in 0..2 {
@@ -4919,10 +6138,7 @@ mod tests {
     #[test]
     fn lifecycle_trial_error_syncs_engine_trial_failure() {
         let state = CommandState::new();
-        state
-            .registry
-            .install(&empty_index(), test_manifest("com.a"))
-            .unwrap();
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
         for _ in 0..2 {
             cmd_recover_report(&state, "failure", None).unwrap();
         }
@@ -4949,10 +6165,7 @@ mod tests {
         );
         let s = find_summary(&state, "com.a").unwrap();
         assert_eq!(s.state, tauron_host::lifecycle::State::Disabled);
-        assert!(
-            s.disabled_by_safemode,
-            "标志必须保留：引擎已知失败，对账不得把它清掉"
-        );
+        assert!(s.disabled_by_safemode, "标志必须保留：引擎已知失败，对账不得把它清掉");
         // 再对账一次，证明是稳态而非一次侥幸。
         reconcile_recovery_phase(&state);
         assert!(find_summary(&state, "com.a").unwrap().disabled_by_safemode);
@@ -5009,10 +6222,7 @@ mod tests {
 
     /// 带恢复持久化目录的装配配置（其余取缺省）。
     fn recovery_cfg(dir: &std::path::Path) -> AdapterConfig {
-        AdapterConfig {
-            recovery_data_dir: Some(dir.to_path_buf()),
-            ..AdapterConfig::default()
-        }
+        AdapterConfig { recovery_data_dir: Some(dir.to_path_buf()), ..AdapterConfig::default() }
     }
 
     #[test]
@@ -5121,10 +6331,7 @@ mod tests {
             assert!(boot["counter"].get(field).is_some(), "counter 缺 {field}");
         }
         for field in ["enabled", "dir", "bootInFlight", "lastError"] {
-            assert!(
-                boot["persistence"].get(field).is_some(),
-                "persistence 缺 {field}"
-            );
+            assert!(boot["persistence"].get(field).is_some(), "persistence 缺 {field}");
         }
         assert!(boot["lastContext"].is_array(), "R7 新增 lastContext");
     }
@@ -5135,10 +6342,7 @@ mod tests {
         let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
         let boot = cmd_recover_boot(&state).unwrap();
         assert_eq!(boot["loadSource"], "fresh");
-        assert!(
-            boot["lastContext"].as_array().unwrap().is_empty(),
-            "首次启动没有上下文，不许伪造"
-        );
+        assert!(boot["lastContext"].as_array().unwrap().is_empty(), "首次启动没有上下文，不许伪造");
     }
 
     #[test]
@@ -5152,10 +6356,7 @@ mod tests {
         let boot = cmd_recover_boot(&state).unwrap();
         assert_eq!(boot["persistence"]["enabled"], true);
         assert!(
-            boot["persistence"]["lastError"]
-                .as_str()
-                .unwrap()
-                .contains("落盘失败"),
+            boot["persistence"]["lastError"].as_str().unwrap().contains("落盘失败"),
             "落盘失败必须可见：{}",
             boot["persistence"]["lastError"]
         );
@@ -5189,11 +6390,7 @@ mod tests {
                 .expect_err("畸形 label 必须被拒——降级成主窗即等于伪造 label 提权");
             assert_eq!(err.code, ErrorCode::E_AUTH_DENIED, "{bad}");
             assert!(err.message.contains(bad), "错误消息要带原始 label：{}", err.message);
-            assert!(
-                err.message.contains("绝不降级"),
-                "消息必须点明不降级：{}",
-                err.message
-            );
+            assert!(err.message.contains("绝不降级"), "消息必须点明不降级：{}", err.message);
         }
         // 正常解析（既有模型）：无前缀 = 主窗；`plugin-<合法 id>` = 插件。
         assert_eq!(Caller::from_label("main").unwrap(), Caller::MainWindow);
@@ -5229,6 +6426,21 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 3, "档位表里的特权命令不该少于 3 条（校验没跑空）");
+    }
+
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn optional_install_commands_are_main_window_only_and_registered_as_privileged() {
+        assert_eq!(PLUGIN_INSTALL_AUTH.len(), PLUGIN_INSTALL_COMMANDS.len());
+        for (auth, command) in PLUGIN_INSTALL_AUTH.iter().zip(PLUGIN_INSTALL_COMMANDS) {
+            assert_eq!(auth.command, *command);
+            assert_eq!(auth.tier, tauron_host::authz::AuthTier::Privileged);
+            assert_eq!(
+                require_main_window(&plugin_caller("com.x"), command).unwrap_err().code,
+                ErrorCode::E_AUTH_DENIED
+            );
+            assert!(require_main_window(&Caller::MainWindow, command).is_ok());
+        }
     }
 
     /// `host_registry_admin`：插件主体被拒且**零副作用**；主窗能禁用。
@@ -5286,10 +6498,7 @@ mod tests {
         let fake = Arc::new(FakeSpawner::default());
         let state = CommandState::with_spawner(fake.clone());
         for (id, sidecar) in [("com.proc.a", "a.exe"), ("com.proc.b", "b.exe")] {
-            state
-                .registry
-                .install(&empty_index(), process_manifest(id, Some(sidecar)))
-                .unwrap();
+            state.registry.install(&empty_index(), process_manifest(id, Some(sidecar))).unwrap();
             enabled_process_plugin(&state, id);
         }
 
@@ -5311,11 +6520,7 @@ mod tests {
             1,
             "拒绝路径一次都不许新增启动调用——否则等于插件越权起了 B 的 sidecar"
         );
-        assert_eq!(
-            state.registry.runtime_len(),
-            1,
-            "拒绝路径不得给 B 留下租约"
-        );
+        assert_eq!(state.registry.runtime_len(), 1, "拒绝路径不得给 B 留下租约");
     }
 
     /// `host_runtime_health`：插件主体不得查进程健康（带 pid、且会驱动崩溃检测）。
@@ -5324,15 +6529,15 @@ mod tests {
         let (state, _fake) = process_state("com.proc", Some("sidecar.exe"));
         enabled_process_plugin(&state, "com.proc");
         let handle =
-            cmd_runtime_spawn_as(&Caller::MainWindow, &state, "com.proc", &valid_profile()).unwrap();
+            cmd_runtime_spawn_as(&Caller::MainWindow, &state, "com.proc", &valid_profile())
+                .unwrap();
 
-        let err = cmd_runtime_health_as(&plugin_caller("com.proc"), &state, &handle.lease)
-            .unwrap_err();
+        let err =
+            cmd_runtime_health_as(&plugin_caller("com.proc"), &state, &handle.lease).unwrap_err();
         assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
 
         // 对照：主窗用**同一个租约**查得到（证明拒绝来自身份，不是租约无效）。
-        let health =
-            cmd_runtime_health_as(&Caller::MainWindow, &state, &handle.lease).unwrap();
+        let health = cmd_runtime_health_as(&Caller::MainWindow, &state, &handle.lease).unwrap();
         assert_eq!(health.pid, handle.pid);
         assert!(health.alive);
     }
@@ -5353,8 +6558,8 @@ mod tests {
 
         // 别人的键：读、写都拒；写被拒后 Store 里**没有**任何痕迹。
         for key in ["plugin:p.b.theme", "theme", "host.settings"] {
-            let err = cmd_settings_set_as(&a, &state, key, serde_json::json!("hijack"))
-                .unwrap_err();
+            let err =
+                cmd_settings_set_as(&a, &state, key, serde_json::json!("hijack")).unwrap_err();
             assert_eq!(err.code, ErrorCode::E_AUTH_DENIED, "写 {key} 必须被拒");
             assert_eq!(
                 cmd_settings_get_as(&Caller::MainWindow, &state, key).unwrap(),
@@ -5393,14 +6598,11 @@ mod tests {
         let state = CommandState::new();
         let plugin = plugin_caller("p.a");
 
-        let err = cmd_settings_adopt_legacy_as(&plugin, &state, serde_json::json!({"theme": "dark"}))
-            .unwrap_err();
+        let err =
+            cmd_settings_adopt_legacy_as(&plugin, &state, serde_json::json!({"theme": "dark"}))
+                .unwrap_err();
         assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
-        assert_eq!(
-            host_settings_data_version(&state),
-            None,
-            "拒绝路径不得标注数据版本"
-        );
+        assert_eq!(host_settings_data_version(&state), None, "拒绝路径不得标注数据版本");
         assert_eq!(
             cmd_settings_get_as(&Caller::MainWindow, &state, "theme").unwrap(),
             serde_json::Value::Null,
@@ -5409,11 +6611,7 @@ mod tests {
 
         let err = cmd_settings_migrate_as(&plugin, &state).unwrap_err();
         assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
-        assert_eq!(
-            host_settings_data_version(&state),
-            None,
-            "拒绝路径不得把空数据标成最新版"
-        );
+        assert_eq!(host_settings_data_version(&state), None, "拒绝路径不得把空数据标成最新版");
 
         // 对照：主窗走得通（接手 → 迁一步 → 再迁 0 步）。
         cmd_settings_adopt_legacy_as(
@@ -5422,10 +6620,7 @@ mod tests {
             serde_json::json!({"plugin:p.a.theme": "dark"}),
         )
         .unwrap();
-        assert_eq!(
-            host_settings_data_version(&state).as_deref(),
-            Some(HOST_SETTINGS_SCHEMA_V1)
-        );
+        assert_eq!(host_settings_data_version(&state).as_deref(), Some(HOST_SETTINGS_SCHEMA_V1));
         assert_eq!(cmd_settings_migrate_as(&Caller::MainWindow, &state).unwrap(), 1);
         assert_eq!(cmd_settings_migrate_as(&Caller::MainWindow, &state).unwrap(), 0);
     }
@@ -5524,23 +6719,13 @@ mod tests {
         let a = plugin_caller("p.a");
 
         // 自己命名空间 → 装载成功。
-        cmd_i18n_load_as(&a, &state, "zh-CN", entries(&[("title", "我的")]), Some("p.a"))
-            .unwrap();
+        cmd_i18n_load_as(&a, &state, "zh-CN", entries(&[("title", "我的")]), Some("p.a")).unwrap();
         cmd_i18n_set_locale(&state, "zh-CN").unwrap();
-        assert_eq!(
-            cmd_i18n_t(&state, &I18nEngine::plugin_key("p.a", "title")).unwrap(),
-            "我的"
-        );
+        assert_eq!(cmd_i18n_t(&state, &I18nEngine::plugin_key("p.a", "title")).unwrap(), "我的");
 
         // 别人的命名空间 → 拒绝，且**引擎里没有** `plugin:p.b.oc.*`。
-        let err = cmd_i18n_load_as(
-            &a,
-            &state,
-            "zh-CN",
-            entries(&[("title", "投毒")]),
-            Some("p.b"),
-        )
-        .unwrap_err();
+        let err = cmd_i18n_load_as(&a, &state, "zh-CN", entries(&[("title", "投毒")]), Some("p.b"))
+            .unwrap_err();
         assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
         assert!(
             state
@@ -5557,12 +6742,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
         assert!(
-            state
-                .i18n
-                .lock()
-                .get_bundle("zh-CN")
-                .and_then(|b| b.get("oc.app"))
-                .is_none(),
+            state.i18n.lock().get_bundle("zh-CN").and_then(|b| b.get("oc.app")).is_none(),
             "宿主命名空间不得被插件写入"
         );
 
@@ -5575,7 +6755,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(cmd_i18n_t(&state, &"oc.app".to_string()).unwrap(), "应用标题");
+        assert_eq!(cmd_i18n_t(&state, "oc.app").unwrap(), "应用标题");
         // 主窗也能代插件装载（卸载/重装等宿主流程）。
         cmd_i18n_load_as(
             &Caller::MainWindow,
@@ -5585,10 +6765,7 @@ mod tests {
             Some("p.b"),
         )
         .unwrap();
-        assert_eq!(
-            cmd_i18n_t(&state, &I18nEngine::plugin_key("p.b", "title")).unwrap(),
-            "代装"
-        );
+        assert_eq!(cmd_i18n_t(&state, &I18nEngine::plugin_key("p.b", "title")).unwrap(), "代装");
     }
 
     /// 把 state 推到「安全模式 + `p.b` 处于试验性启用」，供下面两条测试用。
@@ -5619,13 +6796,8 @@ mod tests {
         let a = plugin_caller("p.a");
 
         // 前置：诊断上下文里此刻有两条（两次启动失败，`pluginId` 均为 `None`）。
-        let ctx_before: Vec<Option<String>> = state
-            .recovery
-            .lock()
-            .context()
-            .iter()
-            .map(|e| e.plugin_id.clone())
-            .collect();
+        let ctx_before: Vec<Option<String>> =
+            state.recovery.lock().context().iter().map(|e| e.plugin_id.clone()).collect();
         assert_eq!(ctx_before.len(), 2);
         assert!(ctx_before.iter().all(|p| p.is_none()), "前置上下文不该已经指向 B");
 
@@ -5648,13 +6820,8 @@ mod tests {
         assert_eq!(state.recovery.lock().counter().consecutive_failures, 2);
         assert_eq!(state.recovery.lock().counter().safemode_failures, 0);
         assert_eq!(state.recovery.lock().decide_boot_phase().as_str(), "safemode");
-        let ctx_after: Vec<Option<String>> = state
-            .recovery
-            .lock()
-            .context()
-            .iter()
-            .map(|e| e.plugin_id.clone())
-            .collect();
+        let ctx_after: Vec<Option<String>> =
+            state.recovery.lock().context().iter().map(|e| e.plugin_id.clone()).collect();
         assert_eq!(
             ctx_after, ctx_before,
             "拒绝路径不得把故障栽赃进诊断上下文（长度与归因都必须原样）"
@@ -5676,7 +6843,8 @@ mod tests {
 
         // 对照二：主窗带任意 pluginId / `None` 照旧通过。
         let fresh = state_with_b_under_trial();
-        let ok = cmd_recover_report_as(&Caller::MainWindow, &fresh, "failure", Some("p.b")).unwrap();
+        let ok =
+            cmd_recover_report_as(&Caller::MainWindow, &fresh, "failure", Some("p.b")).unwrap();
         assert_eq!(ok["suspectedPlugin"], "p.b");
         let ok = cmd_recover_report_as(&Caller::MainWindow, &fresh, "success", None).unwrap();
         assert_eq!(ok["engineAction"], "bootSuccess");
@@ -5704,9 +6872,7 @@ mod tests {
         );
         // 不可逆：B 连合法试启都做不了了（TRIAL_MAX_ATTEMPTS = 1）。
         assert_eq!(
-            cmd_recover_trial_enable_as(&Caller::MainWindow, &state, "p.b")
-                .unwrap_err()
-                .code,
+            cmd_recover_trial_enable_as(&Caller::MainWindow, &state, "p.b").unwrap_err().code,
             ErrorCode::E_PLUGIN_DISABLED
         );
     }
@@ -5837,11 +7003,8 @@ mod tests {
         cmd_events_publish(&state, "host", "app.ready", serde_json::json!({ "n": 1 }))
             .expect("ipc 域：发布必须可用");
 
-        // ⑦ brand：形状必须是对象（桩返回 `{}` 而不是 `null`——后者会让前端取属性崩溃）。
-        assert!(
-            cmd_brand_info(&state).unwrap().is_object(),
-            "brand 域：必须是对象而不是 null"
-        );
+        // ⑦ brand provider 未接入时必须明确报告 unsupported。
+        assert!(!cmd_brand_info(&state).unwrap().supported);
     }
 
     #[test]
@@ -5854,10 +7017,10 @@ mod tests {
         // 判定的第二个入口同样只认主窗：`require_self_plugin_scope` 对主窗放行任意
         // 署名、对插件只放行自己——两块判定不重叠，也不是"二选一"。
         assert!(require_self_plugin_scope(&Caller::MainWindow, "host_notify", Some("x")).is_ok());
+        assert!(require_self_plugin_scope(&Caller::MainWindow, "host_notify", None).is_ok());
         assert!(
-            require_self_plugin_scope(&Caller::MainWindow, "host_notify", None).is_ok()
+            require_self_plugin_scope(&plugin_caller("p.a"), "host_notify", Some("p.a")).is_ok()
         );
-        assert!(require_self_plugin_scope(&plugin_caller("p.a"), "host_notify", Some("p.a")).is_ok());
         for claimed in [Some("p.b"), None] {
             assert_eq!(
                 require_self_plugin_scope(&plugin_caller("p.a"), "host_notify", claimed)
@@ -5871,8 +7034,8 @@ mod tests {
             require_self_plugin_scope(&plugin_caller("p.a"), "host_notify", Some("p.b"))
                 .unwrap_err();
         assert!(impersonate.message.contains("p.b") && impersonate.message.contains("p.a"));
-        let host_ns = require_self_plugin_scope(&plugin_caller("p.a"), "host_notify", None)
-            .unwrap_err();
+        let host_ns =
+            require_self_plugin_scope(&plugin_caller("p.a"), "host_notify", None).unwrap_err();
         assert!(host_ns.message.contains("宿主级") || host_ns.message.contains("应用级"));
         let _ = state;
     }
@@ -5897,6 +7060,9 @@ mod tests {
         let snap = cmd_notifications_list_as(&a, &state, None).unwrap();
         assert_eq!(snap["total"], 2, "total 必须是**可见**集合的真值（不是全局 3）");
         assert_eq!(snap["unread"], 2, "unread 同理——只裁数组会留下未读数泄露");
+        assert_eq!(snap["pluginCapacity"], 64);
+        assert_eq!(snap["pluginUsage"]["p.a"], 2);
+        assert!(snap["pluginUsage"].get("p.b").is_none(), "配额观测不能泄漏邻居活动");
         let items = snap["items"].as_array().unwrap();
         assert_eq!(items.len(), 2);
         for it in items {
@@ -5925,7 +7091,14 @@ mod tests {
         let all = cmd_notifications_list_as(&Caller::MainWindow, &state, None).unwrap();
         assert_eq!(all["total"], 4);
         assert_eq!(all["items"].as_array().unwrap().len(), 4);
-        assert_eq!(cmd_notifications_list_as(&Caller::MainWindow, &state, Some(1)).unwrap()["items"][0]["title"], "B2");
+        assert_eq!(all["capacity"], 512);
+        assert_eq!(all["pluginUsage"]["p.a"], 2);
+        assert_eq!(all["pluginUsage"]["p.b"], 2);
+        assert_eq!(
+            cmd_notifications_list_as(&Caller::MainWindow, &state, Some(1)).unwrap()["items"][0]
+                ["title"],
+            "B2"
+        );
     }
 
     /// **危害实证**：不过身份的内核把别人的通知正文（可能是敏感内容）整份交出去。
@@ -5963,11 +7136,7 @@ mod tests {
         let scoped = cmd_notifications_list_as(&plugin_caller("p.a"), &state, None).unwrap();
         let log = scoped["dispatchLog"].as_array().unwrap();
         assert_eq!(log.len(), 1, "只留能归属到自己的分发记录");
-        assert_eq!(
-            log[0]["entryId"],
-            scoped["items"][0]["id"],
-            "留下的那条必须指向自己的条目"
-        );
+        assert_eq!(log[0]["entryId"], scoped["items"][0]["id"], "留下的那条必须指向自己的条目");
     }
 
     /// 通知写端：插件只能标记自己的通知；`None`（全部已读）与未知 id 一律拒绝。
@@ -6048,10 +7217,7 @@ mod tests {
         let state2 = CommandState::new();
         cmd_notify(&state2, "p.b", "B", "b").unwrap();
         let b_id = state2.notify_store.lock().recent(1)[0].id.clone();
-        assert_eq!(
-            cmd_notifications_read(&state2, Some(&b_id)).unwrap()["marked"],
-            1
-        );
+        assert_eq!(cmd_notifications_read(&state2, Some(&b_id)).unwrap()["marked"], 1);
         assert!(state2.notify_store.lock().get(&b_id).unwrap().read);
     }
 
@@ -6164,18 +7330,16 @@ mod tests {
     }
 
     #[test]
-    fn cmd_brand_info_returns_object_stub() {
+    fn cmd_brand_info_reports_missing_provider() {
         let state = CommandState::new();
         let result = cmd_brand_info(&state);
         assert!(result.is_ok());
-        // 空对象（BrandInfo 全字段可选），不得是 Null。
-        assert_eq!(result.unwrap(), serde_json::json!({}));
+        let result = result.unwrap();
+        assert!(!result.supported);
+        assert!(result.reason.contains("brand provider"));
     }
 
-    fn find_summary(
-        state: &PluginRuntimeState,
-        plugin_id: &str,
-    ) -> Option<PluginSummary> {
+    fn find_summary(state: &PluginRuntimeState, plugin_id: &str) -> Option<PluginSummary> {
         state.registry.list_all().into_iter().find(|p| p.id == plugin_id)
     }
 
@@ -6192,20 +7356,14 @@ mod tests {
         let state = CommandState::new();
         // 全部缺失时返回 key 本身（**不是空串**）：让用户看到 `oc.x` 比看到空
         // 按钮更能暴露缺失文案，空串会让问题彻底隐形。
-        assert_eq!(
-            cmd_i18n_t(&state, "oc.settings.title").unwrap(),
-            "oc.settings.title"
-        );
+        assert_eq!(cmd_i18n_t(&state, "oc.settings.title").unwrap(), "oc.settings.title");
         assert_eq!(cmd_i18n_stats(&state).unwrap()["missingTotal"], 1);
     }
 
     #[test]
     fn cmd_i18n_t_rejects_empty_key() {
         let state = CommandState::new();
-        assert_eq!(
-            cmd_i18n_t(&state, "   ").unwrap_err().code,
-            ErrorCode::E_INVALID_MANIFEST
-        );
+        assert_eq!(cmd_i18n_t(&state, "   ").unwrap_err().code, ErrorCode::E_INVALID_MANIFEST);
     }
 
     #[test]
@@ -6222,10 +7380,7 @@ mod tests {
         let switched = cmd_i18n_set_locale(&state, "zh-CN").unwrap();
         assert_eq!(switched["locale"], "zh-CN");
         assert_eq!(switched["rtl"], serde_json::json!(false));
-        assert_eq!(
-            switched["fallbackChain"],
-            serde_json::json!(["zh-CN", "zh", "en-US"])
-        );
+        assert_eq!(switched["fallbackChain"], serde_json::json!(["zh-CN", "zh", "en-US"]));
 
         assert_eq!(cmd_i18n_t(&state, "oc.hello").unwrap(), "你好");
         assert_eq!(
@@ -6281,10 +7436,7 @@ mod tests {
         cmd_i18n_set_locale(&state, "zh-CN").unwrap();
         // 带前缀的 key 可翻译；未带前缀的原始 key 不存在（不会双写）。
         assert_eq!(cmd_i18n_t(&state, "plugin:p.my-plugin.oc.title").unwrap(), "我的插件");
-        assert_eq!(
-            cmd_i18n_t(&state, "plugin:p.my-plugin.oc.owned").unwrap(),
-            "已带前缀"
-        );
+        assert_eq!(cmd_i18n_t(&state, "plugin:p.my-plugin.oc.owned").unwrap(), "已带前缀");
         assert_eq!(cmd_i18n_t(&state, "title").unwrap(), "title");
         // 已经是完整前缀的 key 原样保留，不会被二次前缀。
         assert_eq!(loaded["bundleKeys"]["zh-CN"], serde_json::json!(2));
@@ -6328,7 +7480,9 @@ mod tests {
         );
         // 插件 id 走同一个校验规则（反域名格式）。
         assert_eq!(
-            cmd_i18n_load(&state, "zh-CN", entries(&[("a", "b")]), Some("not-valid")).unwrap_err().code,
+            cmd_i18n_load(&state, "zh-CN", entries(&[("a", "b")]), Some("not-valid"))
+                .unwrap_err()
+                .code,
             ErrorCode::E_INVALID_MANIFEST
         );
     }
@@ -6341,13 +7495,16 @@ mod tests {
 
         let stats = cmd_i18n_stats(&state).unwrap();
         // 线名必须是 camelCase，且字段齐全（前端按此渲染）。
-        for field in [
-            "locale", "rtl", "fallbackChain", "registeredLocales", "bundleKeys", "missingTotal",
-        ] {
+        for field in
+            ["locale", "rtl", "fallbackChain", "registeredLocales", "bundleKeys", "missingTotal"]
+        {
             assert!(stats.get(field).is_some(), "缺少字段 {field}");
         }
         assert_eq!(stats["locale"], "en-US");
-        assert!(stats["registeredLocales"].as_array().unwrap().contains(&serde_json::json!("zh-CN")));
+        assert!(stats["registeredLocales"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("zh-CN")));
         assert_eq!(stats["bundleKeys"]["zh-CN"], 1);
         assert_eq!(stats["missingTotal"], 1);
     }
@@ -6430,10 +7587,7 @@ mod tests {
 
         // 新进程：同一数据目录重新装配，设置必须从磁盘回来。
         let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
-        assert_eq!(
-            cmd_settings_get(&state, "plugin:p.theme").unwrap(),
-            serde_json::json!("dark")
-        );
+        assert_eq!(cmd_settings_get(&state, "plugin:p.theme").unwrap(), serde_json::json!("dark"));
         assert_eq!(cmd_settings_get(&state, "a.b").unwrap(), serde_json::json!(7));
         // 落盘文件名固定，方便宿主/运维定位。
         assert!(t.path().join(HOST_SETTINGS_FILE).is_file());
@@ -6482,10 +7636,7 @@ mod tests {
             serde_json::json!({"plugin:p.theme": "dark", "other.key": 7}),
         )
         .unwrap();
-        assert_eq!(
-            host_settings_data_version(&state).as_deref(),
-            Some(HOST_SETTINGS_SCHEMA_V1)
-        );
+        assert_eq!(host_settings_data_version(&state).as_deref(), Some(HOST_SETTINGS_SCHEMA_V1));
 
         // v1 的裸键在 v2 编码下**读不到**——这正是迁移必须存在的原因，
         // 而不是「迁不迁都一样」。
@@ -6497,14 +7648,8 @@ mod tests {
 
         let steps = host_settings_migrate(&state).unwrap();
         assert_eq!(steps, 1, "v1 → v2 恰好一步");
-        assert_eq!(
-            host_settings_data_version(&state).as_deref(),
-            Some(HOST_SETTINGS_SCHEMA_V2)
-        );
-        assert_eq!(
-            cmd_settings_get(&state, "plugin:p.theme").unwrap(),
-            serde_json::json!("dark")
-        );
+        assert_eq!(host_settings_data_version(&state).as_deref(), Some(HOST_SETTINGS_SCHEMA_V2));
+        assert_eq!(cmd_settings_get(&state, "plugin:p.theme").unwrap(), serde_json::json!("dark"));
         assert_eq!(cmd_settings_get(&state, "other.key").unwrap(), serde_json::json!(7));
 
         // 幂等：再迁一次是 0 步。
@@ -6536,26 +7681,17 @@ mod tests {
 
         // 迁移：v1 → v2 恰好一步。
         assert_eq!(cmd_settings_migrate(&state).unwrap(), 1, "v1 → v2 恰好一步");
-        assert_eq!(
-            host_settings_data_version(&state).as_deref(),
-            Some(HOST_SETTINGS_SCHEMA_V2)
-        );
+        assert_eq!(host_settings_data_version(&state).as_deref(), Some(HOST_SETTINGS_SCHEMA_V2));
         assert_eq!(
             cmd_settings_get(&state, "plugin:p.theme").unwrap(),
             serde_json::json!("dark"),
             "带 `.` 的键迁移后必须经命令层读得出来"
         );
-        assert_eq!(
-            cmd_settings_get(&state, "lang").unwrap(),
-            serde_json::json!("zh-CN")
-        );
+        assert_eq!(cmd_settings_get(&state, "lang").unwrap(), serde_json::json!("zh-CN"));
 
         // 幂等：再迁一次是 0 步，数据不动。
         assert_eq!(cmd_settings_migrate(&state).unwrap(), 0);
-        assert_eq!(
-            cmd_settings_get(&state, "plugin:p.theme").unwrap(),
-            serde_json::json!("dark")
-        );
+        assert_eq!(cmd_settings_get(&state, "plugin:p.theme").unwrap(), serde_json::json!("dark"));
     }
 
     #[test]
@@ -6623,11 +7759,7 @@ mod tests {
 
     impl AdapterMockSink {
         fn new(supported: bool, fail: bool) -> Arc<Self> {
-            Arc::new(Self {
-                supported,
-                fail,
-                calls: parking_lot::Mutex::new(Vec::new()),
-            })
+            Arc::new(Self { supported, fail, calls: parking_lot::Mutex::new(Vec::new()) })
         }
 
         fn call_count(&self) -> usize {
@@ -6659,11 +7791,7 @@ mod tests {
         let log = snap["dispatchLog"].as_array().unwrap();
         assert_eq!(log.len(), 1, "dispatchLog 必须有记录");
         assert_eq!(log[0]["outcome"], "system");
-        assert_eq!(
-            log[0]["entryId"],
-            snap["items"][0]["id"],
-            "日志指的就是这条通知"
-        );
+        assert_eq!(log[0]["entryId"], snap["items"][0]["id"], "日志指的就是这条通知");
         assert_eq!(sink.calls.lock()[0], snap["items"][0]["id"].as_str().unwrap());
     }
 
@@ -6743,18 +7871,28 @@ mod tests {
     #[test]
     fn cmd_contributes_list_by_kind() {
         let state = CommandState::new();
-        cmd_contributes_register(&state, "p1", ContributeEntry {
-            plugin_id: "p1".to_string(),
-            kind: "command".to_string(),
-            id: "cmd1".to_string(),
-            label: "Cmd 1".to_string(),
-        }).unwrap();
-        cmd_contributes_register(&state, "p2", ContributeEntry {
-            plugin_id: "p2".to_string(),
-            kind: "panel".to_string(),
-            id: "panel1".to_string(),
-            label: "Panel 1".to_string(),
-        }).unwrap();
+        cmd_contributes_register(
+            &state,
+            "p1",
+            ContributeEntry {
+                plugin_id: "p1".to_string(),
+                kind: "command".to_string(),
+                id: "cmd1".to_string(),
+                label: "Cmd 1".to_string(),
+            },
+        )
+        .unwrap();
+        cmd_contributes_register(
+            &state,
+            "p2",
+            ContributeEntry {
+                plugin_id: "p2".to_string(),
+                kind: "panel".to_string(),
+                id: "panel1".to_string(),
+                label: "Panel 1".to_string(),
+            },
+        )
+        .unwrap();
         let commands = cmd_contributes_list(&state, Some("command")).unwrap();
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].id, "cmd1");
@@ -6850,12 +7988,7 @@ mod tests {
         // 这里用 lifecycle_report 测试：对一个不存在的插件，
         // registry 应返回 E_UNKNOWN_PLUGIN 而非 panic。
         let state = CommandState::new();
-        let result = cmd_lifecycle_report(
-            &state,
-            "plugin-test.nonexistent",
-            None,
-            Event::Enable,
-        );
+        let result = cmd_lifecycle_report(&state, "plugin-test.nonexistent", None, Event::Enable);
         assert!(result.is_err());
         // 错误码不应是 E_HOST_PANIC（因为逻辑正确处理了未知插件）
         assert_ne!(result.unwrap_err().code, ErrorCode::E_HOST_PANIC);
@@ -6874,9 +8007,7 @@ mod tests {
 
         for _ in 0..10 {
             let state = Arc::clone(&state);
-            handles.push(std::thread::spawn(move || {
-                cmd_registry_list_all(&state).is_ok()
-            }));
+            handles.push(std::thread::spawn(move || cmd_registry_list_all(&state).is_ok()));
         }
 
         let results: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
@@ -6891,22 +8022,15 @@ mod tests {
         // 先声明 topic
         {
             let bus = state.bus.lock();
-            let decls = vec![EventDecl {
-                topic: "plugin:p.ready".to_string(),
-                public: true,
-            }];
+            let decls = vec![EventDecl { topic: "plugin:p.ready".to_string(), public: true }];
             bus.declare_topics("p", &decls).unwrap();
         }
 
         for i in 0..10 {
             let state = Arc::clone(&state);
             handles.push(std::thread::spawn(move || {
-                cmd_events_publish(
-                    &state,
-                    "p",
-                    "plugin:p.ready",
-                    serde_json::json!({"seq": i}),
-                ).is_ok()
+                cmd_events_publish(&state, "p", "plugin:p.ready", serde_json::json!({"seq": i}))
+                    .is_ok()
             }));
         }
 
@@ -6921,10 +8045,7 @@ mod tests {
         // 声明 topic
         {
             let bus = state.bus.lock();
-            let decls = vec![EventDecl {
-                topic: "plugin:p.ready".to_string(),
-                public: true,
-            }];
+            let decls = vec![EventDecl { topic: "plugin:p.ready".to_string(), public: true }];
             bus.declare_topics("p", &decls).unwrap();
         }
 
@@ -6934,12 +8055,7 @@ mod tests {
             let id = i;
             handles.push(std::thread::spawn(move || {
                 let _sub = cmd_events_subscribe(&state, &format!("c{id}"), "w1", "plugin:p.ready");
-                cmd_events_publish(
-                    &state,
-                    "p",
-                    "plugin:p.ready",
-                    serde_json::json!({"seq": id}),
-                )
+                cmd_events_publish(&state, "p", "plugin:p.ready", serde_json::json!({"seq": id}))
             }));
         }
 
@@ -7000,6 +8116,49 @@ mod tests {
     }
 
     #[test]
+    fn resource_stats_report_live_usage_and_are_main_window_only() {
+        let state = CommandState::new();
+        let index = empty_index();
+        let id = state.registry.install(&index, test_manifest("p.stats")).unwrap();
+        state.registry.admin_op(&id, RegistryAdminOp::Enable).unwrap();
+        let call = state.registry.call_begin(&id, "stats.probe", serde_json::json!({})).unwrap();
+        state
+            .registry
+            .stream_bind(&call.call_id, "p.stats", Arc::new(tauron_host::stream::NullSink))
+            .unwrap();
+        state.registry.stream_open(&call.call_id, "p.stats").unwrap();
+        state
+            .bus
+            .lock()
+            .declare_topics(
+                "p.stats",
+                &[tauron_host::manifest::EventDecl {
+                    topic: "p.stats.events".into(),
+                    public: true,
+                }],
+            )
+            .unwrap();
+        state.bus.lock().subscribe("p.stats", "main", "p.stats.events").unwrap();
+        cmd_notify(&state, "p.stats", "stats", "visible use").unwrap();
+
+        let snapshot = cmd_resource_stats_as(&Caller::MainWindow, &state).unwrap();
+        assert_eq!(snapshot["global"]["pendingCalls"]["used"], 1);
+        assert_eq!(snapshot["global"]["streams"]["used"], 1);
+        assert_eq!(snapshot["global"]["subscriptions"]["used"], 1);
+        assert_eq!(snapshot["global"]["notifications"]["used"], 1);
+        assert_eq!(snapshot["global"]["notifications"]["evictedTotal"], 0);
+        assert_eq!(snapshot["perPlugin"]["plugins"][0]["pluginId"], "p.stats");
+        assert_eq!(snapshot["perPlugin"]["plugins"][0]["pendingCalls"], 1);
+        assert_eq!(snapshot["perPlugin"]["plugins"][0]["streams"], 1);
+        assert_eq!(snapshot["perPlugin"]["plugins"][0]["subscriptions"], 1);
+        assert_eq!(snapshot["perPlugin"]["plugins"][0]["notifications"], 1);
+        assert_eq!(snapshot["perPlugin"]["plugins"][0]["notificationEvictions"], 0);
+
+        let denied = cmd_resource_stats_as(&plugin_caller("p.stats"), &state).unwrap_err();
+        assert_eq!(denied.code, ErrorCode::E_AUTH_DENIED);
+    }
+
+    #[test]
     fn install_plugin_from_json_records_install_failed_when_manifest_malformed() {
         let state = CommandState::new();
         // id 合法、但 `version` 不是 semver → 解析失败。
@@ -7017,10 +8176,7 @@ mod tests {
         let list = cmd_registry_list_all(&state).unwrap();
         assert_eq!(list.len(), 1, "解析失败也必须留痕");
         let entry = state.registry.find(&PluginId::new("p.broken").unwrap()).unwrap();
-        assert_eq!(
-            entry.state.state,
-            tauron_host::lifecycle::State::InstallFailed
-        );
+        assert_eq!(entry.state.state, tauron_host::lifecycle::State::InstallFailed);
         assert!(
             entry.state.last_reason.as_deref().unwrap_or("").contains("解析失败"),
             "失败原因要落在 last_reason 上"
@@ -7044,10 +8200,7 @@ mod tests {
         // `deny_unknown_fields`：拼写漂移必须失败，而不是静默忽略。
         let state = CommandState::new();
         let mut value = serde_json::to_value(test_manifest("p.typo")).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("pluginType".to_string(), serde_json::json!("js"));
+        value.as_object_mut().unwrap().insert("pluginType".to_string(), serde_json::json!("js"));
         let err = install_plugin_from_json(&state, &value.to_string()).unwrap_err();
         assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST);
     }
@@ -7106,7 +8259,8 @@ mod tests {
             r#"{ "registry": { "plugin_filter": { "deny": ["com.blocked"] } } }"#,
         )
         .unwrap();
-        let state = CommandState::with_adapter_config(AdapterConfig::from_client_config(&cfg, None));
+        let state =
+            CommandState::with_adapter_config(AdapterConfig::from_client_config(&cfg, None));
 
         // 被 deny 的插件：`install` 应返回 E_PLUGIN_FILTERED，且不入库。
         let mut blocked = test_manifest("com.blocked");
@@ -7159,12 +8313,7 @@ mod tests {
         assert_eq!(outcome.to, tauron_host::lifecycle::State::Enabled);
 
         // 通过 lifecycle_report 上报 Attach
-        let attach = cmd_lifecycle_report(
-            &state,
-            "plugin-p.lifecycle",
-            None,
-            Event::Attach,
-        );
+        let attach = cmd_lifecycle_report(&state, "plugin-p.lifecycle", None, Event::Attach);
         assert!(attach.is_ok());
         let outcome = attach.unwrap();
         assert_eq!(outcome.to, tauron_host::lifecycle::State::Running);
@@ -7289,20 +8438,23 @@ mod tests {
     #[test]
     fn cmd_clipboard_roundtrip() {
         let state = CommandState::new();
-        assert_eq!(cmd_clipboard_read(&state).unwrap(), "");
-        cmd_clipboard_write(&state, "hello tauron".to_string()).unwrap();
-        assert_eq!(cmd_clipboard_read(&state).unwrap(), "hello tauron");
+        assert_eq!(cmd_clipboard_read(&state).unwrap().value, "");
+        let write = cmd_clipboard_write(&state, "hello tauron".to_string()).unwrap();
+        assert!(!write.supported);
+        assert_eq!(write.fallback.as_deref(), Some("in-process-buffer"));
+        let read = cmd_clipboard_read(&state).unwrap();
+        assert!(!read.supported);
+        assert_eq!(read.fallback, "in-process-buffer");
+        assert_eq!(read.value, "hello tauron");
     }
 
     #[test]
     fn cmd_deep_link_register_records_protocol() {
         let state = CommandState::new();
         assert!(state.shell_ext.lock().deep_link_protocol.is_none());
-        cmd_deep_link_register(&state, "tauron".to_string()).unwrap();
-        assert_eq!(
-            state.shell_ext.lock().deep_link_protocol.as_deref(),
-            Some("tauron")
-        );
+        let result = cmd_deep_link_register(&state, "tauron".to_string()).unwrap();
+        assert!(matches!(result, ProviderResult::Unsupported(_)));
+        assert_eq!(state.shell_ext.lock().deep_link_protocol.as_deref(), Some("tauron"));
     }
 
     #[test]
@@ -7340,38 +8492,30 @@ mod tests {
             }),
             "线形字段名/数量必须与 TS 同步（camelCase、无额外字段）"
         );
-        assert_eq!(
-            state.shell_ext.lock().update_state.as_deref(),
-            Some("downloaded:2.0.0")
-        );
+        assert_eq!(state.shell_ext.lock().update_state.as_deref(), Some("downloaded:2.0.0"));
         let inst = cmd_market_install(&state, Some("2.0.0")).unwrap();
         assert!(inst.ok && inst.simulated);
-        assert_eq!(
-            serde_json::to_value(&inst).unwrap()["simulated"],
-            serde_json::json!(true)
-        );
-        assert_eq!(
-            state.shell_ext.lock().update_state.as_deref(),
-            Some("installed:2.0.0")
-        );
+        assert_eq!(serde_json::to_value(&inst).unwrap()["simulated"], serde_json::json!(true));
+        assert_eq!(state.shell_ext.lock().update_state.as_deref(), Some("installed:2.0.0"));
         // 缺省 version 时线形仍是同一形状（version = null），不是换一种形状。
         let none = cmd_market_download(&state, None).unwrap();
         assert_eq!(none.version, None);
-        assert_eq!(
-            serde_json::to_value(&none).unwrap()["version"],
-            serde_json::Value::Null
-        );
+        assert_eq!(serde_json::to_value(&none).unwrap()["version"], serde_json::Value::Null);
     }
 
     #[test]
     fn cmd_dialog_commands_return_cancelled_defaults() {
         let state = CommandState::new();
-        // 无原生 UI：open/save 返回 None（取消），confirm 返回 false。
-        assert_eq!(cmd_dialog_open(&state, false, false).unwrap(), None);
-        assert_eq!(cmd_dialog_save(&state, None).unwrap(), None);
-        assert!(!cmd_dialog_confirm(&state, "t", "m").unwrap());
-        assert!(cmd_dialog_message(&state, "t", "m", None).is_ok());
-        assert!(cmd_dialog_message(&state, "t", "m", Some("error")).is_ok());
+        // 无原生 UI 必须报告 Unsupported，不能伪装成取消或成功。
+        for result in [
+            serde_json::to_value(cmd_dialog_open(&state, false, false).unwrap()).unwrap(),
+            serde_json::to_value(cmd_dialog_save(&state, None).unwrap()).unwrap(),
+            serde_json::to_value(cmd_dialog_confirm(&state, "t", "m").unwrap()).unwrap(),
+            serde_json::to_value(cmd_dialog_message(&state, "t", "m", None).unwrap()).unwrap(),
+        ] {
+            assert_eq!(result["supported"], false);
+            assert!(result["reason"].as_str().is_some_and(|s| !s.is_empty()));
+        }
     }
 
     #[test]
@@ -7389,8 +8533,8 @@ mod tests {
     #[test]
     fn cmd_deep_link_register_rejects_empty_protocol() {
         let state = CommandState::new();
-        let err = cmd_deep_link_register(&state, "  ".to_string())
-            .expect_err("空协议不是可注册的协议名");
+        let err =
+            cmd_deep_link_register(&state, "  ".to_string()).expect_err("空协议不是可注册的协议名");
         assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST);
         assert!(state.shell_ext.lock().deep_link_protocol.is_none());
     }
@@ -7470,10 +8614,7 @@ mod tests {
         );
         state.subscription_groups.lock().insert(
             "grp:b".to_string(),
-            GroupSubscription {
-                subscriber: "com.b".into(),
-                tokens: vec!["t.b1".into()],
-            },
+            GroupSubscription { subscriber: "com.b".into(), tokens: vec!["t.b1".into()] },
         );
 
         cmd_registry_admin(&state, "com.a", RegistryAdminOp::Uninstall).unwrap();
@@ -7489,14 +8630,12 @@ mod tests {
         }
 
         // i18n：被卸载插件的命名空间清空，其他插件的文案不受影响。
-        assert_eq!(
-            cmd_i18n_t(&state, "plugin:com.a.oc.title").unwrap(),
-            "plugin:com.a.oc.title"
-        );
+        assert_eq!(cmd_i18n_t(&state, "plugin:com.a.oc.title").unwrap(), "plugin:com.a.oc.title");
         assert_eq!(cmd_i18n_t(&state, "plugin:com.b.oc.title").unwrap(), "B");
 
         // 贡献：被卸载插件的入口全部移除。
-        assert!(cmd_contributes_list(&state, Some("menu")).unwrap()
+        assert!(cmd_contributes_list(&state, Some("menu"))
+            .unwrap()
             .iter()
             .all(|e| e.plugin_id != "com.a"));
 
@@ -7543,6 +8682,10 @@ mod tests {
         next_pid: std::sync::atomic::AtomicU32,
         fail_with: Mutex<Option<ProcError>>,
         fail_kill_with: Mutex<Option<String>>,
+        /// pid → 已登记的 stdout 帧接收器（0.4-A1 帧回路）。
+        sinks: Mutex<HashMap<u32, Arc<dyn ProcessFrameSink>>>,
+        /// pid → 写入 stdin 的帧序列（0.4-A1 帧回路）。
+        written: Mutex<HashMap<u32, Vec<Vec<u8>>>>,
     }
 
     impl FakeSpawner {
@@ -7551,11 +8694,7 @@ mod tests {
         }
 
         fn last_cfg(&self) -> SpawnConfig {
-            self.calls
-                .lock()
-                .last()
-                .cloned()
-                .expect("启动面未被调用（本用例要求它必须被调用过）")
+            self.calls.lock().last().cloned().expect("启动面未被调用（本用例要求它必须被调用过）")
         }
 
         /// 终止面收到的 pid 序列（按调用顺序）。
@@ -7577,6 +8716,16 @@ mod tests {
         fn fail_kill_with(&self, msg: &str) {
             *self.fail_kill_with.lock() = Some(msg.to_string());
         }
+
+        /// 某进程写入 stdin 的帧序列（0.4-A1 帧回路验证用）。
+        fn written_frames(&self, pid: u32) -> Vec<Vec<u8>> {
+            self.written.lock().get(&pid).cloned().unwrap_or_default()
+        }
+
+        /// 某进程登记的 stdout 帧接收器（测试据此模拟 sidecar 回帧）。
+        fn sink_of(&self, pid: u32) -> Option<Arc<dyn ProcessFrameSink>> {
+            self.sinks.lock().get(&pid).cloned()
+        }
     }
 
     impl ProcSpawner for FakeSpawner {
@@ -7585,10 +8734,7 @@ mod tests {
             if let Some(e) = self.fail_with.lock().take() {
                 return Err(e);
             }
-            let pid = self
-                .next_pid
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                + 1000;
+            let pid = self.next_pid.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1000;
             self.alive.lock().insert(pid);
             Ok(SpawnedProc { pid })
         }
@@ -7610,6 +8756,18 @@ mod tests {
             } else {
                 tauron_proc::KillOutcome::AlreadyGone
             })
+        }
+
+        /// 记录写往 sidecar stdin 的帧（0.4-A1：帧回路投递侧）。
+        fn write_frame(&self, pid: u32, frame: &[u8]) -> std::io::Result<()> {
+            self.written.lock().entry(pid).or_default().push(frame.to_vec());
+            Ok(())
+        }
+
+        /// 登记 stdout 帧接收器（0.4-A1：帧回路回帧侧；测试据此模拟 sidecar）。
+        fn register_frame_sink(&self, pid: u32, sink: Arc<dyn ProcessFrameSink>) -> bool {
+            self.sinks.lock().insert(pid, sink);
+            true
         }
     }
 
@@ -7651,11 +8809,60 @@ mod tests {
     fn process_state(id: &str, sidecar: Option<&str>) -> (CommandState, Arc<FakeSpawner>) {
         let fake = Arc::new(FakeSpawner::default());
         let state = CommandState::with_spawner(fake.clone());
-        state
-            .registry
-            .install(&empty_index(), process_manifest(id, sidecar))
-            .unwrap();
+        state.registry.install(&empty_index(), process_manifest(id, sidecar)).unwrap();
         (state, fake)
+    }
+
+    /// 0.4-A1 进程投递闭环（Rust 层，不真起 sidecar）：
+    /// 宿主发起 → JSON-RPC 帧写入 sidecar stdin（fake 记录）→ 模拟 sidecar 回帧
+    /// （含 `callId`）→ `ProcessFrameSinkImpl` 调 `settle_call` → pending 表结算。
+    #[test]
+    fn process_call_delivers_frame_to_stdin_and_settles_via_sink() {
+        let (state, fake) = process_state("com.example.svcrec", Some("svc"));
+        enabled_process_plugin(&state, "com.example.svcrec");
+        let handle = cmd_runtime_spawn(&state, "com.example.svcrec", &valid_profile()).unwrap();
+
+        // 宿主 → 插件：跨主体调用应投递成功（待应答）。
+        let res = cmd_call_plugin(
+            &state,
+            "main",
+            "com.example.svcrec",
+            "doThing",
+            serde_json::json!({ "x": 1 }),
+        )
+        .expect("跨主体调用命令面应成功");
+        let call = match res {
+            ProviderResult::Value(c) => c,
+            ProviderResult::Unsupported(u) => {
+                panic!("进程插件应有投递通路，却返回 Unsupported：{}", u.reason)
+            }
+        };
+
+        // 投递侧：应恰好向 sidecar stdin 写一帧，且帧携带权威字段。
+        let frames = fake.written_frames(handle.pid);
+        assert_eq!(frames.len(), 1, "应恰好向 sidecar stdin 写一帧");
+        let frame: serde_json::Value = serde_json::from_slice(&frames[0]).unwrap();
+        assert_eq!(frame["method"], "doThing");
+        assert_eq!(frame["target"], "com.example.svcrec");
+        assert_eq!(frame["params"], serde_json::json!({ "x": 1 }));
+        assert_eq!(
+            frame["callId"], call.call_id,
+            "帧上的 callId 必须与 pending 表一致（回帧据此关联）"
+        );
+
+        // 回帧侧：模拟 sidecar 写回结果帧 → sink 结算。
+        let sink = fake.sink_of(handle.pid).expect("spawn 后必须已登记 stdout 帧接收器");
+        let reply = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": call.seq,
+            "callId": call.call_id,
+            "result": { "done": true },
+        });
+        sink.on_frame(handle.pid, serde_json::to_vec(&reply).unwrap().as_slice());
+
+        let settled = state.registry.peek_call(&call.call_id).expect("调用应仍在表里");
+        assert_eq!(settled.state, tauron_host::registry::CallState::Settled);
+        assert_eq!(settled.result, Some(serde_json::json!({ "done": true })));
     }
 
     /// 「非 Process 插件被拒」：结构化失败码 + **启动面一次都不许被调用** + 无租约。
@@ -7826,10 +9033,8 @@ mod tests {
     fn process_plugin_without_sidecar_cannot_even_be_installed() {
         let fake = Arc::new(FakeSpawner::default());
         let state = CommandState::with_spawner(fake.clone());
-        let err = state
-            .registry
-            .install(&empty_index(), process_manifest("com.proc", None))
-            .unwrap_err();
+        let err =
+            state.registry.install(&empty_index(), process_manifest("com.proc", None)).unwrap_err();
         assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST);
         assert!(err.message.contains("entry.sidecar"), "message={}", err.message);
         assert_eq!(fake.call_count(), 0, "装不进来的插件不可能走到启动面");
@@ -7846,12 +9051,7 @@ mod tests {
         assert_eq!(err.code, ErrorCode::E_INSTALL_FAILED);
         assert!(!err.retryable, "确定性的启动失败不得被标成可重试");
         assert_eq!(state.registry.runtime_len(), 0, "启动失败绝不能铸出租约");
-        assert!(
-            state
-                .registry
-                .runtime_handle_of(&PluginId::new("com.proc").unwrap())
-                .is_none()
-        );
+        assert!(state.registry.runtime_handle_of(&PluginId::new("com.proc").unwrap()).is_none());
     }
 
     /// 未知 / 失效 lease → `E_LEASE_EXPIRED`（**不是** `E_CALL_NOT_FOUND`）。
@@ -7860,11 +9060,7 @@ mod tests {
         let (state, _fake) = process_state("com.proc", Some("sidecar.exe"));
         let err = cmd_runtime_health(&state, "no-such-lease").unwrap_err();
         assert_eq!(err.code, ErrorCode::E_LEASE_EXPIRED);
-        assert_ne!(
-            err.code,
-            ErrorCode::E_CALL_NOT_FOUND,
-            "租约边界必须与 pending call 边界分开"
-        );
+        assert_ne!(err.code, ErrorCode::E_CALL_NOT_FOUND, "租约边界必须与 pending call 边界分开");
     }
 
     /// 崩溃：投递 `RuntimeCrash`（状态机真的吃了它）+ `consecutiveFailures` +1
@@ -7935,10 +9131,6 @@ mod tests {
             proc_error_to_host(ProcError::InvalidSpawnConfig("x".to_string())).code,
             ErrorCode::E_INVALID_MANIFEST
         );
-        assert_eq!(
-            proc_error_to_host(ProcError::HashMismatch).code,
-            ErrorCode::E_INSTALL_FAILED
-        );
         // ABI 不匹配**独立成码**（不并进 E_INSTALL_FAILED）：它是版本兼容问题，
         // 前端据此提示"升级插件/宿主"而不是"重装"。
         assert_eq!(
@@ -7949,14 +9141,9 @@ mod tests {
             .code,
             ErrorCode::E_ABI_MISMATCH
         );
-        assert_eq!(
-            proc_error_to_host(ProcError::CrashLimitExceeded { plugin_id: "p".to_string() }).code,
-            ErrorCode::E_PLUGIN_DISABLED
-        );
         for e in [
             ProcError::SpawnFailed("x".to_string()),
-            ProcError::Timeout("x".to_string()),
-            ProcError::HeartbeatLost("x".to_string()),
+            ProcError::ProcessTerminated("x".to_string()),
         ] {
             let mapped = proc_error_to_host(e);
             assert_ne!(
@@ -8225,8 +9412,8 @@ mod tests {
         assert!(!after.state.disabled_by_safemode);
 
         // 确认后必须真的能再起一个进程（窗口已清，不再被预算门拦下）。
-        let handle = cmd_runtime_spawn(&state, "com.proc", &valid_profile())
-            .expect("确认后必须能再次启动");
+        let handle =
+            cmd_runtime_spawn(&state, "com.proc", &valid_profile()).expect("确认后必须能再次启动");
         assert_eq!(fake.call_count(), 2, "确认后必须能再次启动");
         assert_eq!(handle.pid, 1001, "必须是新的 pid");
         assert_eq!(
@@ -8249,10 +9436,7 @@ mod tests {
 
         // 一次崩溃 → ERRORED_RETRYABLE（崩溃窗口只有 1 次，远未超限）。
         spawn_then_crash(&state, &fake, "com.proc");
-        assert_eq!(
-            state.registry.find(&id).unwrap().state.state,
-            LifecycleState::ErroredRetryable
-        );
+        assert_eq!(state.registry.find(&id).unwrap().state.state, LifecycleState::ErroredRetryable);
         // 走**既有**迁移落到"需用户确认"：ErroredRetryable + RETRY_EXHAUSTED。
         let out = state.registry.report_event(&id, Event::RetryExhausted).unwrap();
         assert!(!out.illegal);
@@ -8637,11 +9821,7 @@ mod tests {
         }
 
         fn noop_only(window: Arc<dyn WindowSink>) -> PluginRuntimeState {
-            state_with_sinks(
-                window,
-                Arc::new(NoopDialogSink),
-                Arc::new(NoopDeepLinkSink),
-            )
+            state_with_sinks(window, Arc::new(NoopDialogSink), Arc::new(NoopDeepLinkSink))
         }
 
         /// 记录型窗口假实现：证明命令**真的**转调了 sink（而不是自己吞掉）。
@@ -8657,11 +9837,7 @@ mod tests {
 
         impl RecordingWindowSink {
             fn with_results(relaunch_ok: bool, create_ok: bool) -> Self {
-                Self {
-                    relaunch_ok,
-                    create_ok,
-                    ..Default::default()
-                }
+                Self { relaunch_ok, create_ok, ..Default::default() }
             }
 
             fn push(&self, op: &'static str, label: Option<&str>, detail: String) {
@@ -8738,6 +9914,10 @@ mod tests {
         }
 
         impl DialogSink for RecordingDialogSink {
+            fn native_supported(&self) -> bool {
+                true
+            }
+
             fn open_file(&self, _multiple: bool, _directory: bool) -> HostResult<Option<String>> {
                 Ok(self.open.clone())
             }
@@ -8747,9 +9927,7 @@ mod tests {
             }
 
             fn message(&self, kind: &str, title: &str, body: &str) -> HostResult<()> {
-                self.messages
-                    .lock()
-                    .push((kind.to_string(), title.to_string(), body.to_string()));
+                self.messages.lock().push((kind.to_string(), title.to_string(), body.to_string()));
                 Ok(())
             }
 
@@ -8916,18 +10094,11 @@ mod tests {
                 "窗口命令必须逐条转调 sink（顺序 = 调用顺序）"
             );
             assert_eq!(
-                sink.ops
-                    .lock()
-                    .iter()
-                    .filter(|r| r.label.as_deref() == Some(label))
-                    .count(),
+                sink.ops.lock().iter().filter(|r| r.label.as_deref() == Some(label)).count(),
                 6,
                 "带目标的六条操作必须把宿主侧的 label 原样传给 sink"
             );
-            assert!(
-                relaunch.relaunch_requested,
-                "sink 说重启已请求 → 命令必须如实回传 true"
-            );
+            assert!(relaunch.relaunch_requested, "sink 说重启已请求 → 命令必须如实回传 true");
 
             // 反向对照：**换回缺省（进程内）sink，同一命令给出不同结果**。
             let degraded = CommandState::new();
@@ -8936,10 +10107,7 @@ mod tests {
                 !out.relaunch_requested,
                 "缺省 MemoryWindowSink 没有重启原语，必须如实回 false"
             );
-            assert!(
-                out.reason.is_some(),
-                "降级必须带原因，而不是一个无解释的 false"
-            );
+            assert!(out.reason.is_some(), "降级必须带原因，而不是一个无解释的 false");
         }
 
         /// 注入返回 `Some("x")` 的假对话框实现 → `cmd_dialog_open` 必须回 `Some("x")`，
@@ -8959,15 +10127,28 @@ mod tests {
             );
 
             assert_eq!(
-                cmd_dialog_open(&state, false, false).unwrap().as_deref(),
+                match cmd_dialog_open(&state, false, false).unwrap() {
+                    ProviderResult::Value(value) => value,
+                    ProviderResult::Unsupported(_) =>
+                        panic!("recording provider reports supported"),
+                }
+                .as_deref(),
                 Some("/tmp/picked.png")
             );
             assert_eq!(
-                cmd_dialog_save(&state, Some("a.txt")).unwrap().as_deref(),
+                match cmd_dialog_save(&state, Some("a.txt")).unwrap() {
+                    ProviderResult::Value(value) => value,
+                    ProviderResult::Unsupported(_) =>
+                        panic!("recording provider reports supported"),
+                }
+                .as_deref(),
                 Some("/tmp/out.txt")
             );
-            assert!(cmd_dialog_confirm(&state, "t", "m").unwrap());
-            cmd_dialog_message(&state, "t", "m", Some("warning")).unwrap();
+            assert_eq!(cmd_dialog_confirm(&state, "t", "m").unwrap(), ProviderResult::Value(true));
+            assert_eq!(
+                cmd_dialog_message(&state, "t", "m", Some("warning")).unwrap(),
+                ProviderResult::Value(())
+            );
             assert_eq!(
                 dialog.messages.lock().clone(),
                 vec![("warning".to_string(), "t".to_string(), "m".to_string())],
@@ -8976,8 +10157,14 @@ mod tests {
 
             // 反向对照：缺省 NoopDialogSink 对同一入参返回取消。
             let degraded = CommandState::new();
-            assert_eq!(cmd_dialog_open(&degraded, false, false).unwrap(), None);
-            assert!(!cmd_dialog_confirm(&degraded, "t", "m").unwrap());
+            assert!(matches!(
+                cmd_dialog_open(&degraded, false, false).unwrap(),
+                ProviderResult::Unsupported(_)
+            ));
+            assert!(matches!(
+                cmd_dialog_confirm(&degraded, "t", "m").unwrap(),
+                ProviderResult::Unsupported(_)
+            ));
         }
 
         /// **顺序不变量**：`host_window_relaunch` 必须先对账、后重启。
@@ -8990,10 +10177,7 @@ mod tests {
             let sink = Arc::new(RelaunchOrderingSink::default());
             let state = noop_only(sink.clone());
             sink.bind_registry(state.registry.clone());
-            state
-                .registry
-                .install(&empty_index(), test_manifest("com.a"))
-                .unwrap();
+            state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
 
             // 直接在恢复引擎上造出「安全模式 + 非必需插件应被禁用」的判定，
             // 但**不**经过 `cmd_recover_report`（它会自己对账）——否则注册表标志
@@ -9033,10 +10217,7 @@ mod tests {
             let control_sink = Arc::new(RelaunchOrderingSink::default());
             let control = noop_only(control_sink.clone());
             control_sink.bind_registry(control.registry.clone());
-            control
-                .registry
-                .install(&empty_index(), test_manifest("com.a"))
-                .unwrap();
+            control.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
             {
                 let mut engine = control.recovery.lock();
                 engine.register_plugin("com.a");
@@ -9066,10 +10247,7 @@ mod tests {
             let err = cmd_window_relaunch_as(&Caller::Plugin("com.a".to_string()), &state)
                 .expect_err("插件主体不得触发应用重启");
             assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
-            assert!(
-                sink.op_names().is_empty(),
-                "拒绝路径不得调用 sink（判定必须在转调之前）"
-            );
+            assert!(sink.op_names().is_empty(), "拒绝路径不得调用 sink（判定必须在转调之前）");
 
             // 畸形 label 构造不出主体（`Caller::from_label` 就拒了）——这是同一道门。
             assert_eq!(
@@ -9177,10 +10355,7 @@ mod tests {
         fn window_create_refuses_plugins_without_a_ui_entry() {
             let sink = Arc::new(RecordingWindowSink::with_results(true, true));
             let state = noop_only(sink.clone());
-            state
-                .registry
-                .install(&empty_index(), test_manifest("com.a"))
-                .unwrap();
+            state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
             let err = cmd_window_create_as(
                 &Caller::MainWindow,
                 &state,
@@ -9247,10 +10422,7 @@ mod tests {
         /// 深链接：sink 被真实驱动；**换协议时先注销旧值**。
         #[test]
         fn deep_link_register_drives_the_sink_and_releases_the_previous_protocol() {
-            let sink = Arc::new(RecordingDeepLinkSink {
-                native: false,
-                ..Default::default()
-            });
+            let sink = Arc::new(RecordingDeepLinkSink { native: false, ..Default::default() });
             let state = state_with_sinks(
                 Arc::new(MemoryWindowSink::new()),
                 Arc::new(NoopDialogSink),
@@ -9272,10 +10444,7 @@ mod tests {
                 ],
                 "同值重复注册不注销；换值必须先注销"
             );
-            assert_eq!(
-                state.shell_ext.lock().deep_link_protocol.as_deref(),
-                Some("other")
-            );
+            assert_eq!(state.shell_ext.lock().deep_link_protocol.as_deref(), Some("other"));
             // 降级事实必须可机读：本仓没有说话算数的 OS 级注册。
             assert!(!sink.native_supported());
         }

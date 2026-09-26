@@ -34,7 +34,68 @@
 
 **应用层**
 
-- `host_*` 命令族共 54 条（底座 38 + 插件运行时 16）
+- **发布收口三轮审计（0.4，2026-09-26）**：按「主体流程全联通、核心链路无断链、
+  无孤儿逻辑、无死循环」对 Rust 15 crate + TS 20 包做了三轮全量审计，修复：
+  - **删除孤儿模拟执行器 `ProcRunner`**（`tauron-proc/src/spawn.rs`，约 470 行）：
+    全仓零生产调用方（真实链路 = `CommandSpawner` + `tauron-host` 的
+    `RuntimeTable`），且 `spawn` 不真起进程却返回 `Running`、RPC 是回显模拟——
+    与真实执行器并存极易误用。仅被它使用的 `RpcConfig` / `HeartbeatTracker` /
+    `ConcurrencyTracker` / `ProcPluginConfig` / `validate_plugin_config` 等与
+    `ProcError` 的九个零产生点变体一并删除（**诚实边界**：真实链路的心跳监控
+    尚未实现，见 capability-closure-plan A3 注记——是"未实现"，不是"在别处"）。
+  - **孤儿死代码清除**：`RuntimeTable::has_reaper`（仅测试调用）、
+    `tauri.rs::parse_stream_kind`（零调用方）删除。
+  - **`host_contributes_list` 补登记 authz 档位**（scoped-read）：`ShellClient.
+    contributesList()` 一直在调、handler 已注册，但不在 `COMMANDS` /
+    `ADMIN_COMMANDS`——R7 收口同类缺口。TS `CAPABILITIES` 镜像同步（22→23 条）。
+  - **能力真相采纳链路接通**（0.4-A2 收尾）：`ShellClient.refreshCapabilities()`
+    此前有实现无入口；示例 app 启动即拉取 `host_capabilities` 回填传输层，
+    并用 `supports('host_registry_install')` 对 feature-gated 命令做明确拒绝。
+  - **`CommandSpawner` 加固**：spawn 的 stdin/stdout 管道句柄获取失败路径现在
+    kill+wait 回收子进程（不再留孤儿进程）；`register_frame_sink` 拒绝进程
+    EOF 后的迟到注册（closed 集合），消除重复"崩溃→重启"下 sink 表无界累积。
+  - **锁纪律修复**：`cmd_registry_admin` 的卸载回收块此前持 bus 锁嵌套获取
+    其余五把锁（无反向路径、不成环，但属未声明嵌套序），改为 bus 锁只覆盖
+    两个 dispose 调用。
+  - **契约钉补齐**：`@tauron/app-contract-kit` 的错误码全集测试补
+    `E_CALL_ALREADY_SETTLED`（0.4-A1 漏网的第二阶钉子）。
+  - **文档数字全量对账**：命令面 54/56/58 等历史口径统一为实测
+    **59 条（底座 39 + 插件运行时 20；`plugin-install` 另加 2 条）**，涉及
+    overview / app-layer-wire / installation / incremental-adoption /
+    competitive-analysis / 示例 README；wire-gate 计数 110→140。
+- **跨主体调用示例切换主推 SDK（0.4-A2，轮 22）**：示例 app 插件页
+  `examples/minimal-app/src/plugin/first.ts` 从 legacy iframe SDK 改用
+  `@tauron/app-plugin-sdk`（`createPlugin` + `createPluginContext` 接宿主 RPC 面，
+  注册声明式命令即开执行泵）；旧实现保留为 `legacy-first.ts` 并标注 deprecated。
+  新增 `plugin-window.html` 构建入口（插件面板窗口页，经 `host_window_create`
+  依 manifest `entry.ui` 加载进 `plugin-<id>` webview）；主窗新增「打开插件窗口 →
+  `callPlugin` → `callTakeResult` 取件」演示段。wire-gate 新增门禁：
+  `app-plugin-sdk` 必须有非测试的消费方（示例 app）。
+- **进程执行器收口（0.4-A3，轮 21 → 发布审计深化）**：wire-gate 钉死
+  `CommandSpawner` 必须 piped stdin/stdout + `thread::spawn` 读线程 + `BufReader`
+  排空 + EOF 回收句柄（剥注释后断言，允许诚实边界注释引用历史符号）。
+  发布审计将轮 21 的"心跳按插件分账"修复**深化为删除**：原修复针对的
+  `ProcRunner` 模拟器全仓零生产调用方（孤儿），连同其全局心跳单例、RPC 回显
+  模拟与专属配置类型整体移除——真实链路（`CommandSpawner` + `RuntimeTable`）
+  从未有过跨插件共享的心跳状态；心跳监控在真实链路上**尚未实现**（诚实边界）。
+- **调用投递闭环（0.4-A1，轮 20）**：`host_plugin_call` 此前只登记 pending、从不投递
+  （「有命令 ≠ 有链路」的典型）。现在引入 `tauron-host::call_delivery` 的
+  `CallDelivery` 抽象，按插件形态选投递实现：
+  - **Js 型**：复用事件总线 request 通道（零新增命令、零新增传输）——宿主经
+    `EventBus::deliver_inbound` 写入保留 topic `plugin:<id>:__call`，`app-plugin-sdk`
+    取件泵识别 `:__call` 帧、自动执行已注册命令并经 `host_call_result` 回填；
+  - **Process 型**：`tauron-proc` 的 `CommandSpawner` 改接 `Stdio::piped()`，每进程
+    一个 stdout 读线程持续排空，`ProcSpawner` trait 新增 `write_frame` /
+    `register_frame_sink`（缺省实现诚实返回不支持）；`ProcessCallDelivery` 写
+    JSON-RPC 行帧（`callId` 内嵌关联），回帧经 `ProcessFrameSinkImpl` 结算。
+    **诚实边界**：无真 sidecar，端到端无运行期证据；Rust 层闭环用 fake 启动面验证。
+  - **未装配 delivery** → `UnwiredDelivery` 如实返回 `Unsupported`，绝不伪造 `PendingCall`。
+  - 新增命令 `host_call_plugin` / `host_call_result` / `host_call_take`（self 档，
+    追加在 `ErrorCode`/authz/能力表末尾）；新错误码 `E_CALL_ALREADY_SETTLED`
+    （重复回填显式拒绝，不覆盖）。
+  - Rust 闭环测试：`process_call_delivers_frame_to_stdin_and_settles_via_sink`。
+- `host_*` 命令族共 59 条（底座 39 + 插件运行时 20；`plugin-install` feature 另加
+  `host_registry_install` / `host_registry_install_preview` 2 条，默认构建不注册）
 - 生命周期状态机：10 态 / 18 事件 / 7 守卫，表驱动 `TRANSITIONS`（表内顺序即优先级），
   `MAX_CHAIN_DEPTH = 2`
 - 三档授权 `AuthTier{Self_, ScopedRead, Privileged}`；`self` 档的 pluginId 只从
@@ -47,10 +108,10 @@
 
 **跨语言契约**
 
-- `@tauron/contract-tests` 的 wire-gate：直接正则解析 Rust 源码文本做断言，**110 条**
+- `@tauron/contract-tests` 的 wire-gate：直接正则解析 Rust 源码文本做断言，**140 条**
   （`vitest run src/wire-gate.test.ts` 实跑计数）
 - 全部跨 IPC 边界的 Rust 结构体强制 `#[serde(rename_all = "camelCase", deny_unknown_fields)]`
-- 双套错误码且零交集：框架层 `SC-xxxx`（14 个）/ 应用层 `E_*`（19 个）
+- 双套错误码且零交集：框架层 `SC-xxxx`（14 个）/ 应用层 `E_*`（20 个）
 
 **工程与发布基础设施**（本次补齐）
 
@@ -126,7 +187,7 @@
   「现在适合拿它做什么」适不适合表，并挂上安装文档入口
 - **文档数字按实测重测并修正**：ESLint `0 error / 81 warning`（原写 82，已过期）；
   示例工程 README 与 `@tauron/host` README 的 `host_*` 命令数 `45 条` → **54 条**
-  （底座 38 + 插件运行时 16，逐条数过 `tauron_substrate_handler!` /
+  （底座 39 + 插件运行时 20，逐条数过 `tauron_substrate_handler!` /
   `tauron_plugin_handler!` 的宏定义）
 - `docs/architecture/README.md` 文档地图补 `installation.md` 一行（标注为「落地
   入口——第一次接触先读这份」）；示例工程 README 补「安装包获取与运行」一节
@@ -145,6 +206,22 @@
 
 ### Fixed
 
+- **能力表对 feature-gated 命令误报已注册（0.4-A2）**：`host_registry_install` /
+  `host_registry_install_preview` 在 Rust 侧挂 `#[cfg(feature = "plugin-install")]`，
+  而 `crates/tauron-adapter` 的 `default = []`——默认构建的宿主根本注册不了这两条。
+  此前它们被无条件列进 TS 的 `FRAMEWORK_COMMANDS`，于是 `capabilities()` /
+  `supports()` 对它们返回 `true`，调用方直到真正 `invoke` 才 `command not found`。
+  现在这两条移入新的 `OPTIONAL_FRAMEWORK_COMMANDS`，**不进**静态能力表；
+  只能由运行期真相开门——`ShellClient.refreshCapabilities()` 调 `host_capabilities`
+  并把返回的实际命令集回填传输层（`TauriBackend.adoptCapabilities`）。
+  新增 2 条 wire-gate 门禁锁死「TS 可选集 == Rust 可选集」与「可选命令不得出现在静态表」，
+  并已做负向突变验证。
+- **wire-gate 能力协商门禁在默认构建下假红（0.4-A8-1）**：门禁的 `parse()` 辅助
+  按字面串 `indexOf('pub const X: &[&str] = &[')` 匹配，而 `PLUGIN_INSTALL_COMMANDS`
+  的声明被 rustfmt 折成 `=\n    &[`，匹配随即失配（`-1`），
+  `host_capabilities 命令集与 handler 宏严格同源` 恒红。改为容忍换行的正则，
+  并加上「解析到 0 条必须失败」的断言——否则正则失配会表现为"空数组 = 一致"的假绿。
+  修复后 `pnpm -r test` 由 1645 含 1 红变为 **1647 全绿**。
 - **`tauron-notify` 的活锁风险**：`push` / `trim_to` 的驱逐循环在 `order` 与
   `entries` 失同步时会空转（宿主挂死）。加入收敛保护（一轮未减少即跳出），
   并补 2 个针对性测试。
@@ -353,9 +430,9 @@ cargo clippy --workspace --all-targets -- -D warnings   # 从未运行
 
 `pnpm format:check` 当前会失败。CI 里没有 format 门禁，避免永久红。
 
-**3. ESLint 有 81 条 warning（0 error）**
+**3. ESLint 有 80 条 warning（0 error）**
 
-`pnpm lint` 退出码为 0，因此已作为**硬门禁**接入 CI。81 条 warning 绝大多数是
+`pnpm lint` 退出码为 0，因此已作为**硬门禁**接入 CI。80 条 warning 绝大多数是
 测试文件里的未用导入。**不要**加 `--max-warnings 0`，那会让仓库直接变红。
 
 **4. Rust 测试未在有网络的环境执行过**
@@ -418,15 +495,16 @@ Windows 腿红掉、连 NSIS 也拿不到。NSIS 是 Windows 侧主安装包格�
 **未实测**：CI 上 `--bundles nsis,msi`（即 WiX 下载在 runner 上是否稳定）——
 本机因沙箱代理无法验证。要加回 MSI，需先在 CI 上确认这一步能过。
 
-**11. sidecar ABI 校验的「实际值」无可信来源**
+**12. sidecar ABI 校验的「实际值」无可信来源**
 
 `host_runtime_spawn` 现在会比对宿主 ABI 契约与调用方声明的 `profile.abi`（不符 →
 `E_ABI_MISMATCH`），但 `profile.abi` 是**调用方自报**的——这道校验挡的是「配置错配 /
 前端用了旧模板」，**不是**「恶意调用方伪造 ABI」。真正的可信校验需要 sidecar 在
-RPC 握手时自报指纹（**尚未实现**：`tauron-proc` 的 RPC 帧循环未接线）。同一性质：
-`validate_spawn_config` 的签名 / 哈希检查也只做**格式**校验（非空 / 长度 64），
-不做真实验签——`ProcError::SignatureInvalid` / `HashMismatch` 目前同样无生产产生点
-（只有映射表与测试引用它们）。这两条**不构成安全边界**，发布公告里不要写成
+RPC 握手时自报指纹（**尚未实现**：0.4-A1 已把 `tauron-proc` 的 RPC 帧循环接线
+（piped + 读线程），但握手期指纹自报仍是路线图项）。`validate_spawn_config` 的
+签名 / 哈希检查同样只做**格式**校验（非空 / 长度 64），不做真实验签——发布审计
+已把零产生点的 `ProcError::SignatureInvalid` / `HashMismatch` 变体删除，未来实现
+真实验签时按需新增。这两条**不构成安全边界**，发布公告里不要写成
 「已实现进程插件验签 / ABI 校验」。
 
 ---

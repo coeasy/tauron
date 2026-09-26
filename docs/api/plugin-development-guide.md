@@ -12,6 +12,7 @@
 - [插件结构（两个清单）](#插件结构两个清单)
 - [权限系统](#权限系统)
 - [插件 SDK](#插件-sdk)
+- [跨主体调用（0.4-A1）](#跨主体调用04-a1)
 - [宿主命令面](#宿主命令面)
 - [错误码](#错误码)
 - [生命周期状态机](#生命周期状态机)
@@ -232,7 +233,47 @@ tauron plugin new com.example.sys  --type process  # 骨架含 main.js
 
 ## 插件 SDK
 
-JS 插件通过 `@tauron/plugin-sdk` 注册：
+JS 插件有**两代 SDK**。新插件一律从主轨起步；旧轨是 iframe 代理协议（§4.2B）一代的
+过渡产物，仍是公开 API 但不再演进。
+
+### 主轨：`@tauron/app-plugin-sdk`（推荐）
+
+`createPlugin` 是声明式工厂——命令、设置页、贡献、事件订阅全部声明在定义对象上，
+`activate` 期由 SDK 统一注册：
+
+```javascript
+import { createPlugin } from '@tauron/app-plugin-sdk';
+
+const plugin = createPlugin({
+  id: 'com.example.myplugin',
+  name: 'my-plugin',
+  version: '1.0.0',
+  commands: {
+    async format(args, ctx) {
+      return { formatted: String(args.code).replace(/\s+/g, ' ') };
+    },
+  },
+  events: { subscribe: ['data-changed'] },
+  onEvent(topic, payload, ctx) { /* … */ },
+});
+
+export default plugin;
+```
+
+要点（都以代码为准）：
+
+- **注册命令即开泵**：宿主总线是**拉取**模型（`host_events_drain`），帧只进队列、
+  没人取就永远到不了订阅者。`createPluginContext` 内建的取件泵每 100ms 取回
+  request / event 两路帧并分发——这只泵同时也是**跨主体调用的执行泵**（见
+  [跨主体调用](#跨主体调用04-a1)）。没有泵，「订阅成功」永远收不到帧。
+- `contributes` 在 `activate` 期逐条 `host_contributes_register`（best-effort：
+  宿主侧重复 id 只告警不阻断激活，卸载时由宿主按插件 id 整体回收）。
+- `PluginContext` 就是共享契约（`@tauron/plugin-context-contract`）的具体化版本，
+  签名漂移由编译期断言拦下。
+- 测试替身：`createPluginTestContext` / `createMockContext`
+  （`@tauron/app-plugin-sdk/testing`）。
+
+### 旧轨：`@tauron/plugin-sdk`（legacy，保留不删）
 
 ```javascript
 import { registerPlugin } from '@tauron/plugin-sdk';
@@ -251,9 +292,58 @@ registerPlugin({
 });
 ```
 
-SDK 的 `createPlugin()` 在 `attach` 期调用 `host_contributes_register` 注册贡献，
-在 `dispose` 期调用 `host_events_unsubscribe` 退订。事件取件走 `host_events_drain`
-（拉取本插件待投递帧）。测试替身见 `@tauron/plugin-sdk/testing`。
+旧轨面向 `__invoke:` / `__result:` postMessage 代理协议，`registerPlugin` 只 wire 了
+`onEnable`（宿主没有下发禁用通知的手段，`onDisable` 是尽力而为）。已有插件可以继续用，
+新插件不要从它起步。
+
+---
+
+## 跨主体调用（0.4-A1）
+
+宿主 ↔ 插件、插件 ↔ 插件的跨主体调用已闭环：**登记 → 投递 → 执行 → 回填 → 取件**
+每一跳都有生产实现（不是「有命令、没链路」）。发起主体由宿主从 webview label 解析
+（防冒充），主窗即 `"main"`；配额记在**发起方**名下。
+
+### 发起方（主窗示例）
+
+```ts
+const info = await shell.callPlugin('com.example.calc', 'add', { a: 1, b: 2 });
+// info.state === 'pending'：已登记、已投递，等执行方回填
+// 稍后取件（一次性语义：settled 取走即删；pending 返回副本、条目保留）
+const done = await shell.callTakeResult(info.callId);
+if (done.state === 'settled') {
+  if (done.errorCode) { /* 执行方失败 */ } else { /* 用 done.result */ }
+}
+```
+
+`ShellClient.callPlugin(target, method, argsJson?)` 只能在主窗调（宿主主窗视角的
+封装）。插件侧发起用 `HostClient.callPlugin` / `takeCallResult`（self 档：只有
+发起方本人能取走结果）。
+
+### 执行方（插件）
+
+**推荐什么都不用写**：只要命令是通过 `@tauron/app-plugin-sdk` 注册的（声明式
+`commands` 字段或 `ctx.commands.register`），取件泵会自动识别 `plugin:<id>:__call`
+帧、执行 handler 并经 `host_call_result` 回填结果；命令不存在或 handler 抛异常
+都会回填 `E_CALL_EXEC_FAILED`（执行方侧约定码，**不属于**宿主 `E_*` 枚举——执行方
+对自己「能不能执行」负责）。**失败也必须回填**：静默 = 发起方等到 TTL 超时。
+
+需要手工结算时（例如 process 插件自行实现帧回路）用
+`HostClient.reportCallResult({ callId, ok, result?, errorCode? })`：
+
+- 仅该调用的 target 本人可回填（宿主校验身份 == target）；
+- 对已结算的调用重复回填得 `E_CALL_ALREADY_SETTLED`（幂等拒绝，**不覆盖**）。
+
+### 投递通路（宿主按目标插件形态选）
+
+| 目标形态 | 通路 | 无通路时 |
+|---|---|---|
+| js | 事件总线 request 通道（topic `plugin:<id>:__call`，插件经 `host_events_drain` 取件） | — |
+| process | sidecar stdin 帧回路（`tauron-adapter::process_delivery`） | — |
+| wasm / B+ | 无 | 结构化 `Unsupported` 失败（**诚实失败**，不假装投递成功） |
+
+js / process 两条通路都在 `tauron-adapter::default_deliveries` 里生产装配；未装配
+任何通路时落到 `UnwiredDelivery`，返回有类型的 `Unsupported` 而非静默成功。
 
 ---
 
@@ -264,9 +354,9 @@ SDK 的 `createPlugin()` 在 `attach` 期调用 `host_contributes_register` 注�
 登记表（`authz::COMMANDS` / `ADMIN_COMMANDS`）的强制兑底是**门禁测试**
 （`validate_command_registry` + TS 镜像 `capabilities.ts`）。
 
-### 插件面命令（16 条，登记在档位表内）
+### 插件面命令（17 条，登记在 `authz::COMMANDS`）
 
-**Self_（12 条）**——身份取自 webview label（`plugin-<id>`），入参里的身份字段一律忽略（防冒充）：
+**Self_（15 条）**——身份取自 webview label（`plugin-<id>`），入参里的身份字段一律忽略（防冒充）：
 
 | 命令 | 说明 |
 |---|---|
@@ -282,26 +372,33 @@ SDK 的 `createPlugin()` 在 `attach` 期调用 `host_contributes_register` 注�
 | `host_stream_open` | 为一次已挂帧载体的调用开流 |
 | `host_stream_write` | 写一帧（seq 由宿主铸） |
 | `host_stream_close` | 发终帧并使句柄失效 |
+| `host_call_plugin` | 跨主体调用：宿主调插件或插件调插件（caller / target 显式，见[跨主体调用](#跨主体调用04-a1)） |
+| `host_call_result` | 执行方回填一次调用的结果（仅 target 可回填） |
+| `host_call_take` | 发起方取走一次已结算的结果（仅 caller 可取） |
 
-**ScopedRead（1 条）**：
+**ScopedRead（2 条）**——按身份过滤结果集而非拒绝：
 
 | 命令 | 说明 |
 |---|---|
 | `host_registry_list` | 列出可见插件（结果按可见性过滤） |
+| `host_contributes_list` | 列出贡献表（commands / menus / panels / settings，纯只读） |
 
-**Privileged（3 条）**——仅主窗 / 宿主 UI：
+### 主窗特权命令（4 条，登记在 `authz::ADMIN_COMMANDS`）
+
+**Privileged（4 条）**——仅主窗 / 宿主 UI，代码层判定与部署 ACL 双保险：
 
 | 命令 | 说明 |
 |---|---|
 | `host_registry_admin` | 管理操作：`disable` / `enable` / `uninstall` / `purge` |
 | `host_runtime_spawn` | 启动进程插件 sidecar（幂等：已有租约则返回既有 pid / lease） |
 | `host_runtime_health` | 按租约查询 sidecar 健康（pid / 崩溃窗口计数；暴露 PID 故同属特权） |
+| `host_resource_stats` | 查看全局及逐插件的 pending、流、订阅与通知配额占用 |
 
 ### 底座命令（主窗专属）
 
 其余命令（`host_window_*` / `host_settings_*` / `host_notify` / `host_recover_*` /
-`host_market_*` / `host_i18n_*` / `host_brand_info` / `host_registry_list_all` /
-`host_contributes_list` 等）**不在档位表内**——它们是主窗专属命令，由 Tauri
+`host_market_*` / `host_i18n_*` / `host_brand_info` / `host_registry_list_all` 等）
+**不在档位表内**——它们是主窗专属命令，由 Tauri
 capability 的 `windows` 字段限制（只授予 `main`），不走 `authz` 表。
 完整线格式见 `docs/architecture/app-layer-wire.md`。
 
@@ -333,7 +430,7 @@ capability 的 `windows` 字段限制（只授予 `main`），不走 `authz` 表
 | `SC-3003` | `PLUGIN_EXITED` | 插件退出 |
 | `SC-9001` | `INTERNAL` | 内部错误（**可重试**） |
 
-### 应用层 `E_*`（19 个，`tauron-host`）
+### 应用层 `E_*`（20 个，`tauron-host`）
 
 变体名即**跨 IPC 线协议名**（改名即破坏兼容）。TS 侧 `HOST_ERROR_CODES`
 按**声明顺序**比对（wire-gate 门禁）。
@@ -359,6 +456,7 @@ capability 的 `windows` 字段限制（只授予 `main`），不走 `authz` 表
 | `E_PLUGIN_TYPE_NO_RUNTIME` | 该插件类型没有运行期执行器（如对 js/wasm 插件调 `host_runtime_spawn`） |
 | `E_LEASE_EXPIRED` | 运行时租约不存在或已失效 |
 | `E_STREAM_FULL` | 流句柄数达到上限（`MAX_STREAMS = 1024`）——先 `host_stream_close` 再开 |
+| `E_CALL_ALREADY_SETTLED` | 执行方对同一次跨主体调用重复回填（0.4-A1；重复回填显式拒绝，不覆盖） |
 
 **可重试集合只有 3 个**：`E_HOST_PANIC` / `E_CALL_TIMEOUT` / `E_PLUGIN_FILTERED`。
 其余一律不可自动重试——把一个确定性失败标成可重试会让前端无限重试。

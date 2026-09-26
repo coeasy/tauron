@@ -48,6 +48,9 @@ pub const OVERFLOW_STREAK_LIMIT: usize = 3;
 /// 与其余「表满」类错误一致）。
 pub const MAX_SUBSCRIPTIONS: usize = 4096;
 
+/// 单插件可同时登记的订阅上限。
+pub const MAX_SUBSCRIPTIONS_PER_PLUGIN: usize = 256;
+
 /// 熔断关闭阈值：drain 后深度降到上限的该比例以下即复位。
 const CIRCUIT_CLOSE_RATIO: f64 = 0.5;
 
@@ -313,10 +316,7 @@ impl Default for EventBus {
 impl EventBus {
     pub fn with_capacity(capacity: usize) -> Self {
         assert!(capacity >= 1, "队列上限至少 1");
-        Self {
-            capacity,
-            ..Default::default()
-        }
+        Self { capacity, ..Default::default() }
     }
 
     // ── 安装期声明 ────────────────────────────────────────────────
@@ -340,10 +340,7 @@ impl EventBus {
             }
             t.insert(
                 d.topic.clone(),
-                TopicMeta {
-                    publisher: publisher.to_string(),
-                    is_public: d.public,
-                },
+                TopicMeta { publisher: publisher.to_string(), is_public: d.public },
             );
         }
         Ok(())
@@ -374,9 +371,7 @@ impl EventBus {
     }
 
     pub fn is_approved(&self, subscriber: &str, topic: &str) -> bool {
-        self.approvals
-            .lock()
-            .contains_key(&(subscriber.to_string(), topic.to_string()))
+        self.approvals.lock().contains_key(&(subscriber.to_string(), topic.to_string()))
     }
 
     // ── 订阅 ─────────────────────────────────────────────────────
@@ -397,36 +392,20 @@ impl EventBus {
         topic: &str,
     ) -> HostResult<SubscribeOutcome> {
         if subscriber.is_empty() || topic.is_empty() {
-            return Err(HostError::new(
-                ErrorCode::E_AUTH_DENIED,
-                "subscriber 与 topic 均不可为空",
-            ));
+            return Err(HostError::new(ErrorCode::E_AUTH_DENIED, "subscriber 与 topic 均不可为空"));
         }
 
-        let meta = self
-            .topics
-            .read()
-            .get(topic)
-            .cloned()
-            .ok_or_else(|| {
-                HostError::new(
-                    ErrorCode::E_AUTH_DENIED,
-                    format!("topic `{topic}` 未被任何插件声明，不可订阅"),
-                )
-            })?;
+        let meta = self.topics.read().get(topic).cloned().ok_or_else(|| {
+            HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                format!("topic `{topic}` 未被任何插件声明，不可订阅"),
+            )
+        })?;
 
-        let allowed = if meta.publisher == subscriber {
-            true
-        } else if meta.is_public {
-            true
-        } else if self.is_approved(subscriber, topic) {
-            true
-        } else {
-            self.stats.lock().rejected_subscribes += 1;
-            false
-        };
-
+        let allowed =
+            meta.publisher == subscriber || meta.is_public || self.is_approved(subscriber, topic);
         if !allowed {
+            self.stats.lock().rejected_subscribes += 1;
             return Err(HostError::new(
                 ErrorCode::E_AUTH_DENIED,
                 format!(
@@ -439,48 +418,56 @@ impl EventBus {
         // 幂等：同 subscriber × window × topic 已存在则复用 token。
         // 上限检查放在幂等**之后**：已达上限时，重复订阅（复用同一 token）
         // 仍必须成功，否则持续重复调用的插件会突然开始失败。
-        {
-            let s = self.subs.lock();
-            if let Some(existing) = s.values().find(|m| {
-                m.subscriber == subscriber && m.window == window && m.topic == topic
-            }) {
-                return Ok(SubscribeOutcome {
-                    token: existing.token.clone(),
-                    duplicate: true,
-                });
+        let token = {
+            let mut s = self.subs.lock();
+            if let Some(existing) = s
+                .values()
+                .find(|m| m.subscriber == subscriber && m.window == window && m.topic == topic)
+            {
+                return Ok(SubscribeOutcome { token: existing.token.clone(), duplicate: true });
             }
-            // 软上限（检查与插入之间可能有并发插入，内存守卫足够）。
+            let plugin_subscriptions =
+                s.values().filter(|meta| meta.subscriber == subscriber).count();
+            if plugin_subscriptions >= MAX_SUBSCRIPTIONS_PER_PLUGIN {
+                return Err(HostError::new(
+                    ErrorCode::E_SUBSCRIPTION_FULL,
+                    format!(
+                        "插件订阅数已达上限 {MAX_SUBSCRIPTIONS_PER_PLUGIN}（当前 {plugin_subscriptions}）"
+                    ),
+                ));
+            }
             if s.len() >= MAX_SUBSCRIPTIONS {
                 return Err(HostError::new(
                     ErrorCode::E_SUBSCRIPTION_FULL,
-                    format!("订阅表已达上限 {MAX_SUBSCRIPTIONS}（window 由调用方给定，不得用作无限增长维度）"),
+                    format!(
+                        "订阅表已达上限 {MAX_SUBSCRIPTIONS}（window 由调用方给定，不得用作无限增长维度）"
+                    ),
                 ));
             }
-        }
+            let token = format!(
+                "sub-{}",
+                self.next_token.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            );
+            s.insert(
+                token.clone(),
+                SubMeta {
+                    token: token.clone(),
+                    subscriber: subscriber.to_string(),
+                    topic: topic.to_string(),
+                    window: window.to_string(),
+                },
+            );
 
-        let token = format!("sub-{}", self.next_token.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-
-        // **锁序**：先 `subs` 后 `topic_subscribers`（全模块统一顺序）。
-        // 反序（先 topics_subscribers 后 subs）会与两处反向持有构成死锁环：
-        // publish 的悬挂清理分支与 unsubscribe 都是 subs → topic_subscribers。
-        // 反序还会丢订阅：publish 在 topic_subscribers 看到 token 但 subs 里还
-        // 没有时，会把它当悬挂订阅**删除**，随后 subscribe 才写入 subs——
-        // token 留在 subs 里却不在 topic_subscribers 中，事件永远投不出去。
-        self.subs.lock().insert(
-            token.clone(),
-            SubMeta {
-                token: token.clone(),
-                subscriber: subscriber.to_string(),
-                topic: topic.to_string(),
-                window: window.to_string(),
-            },
-        );
-
-        let mut ts = self.topic_subscribers.lock();
-        let entry = ts.entry(topic.to_string()).or_default();
-        if !entry.contains(&token) {
-            entry.push(token.clone());
-        }
+            // **锁序**：先 `subs` 后 `topic_subscribers`（全模块统一顺序）。
+            // 两张索引在同一锁序区间内更新，避免并发 publish 把刚登记的订阅
+            // 当成悬挂 token 清掉；容量检查与插入也因此具有原子性。
+            let mut ts = self.topic_subscribers.lock();
+            let entry = ts.entry(topic.to_string()).or_default();
+            if !entry.contains(&token) {
+                entry.push(token.clone());
+            }
+            token
+        };
         Ok(SubscribeOutcome { token, duplicate: false })
     }
 
@@ -502,7 +489,13 @@ impl EventBus {
     ///
     /// 越界发布（topic 未声明，或调用方不是声明者）**只丢弃并计数**，
     /// 不返回错误——否则越界发布会变成一条可用的存在性探测通道。
-    pub fn publish(&self, publisher: &str, topic: &str, payload: Value, kind: ChannelKind) -> PublishResult {
+    pub fn publish(
+        &self,
+        publisher: &str,
+        topic: &str,
+        payload: Value,
+        kind: ChannelKind,
+    ) -> PublishResult {
         self.stats.lock().publishes += 1;
 
         // **锁序**：`topics` 读锁必须在取 `stats` 之前释放。写成 `match
@@ -545,14 +538,7 @@ impl EventBus {
                 let mut qs = self.queues.lock();
                 let q = qs.entry(key.clone()).or_insert_with(|| Queue::new(self.capacity));
                 let seq = q.frames.len() as u64;
-                q.enqueue(
-                    kind,
-                    Frame {
-                        topic: topic.to_string(),
-                        seq,
-                        payload: payload.clone(),
-                    },
-                )
+                q.enqueue(kind, Frame { topic: topic.to_string(), seq, payload: payload.clone() })
             };
             match result {
                 EnqueueResult::Queued => delivered += 1,
@@ -569,7 +555,12 @@ impl EventBus {
     }
 
     /// 请求类发布（可靠语义）：溢出返回结构化错误而非静默丢弃。
-    pub fn publish_request(&self, publisher: &str, topic: &str, payload: Value) -> HostResult<PublishResult> {
+    pub fn publish_request(
+        &self,
+        publisher: &str,
+        topic: &str,
+        payload: Value,
+    ) -> HostResult<PublishResult> {
         let res = self.publish(publisher, topic, payload, ChannelKind::Request);
         if res.overflow > 0 {
             return Err(HostError::new(
@@ -581,6 +572,43 @@ impl EventBus {
             ));
         }
         Ok(res)
+    }
+
+    /// **宿主内部调用投递**：把一帧直接入队到目标插件的 `Request` 通道，**绕过**
+    /// topic 声明与发布者鉴权（宿主是受信任的路由器，直接写 `(target, Request)` 队列）。
+    ///
+    /// 这是 `CallDelivery`（A1）的 Js 型投递落点：复用既有的 `Request` 通道与可靠
+    /// 语义（溢出即明确错误），但**不**要求目标插件预先声明 topic——否则插件必须在
+    /// 订阅之前就声明好 `__call` 入站 topic，而订阅发生在启动期、声明又依赖激活期，
+    /// 时序上凑不到一起。直接写队列则订阅/取件（`host_events_drain(target, "request")`）
+    /// 照常工作，topic 仅作为帧上的路由标签用于前端区分。
+    ///
+    /// 返回入队份数（可靠通道下成功恒为 `1`，满则为 `0` 并转结构化错误）。
+    pub fn deliver_inbound(&self, target: &str, topic: &str, payload: Value) -> HostResult<usize> {
+        if target.is_empty() {
+            return Err(HostError::new(ErrorCode::E_AUTH_DENIED, "调用投递目标不可为空"));
+        }
+        let mut qs = self.queues.lock();
+        let key = (target.to_string(), ChannelKind::Request);
+        let q = qs.entry(key).or_insert_with(|| Queue::new(self.capacity));
+        let seq = q.frames.len() as u64;
+        let result = q.enqueue(
+            ChannelKind::Request,
+            Frame {
+                topic: topic.to_string(),
+                seq,
+                payload,
+            },
+        );
+        match result {
+            EnqueueResult::Queued | EnqueueResult::QueuedWithOverflow => Ok(1),
+            EnqueueResult::Full | EnqueueResult::DroppedCircuitOpen => Err(HostError::new(
+                ErrorCode::E_CALL_PENDING_FULL,
+                format!(
+                    "调用投递队列已满，无法投递到 `{target}` 的 `{topic}`（可靠通道不可静默丢弃）"
+                ),
+            )),
+        }
     }
 
     // ── 消费 ─────────────────────────────────────────────────────
@@ -605,10 +633,7 @@ impl EventBus {
 
     /// 队列统计。
     pub fn queue_stats(&self, subscriber: &str, kind: ChannelKind) -> Option<QueueStats> {
-        self.queues
-            .lock()
-            .get(&(subscriber.to_string(), kind))
-            .map(|q| q.stats())
+        self.queues.lock().get(&(subscriber.to_string(), kind)).map(|q| q.stats())
     }
 
     /// 总线级统计。
@@ -657,10 +682,7 @@ impl EventBus {
     pub fn dispose_subscriber(&self, subscriber: &str) -> usize {
         let tokens: Vec<String> = {
             let s = self.subs.lock();
-            s.values()
-                .filter(|m| m.subscriber == subscriber)
-                .map(|m| m.token.clone())
-                .collect()
+            s.values().filter(|m| m.subscriber == subscriber).map(|m| m.token.clone()).collect()
         };
         for token in &tokens {
             let _ = self.unsubscribe(token);
@@ -677,6 +699,16 @@ impl EventBus {
     /// 该订阅者是否还有任何悬挂订阅（§8-3 断言用）。
     pub fn has_hanging_subscriptions(&self, subscriber: &str) -> bool {
         self.subs.lock().values().any(|m| m.subscriber == subscriber)
+    }
+
+    /// 当前订阅者的订阅数（配额观测口径）。
+    pub fn subscription_count(&self, subscriber: &str) -> usize {
+        self.subs.lock().values().filter(|meta| meta.subscriber == subscriber).count()
+    }
+
+    /// 当前订阅总数（宿主资源诊断口径）。
+    pub fn subscription_total(&self) -> usize {
+        self.subs.lock().len()
     }
 
     /// 某订阅者在指定窗口下已订阅的 topic 列表（按 topic 去重、稳定排序）。
@@ -721,11 +753,7 @@ mod tests {
     }
 
     fn declare(b: &EventBus, pub_id: &str, topic: &str, is_public: bool) {
-        b.declare_topics(
-            pub_id,
-            &[EventDecl { topic: topic.into(), public: is_public }],
-        )
-        .unwrap();
+        b.declare_topics(pub_id, &[EventDecl { topic: topic.into(), public: is_public }]).unwrap();
     }
 
     // ── 发布授权 ──────────────────────────────────────────────────
@@ -736,25 +764,41 @@ mod tests {
         // 无限增长维度（否则 self 档命令即可耗尽宿主内存）。
         let b = bus(8);
         declare(&b, "com.a", "plugin:com.a:x", true);
-        for i in 0..MAX_SUBSCRIPTIONS {
-            b.subscribe("com.b", &format!("w{i}"), "plugin:com.a:x").unwrap();
+        for i in 0..MAX_SUBSCRIPTIONS / MAX_SUBSCRIPTIONS_PER_PLUGIN {
+            let subscriber = format!("com.b{i}");
+            for window in 0..MAX_SUBSCRIPTIONS_PER_PLUGIN {
+                b.subscribe(&subscriber, &format!("w{window}"), "plugin:com.a:x").unwrap();
+            }
         }
-        let e = b
-            .subscribe("com.b", "w-overflow", "plugin:com.a:x")
-            .unwrap_err();
+        let e = b.subscribe("com.overflow", "w-overflow", "plugin:com.a:x").unwrap_err();
         assert_eq!(e.code, ErrorCode::E_SUBSCRIPTION_FULL);
         assert!(!e.retryable, "表满属确定性失败，不应被自动重试");
 
         // 达限后**幂等重复订阅仍须成功**（复用 token），否则持续重复调用的
         // 插件会在上限处突然开始失败。
-        let again = b.subscribe("com.b", "w0", "plugin:com.a:x").unwrap();
+        let again = b.subscribe("com.b0", "w0", "plugin:com.a:x").unwrap();
         assert!(again.duplicate, "上限不应影响幂等复用路径");
 
         // 容量随回收释放：卸载订阅者后必须能重新订阅（否则上限会随生命周期
         // 累积成永久占满，正常使用也会被拒）。
-        b.dispose_subscriber("com.b");
-        b.subscribe("com.b", "w-after-dispose", "plugin:com.a:x")
-            .expect("回收后应重新可订阅");
+        b.dispose_subscriber("com.b0");
+        b.subscribe("com.b0", "w-after-dispose", "plugin:com.a:x").expect("回收后应重新可订阅");
+    }
+
+    #[test]
+    fn subscription_quota_is_per_plugin_and_isolated() {
+        let b = bus(8);
+        declare(&b, "owner", "plugin:owner:public", true);
+        for i in 0..MAX_SUBSCRIPTIONS_PER_PLUGIN {
+            b.subscribe("plugin.a", &format!("window-{i}"), "plugin:owner:public").unwrap();
+        }
+        assert_eq!(b.subscription_count("plugin.a"), MAX_SUBSCRIPTIONS_PER_PLUGIN);
+        let error = b.subscribe("plugin.a", "overflow", "plugin:owner:public").unwrap_err();
+        assert_eq!(error.code, ErrorCode::E_SUBSCRIPTION_FULL);
+
+        b.subscribe("plugin.b", "window", "plugin:owner:public")
+            .expect("plugin.a 的配额不能阻断 plugin.b");
+        assert_eq!(b.subscription_count("plugin.b"), 1);
     }
 
     #[test]
@@ -806,7 +850,7 @@ mod tests {
         let b = bus(16);
         declare(&b, "com.a", "plugin:com.a:x", false);
         declare(&b, "com.a", "plugin:com.a:x", true);
-        assert_eq!(b.topic_meta("plugin:com.a:x").unwrap().is_public, true);
+        assert!(b.topic_meta("plugin:com.a:x").unwrap().is_public);
     }
 
     // ── 订阅授权 ──────────────────────────────────────────────────
@@ -869,7 +913,7 @@ mod tests {
         declare(&b, "com.a", "plugin:com.a:x", true);
         let o1 = b.subscribe("com.b", "w1", "plugin:com.a:x").unwrap();
         let o2 = b.subscribe("com.b", "w1", "plugin:com.a:x").unwrap();
-        assert!(o1.duplicate == false);
+        assert!(!o1.duplicate);
         assert!(o2.duplicate, "同窗口重复订阅应被识别");
         assert_eq!(o1.token, o2.token);
         // 只有一份队列：不产生第二份。
@@ -1002,9 +1046,8 @@ mod tests {
         // 消费者完全不消费，发送超过容量（溢出 2 次，未达熔断阈值）。
         let mut total_overflow = 0usize;
         for i in 0..10 {
-            total_overflow += b
-                .publish("com.a", "plugin:com.a:x", Value::from(i), ChannelKind::Event)
-                .overflow;
+            total_overflow +=
+                b.publish("com.a", "plugin:com.a:x", Value::from(i), ChannelKind::Event).overflow;
         }
         let frames = b.drain("com.b", ChannelKind::Event).unwrap();
         // 只剩最新的 8 帧（最旧的 2 帧被持续丢弃）。
@@ -1032,14 +1075,8 @@ mod tests {
             let st = b.queue_stats("com.b", kind).unwrap();
             assert_eq!(st.depth, 1, "每种通道各有独立队列：{kind:?}");
         }
-        assert_eq!(
-            b.drain("com.b", ChannelKind::Event).unwrap()[0].payload,
-            Value::from("event")
-        );
-        assert_eq!(
-            b.drain("com.b", ChannelKind::Request).unwrap()[0].payload,
-            Value::from("req")
-        );
+        assert_eq!(b.drain("com.b", ChannelKind::Event).unwrap()[0].payload, Value::from("event"));
+        assert_eq!(b.drain("com.b", ChannelKind::Request).unwrap()[0].payload, Value::from("req"));
     }
 
     #[test]
@@ -1153,15 +1190,13 @@ mod tests {
             .and_then(|s| s.split("pub fn unsubscribe(").next())
             .expect("subscribe 函数体");
 
-        let subs_insert = body
-            .find("self.subs.lock().insert(")
-            .expect("subscribe 里应有 subs 插入");
-        let reverse_index = body
-            .find("self.topic_subscribers.lock()")
-            .expect("subscribe 里应有反向索引写入");
+        let subs_lock = body.find("self.subs.lock()").expect("subscribe 里应有 subs 锁");
+        let subs_insert = body.find("s.insert(").expect("subscribe 里应有 subs 插入");
+        let reverse_index =
+            body.find("self.topic_subscribers.lock()").expect("subscribe 里应有反向索引写入");
 
         assert!(
-            subs_insert < reverse_index,
+            subs_lock < subs_insert && subs_insert < reverse_index,
             "锁序反转：subscribe 必须先取 subs（规范顺序 stats → topics → subs → \
              topic_subscribers → approvals → queues）"
         );
@@ -1316,7 +1351,8 @@ mod tests {
 
     #[test]
     fn publish_result_serializes_for_ipc() {
-        let v = serde_json::to_value(PublishResult { delivered: 3, overflow: 1, dropped: false }).unwrap();
+        let v = serde_json::to_value(PublishResult { delivered: 3, overflow: 1, dropped: false })
+            .unwrap();
         assert_eq!(v["delivered"], 3);
         assert_eq!(v["overflow"], 1);
         assert_eq!(v["dropped"], false);

@@ -247,7 +247,7 @@ export function generatePluginManifest(config: PluginConfig): string {
   // entry（JS/Process/WASM 必填，Rust 校验）
   switch (config.pluginType) {
     case 'js':
-      manifest.entry = { js: 'src/index.js' };
+      manifest.entry = { js: 'src/index.ts' };
       break;
     case 'process':
       manifest.entry = { sidecar: `bin/${config.id.replace(/[^a-zA-Z0-9]/g, '_')}.exe` };

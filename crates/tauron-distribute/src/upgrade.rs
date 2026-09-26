@@ -229,12 +229,7 @@ pub struct UpgradeRunner {
 impl UpgradeRunner {
     /// 创建新的升级执行器。
     pub fn new(options: UpgradeOptions) -> Self {
-        Self {
-            options,
-            progress: UpgradeProgress::new(),
-            downloader: None,
-            verifier: None,
-        }
+        Self { options, progress: UpgradeProgress::new(), downloader: None, verifier: None }
     }
 
     /// 设置下载器。
@@ -268,14 +263,12 @@ impl UpgradeRunner {
             return Err(DistributeError::InvalidBody("版本号不能为空".into()));
         }
         if !self.options.download_dir.exists() {
-            fs::create_dir_all(&self.options.download_dir).map_err(|e| {
-                DistributeError::InvalidBody(format!("创建下载目录失败：{}", e))
-            })?;
+            fs::create_dir_all(&self.options.download_dir)
+                .map_err(|e| DistributeError::InvalidBody(format!("创建下载目录失败：{}", e)))?;
         }
         if !self.options.backup_dir.exists() {
-            fs::create_dir_all(&self.options.backup_dir).map_err(|e| {
-                DistributeError::InvalidBody(format!("创建备份目录失败：{}", e))
-            })?;
+            fs::create_dir_all(&self.options.backup_dir)
+                .map_err(|e| DistributeError::InvalidBody(format!("创建备份目录失败：{}", e)))?;
         }
         Ok(())
     }
@@ -342,21 +335,15 @@ impl UpgradeRunner {
 
     /// 下载更新包。
     fn download_update(&mut self) -> DistributeResult<PathBuf> {
-        let download_path = self.options.download_dir.join(format!(
-            "update-{}.zip",
-            self.options.manifest.version
-        ));
+        let download_path =
+            self.options.download_dir.join(format!("update-{}.zip", self.options.manifest.version));
 
         // 模拟下载（实际实现会调用 Downloader）
         if let Some(ref downloader) = self.downloader {
             let mut progress_cb = |downloaded: u64, total: u64| {
                 self.progress.set_download_progress(downloaded, total);
             };
-            downloader.download(
-                &self.options.manifest.url,
-                &download_path,
-                &mut progress_cb,
-            )?;
+            downloader.download(&self.options.manifest.url, &download_path, &mut progress_cb)?;
         } else {
             // 模拟下载：创建一个空文件
             fs::write(&download_path, b"mock-update-content")
@@ -394,17 +381,11 @@ impl UpgradeRunner {
 
         // 模拟备份（实际实现会复制文件）
         // 这里只记录备份路径
-        let backup_info = format!(
-            "backup: {} -> {}",
-            self.options.install_dir.display(),
-            backup_path.display()
-        );
+        let backup_info =
+            format!("backup: {} -> {}", self.options.install_dir.display(), backup_path.display());
 
-        fs::write(
-            self.options.backup_dir.join("backup-info.txt"),
-            backup_info.as_bytes(),
-        )
-        .map_err(|e| DistributeError::InvalidBody(format!("备份失败：{}", e)))?;
+        fs::write(self.options.backup_dir.join("backup-info.txt"), backup_info.as_bytes())
+            .map_err(|e| DistributeError::InvalidBody(format!("备份失败：{}", e)))?;
 
         Ok(())
     }
@@ -430,7 +411,11 @@ impl UpgradeRunner {
 
         fs::write(
             extract_dir.join("release-notes.txt"),
-            format!("Release {} - {}", self.options.manifest.version, self.options.manifest.release_date).as_bytes(),
+            format!(
+                "Release {} - {}",
+                self.options.manifest.version, self.options.manifest.release_date
+            )
+            .as_bytes(),
         )
         .map_err(|e| DistributeError::InvalidBody(format!("解压失败：{}", e)))?;
 
@@ -459,13 +444,16 @@ impl UpgradeRunner {
         // 检查是否有备份
         let backup_info_path = self.options.backup_dir.join("backup-info.txt");
         if !backup_info_path.exists() {
-            return Err(DistributeError::InvalidBody("没有备份可回滚".into()));
+            let message = "没有备份可回滚";
+            self.progress.set_error(message.to_string());
+            return Err(DistributeError::InvalidBody(message.into()));
         }
 
-        // 模拟回滚（实际实现会恢复备份文件）
-        self.progress.set_state(UpgradeState::Completed);
-
-        Ok(())
+        // 当前执行器尚未实现备份内容恢复。发现元数据不能冒充回滚成功，
+        // 否则调用方会在文件仍处于新版本时把升级视为已回滚。
+        let message = "检测到备份，但备份文件恢复尚未接入";
+        self.progress.set_error(message.to_string());
+        Err(DistributeError::InvalidBody(message.into()))
     }
 
     /// 重启应用。
@@ -507,10 +495,7 @@ pub struct MockDownloader {
 
 impl MockDownloader {
     pub fn new(download_bytes: u64, total_bytes: u64) -> Self {
-        Self {
-            download_bytes,
-            total_bytes,
-        }
+        Self { download_bytes, total_bytes }
     }
 }
 
@@ -693,7 +678,8 @@ mod tests {
     #[test]
     fn test_download_with_mock() {
         let options = test_options();
-        let runner = UpgradeRunner::new(options).with_downloader(Box::new(MockDownloader::default()));
+        let runner =
+            UpgradeRunner::new(options).with_downloader(Box::new(MockDownloader::default()));
         let progress = runner.progress().clone();
         assert_eq!(progress.state, UpgradeState::Idle);
     }
@@ -705,7 +691,10 @@ mod tests {
         let options = test_options();
         let runner = UpgradeRunner::new(options).with_verifier(Box::new(MockVerifier::new(true)));
         // 验证器已设置
-        assert!(runner.options().manifest.signature.is_empty() || !runner.options().manifest.signature.is_empty());
+        assert!(
+            runner.options().manifest.signature.is_empty()
+                || !runner.options().manifest.signature.is_empty()
+        );
     }
 
     // ── 执行测试 ──
@@ -734,16 +723,35 @@ mod tests {
 
     #[test]
     fn test_rollback_without_backup() {
-        let options = test_options();
-        let backup_dir = options.backup_dir.clone();
+        let mut options = test_options();
+        let backup_dir =
+            std::env::temp_dir().join(format!("tauron-rollback-no-backup-{}", std::process::id()));
+        options.backup_dir = backup_dir.clone();
         let mut runner = UpgradeRunner::new(options);
-        
+
         // 确保备份目录不存在（清理之前的测试数据）
         let _ = std::fs::remove_dir_all(&backup_dir);
-        
+
         let result = runner.rollback();
         // 没有备份应该失败
         assert!(result.is_err());
+        assert_eq!(runner.progress().state, UpgradeState::Failed);
+    }
+
+    #[test]
+    fn test_rollback_does_not_report_success_without_restore_implementation() {
+        let mut options = test_options();
+        let backup_dir = std::env::temp_dir()
+            .join(format!("tauron-rollback-with-backup-{}", std::process::id()));
+        options.backup_dir = backup_dir.clone();
+        let _ = std::fs::remove_dir_all(&backup_dir);
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        std::fs::write(backup_dir.join("backup-info.txt"), "previous version").unwrap();
+        let mut runner = UpgradeRunner::new(options);
+        let result = runner.rollback();
+        assert!(result.is_err());
+        assert_eq!(runner.progress().state, UpgradeState::Failed);
+        let _ = std::fs::remove_dir_all(backup_dir);
     }
 
     // ── 重启测试 ──
@@ -762,13 +770,19 @@ mod tests {
     fn test_create_upgrade_runner() {
         let options = test_options();
         let runner = create_upgrade_runner(options);
-        assert!(runner.options().manifest.version.is_empty() || !runner.options().manifest.version.is_empty());
+        assert!(
+            runner.options().manifest.version.is_empty()
+                || !runner.options().manifest.version.is_empty()
+        );
     }
 
     #[test]
     fn test_create_default_upgrade_runner() {
         let runner = create_default_upgrade_runner();
-        assert!(runner.options().manifest.version.is_empty() || !runner.options().manifest.version.is_empty());
+        assert!(
+            runner.options().manifest.version.is_empty()
+                || !runner.options().manifest.version.is_empty()
+        );
     }
 
     // ── Mock 下载器测试 ──

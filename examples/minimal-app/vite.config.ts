@@ -1,7 +1,8 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'node:path';
 
-// 多入口：index.html（宿主主窗）+ plugin.html（沙箱 iframe 插件页）。
+// 多入口：index.html（宿主主窗）+ plugin.html（沙箱 iframe 插件页，legacy）+
+// plugin-window.html（插件面板窗口页，0.4-A2 主推 SDK）。
 // 沙箱 iframe 是 opaque origin，产物资源必须用相对路径（base: './'）。
 export default defineConfig({
   base: './',
@@ -20,6 +21,7 @@ export default defineConfig({
       input: {
         main: resolve(__dirname, 'index.html'),
         plugin: resolve(__dirname, 'plugin.html'),
+        pluginWindow: resolve(__dirname, 'plugin-window.html'),
       },
     },
   },

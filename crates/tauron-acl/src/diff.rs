@@ -61,9 +61,9 @@ impl GrantDiff {
 fn scope_strings(v: &Option<Value>) -> Option<Vec<String>> {
     let v = v.as_ref()?;
     match v {
-        Value::Array(items) => Some(
-            items.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
-        ),
+        Value::Array(items) => {
+            Some(items.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        }
         Value::String(s) => Some(vec![s.clone()]),
         _ => Some(Vec::new()),
     }
@@ -143,8 +143,7 @@ pub fn diff(old: Option<&GrantSet>, new: &GrantSet) -> GrantDiff {
         }
     }
 
-    let requires_reapproval = !added.is_empty()
-        || scope_changes.iter().any(|c| c.grew);
+    let requires_reapproval = !added.is_empty() || scope_changes.iter().any(|c| c.grew);
 
     GrantDiff {
         added,
@@ -181,7 +180,7 @@ mod tests {
             if *scoped {
                 scopes.insert(
                     perm.to_string(),
-                    Value::Array(vec![Value::String(format!("https://api.example.com/**"))]),
+                    Value::Array(vec![Value::String("https://api.example.com/**".to_string())]),
                 );
             }
         }
@@ -200,13 +199,7 @@ mod tests {
 
     #[test]
     fn diff_first_approval_everything_is_added() {
-        let new = gs(
-            "com.a",
-            &[
-                ("http:allow-fetch", true),
-                ("store:allow-get", false),
-            ],
-        );
+        let new = gs("com.a", &[("http:allow-fetch", true), ("store:allow-get", false)]);
         let d = diff(None, &new);
         assert!(d.requires_reapproval);
         assert_eq!(d.added.len(), 2);
@@ -215,13 +208,7 @@ mod tests {
         assert_eq!(d.summary(), "需重新审批：新增 2 项权限；1 项 scope 变宽");
 
         // 两条都带 scope → 两项变宽；无 scope 的权限不产生 scope 变化。
-        let both = gs(
-            "com.a",
-            &[
-                ("http:allow-fetch", true),
-                ("fs:allow-app-read", true),
-            ],
-        );
+        let both = gs("com.a", &[("http:allow-fetch", true), ("fs:allow-app-read", true)]);
         assert_eq!(diff(None, &both).summary(), "需重新审批：新增 2 项权限；2 项 scope 变宽");
     }
 

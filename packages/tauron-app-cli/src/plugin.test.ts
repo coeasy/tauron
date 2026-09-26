@@ -261,7 +261,7 @@ describe('pluginScaffold', () => {
     expect(manifest.permissions).toContain('tauri:window:allow-close');
     expect(manifest.framework).toBeDefined();
     expect(manifest.entry).toBeDefined();
-    expect(manifest.entry.js).toBe('src/index.js');
+    expect(manifest.entry.js).toBe('src/index.ts');
     expect(manifest.platforms).toContain('win');
   });
 

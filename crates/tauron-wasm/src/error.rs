@@ -53,23 +53,14 @@ mod tests {
 
     #[test]
     fn error_messages() {
-        assert!(WasmError::AbiMismatch {
-            expected: "1.0".into(),
-            actual: "2.0".into(),
-        }
-        .to_string()
-        .contains("1.0"));
-        assert!(WasmError::HostFnNotAllowed {
-            fn_name: "my_fn".into(),
-        }
-        .to_string()
-        .contains("my_fn"));
-        assert!(WasmError::MemoryLimitExceeded {
-            plugin_id: "test".into(),
-            size: 100,
-            max: 50,
-        }
-        .to_string()
-        .contains("100"));
+        assert!(WasmError::AbiMismatch { expected: "1.0".into(), actual: "2.0".into() }
+            .to_string()
+            .contains("1.0"));
+        assert!(WasmError::HostFnNotAllowed { fn_name: "my_fn".into() }
+            .to_string()
+            .contains("my_fn"));
+        assert!(WasmError::MemoryLimitExceeded { plugin_id: "test".into(), size: 100, max: 50 }
+            .to_string()
+            .contains("100"));
     }
 }

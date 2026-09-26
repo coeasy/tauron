@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{BrandConfig, BrandError, BrandResult, BuildType, Platform, merge_config};
+use crate::{merge_config, BrandConfig, BrandError, BrandResult, BuildType, Platform};
 
 // ──────────────────────────────────────────────────────────────────────────
 // 构建配置
@@ -156,7 +156,8 @@ impl BrandBuilder {
 
         // 3. 应用品牌标识
         if self.options.dev_mode {
-            config["productName"] = serde_json::json!(format!("{} (Dev)", self.options.brand.autostart_name));
+            config["productName"] =
+                serde_json::json!(format!("{} (Dev)", self.options.brand.autostart_name));
             config["identifier"] = serde_json::json!(self.options.brand.dev_identifier());
         } else {
             config["productName"] = serde_json::json!(self.options.brand.autostart_name);
@@ -199,16 +200,14 @@ impl BrandBuilder {
 
     /// 生成图标配置。
     fn generate_icon_config(&self) -> Vec<String> {
-        let mut icons = Vec::new();
-
-        // 添加默认图标路径
-        icons.push("icons/icon.png".to_string());
-        icons.push("icons/icon.png".to_string());
-        icons.push("icons/32x32.png".to_string());
-        icons.push("icons/128x128.png".to_string());
-        icons.push("icons/128x128@2x.png".to_string());
-        icons.push("icons/icon.icns".to_string());
-        icons.push("icons/icon.ico".to_string());
+        let mut icons = vec![
+            "icons/icon.png".to_string(),
+            "icons/32x32.png".to_string(),
+            "icons/128x128.png".to_string(),
+            "icons/128x128@2x.png".to_string(),
+            "icons/icon.icns".to_string(),
+            "icons/icon.ico".to_string(),
+        ];
 
         // 添加品牌特定图标（键为平台：落盘路径按平台分目录，避免跨平台互相覆盖）
         for (platform, icon_path) in &self.options.brand.icons {
@@ -285,12 +284,7 @@ impl BrandBuilder {
             generated_at: chrono::Utc::now().to_rfc3339(),
         };
 
-        Ok(BuildResult {
-            success: true,
-            config_path: Some(config_path),
-            info,
-            error: None,
-        })
+        Ok(BuildResult { success: true, config_path: Some(config_path), info, error: None })
     }
 
     /// 执行构建（带错误处理）。
@@ -355,8 +349,8 @@ pub fn create_default_builder() -> BrandBuilder {
 mod tests {
     use super::*;
     use crate::BrandConfig;
-    use std::path::PathBuf;
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     fn test_brand() -> BrandConfig {
         let mut b = BrandConfig {
@@ -397,7 +391,10 @@ mod tests {
     #[test]
     fn test_builder_create() {
         let builder = create_default_builder();
-        assert!(builder.options().brand.identifier.is_empty() || !builder.options().brand.identifier.is_empty());
+        assert!(
+            builder.options().brand.identifier.is_empty()
+                || !builder.options().brand.identifier.is_empty()
+        );
     }
 
     #[test]

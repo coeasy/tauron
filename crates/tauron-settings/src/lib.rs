@@ -33,19 +33,17 @@ pub mod store;
 
 pub use error::{LayerKind, SettingsError, SettingsResult};
 pub use merge::{
-    apply_op, deep_merge, delete_path, decide_write, inherited_at, merge_layers, read_path,
-    split_unset, validate_path, write_path, UNSET_KEY, WriteOp,
+    apply_op, decide_write, deep_merge, delete_path, inherited_at, merge_layers, read_path,
+    split_unset, validate_path, write_path, WriteOp, UNSET_KEY,
 };
 pub use registry::{count_fields, Entry, SchemaRegistry, FIELD_LIMIT};
-pub use store::{
-    ChangeEvent, Migration, PluginState, SettingsStore, MIGRATION_STEP_LIMIT,
-};
+pub use store::{ChangeEvent, Migration, PluginState, SettingsStore, MIGRATION_STEP_LIMIT};
 
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use tauron_schema::validate;
     use serde_json::{json, Value};
+    use tauron_schema::validate;
 
     /// 端到端：schema 注册 → 四层注入 → 用户写入 → 等值回落 → unset →
     /// 渲染数据产出。覆盖计划 §4.12 的全部关键约束。
@@ -70,7 +68,11 @@ mod integration_tests {
         assert_eq!(store.registry().get("p.app").unwrap().field_count, 3);
 
         // 2. 四层注入。
-        store.set_layer("p.app", LayerKind::Builtin, json!({"volume": 10, "muted": false, "language": "zh"}));
+        store.set_layer(
+            "p.app",
+            LayerKind::Builtin,
+            json!({"volume": 10, "muted": false, "language": "zh"}),
+        );
         store.set_layer("p.app", LayerKind::Brand, json!({"language": "en"}));
         store.set_layer("p.app", LayerKind::Plugin, json!({"volume": 20}));
         let got = store.get("p.app").unwrap();
@@ -131,7 +133,11 @@ mod integration_tests {
     fn equal_writes_do_not_produce_changes() {
         let mut store = SettingsStore::new();
         store
-            .register("p.x", "1.0.0", &json!({"type":"object","properties":{"a":{"type":"integer"}}}))
+            .register(
+                "p.x",
+                "1.0.0",
+                &json!({"type":"object","properties":{"a":{"type":"integer"}}}),
+            )
             .unwrap();
         store.set_layer("p.x", LayerKind::Builtin, json!({"a": 1}));
         let sub = store.watch("p.x");
@@ -149,13 +155,18 @@ mod integration_tests {
     fn bad_config_reports_path() {
         let mut store = SettingsStore::new();
         store
-            .register("p.x", "1.0.0", &json!({"type":"object","properties":{"v":{"type":"integer","minimum":0}}}))
+            .register(
+                "p.x",
+                "1.0.0",
+                &json!({"type":"object","properties":{"v":{"type":"integer","minimum":0}}}),
+            )
             .unwrap();
         store.set_layer("p.x", LayerKind::Builtin, json!({"v": 5}));
         // 直接注入坏的用户层（模拟磁盘损坏）。
         store.set_layer("p.x", LayerKind::User, json!({"v": -10}));
         let merged = store.get("p.x").unwrap();
-        let errs = validate(&store.registry().get("p.x").unwrap().compiled.schema, &merged).unwrap_err();
+        let errs =
+            validate(&store.registry().get("p.x").unwrap().compiled.schema, &merged).unwrap_err();
         assert!(!errs.is_empty());
         assert!(errs.iter().all(|e| e.path.starts_with("/")), "{errs:?}");
     }

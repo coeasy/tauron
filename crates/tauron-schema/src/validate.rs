@@ -54,11 +54,7 @@ fn check(schema: &Value, value: &Value, path: &str, errs: &mut Vec<ValidationErr
         if !expected.is_empty() && !expected.iter().any(|e| matches_type(value, e)) {
             errs.push(ValidationError::new(
                 path,
-                format!(
-                    "期望类型 {}，实际 {}",
-                    expected.join("|"),
-                    actual_type(value)
-                ),
+                format!("期望类型 {}，实际 {}", expected.join("|"), actual_type(value)),
             ));
             return; // 类型不符时后续关键字判定无意义
         }
@@ -75,7 +71,10 @@ fn check(schema: &Value, value: &Value, path: &str, errs: &mut Vec<ValidationErr
     }
     if let Some(c) = m.get("const") {
         if c != value {
-            errs.push(ValidationError::new(path, format!("值 {} 不等于 const {}", compact(value), compact(c))));
+            errs.push(ValidationError::new(
+                path,
+                format!("值 {} 不等于 const {}", compact(value), compact(c)),
+            ));
         }
     }
 
@@ -84,13 +83,19 @@ fn check(schema: &Value, value: &Value, path: &str, errs: &mut Vec<ValidationErr
         if let Some(min) = m.get("minLength").and_then(|v| v.as_u64()) {
             let len = s.chars().count() as u64;
             if len < min {
-                errs.push(ValidationError::new(path, format!("字符串长度 {len} 小于 minLength {min}")));
+                errs.push(ValidationError::new(
+                    path,
+                    format!("字符串长度 {len} 小于 minLength {min}"),
+                ));
             }
         }
         if let Some(max) = m.get("maxLength").and_then(|v| v.as_u64()) {
             let len = s.chars().count() as u64;
             if len > max {
-                errs.push(ValidationError::new(path, format!("字符串长度 {len} 大于 maxLength {max}")));
+                errs.push(ValidationError::new(
+                    path,
+                    format!("字符串长度 {len} 大于 maxLength {max}"),
+                ));
             }
         }
         if let Some(p) = m.get("pattern").and_then(|v| v.as_str()) {
@@ -114,17 +119,26 @@ fn check(schema: &Value, value: &Value, path: &str, errs: &mut Vec<ValidationErr
         }
         if let Some(min) = m.get("exclusiveMinimum").and_then(|v| v.as_f64()) {
             if n <= min {
-                errs.push(ValidationError::new(path, format!("值 {n} 未大于 exclusiveMinimum {min}")));
+                errs.push(ValidationError::new(
+                    path,
+                    format!("值 {n} 未大于 exclusiveMinimum {min}"),
+                ));
             }
         }
         if let Some(max) = m.get("exclusiveMaximum").and_then(|v| v.as_f64()) {
             if n >= max {
-                errs.push(ValidationError::new(path, format!("值 {n} 未小于 exclusiveMaximum {max}")));
+                errs.push(ValidationError::new(
+                    path,
+                    format!("值 {n} 未小于 exclusiveMaximum {max}"),
+                ));
             }
         }
         if let Some(div) = m.get("multipleOf").and_then(|v| v.as_f64()) {
             if div != 0.0 && ((n / div) % 1.0).abs() > 1e-9 {
-                errs.push(ValidationError::new(path, format!("值 {n} 不是 multipleOf {div} 的整数倍")));
+                errs.push(ValidationError::new(
+                    path,
+                    format!("值 {n} 不是 multipleOf {div} 的整数倍"),
+                ));
             }
         }
     }
@@ -143,7 +157,10 @@ fn check(schema: &Value, value: &Value, path: &str, errs: &mut Vec<ValidationErr
         let max_props = m.get("maxProperties").and_then(|v| v.as_u64());
         if let Some(mp) = max_props {
             if (props.len() as u64) > mp {
-                errs.push(ValidationError::new(path, format!("属性数 {} 大于 maxProperties {mp}", props.len())));
+                errs.push(ValidationError::new(
+                    path,
+                    format!("属性数 {} 大于 maxProperties {mp}", props.len()),
+                ));
             }
         }
         for (key, v) in props {
@@ -163,12 +180,18 @@ fn check(schema: &Value, value: &Value, path: &str, errs: &mut Vec<ValidationErr
     if let Some(items) = value.as_array() {
         if let Some(min) = m.get("minItems").and_then(|v| v.as_u64()) {
             if (items.len() as u64) < min {
-                errs.push(ValidationError::new(path, format!("数组长度 {} 小于 minItems {min}", items.len())));
+                errs.push(ValidationError::new(
+                    path,
+                    format!("数组长度 {} 小于 minItems {min}", items.len()),
+                ));
             }
         }
         if let Some(max) = m.get("maxItems").and_then(|v| v.as_u64()) {
             if (items.len() as u64) > max {
-                errs.push(ValidationError::new(path, format!("数组长度 {} 大于 maxItems {max}", items.len())));
+                errs.push(ValidationError::new(
+                    path,
+                    format!("数组长度 {} 大于 maxItems {max}", items.len()),
+                ));
             }
         }
         if m.get("uniqueItems").and_then(|v| v.as_bool()) == Some(true) {
@@ -209,10 +232,7 @@ fn check(schema: &Value, value: &Value, path: &str, errs: &mut Vec<ValidationErr
     if let Some(Value::Array(branches)) = m.get("oneOf") {
         let hits = branches.iter().filter(|b| matches_one(b, value)).count();
         if hits != 1 {
-            errs.push(ValidationError::new(
-                path,
-                format!("oneOf 命中 {hits} 个分支（应为 1）"),
-            ));
+            errs.push(ValidationError::new(path, format!("oneOf 命中 {hits} 个分支（应为 1）")));
         }
     }
     if let Some(Value::Array(branches)) = m.get("anyOf") {
@@ -241,7 +261,9 @@ fn matches_type(value: &Value, expected: &str) -> bool {
         "null" => value.is_null(),
         "string" => value.is_string(),
         "boolean" => value.as_bool().is_some(),
-        "integer" => matches!(value, Value::Number(n) if n.is_i64() || n.is_u64() || is_integral_f64(n.as_f64())),
+        "integer" => {
+            matches!(value, Value::Number(n) if n.is_i64() || n.is_u64() || is_integral_f64(n.as_f64()))
+        }
         "number" => value.is_number(),
         "array" => value.is_array(),
         "object" => value.is_object(),
@@ -269,9 +291,7 @@ fn matches_pattern(pattern: &str, s: &str) -> bool {
     static RE_CACHE: OnceLock<()> = OnceLock::new();
     let _ = RE_CACHE.get_or_init(|| ());
     // 每次构造代价可接受：pattern 数量远小于校验次数。
-    regex::Regex::new(pattern)
-        .map(|re| re.is_match(s))
-        .unwrap_or(false)
+    regex::Regex::new(pattern).map(|re| re.is_match(s)).unwrap_or(false)
 }
 
 fn compact(v: &Value) -> String {
@@ -292,11 +312,8 @@ fn join(base: &str, key: &str) -> String {
 
 /// 把校验失败聚合成单条 [`crate::error::SchemaError::Validation`]。
 pub fn into_schema_error(errs: &[ValidationError]) -> crate::error::SchemaError {
-    let text = errs
-        .iter()
-        .map(|e| format!("{} {}", e.path, e.message))
-        .collect::<Vec<_>>()
-        .join("；");
+    let text =
+        errs.iter().map(|e| format!("{} {}", e.path, e.message)).collect::<Vec<_>>().join("；");
     crate::error::SchemaError::Validation(text)
 }
 
@@ -518,7 +535,8 @@ mod tests {
 
     #[test]
     fn items_schema_applies_to_every_element() {
-        let errs = validate(&json!({"type":"array","items":{"type":"integer"}}), &json!(["a", 1])).unwrap_err();
+        let errs = validate(&json!({"type":"array","items":{"type":"integer"}}), &json!(["a", 1]))
+            .unwrap_err();
         assert_eq!(errs[0].path, "/0");
     }
 
@@ -538,11 +556,9 @@ mod tests {
 
     #[test]
     fn draft7_prefix_items_are_checked_positionally() {
-        let errs = validate(
-            &json!({"items":[{"type":"integer"},{"type":"string"}]}),
-            &json!(["x", 1]),
-        )
-        .unwrap_err();
+        let errs =
+            validate(&json!({"items":[{"type":"integer"},{"type":"string"}]}), &json!(["x", 1]))
+                .unwrap_err();
         assert_eq!(errs[0].path, "/0");
         assert_eq!(errs[1].path, "/1");
     }
@@ -596,7 +612,9 @@ mod tests {
     fn into_schema_error_joins_all() {
         let errs = validate(&json!({"type":"integer"}), &json!("x")).unwrap_err();
         let e = into_schema_error(&errs);
-        assert!(matches!(e, crate::error::SchemaError::Validation(ref m) if m.contains("期望类型 integer")));
+        assert!(
+            matches!(e, crate::error::SchemaError::Validation(ref m) if m.contains("期望类型 integer"))
+        );
     }
 
     #[test]

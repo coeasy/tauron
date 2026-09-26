@@ -79,7 +79,7 @@ describe('门禁：命令核心入口存在', () => {
   it('事件 topic 前缀与 TS eventNamespace 一致', () => {
     expect(dispatch).toContain('EVENT_TOPIC_PREFIX: &str = "plugin:"');
     // Rust dispatch 以冒号切分 `<id>:<event>`；TS eventNamespace 必须产出同形
-    expect(dispatch).toMatch(/splitn\(2, ':'\)/);
+    expect(dispatch).toMatch(/split_once\('\:'\)|splitn\(2, ':'\)/);
     const types = read('packages/types/src/plugin.ts');
     expect(types).toContain('`plugin:${pluginId}:${eventName}`');
   });
@@ -716,10 +716,10 @@ function rustCommandParams(): Map<string, RustParam[]> {
       const name = t.slice(0, idx).trim();
       const type = t.slice(idx + 1).trim();
       // 注入参数（Tauri DI）不是线参数：State<'_, _> 生命周期标注、
-      // 运行时句柄（WebviewWindow/AppHandle/Window/Webview，可能带 tauri:: 路径）。
+      // 运行时句柄（CallerSource/WebviewWindow/AppHandle/Window/Webview，可能带 tauri:: 路径）。
       const injected =
         type.includes("'") ||
-        /\b(WebviewWindow|Webview|AppHandle|Window|State)\b/.test(type);
+        /\b(CallerSource|TauriCallerSource|WebviewWindow|Webview|AppHandle|Window|State)\b/.test(type);
       if (injected) return;
       params.push({
         key: snakeToCamel(name),
@@ -909,7 +909,7 @@ describe('门禁：生命周期状态机镜像 TS ↔ Rust', () => {
   it('每个事件在 TRANSITIONS 里都有规则（无「上报必非法」的事件）', () => {
     const table = transitions();
     const covered = new Set(
-      [...table.matchAll(/rule!\(State::\w+,\s*Event::(\w+)/g)].map((m) => m[1]!),
+      [...table.matchAll(/rule!\(\s*State::\w+,\s*Event::(\w+)/g)].map((m) => m[1]!),
     );
 
     const missing = rustEnumVariants(LIFECYCLE_RS, 'Event').filter((e) => !covered.has(e));
@@ -929,7 +929,7 @@ describe('门禁：生命周期状态机镜像 TS ↔ Rust', () => {
     // 守卫是可选的第 3 个位置参数，必须允许（否则带守卫的规则目标会漏掉）。
     const tos = new Set(
       [
-        ...table.matchAll(/rule!\(State::\w+,\s*Event::\w+,\s*(?:Guard::\w+,\s*)?State::(\w+)/g),
+        ...table.matchAll(/rule!\(\s*State::\w+,\s*Event::\w+,\s*(?:Guard::\w+,\s*)?State::(\w+)/g),
       ].map((m) => m[1]!),
     );
 
@@ -941,7 +941,7 @@ describe('门禁：生命周期状态机镜像 TS ↔ Rust', () => {
 
   it('唯一无出边的状态是终态 Uninstalled（其余状态不得卡死）', () => {
     const table = transitions();
-    const froms = new Set([...table.matchAll(/rule!\(State::(\w+),/g)].map((m) => m[1]!));
+    const froms = new Set([...table.matchAll(/rule!\(\s*State::(\w+),/g)].map((m) => m[1]!));
 
     const deadEnds = rustEnumVariants(LIFECYCLE_RS, 'State').filter((s) => !froms.has(s));
     expect(
@@ -968,7 +968,11 @@ const TIER_WIRE: Record<string, string> = {
 
 /** 解析 authz.rs 命令表的 (command, tier)。 */
 function rustAuthTable(): Map<string, string> {
-  const src = read('crates/tauron-host/src/authz.rs').replace(/\/\/[^\n]*/g, '');
+  const core = read('crates/tauron-host/src/authz.rs');
+  const adapter = read('crates/tauron-adapter/src/lib.rs');
+  const optional = adapter.slice(adapter.indexOf('pub const PLUGIN_INSTALL_AUTH'), adapter.indexOf('/// 命令状态'));
+  const normalizedOptional = optional.replace(/tauron_host::authz::AuthTier::/g, 'AuthTier::');
+  const src = `${core}\n${normalizedOptional}`.replace(/\/\/[^\n]*/g, '');
   const out = new Map<string, string>();
   for (const m of src.matchAll(/command:\s*"(host_\w+)",\s*tier:\s*AuthTier::(\w+)/g)) {
     const tier = TIER_WIRE[m[2]!];
@@ -979,14 +983,15 @@ function rustAuthTable(): Map<string, string> {
 }
 
 describe('门禁：能力表（命令 → 档位）TS ↔ Rust 同构', () => {
-  it('命令集合一致（插件面 13 条 + 主窗特权 3 条）', () => {
+  it('命令集合一致（插件面 17 条 + 主窗特权 6 条）', () => {
     const rust = rustAuthTable();
     const ts = new Map(CAPABILITIES.map((c) => [c.command, c.tier]));
     // 不写死总数（会随命令面增长而漂移）：只钉住两表**逐条相等**与结构比例。
     expect(ts.size, 'TS CAPABILITIES 条目数').toBe(rust.size);
     expect([...ts.keys()].sort(), '命令集合').toEqual([...rust.keys()].sort());
     const pluginFace = CAPABILITIES.filter((c) => c.tier !== 'privileged');
-    expect(pluginFace.length, '插件面（self + scoped-read）命令数').toBe(13);
+    // 17 = 13（0.4-A1 之前）+ 跨主体调用 3 条 + 0.4 审计补登记 host_contributes_list。
+    expect(pluginFace.length, '插件面（self + scoped-read）命令数').toBe(17);
     expect(CAPABILITIES.filter((c) => c.consumer === 'plugin').map((c) => c.command).sort()).toEqual(
       pluginFace.map((c) => c.command).sort(),
     );
@@ -1008,9 +1013,9 @@ describe('门禁：能力表（命令 → 档位）TS ↔ Rust 同构', () => {
         `${cmd} 的 TS 档位必须同为 privileged`,
       ).toBe('privileged');
     }
-    // 特权档命令**不得**出现在插件可见能力里：这是"下放"的唯一形态。
+    // 特权档命令**不得**出现在插件可见能力里。
     expect(CAPABILITIES.filter((c) => c.tier === 'privileged').map((c) => c.command).sort()).toEqual(
-      ['host_registry_admin', 'host_runtime_health', 'host_runtime_spawn'],
+      ['host_registry_admin', 'host_registry_install', 'host_registry_install_preview', 'host_resource_stats', 'host_runtime_health', 'host_runtime_spawn'],
     );
   });
 
@@ -1085,9 +1090,34 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
     const lib = read('crates/tauron-adapter/src/lib.rs');
     expect(lib).toContain('"available": false');
     const ts = read('packages/tauron-host/src/auto-update-client.ts');
-    expect(ts).toMatch(/result\?\.available/);
-    // 品牌信息桩返回对象（BrandInfo 全字段可选）
-    expect(lib).toMatch(/cmd_brand_info[\s\S]{0,400}json!\(\{\}\)/);
+    expect(ts).toMatch(/result\?\.simulated/);
+    expect(ts).toMatch(/info\?\.available/);
+    // 品牌 provider 缺失必须返回显式 Unsupported，而非空对象假装已连接。
+    expect(lib).toMatch(/pub fn cmd_brand_info[\s\S]{0,250}HostResult<UnsupportedBody>/);
+  });
+
+  it('provider 缺失时的底座桩必须用类型化结果诚实披露', () => {
+    const lib = read('crates/tauron-adapter/src/lib.rs');
+    const body = /pub struct UnsupportedBody \{([\s\S]*?)\n\}/.exec(lib)?.[1] ?? '';
+    expect(body).toMatch(/supported:\s*bool/);
+    expect(body).toMatch(/reason:\s*String/);
+    expect(body).toMatch(/fallback:\s*Option<String>/);
+    for (const cmd of ['open', 'save', 'message', 'confirm']) {
+      const impl = new RegExp(`pub fn cmd_dialog_${cmd}\\([\\s\\S]*?\\n\\}`).exec(lib)?.[0] ?? '';
+      expect(impl, `cmd_dialog_${cmd} 缺失`).not.toBe('');
+      expect(impl, `cmd_dialog_${cmd} 未判定 provider 能力`).toContain('native_supported()');
+      expect(impl, `cmd_dialog_${cmd} 未返回 Unsupported`).toContain('ProviderResult::Unsupported');
+    }
+    expect(lib).toMatch(/pub fn cmd_clipboard_write[\s\S]*?HostResult<UnsupportedBody>/);
+    expect(lib).toMatch(/pub fn cmd_clipboard_read[\s\S]*?HostResult<DegradedValue<String>>/);
+    expect(lib).toMatch(/pub fn cmd_deep_link_register[\s\S]*?HostResult<ProviderResult<\(\)>>/);
+    expect(lib).toMatch(/pub fn cmd_brand_info[\s\S]*?HostResult<UnsupportedBody>/);
+    expect(lib).toMatch(/pub struct MarketCheckResult[\s\S]*?pub simulated: bool/);
+    expect(lib).toMatch(/pub struct MarketUpdateResult[\s\S]*?pub simulated: bool/);
+    const dialogTs = read('packages/tauron-host/src/dialog-client.ts');
+    expect(dialogTs).toContain('clipboardReadDetailed');
+    expect(dialogTs).toContain('isUnsupportedBody');
+    expect(read('packages/tauron-host/src/deep-link-client.ts')).toMatch(/Promise<ProviderResult<void>/);
   });
 
   it('ContributeEntry 必须 camelCase（pluginId 双向：register 反序列化 + list 序列化）', () => {
@@ -1223,9 +1253,10 @@ describe('门禁：应用层命令注册完整性（未注册 = 前端 command n
       (m) => m[1]!,
     );
     expect(lists.length, '未解析出 generate_handler! 列表（正则失配）').toBeGreaterThanOrEqual(2);
-    const registered = new Set(
-      lists.flatMap((l) => [...l.matchAll(/tauri::(\w+)/g)].map((m) => m[1]!)),
-    );
+    const registered = new Set([
+      ...lists.flatMap((l) => [...l.matchAll(/tauri::(\w+)/g)].map((m) => m[1]!)),
+      ...[...adapter.matchAll(/\$crate::tauri::(host_registry_install(?:_preview)?),/g)].map((m) => m[1]!),
+    ]);
 
     const missing = cmds.filter((c) => !registered.has(c));
     expect(
@@ -1234,6 +1265,75 @@ describe('门禁：应用层命令注册完整性（未注册 = 前端 command n
     ).toEqual([]);
     expect([...registered].filter((r) => !cmds.includes(r))).toEqual([]);
     expect(registered.size).toBe(cmds.length);
+  });
+
+  it('host_capabilities 命令集与底座 / 插件 handler 宏严格同源', () => {
+    const rust = read('crates/tauron-adapter/src/lib.rs');
+    const parse = (name: string): string[] => {
+      // A8-1：不能按字面串 `indexOf('... = &[')` 匹配——rustfmt 会把 `= &[` 折成
+      // `=\n    &[`，字面串匹配随即失配（曾让 `PLUGIN_INSTALL_COMMANDS` 解析成 -1，
+      // 使本门禁在默认构建下假红）。解析类辅助一律容忍换行，并断言结果非空：
+      // 解析到 0 条必须失败，否则正则失配会表现为"空数组 = 一致"的假绿。
+      const decl = new RegExp(`pub const ${name}: &\\[&str\\]\\s*=\\s*&\\s*\\[([\\s\\S]*?)\\];`);
+      const matched = decl.exec(rust);
+      expect(matched, `missing ${name}（正则失配）`).not.toBeNull();
+      const entries = [...matched![1]!.matchAll(/"(host_[a-z0-9_]+)"/g)].map((m) => m[1]!);
+      expect(entries.length, `${name} 解析出 0 条命令（正则失配）`).toBeGreaterThan(0);
+      return entries;
+    };
+    const substrate = parse('SUBSTRATE_COMMANDS');
+    const plugin = parse('PLUGIN_RUNTIME_COMMANDS');
+    const optionalInstall = parse('PLUGIN_INSTALL_COMMANDS');
+    const handlers = rustHandlerFamilies();
+    expect(substrate.length).toBeGreaterThan(30);
+    expect(plugin.length).toBeGreaterThan(10);
+    expect(new Set(substrate).size).toBe(substrate.length);
+    expect(new Set(plugin).size).toBe(plugin.length);
+    expect(substrate.sort()).toEqual(handlers.substrate.sort());
+    expect([...substrate, ...plugin, ...optionalInstall].sort()).toEqual(handlers.full.sort());
+  });
+
+  // 0.4-A2：Rust 侧 feature-gated 的命令，TS 侧不得混进静态能力表。
+  //
+  // 断链原型：`host_registry_install*` 挂 `#[cfg(feature = "plugin-install")]` 而
+  // `Cargo.toml` 的 `default = []`，默认构建不注册；此前它们被无条件列进
+  // `FRAMEWORK_COMMANDS`，于是 `capabilities()` 对它们误报已注册——调用方按能力表
+  // 判断"能不能装插件"拿到 `true`，直到 invoke 才 `command not found`。
+  // 本门禁把「哪些命令是可选的」这份真相钉在两侧之间：集合必须对得上，
+  // 且可选命令**不得**出现在静态全集里（只能由 host_capabilities 运行期开门）。
+  it('TS 可选命令集与 Rust feature-gated 命令集一致（默认构建不得误报已注册）', () => {
+    const rust = read('crates/tauron-adapter/src/lib.rs');
+    const installBlock = /pub const PLUGIN_INSTALL_COMMANDS[\s\S]*?\];/.exec(rust)?.[0] ?? '';
+    const rustOptional = [...installBlock.matchAll(/"(host_[a-z0-9_]+)"/g)].map((m) => m[1]!);
+    expect(rustOptional.length, '未解析出 Rust 侧可选命令（正则失配）').toBeGreaterThan(0);
+
+    const ts = read('packages/tauron-host/src/tauri-backend.ts');
+    const tsOptional = [
+      ...(/export const OPTIONAL_FRAMEWORK_COMMANDS = \[([\s\S]*?)\] as const;/.exec(ts)?.[1] ??
+        '').matchAll(/'(host_[a-z0-9_]+)'/g),
+    ].map((m) => m[1]!);
+    expect(tsOptional.length, '未解析出 TS 侧可选命令（正则失配）').toBeGreaterThan(0);
+    expect(tsOptional.sort()).toEqual(rustOptional.sort());
+
+    // 静态全集里不得出现可选命令——出现即回退成"能力表说有、invoke 说没有"。
+    const staticList =
+      /const FRAMEWORK_COMMANDS = \[([\s\S]*?)\] as const;/.exec(ts)?.[1] ?? '';
+    const staticCmds = [...staticList.matchAll(/'(host_[a-z0-9_]+)'/g)].map((m) => m[1]!);
+    expect(staticCmds.length, '未解析出 TS 静态命令全集（正则失配）').toBeGreaterThan(30);
+    const leaked = staticCmds.filter((c) => rustOptional.includes(c));
+    expect(
+      leaked,
+      `feature-gated 命令不得出现在静态能力表（否则默认构建误报已注册）：${leaked.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('存在运行期回填能力集的入口（adoptCapabilities ↔ refreshCapabilities）', () => {
+    const tb = read('packages/tauron-host/src/tauri-backend.ts');
+    expect(/adoptCapabilities\(commands: Iterable<string>\)/.test(tb)).toBe(true);
+    const sc = read('packages/tauron-host/src/shell-client.ts');
+    expect(/refreshCapabilities\(\)/.test(sc)).toBe(true);
+    // 回填必须走 host_capabilities 的返回值，不得回到硬编码清单。
+    expect(/adoptRuntimeCapabilities\(this\.backend, caps\.commands\)/.test(sc)).toBe(true);
   });
 });
 
@@ -1352,6 +1452,76 @@ describe('门禁：断链回归（贡献身份绑定 / 事件取件泵 / 声明�
     expect(ctx, '退订/销毁必须收泵（否则空转 IPC）').toMatch(/stopPump\(\)/);
   });
 
+  it('0.4-A1：入站调用帧词表 TS ↔ Rust 同源，且执行泵必须回填结果', () => {
+    // 跨主体调用的取件侧：SDK 泵识别 `:__call` 帧自动执行，后缀必须与 Rust
+    // `call_delivery::CALL_TOPIC_SUFFIX` 逐字一致——否则调用帧永远不被识别，
+    // 发起方只能等到 TTL（另一类「受理了但永不回帧」断链）。
+    const rust = read('crates/tauron-host/src/call_delivery.rs');
+    const suffix = /CALL_TOPIC_SUFFIX:\s*&str\s*=\s*"([^"]+)"/.exec(rust)?.[1];
+    expect(suffix, 'Rust 侧 CALL_TOPIC_SUFFIX 解析失败').toBeTruthy();
+
+    const ctx = read('packages/tauron-app-plugin-sdk/src/context.ts');
+    expect(ctx, `SDK 泵必须识别 \`${suffix}\` 调用帧`).toContain(`'${suffix}'`);
+    // 识别之后必须真的回填：不回填 = 发起方等待 TTL，链路只通一半。
+    expect(ctx, '执行泵必须调用 reportCallResult 回填结果').toMatch(/reportCallResult\(/);
+    // 失败也必须回填（命令不存在 / handler 抛异常），不得静默。
+    expect(ctx, '执行失败必须有回填分支').toMatch(/CALL_EXEC_FAILED/);
+  });
+
+  it('0.4-轮21：sidecar stdout 必须有读线程在排水（piped 而不读 = sidecar 堵死）', () => {
+    // 断链回归：历史实现用 `Stdio::null()` 丢弃 sidecar 输出——宿主永远收不到
+    // 任何回帧，「宿主 → sidecar → 回帧 → 结算」这条链断在最后一跳（0.4-A1 修复）。
+    // 这条门禁防止有人"简化"回 null，或者只 piped 不排水——后者会让 sidecar 在
+    // stdout 缓冲区写满时永久阻塞。注意：注释里提到这些符号是允许的（诚实边界
+    // 注释必须能引用历史），故先剥注释再断言。
+    const raw = read('crates/tauron-proc/src/spawner.rs');
+    const code = raw.replace(/\/\/[^\n]*/g, '');
+
+    // ① stdin 与 stdout 必须 piped（写帧 + 读帧双通道，各至少一次）。
+    const pipedCount = [...code.matchAll(/Stdio::piped\(\)/g)].length;
+    expect(pipedCount, 'spawn 必须 piped stdin 与 stdout 双通道').toBeGreaterThanOrEqual(2);
+    expect(code, '不得用 Stdio::null() 丢弃 sidecar 输出（回帧断链）').not.toMatch(/Stdio::null\(\)/);
+
+    // ② 必须有读线程在持续排水（BufReader 逐行 → on_frame 送 sink）。
+    expect(code, '必须有读线程（thread::spawn）持续排水 stdout').toMatch(/thread::spawn/);
+    expect(code, '读线程必须用 BufReader 逐行排水').toMatch(/BufReader/);
+    expect(code, '读到帧必须交给 ProcessFrameSink（on_frame）').toMatch(/on_frame\(/);
+
+    // ③ EOF 必须回收 sink 与 stdin 句柄（句柄表不得随进程退出单调增长）。
+    expect(code, 'EOF 必须回收 sink 与 stdin 句柄表').toMatch(/remove\(&pid\)/);
+  });
+
+  it('0.4-A2：主推 SDK 必须有非测试的消费方（示例 app 端到端证据）', () => {
+    // 断链回归：`@tauron/app-plugin-sdk` 此前只有测试在用（「有 SDK、没用户」）。
+    // A2 把示例 app 的插件页切到主推 SDK——这条门禁防止它再退回孤儿状态。
+    const pkg = read('examples/minimal-app/package.json');
+    expect(pkg, '示例 app 必须声明 app-plugin-sdk 依赖').toMatch(
+      /"@tauron\/app-plugin-sdk":\s*"workspace:\*"/,
+    );
+
+    // 主推入口 first.ts 必须真用 SDK 的两个核心面：createPlugin（插件定义）
+    // + createPluginContext（接到宿主 RPC 面，含执行泵）。
+    const first = read('examples/minimal-app/src/plugin/first.ts');
+    expect(first, '插件页必须用主推 SDK 的 createPlugin').toMatch(
+      /from '@tauron\/app-plugin-sdk'/,
+    );
+    expect(first, '必须经 createPluginContext 接宿主（含执行泵）').toMatch(/createPluginContext\(/);
+    expect(first, '必须注册声明式命令（注册即开执行泵）').toMatch(/commands:\s*\{/);
+    // 主推页不得再回头用 legacy iframe SDK（两套模型混写 = 读者不知道哪条是主路）。
+    expect(first, '主推页不得 import legacy 的 @tauron/plugin-sdk').not.toMatch(
+      /from '@tauron\/plugin-sdk'/,
+    );
+
+    // legacy 实现保留但必须显式标注 deprecated（防止新插件照着旧样子写）。
+    const legacy = read('examples/minimal-app/src/plugin/legacy-first.ts');
+    expect(legacy, 'legacy 实现必须标注 deprecated').toMatch(/deprecated/);
+
+    // 插件面板窗口页必须存在且进了构建入口（执行泵的宿主载体）。
+    read('examples/minimal-app/plugin-window.html');
+    const vite = read('examples/minimal-app/vite.config.ts');
+    expect(vite, 'plugin-window.html 必须是 vite 构建入口').toMatch(/plugin-window\.html/);
+  });
+
   it('声明式 contributes 必须有激活期注册路径（有类型无调用 = 孤儿配置）', () => {
     // 断链回归：PluginDefinition.contributes 有类型、有文档，此前 activate
     // 的四步全部绕过它——插件作者声明了贡献，宿主永远收不到。
@@ -1380,7 +1550,8 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(lib).toMatch(/fn cmd_notifications_list/);
     expect(lib).toMatch(/fn cmd_notifications_read/);
     // 卸载/清除必须回收该插件的通知（未读计数不得被死条目永久膨胀）。
-    expect(lib).toMatch(/fn cmd_registry_admin[\s\S]{0,1600}notify_store[\s\S]{0,200}cleanup_plugin/);
+    const admin = lib.slice(lib.indexOf('pub fn cmd_registry_admin('), lib.indexOf('pub fn cmd_registry_admin_as('));
+    expect(admin).toMatch(/notify_store[\s\S]{0,200}cleanup_plugin/);
     const ts = read('packages/tauron-host/src/shell-client.ts');
     expect(ts).toMatch(/host_notifications_list/);
     expect(ts).toMatch(/host_notifications_read/);
@@ -1521,6 +1692,11 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // bootstrap 只允许动态 import（非字面量变量，TS 不静态解析）。
     const boot = read('packages/tauron-host/src/bootstrap.ts');
     expect(boot).toMatch(/await import\(moduleName\)/);
+  });
+
+  it('@tauron/host 不得导出无生产调用点的 PluginJsRuntime', () => {
+    const idx = read('packages/tauron-host/src/index.ts');
+    expect(idx).not.toMatch(/PluginJsRuntime/);
   });
 
   // ────────────────────────────────────────────────────────────────────────
@@ -1671,8 +1847,10 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     //    `host_window_create` 同属插件域：它必须查注册表确认 `plugin-<id>` 存在，
     //    故绑 `PluginRuntimeState`（轮 11 R8 加入）。判据始终是 **State bound**，
     //    这个名字正则只是它的可读投影——加命令时两者必须一起改。
+    //    `host_call_` 族（0.4-A1 跨主体调用：plugin/result/take + 既有 end）
+    //    同属插件域：发起/回填/取件都要查 pending 表。
     const PLUGIN_DOMAIN =
-      /^(host_lifecycle_report|host_plugin_call|host_call_end|host_cancel|host_registry_|host_contributes_|host_recover_trial_enable$|host_stream_|host_runtime_|host_window_create$)/;
+      /^(host_lifecycle_report|host_plugin_call|host_call_|host_cancel|host_registry_|host_contributes_|host_recover_trial_enable$|host_stream_|host_runtime_|host_resource_stats$|host_window_create$)/;
     for (const cmd of substrate) {
       expect(full, `底座集合里的 ${cmd} 不在全量集合里`).toContain(cmd);
       expect(
@@ -1681,8 +1859,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       ).toBe(false);
     }
     // 差值必须**恰好**等于插件域命令数：少减=白拿，多减=底座宿主漏功能。
+    // 22 = 19（0.4-A1 之前）+ host_call_plugin / host_call_result / host_call_take。
     const pluginOnly = full.filter((c) => PLUGIN_DOMAIN.test(c));
-    expect(pluginOnly.length, '插件域命令数量异常').toBe(16);
+    expect(pluginOnly.length, '插件域命令数量异常').toBe(22);
     expect(full.length - substrate.length).toBe(pluginOnly.length);
 
     // ③ 两组集合都必须经 origin 门（收窄命令面不得绕过 R4-D2）。
@@ -1917,6 +2096,18 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(registry, 'GC 过期也要补终帧').toMatch(/json!\(\{ "reason": "call_timeout" \}\)/);
   });
 
+  it('S1：传输身份通过 CallerSource 注入，host 命令签名不耦合 WebviewWindow', () => {
+    const tauri = read('crates/tauron-adapter/src/tauri.rs');
+    const signatures = [...tauri.matchAll(/pub fn (host_\w+)\([\s\S]*?\) -> [^{]+\{/g)];
+    expect(signatures.length).toBeGreaterThan(40);
+    for (const signature of signatures) {
+      expect(signature[0], `${signature[1]} 不应直接依赖 Tauri 窗口参数`).not.toMatch(/\bWebviewWindow\b/);
+    }
+    expect(tauri).toMatch(/pub trait CallerSource\s*\{[\s\S]*?fn caller\(&self\) -> HostResult<crate::Caller>/);
+    expect(tauri).toMatch(/impl CallerSource for TauriCallerSource/);
+    expect(tauri).toMatch(/impl<'de> CommandArg<'de, tauri::Wry> for TauriCallerSource/);
+  });
+
   it('R5：TS 侧把**真实** channel 传进 invoke，且 SDK 不碰传输细节', () => {
     const hostTs = read('packages/tauron-host/src/host.ts');
     const backendTs = read('packages/tauron-host/src/backend.ts');
@@ -1954,6 +2145,8 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       'eventsPublish',
       'eventsSubscribe',
       'eventsUnsubscribe',
+      // 0.4-A1：执行泵自动回填跨主体调用结果（仍是 HostClient 方法，不碰传输）。
+      'reportCallResult',
     ]);
   });
 
@@ -2008,6 +2201,12 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     const doc = read('docs/architecture/canonical-owners.md');
     // ① 决策必须成文且可定位（改这张表 = 改架构决策）。
     expect(doc, 'canonical 归属表缺失').toContain('canonical = `tauron-host`');
+    const placement = doc.slice(doc.indexOf('## 0.3 crate 归置决策'), doc.indexOf('## 依据'));
+    expect(placement, '0.3 孤儿 crate 归置表缺失').toContain('| `tauron-acl` | 迁移中 |');
+    for (const crate of ['tauron-brand', 'tauron-market', 'tauron-wasm', 'tauron-theme', 'tauron-distribute', 'tauron-shell']) {
+      expect(placement, `归置表缺少 ${crate}`).toContain(`| \`${crate}\` |`);
+    }
+    expect(placement.match(/^\| `tauron-[^`]+` \|/gm)?.length).toBe(7);
     for (const owner of [
       'crates/tauron-host/src/eventbus.rs',
       'crates/tauron-host/src/registry.rs',
@@ -2413,6 +2612,7 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       ['host_registry_admin', 'cmd_registry_admin_as'],
       ['host_runtime_spawn', 'cmd_runtime_spawn_as'],
       ['host_runtime_health', 'cmd_runtime_health_as'],
+      ['host_resource_stats', 'cmd_resource_stats_as'],
       ['host_settings_adopt_legacy', 'cmd_settings_adopt_legacy_as'],
       ['host_settings_migrate', 'cmd_settings_migrate_as'],
       ['host_window_relaunch', 'cmd_window_relaunch_as'],
@@ -2422,8 +2622,8 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       const wrapper = fnBody(tauri, cmd);
       expect(
         wrapper,
-        `${cmd} 没从窗口 label 取主体（硬编码 Caller::MainWindow 即可绕过判定）`,
-      ).toContain('Caller::from_label(window.label())');
+        `${cmd} 没从受信传输上下文取得主体（硬编码 Caller::MainWindow 即可绕过判定）`,
+      ).toMatch(/(?:window\.caller\(\)|Caller::from_label\(window\.label\(\)\))/);
       expect(wrapper, `${cmd} 未把解析出的主体交给核心`).toMatch(
         new RegExp(`(?:crate::)?(?:${core}|wire_registry_admin)\\(&?caller`),
       );
@@ -2443,8 +2643,8 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       const wrapper = fnBody(tauri, cmd);
       expect(
         wrapper,
-        `${cmd} 没从窗口 label 取主体（硬编码 Caller::MainWindow 即可绕过判定）`,
-      ).toContain('Caller::from_label(window.label())');
+        `${cmd} 没从受信传输上下文取得主体（硬编码 Caller::MainWindow 即可绕过判定）`,
+      ).toMatch(/(?:window\.caller\(\)|Caller::from_label\(window\.label\(\)\))/);
       expect(wrapper, `${cmd} 未把解析出的主体交给核心`).toMatch(
         new RegExp(`(?:crate::)?${core}\\(&caller`),
       );
@@ -2468,8 +2668,8 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       ['host_market_download', 'cmd_market_download_as'],
       ['host_market_install', 'cmd_market_install_as'],
     ] as Array<[string, string]>) {
-      expect(fnBody(tauri, cmd), `${cmd} 未从 label 取主体`).toContain(
-        'Caller::from_label(window.label())',
+      expect(fnBody(tauri, cmd), `${cmd} 未从受信传输上下文取得主体`).toMatch(
+        /(?:window\.caller\(\)|Caller::from_label\(window\.label\(\)\))/,
       );
       expect(fnBody(lib, core), `${core} 未做主窗判定`).toMatch(/require_main_window/);
     }
@@ -2527,14 +2727,15 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(ghosts, '宏引用了不存在的命令实现').toEqual([]);
 
     // 结构比例：底座 ⊆ 全量，且差集 = 插件运行时域命令（绑 PluginRuntimeState 的那些）。
-    // 15 → 16（轮 11 R8 加 `host_window_create`：它必须查注册表确认插件存在）。
-    const PLUGIN_RUNTIME_DOMAIN_SIZE = 16;
+    // 16 → 17（M8）；可选 plugin-install feature 另外增加 install + preview 两条主窗命令。
+    // 17 → 20（0.4-A1：跨主体调用三命令 host_call_plugin/result/take 入插件域）。
+    const PLUGIN_RUNTIME_DOMAIN_SIZE = 20;
     const notInSub = [...inPlug].filter((c) => !inSub.has(c));
     expect(
       [...inSub].filter((c) => !inPlug.has(c)),
       '底座宏里出现了不在全量宏里的命令（不是子集）',
     ).toEqual([]);
-    expect(notInSub.length, '插件运行时域命令数（差集）').toBe(PLUGIN_RUNTIME_DOMAIN_SIZE);
+    expect(notInSub.length, '插件运行时域命令数（差集）').toBe(PLUGIN_RUNTIME_DOMAIN_SIZE + 2);
   });
 
   it('ShellClient 调用的命令必须都在宿主注册表内（名字打错 = 前端永远 reject）', () => {

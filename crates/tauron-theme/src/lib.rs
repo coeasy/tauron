@@ -62,12 +62,7 @@ pub struct Theme {
 impl Theme {
     /// 创建新主题。
     pub fn new(id: &str, name: &str, is_dark: bool) -> Self {
-        Self {
-            id: id.to_string(),
-            name: name.to_string(),
-            is_dark,
-            variables: BTreeMap::new(),
-        }
+        Self { id: id.to_string(), name: name.to_string(), is_dark, variables: BTreeMap::new() }
     }
 
     /// 设置一个 CSS 变量。
@@ -92,7 +87,7 @@ impl Theme {
         if self.name.trim().is_empty() {
             return Err(ThemeError::EmptyName);
         }
-        for (key, _) in &self.variables {
+        for key in self.variables.keys() {
             if !key.starts_with("--") {
                 return Err(ThemeError::InvalidVariableName(key.clone()));
             }
@@ -203,11 +198,7 @@ impl Default for ThemeRegistry {
         for theme in builtin_themes() {
             themes.insert(theme.id.clone(), theme);
         }
-        Self {
-            themes,
-            active_id: "light".to_string(),
-            schema_version: 1,
-        }
+        Self { themes, active_id: "light".to_string(), schema_version: 1 }
     }
 }
 
@@ -257,9 +248,7 @@ impl ThemeRegistry {
 
     /// 当前激活主题。
     pub fn active(&self) -> &Theme {
-        self.themes
-            .get(&self.active_id)
-            .unwrap_or_else(|| self.themes.values().next().unwrap())
+        self.themes.get(&self.active_id).unwrap_or_else(|| self.themes.values().next().unwrap())
     }
 
     /// 当前激活主题 ID。
@@ -306,10 +295,16 @@ impl ThemeRegistry {
             } else {
                 format!(":root[data-theme=\"{}\"]", theme.id)
             };
-            parts.push(format!("{} {{\n{}\n}}", selector, theme.variables.iter()
-                .map(|(k, v)| format!("  {k}: {v};"))
-                .collect::<Vec<_>>()
-                .join("\n")));
+            parts.push(format!(
+                "{} {{\n{}\n}}",
+                selector,
+                theme
+                    .variables
+                    .iter()
+                    .map(|(k, v)| format!("  {k}: {v};"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
         }
         parts.join("\n")
     }
@@ -326,16 +321,14 @@ impl ThemeRegistry {
 
     /// 从文件加载。
     pub fn from_file(path: &Path) -> ThemeResult<Self> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| ThemeError::Io(e.to_string()))?;
+        let content = std::fs::read_to_string(path).map_err(|e| ThemeError::Io(e.to_string()))?;
         Self::from_json(&content)
     }
 
     /// 保存到文件。
     pub fn save_to_file(&self, path: &Path) -> ThemeResult<()> {
         let json = self.to_json()?;
-        std::fs::write(path, json)
-            .map_err(|e| ThemeError::Io(e.to_string()))
+        std::fs::write(path, json).map_err(|e| ThemeError::Io(e.to_string()))
     }
 
     /// 获取主题贡献列表（用于 manifest contributes）。
@@ -402,19 +395,13 @@ mod tests {
 
     #[test]
     fn test_theme_validate_empty_id() {
-        let theme = Theme {
-            id: "".to_string(),
-            ..Theme::new("test", "Test", false)
-        };
+        let theme = Theme { id: "".to_string(), ..Theme::new("test", "Test", false) };
         assert!(theme.validate().is_err());
     }
 
     #[test]
     fn test_theme_validate_empty_name() {
-        let theme = Theme {
-            name: "".to_string(),
-            ..Theme::new("test", "Test", false)
-        };
+        let theme = Theme { name: "".to_string(), ..Theme::new("test", "Test", false) };
         assert!(theme.validate().is_err());
     }
 
@@ -612,10 +599,7 @@ mod tests {
         assert!(dark.variable("--oc-color-focus-ring").is_some());
         let light = builtin_light();
         // 暗色主题的 primary 应该与亮色不同
-        assert_ne!(
-            light.variable("--oc-color-primary"),
-            dark.variable("--oc-color-primary")
-        );
+        assert_ne!(light.variable("--oc-color-primary"), dark.variable("--oc-color-primary"));
     }
 
     #[test]
@@ -635,8 +619,8 @@ mod tests {
     #[test]
     fn test_registry_active_fallback() {
         // 当 active_id 不在 themes 中时，应回退到第一个主题
-        let mut registry = ThemeRegistry::default();
-        registry.active_id = "nonexistent".to_string();
+        let mut registry =
+            ThemeRegistry { active_id: "nonexistent".to_string(), ..ThemeRegistry::default() };
         // 没有主题时 active() 会 panic，所以我们测试有主题但 active_id 不匹配
         let theme = Theme::new("custom", "Custom", false);
         registry.register(theme).unwrap();

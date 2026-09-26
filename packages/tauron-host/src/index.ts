@@ -26,6 +26,9 @@ export type {
 
 export type { Backend, ChannelPort, Principal, Unlisten } from './backend.js';
 export { MockBackend } from './backend.js';
+export { MemoryTransport } from './memory-transport.js';
+export type { HostTransport } from './backend.js';
+export type { MemoryCommandHandler, MemoryTransportOptions } from './memory-transport.js';
 export type { MockBackendOptions, MockInvokeCase } from './backend.js';
 
 export {
@@ -74,6 +77,7 @@ export type {
   RuntimeSpawnProfile,
   RuntimeHandle,
   RuntimeHealth,
+  ResourceStats,
   ReapStats,
 } from './shell-client.js';
 
@@ -98,8 +102,17 @@ export type { LazyPluginDescriptor, PluginLoadStatus, PluginCacheEntry } from '.
 export { AutoUpdateClient, createAutoUpdateClient } from './auto-update-client.js';
 export type { AutoUpdateConfig, UpdateInfo, UpdateStatus, DownloadProgress } from './auto-update-client.js';
 
-export { DialogClient, createDialogClient } from './dialog-client.js';
-export type { FileFilter, OpenFileOptions, SaveFileOptions, MessageOptions, ConfirmOptions } from './dialog-client.js';
+export { DialogClient, createDialogClient, isUnsupportedBody, isDegradedValue } from './dialog-client.js';
+export type {
+  FileFilter,
+  OpenFileOptions,
+  SaveFileOptions,
+  MessageOptions,
+  ConfirmOptions,
+  UnsupportedBody,
+  DegradedValue,
+  ProviderResult,
+} from './dialog-client.js';
 
 export { DeepLinkClient, createDeepLinkClient } from './deep-link-client.js';
 export type { DeepLinkConfig, DeepLinkEvent } from './deep-link-client.js';
@@ -177,9 +190,6 @@ export type {
 export { LIFECYCLE_EVENTS, LIFECYCLE_STATES } from './lifecycle.js';
 export type { LifecycleEvent, LifecycleState } from './lifecycle.js';
 
-export {
-  PluginJsRuntime,
-} from './plugin-js.js';
 export type {
   ContributesEntry,
   IdentityActionResult,

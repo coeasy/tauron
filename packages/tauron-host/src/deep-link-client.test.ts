@@ -14,7 +14,7 @@ describe('DeepLinkClient', () => {
     backend = new MockBackend({
       capabilities: ['host_deep_link_register'],
       cases: [
-        { cmd: 'host_deep_link_register', result: undefined },
+        { cmd: 'host_deep_link_register', result: { supported: false, reason: 'OS provider missing', fallback: 'internal-event-routing' } },
       ],
     });
     client = new DeepLinkClient({
@@ -48,8 +48,9 @@ describe('DeepLinkClient', () => {
 
   describe('register()', () => {
     it('注册深链接协议', async () => {
-      await client.register();
+      const result = await client.register();
       expect(client.isRegistered).toBe(true);
+      expect(result).toMatchObject({ supported: false, fallback: 'internal-event-routing' });
       expect(backend.invocations.some(i => i.cmd === 'host_deep_link_register')).toBe(true);
     });
 

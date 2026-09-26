@@ -326,4 +326,3 @@ mod tests {
         assert!(serde_json::from_value::<Event>(snake).is_err());
     }
 }
-

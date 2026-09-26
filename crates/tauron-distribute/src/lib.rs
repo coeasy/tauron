@@ -20,7 +20,10 @@ pub mod error;
 pub mod upgrade;
 
 pub use error::{DistributeError, DistributeResult};
-pub use upgrade::{UpgradeRunner, UpgradeState, UpgradeProgress, UpgradeOptions, UpgradeResult, Downloader, SignatureVerifier, MockDownloader, MockVerifier, create_upgrade_runner, create_default_upgrade_runner};
+pub use upgrade::{
+    create_default_upgrade_runner, create_upgrade_runner, Downloader, MockDownloader, MockVerifier,
+    SignatureVerifier, UpgradeOptions, UpgradeProgress, UpgradeResult, UpgradeRunner, UpgradeState,
+};
 
 /// 更新清单（latest.json 格式）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,12 +146,10 @@ impl GrayscalePolicy {
                 required: self.min_dwell_seconds,
             });
         }
-        let new_batch = self.current.next().ok_or_else(|| {
-            DistributeError::GrayscaleNotReady {
-                current: self.current.as_str().to_string(),
-                elapsed: now.saturating_sub(self.entered_at),
-                required: self.min_dwell_seconds,
-            }
+        let new_batch = self.current.next().ok_or_else(|| DistributeError::GrayscaleNotReady {
+            current: self.current.as_str().to_string(),
+            elapsed: now.saturating_sub(self.entered_at),
+            required: self.min_dwell_seconds,
         })?;
         self.current = new_batch;
         self.entered_at = now;
@@ -180,11 +181,7 @@ pub struct CrashGate {
 
 impl Default for CrashGate {
     fn default() -> Self {
-        Self {
-            threshold_percent: 5.0,
-            current_percent: 0.0,
-            stopped: false,
-        }
+        Self { threshold_percent: 5.0, current_percent: 0.0, stopped: false }
     }
 }
 
@@ -327,26 +324,17 @@ mod tests {
 
     #[test]
     fn grayscale_cannot_advance_before_dwell_time() {
-        let mut p = GrayscalePolicy {
-            entered_at: 1000,
-            min_dwell_seconds: 3600,
-            ..Default::default()
-        };
+        let mut p =
+            GrayscalePolicy { entered_at: 1000, min_dwell_seconds: 3600, ..Default::default() };
         // 1 小时未到。
         assert!(!p.can_advance(1000 + 1800));
-        assert!(matches!(
-            p.advance(1000 + 1800),
-            Err(DistributeError::GrayscaleNotReady { .. })
-        ));
+        assert!(matches!(p.advance(1000 + 1800), Err(DistributeError::GrayscaleNotReady { .. })));
     }
 
     #[test]
     fn grayscale_advances_after_dwell_time() {
-        let mut p = GrayscalePolicy {
-            entered_at: 0,
-            min_dwell_seconds: 3600,
-            ..Default::default()
-        };
+        let mut p =
+            GrayscalePolicy { entered_at: 0, min_dwell_seconds: 3600, ..Default::default() };
         // 1 小时后。
         assert!(p.can_advance(3600));
         let result = p.advance(3601).unwrap();
@@ -408,10 +396,7 @@ mod tests {
 
     #[test]
     fn crash_gate_allows_below_threshold() {
-        let mut gate = CrashGate {
-            threshold_percent: 5.0,
-            ..Default::default()
-        };
+        let mut gate = CrashGate { threshold_percent: 5.0, ..Default::default() };
         // 1/100 = 1%。
         let stopped = gate.update(1, 100);
         assert!(!stopped);
@@ -421,10 +406,7 @@ mod tests {
 
     #[test]
     fn crash_gate_stops_at_threshold() {
-        let mut gate = CrashGate {
-            threshold_percent: 5.0,
-            ..Default::default()
-        };
+        let mut gate = CrashGate { threshold_percent: 5.0, ..Default::default() };
         // 5/100 = 5%。
         let stopped = gate.update(5, 100);
         assert!(stopped);
@@ -433,10 +415,7 @@ mod tests {
 
     #[test]
     fn crash_gate_stops_above_threshold() {
-        let mut gate = CrashGate {
-            threshold_percent: 5.0,
-            ..Default::default()
-        };
+        let mut gate = CrashGate { threshold_percent: 5.0, ..Default::default() };
         // 10/100 = 10%。
         let stopped = gate.update(10, 100);
         assert!(stopped);
@@ -452,10 +431,7 @@ mod tests {
 
     #[test]
     fn crash_gate_reset() {
-        let mut gate = CrashGate {
-            threshold_percent: 5.0,
-            ..Default::default()
-        };
+        let mut gate = CrashGate { threshold_percent: 5.0, ..Default::default() };
         gate.update(10, 100); // 触发停发。
         assert!(gate.is_stopped());
         gate.reset();
@@ -464,11 +440,7 @@ mod tests {
 
     #[test]
     fn crash_gate_serde_roundtrip() {
-        let gate = CrashGate {
-            threshold_percent: 3.5,
-            current_percent: 2.0,
-            stopped: true,
-        };
+        let gate = CrashGate { threshold_percent: 3.5, current_percent: 2.0, stopped: true };
         let v = serde_json::to_value(&gate).unwrap();
         let g2 = serde_json::from_value::<CrashGate>(v).unwrap();
         assert_eq!(g2.threshold_percent, 3.5);
@@ -509,24 +481,19 @@ mod tests {
 
     impl MockClient {
         fn new(manifest: Option<UpdateManifest>) -> Self {
-            Self {
-                manifest,
-                error: None,
-                calls: std::sync::atomic::AtomicUsize::new(0),
-            }
+            Self { manifest, error: None, calls: std::sync::atomic::AtomicUsize::new(0) }
         }
 
         fn with_error(err: DistributeError) -> Self {
-            Self {
-                manifest: None,
-                error: Some(err),
-                calls: std::sync::atomic::AtomicUsize::new(0),
-            }
+            Self { manifest: None, error: Some(err), calls: std::sync::atomic::AtomicUsize::new(0) }
         }
     }
 
     impl EndpointClient for MockClient {
-        fn fetch_manifest(&self, _current_version: &str) -> DistributeResult<Option<UpdateManifest>> {
+        fn fetch_manifest(
+            &self,
+            _current_version: &str,
+        ) -> DistributeResult<Option<UpdateManifest>> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(ref err) = self.error {
                 return Err(err.clone());
@@ -538,19 +505,18 @@ mod tests {
     #[test]
     fn check_for_update_returns_manifest() {
         let client = MockClient::new(Some(test_manifest("2.0.0")));
-        let policy = GrayscalePolicy {
-            current: GrayscaleBatch::Batch100,
-            ..Default::default()
-        };
-        let result = check_for_update(&client, "1.0.0", &policy, 0,);
-        assert!(matches!(result, Ok(UpdateCheckResult::UpdateAvailable(ref m)) if m.version == "2.0.0"));
+        let policy = GrayscalePolicy { current: GrayscaleBatch::Batch100, ..Default::default() };
+        let result = check_for_update(&client, "1.0.0", &policy, 0);
+        assert!(
+            matches!(result, Ok(UpdateCheckResult::UpdateAvailable(ref m)) if m.version == "2.0.0")
+        );
     }
 
     #[test]
     fn check_for_update_returns_up_to_date() {
         let client = MockClient::new(None);
         let policy = GrayscalePolicy::default();
-        let result = check_for_update(&client, "2.0.0", &policy, 0,);
+        let result = check_for_update(&client, "2.0.0", &policy, 0);
         assert!(matches!(result, Ok(UpdateCheckResult::UpToDate)));
     }
 
@@ -560,7 +526,7 @@ mod tests {
         manifest.signature = String::new();
         let client = MockClient::new(Some(manifest));
         let policy = GrayscalePolicy::default();
-        let result = check_for_update(&client, "1.0.0", &policy, 0,);
+        let result = check_for_update(&client, "1.0.0", &policy, 0);
         assert!(matches!(result, Ok(UpdateCheckResult::SignatureInvalid)));
     }
 
@@ -568,7 +534,7 @@ mod tests {
     fn check_for_update_endpoint_error_propagates() {
         let client = MockClient::with_error(DistributeError::EndpointError("500".into()));
         let policy = GrayscalePolicy::default();
-        let result = check_for_update(&client, "1.0.0", &policy, 0,);
+        let result = check_for_update(&client, "1.0.0", &policy, 0);
         assert!(matches!(result, Err(DistributeError::EndpointError(ref s)) if s == "500"));
     }
 
@@ -592,8 +558,10 @@ mod tests {
             ..Default::default()
         };
         // user_hash = 0 → 0%100=0 < 1 → 在灰度范围。
-        let result = check_for_update(&client, "1.0.0", &policy, 0,);
-        assert!(matches!(result, Ok(UpdateCheckResult::UpdateAvailable(ref m)) if m.version == "2.0.0"));
+        let result = check_for_update(&client, "1.0.0", &policy, 0);
+        assert!(
+            matches!(result, Ok(UpdateCheckResult::UpdateAvailable(ref m)) if m.version == "2.0.0")
+        );
     }
 
     #[test]
@@ -615,15 +583,12 @@ mod tests {
     /// 计划 §4.19 测试项：批次 1%→5%→25%→100% + 每批最小停留。
     #[test]
     fn end_to_end_grayscale_progression() {
-        let mut policy = GrayscalePolicy {
-            entered_at: 0,
-            min_dwell_seconds: 3600,
-            ..Default::default()
-        };
+        let mut policy =
+            GrayscalePolicy { entered_at: 0, min_dwell_seconds: 3600, ..Default::default() };
         let client = MockClient::new(Some(test_manifest("2.0.0")));
 
         // Batch 1%: 只覆盖 hash < 1 的用户。
-        let result = check_for_update(&client, "1.0.0", &policy, 0,);
+        let result = check_for_update(&client, "1.0.0", &policy, 0);
         assert!(matches!(result, Ok(UpdateCheckResult::UpdateAvailable(_))));
         let result = check_for_update(&client, "1.0.0", &policy, 50);
         assert!(matches!(result, Ok(UpdateCheckResult::NotInGrayscale)));
@@ -654,10 +619,7 @@ mod tests {
     /// 计划 §4.19 测试项：崩溃率触发停发。
     #[test]
     fn end_to_end_crash_rate_auto_stop() {
-        let mut gate = CrashGate {
-            threshold_percent: 5.0,
-            ..Default::default()
-        };
+        let mut gate = CrashGate { threshold_percent: 5.0, ..Default::default() };
         // 正常发布：1/100 = 1%。
         assert!(!gate.update(1, 100));
         assert!(!gate.is_stopped());
@@ -688,24 +650,24 @@ mod tests {
         // 1. 2xx 正常（有更新）。
         let client = MockClient::new(Some(test_manifest("2.0.0")));
         let policy = GrayscalePolicy::default();
-        let result = check_for_update(&client, "1.0.0", &policy, 0,);
+        let result = check_for_update(&client, "1.0.0", &policy, 0);
         assert!(matches!(result, Ok(UpdateCheckResult::UpdateAvailable(_))));
 
         // 2. 2xx 正常（已是最新）。
         let client = MockClient::new(None);
-        let result = check_for_update(&client, "2.0.0", &policy, 0,);
+        let result = check_for_update(&client, "2.0.0", &policy, 0);
         assert!(matches!(result, Ok(UpdateCheckResult::UpToDate)));
 
         // 3. 空签名（2xx 但签名缺失）。
         let mut manifest = test_manifest("2.0.0");
         manifest.signature = String::new();
         let client = MockClient::new(Some(manifest));
-        let result = check_for_update(&client, "1.0.0", &policy, 0,);
+        let result = check_for_update(&client, "1.0.0", &policy, 0);
         assert!(matches!(result, Ok(UpdateCheckResult::SignatureInvalid)));
 
         // 4. endpoint 错误（404/500）。
         let client = MockClient::with_error(DistributeError::EndpointError("500".into()));
-        let result = check_for_update(&client, "1.0.0", &policy, 0,);
+        let result = check_for_update(&client, "1.0.0", &policy, 0);
         assert!(matches!(result, Err(DistributeError::EndpointError(_))));
     }
 }

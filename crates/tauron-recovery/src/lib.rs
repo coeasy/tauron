@@ -232,8 +232,7 @@ impl BootCounter {
 
     /// 试验启用是否耗尽。
     pub fn trial_exhausted(&self, plugin_id: &str) -> bool {
-        self.trial_failures.get(plugin_id).copied().unwrap_or(0)
-            >= Self::TRIAL_MAX_ATTEMPTS
+        self.trial_failures.get(plugin_id).copied().unwrap_or(0) >= Self::TRIAL_MAX_ATTEMPTS
     }
 
     /// 回落到安全模式禁用。
@@ -434,25 +433,23 @@ impl RecoveryEngine {
             self.required_plugins.insert(plugin_id.to_string());
         }
         self.all_plugins.insert(plugin_id.to_string());
-        self.plugin_states
-            .entry(plugin_id.to_string())
-            .or_insert(match self.phase {
-                BootPhase::Normal => PluginState::Enabled,
-                BootPhase::Safemode => {
-                    if is_required {
-                        PluginState::Enabled
-                    } else {
-                        PluginState::DisabledBySafemode
-                    }
+        self.plugin_states.entry(plugin_id.to_string()).or_insert(match self.phase {
+            BootPhase::Normal => PluginState::Enabled,
+            BootPhase::Safemode => {
+                if is_required {
+                    PluginState::Enabled
+                } else {
+                    PluginState::DisabledBySafemode
                 }
-                BootPhase::Repairmode => {
-                    if is_required {
-                        PluginState::Enabled
-                    } else {
-                        PluginState::DisabledByRepairmode
-                    }
+            }
+            BootPhase::Repairmode => {
+                if is_required {
+                    PluginState::Enabled
+                } else {
+                    PluginState::DisabledByRepairmode
                 }
-            });
+            }
+        });
     }
 
     /// 取插件状态。
@@ -554,8 +551,7 @@ impl RecoveryEngine {
         if self.counter.trial_exhausted(plugin_id) {
             return Err(RecoveryError::TrialExhausted(plugin_id.to_string()));
         }
-        self.plugin_states
-            .insert(plugin_id.to_string(), PluginState::TrialEnable);
+        self.plugin_states.insert(plugin_id.to_string(), PluginState::TrialEnable);
         Ok(())
     }
 
@@ -693,14 +689,26 @@ impl RecoveryEngine {
 
     /// 从 JSON 反序列化。
     pub fn from_json(v: &serde_json::Value) -> RecoveryResult<Self> {
-        let counter = serde_json::from_value(v["counter"].clone()).map_err(|e| RecoveryError::SnapshotFormat(e.to_string()))?;
-        let phase = serde_json::from_value(v["phase"].clone()).map_err(|e| RecoveryError::SnapshotFormat(e.to_string()))?;
-        let plugin_states = serde_json::from_value(v["plugin_states"].clone()).map_err(|e| RecoveryError::SnapshotFormat(e.to_string()))?;
-        let required_plugins = serde_json::from_value(v["required_plugins"].clone()).map_err(|e| RecoveryError::SnapshotFormat(e.to_string()))?;
-        let all_plugins = v.get("all_plugins").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
-        let executed_actions = serde_json::from_value(v["executed_actions"].clone()).map_err(|e| RecoveryError::SnapshotFormat(e.to_string()))?;
-        let executed_effects = serde_json::from_value(v["executed_effects"].clone()).map_err(|e| RecoveryError::SnapshotFormat(e.to_string()))?;
-        let snapshot_meta = v.get("snapshot_meta").filter(|v| !v.is_null()).and_then(|v| serde_json::from_value(v.clone()).ok());
+        let counter = serde_json::from_value(v["counter"].clone())
+            .map_err(|e| RecoveryError::SnapshotFormat(e.to_string()))?;
+        let phase = serde_json::from_value(v["phase"].clone())
+            .map_err(|e| RecoveryError::SnapshotFormat(e.to_string()))?;
+        let plugin_states = serde_json::from_value(v["plugin_states"].clone())
+            .map_err(|e| RecoveryError::SnapshotFormat(e.to_string()))?;
+        let required_plugins = serde_json::from_value(v["required_plugins"].clone())
+            .map_err(|e| RecoveryError::SnapshotFormat(e.to_string()))?;
+        let all_plugins = v
+            .get("all_plugins")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let executed_actions = serde_json::from_value(v["executed_actions"].clone())
+            .map_err(|e| RecoveryError::SnapshotFormat(e.to_string()))?;
+        let executed_effects = serde_json::from_value(v["executed_effects"].clone())
+            .map_err(|e| RecoveryError::SnapshotFormat(e.to_string()))?;
+        let snapshot_meta = v
+            .get("snapshot_meta")
+            .filter(|v| !v.is_null())
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
         // 上下文是**纯诊断**字段：缺失（旧标记文件）或损坏都视为无 context，
         // **绝不**让整份快照判定为损坏——那会平白把一次干净启动算成崩溃，
         // 诊断字段不该有能力改变安全模式判定。
@@ -812,7 +820,11 @@ mod tests {
         assert_eq!(e.phase(), BootPhase::Safemode);
         // 重建状态。
         e.enter_safemode();
-        assert_eq!(e.plugin_state("p.core"), Some(PluginState::Enabled), "必需插件在安全模式仍启用");
+        assert_eq!(
+            e.plugin_state("p.core"),
+            Some(PluginState::Enabled),
+            "必需插件在安全模式仍启用"
+        );
         assert_eq!(e.plugin_state("p.audio"), Some(PluginState::DisabledBySafemode));
         assert_eq!(e.plugin_state("p.video"), Some(PluginState::DisabledBySafemode));
     }
@@ -876,17 +888,11 @@ mod tests {
         e.record_boot_failure(None);
         e.record_boot_failure(None);
         e.enter_safemode();
-        assert!(e
-            .disabled_plugins()
-            .iter()
-            .any(|(id, _)| *id == "p.audio"));
+        assert!(e.disabled_plugins().iter().any(|(id, _)| *id == "p.audio"));
         assert!(e.remove_plugin("p.audio"));
         // 状态表与已知集合都要清空（快照不会再带着已卸载的插件）。
         assert!(e.plugin_state("p.audio").is_none());
-        assert!(!e
-            .disabled_plugins()
-            .iter()
-            .any(|(id, _)| *id == "p.audio"));
+        assert!(!e.disabled_plugins().iter().any(|(id, _)| *id == "p.audio"));
         // 重复移除是幂等 no-op。
         assert!(!e.remove_plugin("p.audio"));
         // 从未登记的插件同样是 no-op（不误报）。
@@ -901,10 +907,7 @@ mod tests {
     fn trial_enable_only_in_safemode() {
         let mut e = engine_with_plugins();
         // 正常模式下不可试验启用。
-        assert!(matches!(
-            e.trial_enable("p.audio"),
-            Err(RecoveryError::RestrictedInSafemode)
-        ));
+        assert!(matches!(e.trial_enable("p.audio"), Err(RecoveryError::RestrictedInSafemode)));
     }
 
     #[test]
@@ -994,10 +997,7 @@ mod tests {
         };
         assert!(e.execute_action(&action).unwrap());
         // 恢复进行中，第二次执行应报错。
-        assert!(matches!(
-            e.execute_action(&action),
-            Err(RecoveryError::RecoveryInProgress)
-        ));
+        assert!(matches!(e.execute_action(&action), Err(RecoveryError::RecoveryInProgress)));
         e.complete_recovery();
     }
 
@@ -1353,7 +1353,8 @@ mod tests {
             seq: 10,
             writer: "engine".into(),
             ts: 1000,
-        }).unwrap();
+        })
+        .unwrap();
 
         let action = RecoveryAction {
             plugin_id: "p.audio".into(),

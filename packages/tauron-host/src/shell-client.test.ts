@@ -27,6 +27,7 @@ const ALL_SHELL_CAPS = [
   'host_market_download',
   'host_market_install',
   'host_brand_info',
+  'host_capabilities',
   'host_i18n_t',
   'host_i18n_t_params',
   'host_i18n_set_locale',
@@ -39,6 +40,7 @@ const ALL_SHELL_CAPS = [
   // P0-2：进程插件运行时（同属主窗特权档）
   'host_runtime_spawn',
   'host_runtime_health',
+  'host_resource_stats',
 ];
 
 describe('ShellClient', () => {
@@ -70,6 +72,10 @@ describe('ShellClient', () => {
           },
         },
         {
+          cmd: 'host_capabilities',
+          result: { families: ['shell', 'settings'], commands: ['host_capabilities'], unsupported: [], pluginRuntime: false },
+        },
+        {
           cmd: 'host_market_check',
           result: {
             available: false,
@@ -92,6 +98,14 @@ describe('ShellClient', () => {
   });
 
   // ── 窗口管理 ──
+
+  it('能力协商获取实际装配结果，并能预判命令是否注册', async () => {
+    const result = await client.capabilities();
+    expect(result.pluginRuntime).toBe(false);
+    expect(result.commands).toContain('host_capabilities');
+    expect(client.supports('host_capabilities')).toBe(true);
+    expect(backend.invocations[0]?.cmd).toBe('host_capabilities');
+  });
 
   describe('window', () => {
     it('windowMinimize 调用 host_window_minimize', async () => {
@@ -427,6 +441,13 @@ describe('ShellClient', () => {
       await client.runtimeHealth('lease-1');
       const inv = backend.invocations.find(i => i.cmd === 'host_runtime_health');
       expect(inv!.args).toEqual({ lease: 'lease-1' });
+    });
+
+    it('resourceStats 只调用主窗诊断命令且不带插件可控参数', async () => {
+      await client.resourceStats();
+      const inv = backend.invocations.find(i => i.cmd === 'host_resource_stats');
+      expect(inv).toBeDefined();
+      expect(inv!.args).toBeUndefined();
     });
 
     it('租约失效错误按租约语义穿越（E_LEASE_EXPIRED，不是 E_CALL_NOT_FOUND）', async () => {

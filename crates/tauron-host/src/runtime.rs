@@ -146,11 +146,6 @@ impl RuntimeTable {
         self.reaper = Some(reaper);
     }
 
-    /// 是否已注入终止能力。
-    pub fn has_reaper(&self) -> bool {
-        self.reaper.is_some()
-    }
-
     /// 回收留痕快照。
     pub fn reap_stats(&self) -> ReapStats {
         self.reap.clone()
@@ -267,9 +262,8 @@ impl RuntimeTable {
         self.reap.attempts += 1;
         let Some(reaper) = self.reaper.clone() else {
             self.reap.failures += 1;
-            self.reap.last_error = Some(format!(
-                "未注入 LeaseReaper：pid {pid} 未被终止（可能是孤儿进程）"
-            ));
+            self.reap.last_error =
+                Some(format!("未注入 LeaseReaper：pid {pid} 未被终止（可能是孤儿进程）"));
             return;
         };
         match reaper.kill(pid) {
@@ -421,7 +415,6 @@ mod tests {
     #[test]
     fn missing_reaper_is_recorded_as_failure() {
         let mut t = RuntimeTable::new();
-        assert!(!t.has_reaper());
         t.register("com.example.proc", 5);
         t.remove_plugin("com.example.proc");
         let s = t.reap_stats();

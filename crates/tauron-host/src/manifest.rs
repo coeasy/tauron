@@ -22,8 +22,8 @@
 //! 门禁），不产出该文件。别把它当生成产物引用。
 
 use crate::error::{ErrorCode, HostError, HostResult};
-use serde::{Deserialize, Serialize};
 use semver::VersionReq;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::Path;
 
@@ -91,7 +91,7 @@ impl PluginId {
     }
 
     /// 便捷引用包装。
-    pub fn get<'a>(&'a self) -> &'a str {
+    pub fn get(&self) -> &str {
         &self.0
     }
 }
@@ -127,7 +127,7 @@ fn bad_manifest(msg: impl Into<String>) -> HostError {
 pub fn parse_version_range(s: &str) -> HostResult<VersionReq> {
     let parts: Vec<&str> = s
         .split_whitespace()
-        .map(|t| t.trim_end_matches(|c| c == ',' || c == ';'))
+        .map(|t| t.trim_end_matches([',', ';']))
         .filter(|t| !t.is_empty())
         .collect();
     if parts.is_empty() {
@@ -259,10 +259,7 @@ impl PermissionIndex {
     /// 嵌进二进制），本函数是它的落地实现。
     pub fn from_json(json: &str) -> HostResult<Self> {
         serde_json::from_str(json).map_err(|e| {
-            HostError::new(
-                ErrorCode::E_INVALID_MANIFEST,
-                format!("权限词表 JSON 解析失败: {e}"),
-            )
+            HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("权限词表 JSON 解析失败: {e}"))
         })
     }
 
@@ -271,10 +268,7 @@ impl PermissionIndex {
     }
 
     pub fn risk_of(&self, identifier: &str) -> Option<Risk> {
-        self.entries
-            .iter()
-            .find(|e| e.identifier == identifier)
-            .map(|e| e.risk)
+        self.entries.iter().find(|e| e.identifier == identifier).map(|e| e.risk)
     }
 
     pub fn entry_of(&self, identifier: &str) -> Option<&PermissionEntry> {
@@ -290,8 +284,7 @@ impl PermissionIndex {
                 ErrorCode::E_INVALID_MANIFEST,
                 format!(
                     "权限 `{}` 不在权限词表 v{} 中；表外字符串一律拒绝安装（R3）",
-                    p.0,
-                    self.version
+                    p.0, self.version
                 ),
             ))
         }
@@ -359,30 +352,22 @@ impl EntrySpec {
                     Ok(())
                 }
             }
-            PluginType::Js => {
-                match &self.js {
-                    Some(j) if !j.trim().is_empty() => Ok(()),
-                    _ => Err(bad_manifest(format!(
-                        "插件 `{id}` 为 js 类型，必须声明非空 `entry.js`"
-                    ))),
-                }
-            }
-            PluginType::Process => {
-                match &self.sidecar {
-                    Some(s) if !s.trim().is_empty() => Ok(()),
-                    _ => Err(bad_manifest(format!(
-                        "插件 `{id}` 为 process 类型，必须声明非空 `entry.sidecar`"
-                    ))),
-                }
-            }
-            PluginType::Wasm => {
-                match &self.wasm {
-                    Some(w) if !w.trim().is_empty() => Ok(()),
-                    _ => Err(bad_manifest(format!(
-                        "插件 `{id}` 为 wasm 类型，必须声明非空 `entry.wasm`"
-                    ))),
-                }
-            }
+            PluginType::Js => match &self.js {
+                Some(j) if !j.trim().is_empty() => Ok(()),
+                _ => Err(bad_manifest(format!("插件 `{id}` 为 js 类型，必须声明非空 `entry.js`"))),
+            },
+            PluginType::Process => match &self.sidecar {
+                Some(s) if !s.trim().is_empty() => Ok(()),
+                _ => Err(bad_manifest(format!(
+                    "插件 `{id}` 为 process 类型，必须声明非空 `entry.sidecar`"
+                ))),
+            },
+            PluginType::Wasm => match &self.wasm {
+                Some(w) if !w.trim().is_empty() => Ok(()),
+                _ => Err(bad_manifest(format!(
+                    "插件 `{id}` 为 wasm 类型，必须声明非空 `entry.wasm`"
+                ))),
+            },
         }
     }
 }
@@ -603,7 +588,8 @@ impl Contributes {
         }
 
         // ── 快捷键校验 ─────────────────────────────────────────────
-        let mut seen_accelerators: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen_accelerators: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for (i, sc) in self.shortcuts.iter().enumerate() {
             let label = format!("shortcuts[{i}]");
             if sc.accelerator.trim().is_empty() {
@@ -659,9 +645,7 @@ impl EventsDecl {
         for (i, e) in self.publish.iter().enumerate() {
             let t = e.topic.trim();
             if t.is_empty() {
-                return Err(bad_manifest(format!(
-                    "插件 `{id}` events.publish[{i}] topic 为空"
-                )));
+                return Err(bad_manifest(format!("插件 `{id}` events.publish[{i}] topic 为空")));
             }
             if t.chars().any(|c| c.is_whitespace() || c == ':') {
                 return Err(bad_manifest(format!(
@@ -671,9 +655,7 @@ impl EventsDecl {
         }
         for (i, s) in self.subscribe.iter().enumerate() {
             if s.trim().is_empty() {
-                return Err(bad_manifest(format!(
-                    "插件 `{id}` events.subscribe[{i}] 为空"
-                )));
+                return Err(bad_manifest(format!("插件 `{id}` events.subscribe[{i}] 为空")));
             }
         }
         Ok(())
@@ -753,28 +735,22 @@ impl PluginManifest {
             };
             errs.push(format!(
                 "插件 `{}` 为 {} 类型，缺少 {field}（A/D 类必填，D13）",
-                self.id,
-                self.plugin_type
+                self.id, self.plugin_type
             ));
         }
 
         if self.framework == VersionReq::STAR {
-            errs.push(format!(
-                "插件 `{}` 的 framework range 为 `*`（过宽，视为不兼容）",
-                self.id
-            ));
+            errs.push(format!("插件 `{}` 的 framework range 为 `*`（过宽，视为不兼容）", self.id));
         }
 
         for p in &self.permissions {
             if let Err(e) = index.check_permitted(p) {
                 errs.push(e.message);
             }
-            if index.entry_of(p.as_str()).is_some_and(|e| e.scoped) {
-                if !self.scopes.contains_key(p.as_str()) {
-                    errs.push(format!(
-                        "权限 `{p}` 需要 scope，但 manifest 未声明对应 scopes 项"
-                    ));
-                }
+            if index.entry_of(p.as_str()).is_some_and(|e| e.scoped)
+                && !self.scopes.contains_key(p.as_str())
+            {
+                errs.push(format!("权限 `{p}` 需要 scope，但 manifest 未声明对应 scopes 项"));
             }
         }
 
@@ -783,9 +759,7 @@ impl PluginManifest {
             let mut seen = std::collections::HashSet::new();
             for (i, p) in self.permissions.iter().enumerate() {
                 if !seen.insert(p.as_str().to_string()) {
-                    errs.push(format!(
-                        "权限 `{p}` 在 permissions[{i}] 处重复声明"
-                    ));
+                    errs.push(format!("权限 `{p}` 在 permissions[{i}] 处重复声明"));
                 }
             }
         }
@@ -801,9 +775,7 @@ impl PluginManifest {
 
         for p in &self.platforms {
             if !SUPPORTED_PLATFORMS.contains(&p.as_str()) {
-                errs.push(format!(
-                    "平台 `{p}` 不在支持矩阵 {SUPPORTED_PLATFORMS:?} 中"
-                ));
+                errs.push(format!("平台 `{p}` 不在支持矩阵 {SUPPORTED_PLATFORMS:?} 中"));
             }
         }
 
@@ -826,9 +798,7 @@ impl PluginManifest {
             let mut seen = std::collections::HashSet::new();
             for (i, h) in self.host_functions.iter().enumerate() {
                 if !seen.insert(h.trim().to_string()) {
-                    errs.push(format!(
-                        "host_functions[{i}] `{h}` 重复声明"
-                    ));
+                    errs.push(format!("host_functions[{i}] `{h}` 重复声明"));
                 }
             }
         }
@@ -882,11 +852,7 @@ pub struct PluginIdentity {
 impl PluginIdentity {
     /// 构造身份（宿主内部路径）。
     pub fn new(id: PluginId, token: u64) -> Self {
-        Self {
-            id: id.clone(),
-            webview_label: format!("plugin-{id}"),
-            token,
-        }
+        Self { id: id.clone(), webview_label: format!("plugin-{id}"), token }
     }
 }
 
@@ -962,10 +928,7 @@ mod tests {
             name: "Formatter".into(),
             version: semver::Version::new(1, 0, 0),
             plugin_type: PluginType::Js,
-            entry: EntrySpec {
-                js: Some("dist/index.js".into()),
-                ..Default::default()
-            },
+            entry: EntrySpec { js: Some("dist/index.js".into()), ..Default::default() },
             permissions: vec![Permission::new("store:allow-get")],
             scopes: serde_json::Map::new(),
             platforms: vec![],
@@ -983,12 +946,7 @@ mod tests {
 
     #[test]
     fn plugin_id_accepts_reverse_domain() {
-        for s in [
-            "com.example.formatter",
-            "io.github.a.b.c",
-            "org-foo.bar.baz",
-            "a.b",
-        ] {
+        for s in ["com.example.formatter", "io.github.a.b.c", "org-foo.bar.baz", "a.b"] {
             assert!(PluginId::new(s).is_ok(), "应接受 {s}");
         }
     }
@@ -1029,10 +987,7 @@ mod tests {
     #[test]
     fn risk_roundtrips_lowercase() {
         assert_eq!(serde_json::to_string(&Risk::High).unwrap(), "\"high\"");
-        assert_eq!(
-            serde_json::from_str::<Risk>("\"elevated\"").unwrap(),
-            Risk::Elevated
-        );
+        assert_eq!(serde_json::from_str::<Risk>("\"elevated\"").unwrap(), Risk::Elevated);
     }
 
     #[test]
@@ -1049,9 +1004,7 @@ mod tests {
         assert_eq!(i.risk_of("store:allow-set"), Some(Risk::Elevated));
         assert_eq!(i.risk_of("nope:allow-x"), None);
         assert!(i.check_permitted(&Permission::new("store:allow-get")).is_ok());
-        let e = i
-            .check_permitted(&Permission::new("store:allow-delete"))
-            .unwrap_err();
+        let e = i.check_permitted(&Permission::new("store:allow-delete")).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_INVALID_MANIFEST);
         assert!(e.message.contains("词表"));
     }
@@ -1060,11 +1013,7 @@ mod tests {
     fn valid_js_manifest_passes() {
         let i = idx();
         let m = js_manifest();
-        assert!(
-            m.validate(&i).is_ok(),
-            "{}",
-            m.validate(&i).unwrap_err().message
-        );
+        assert!(m.validate(&i).is_ok(), "{}", m.validate(&i).unwrap_err().message);
     }
 
     #[test]
@@ -1092,7 +1041,8 @@ mod tests {
     fn table_outside_permission_is_install_failure() {
         let i = idx();
         let mut m = js_manifest();
-        m.permissions = vec![Permission::new("store:allow-get"), Permission::new("fs:allow-delete")];
+        m.permissions =
+            vec![Permission::new("store:allow-get"), Permission::new("fs:allow-delete")];
         let e = m.validate(&i).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_INVALID_MANIFEST);
         assert!(e.message.contains("fs:allow-delete"));
@@ -1111,27 +1061,18 @@ mod tests {
     fn wasm_plugin_requires_abi_wasm() {
         let mut m = js_manifest();
         m.plugin_type = PluginType::Wasm;
-        m.entry = EntrySpec {
-            wasm: Some("dist/p.a.wasm".into()),
-            ..Default::default()
-        };
+        m.entry = EntrySpec { wasm: Some("dist/p.a.wasm".into()), ..Default::default() };
         let e = m.validate(&idx()).unwrap_err();
         assert!(e.message.contains("abi.wasm"));
 
-        m.abi = Some(AbiFingerprint {
-            wasm: Some("sha256:deadbeef".into()),
-            ..Default::default()
-        });
+        m.abi = Some(AbiFingerprint { wasm: Some("sha256:deadbeef".into()), ..Default::default() });
         assert!(m.validate(&idx()).is_ok());
     }
 
     #[test]
     fn b_class_must_not_declare_abi() {
         let mut m = js_manifest();
-        m.abi = Some(AbiFingerprint {
-            wasm: Some("x".into()),
-            ..Default::default()
-        });
+        m.abi = Some(AbiFingerprint { wasm: Some("x".into()), ..Default::default() });
         let e = m.validate(&idx()).unwrap_err();
         assert!(e.message.contains("非 A/D 类"));
     }
@@ -1141,10 +1082,7 @@ mod tests {
         // scopes 声明了未在 permissions 中出现的键 → 拒绝。
         let mut m = js_manifest();
         let mut scopes = serde_json::Map::new();
-        scopes.insert(
-            "store:allow-set".to_string(),
-            serde_json::Value::Array(vec![]),
-        );
+        scopes.insert("store:allow-set".to_string(), serde_json::Value::Array(vec![]));
         m.scopes = scopes;
         m.permissions = vec![Permission::new("store:allow-get")];
         let e = m.validate(&idx()).unwrap_err();
@@ -1226,14 +1164,8 @@ mod tests {
         let mut m = js_manifest();
         m.events = EventsDecl {
             publish: vec![
-                EventDecl {
-                    topic: "ok".into(),
-                    public: true,
-                },
-                EventDecl {
-                    topic: "has space".into(),
-                    public: false,
-                },
+                EventDecl { topic: "ok".into(), public: true },
+                EventDecl { topic: "has space".into(), public: false },
             ],
             subscribe: vec![],
         };
@@ -1272,10 +1204,7 @@ mod tests {
         m.entry = EntrySpec::default();
         assert!(m.validate(&idx()).is_err());
         m.entry.sidecar = Some("formatter.exe".into());
-        m.abi = Some(AbiFingerprint {
-            rust: Some("tauron@2.3.1".into()),
-            ..Default::default()
-        });
+        m.abi = Some(AbiFingerprint { rust: Some("tauron@2.3.1".into()), ..Default::default() });
         let e = m.validate(&idx()).unwrap_err();
         assert!(e.message.contains("非 A/D 类"), "process 是 C 类，不应要求 abi");
         m.abi = None;
@@ -1294,11 +1223,7 @@ mod tests {
         let idx = PermissionIndex::load(SCHEMA_PATH)
             .expect("schema/permissions.index.json 必须存在且可解析");
         assert_eq!(idx.version, 1);
-        assert!(
-            idx.entries.len() >= 40,
-            "词表条目过少（{}），覆盖不足",
-            idx.entries.len()
-        );
+        assert!(idx.entries.len() >= 40, "词表条目过少（{}），覆盖不足", idx.entries.len());
 
         let mut seen = std::collections::HashSet::new();
         for e in &idx.entries {
@@ -1339,9 +1264,7 @@ mod tests {
     fn real_index_rejects_table_outside_permission() {
         // 表外字符串 → 安装期硬失败（计划 §4.2 关键约束）。
         let idx = PermissionIndex::load(SCHEMA_PATH).unwrap();
-        let e = idx
-            .check_permitted(&Permission::new("fs:allow-delete-everything"))
-            .unwrap_err();
+        let e = idx.check_permitted(&Permission::new("fs:allow-delete-everything")).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_INVALID_MANIFEST);
         assert!(e.message.contains("fs:allow-delete-everything"));
     }
@@ -1386,10 +1309,7 @@ mod tests {
                 id: "cmd.format".into(),
                 title: "Format Code".into(),
             }],
-            menus: vec![MenuContribute {
-                id: "menu.format".into(),
-                command: "cmd.format".into(),
-            }],
+            menus: vec![MenuContribute { id: "menu.format".into(), command: "cmd.format".into() }],
             panels: vec![PanelContribute {
                 id: "panel.output".into(),
                 title: "Output".into(),
@@ -1428,10 +1348,7 @@ mod tests {
         // 菜单 id 与命令 id 重复
         let c = Contributes {
             commands: vec![CommandContribute { id: "cmd.format".into(), title: "Format".into() }],
-            menus: vec![MenuContribute {
-                id: "cmd.format".into(),
-                command: "cmd.format".into(),
-            }],
+            menus: vec![MenuContribute { id: "cmd.format".into(), command: "cmd.format".into() }],
             ..Default::default()
         };
         let err = c.validate(&id).unwrap_err();
@@ -1443,10 +1360,7 @@ mod tests {
         let id = contributes_plugin_id();
         let c = Contributes {
             commands: vec![CommandContribute { id: "cmd.a".into(), title: "A".into() }],
-            menus: vec![MenuContribute {
-                id: "menu.a".into(),
-                command: "cmd.nonexistent".into(),
-            }],
+            menus: vec![MenuContribute { id: "menu.a".into(), command: "cmd.nonexistent".into() }],
             ..Default::default()
         };
         let err = c.validate(&id).unwrap_err();
@@ -1488,10 +1402,7 @@ mod tests {
         let id = contributes_plugin_id();
         let long_title = "x".repeat(65);
         let c = Contributes {
-            commands: vec![CommandContribute {
-                id: "cmd.a".into(),
-                title: long_title,
-            }],
+            commands: vec![CommandContribute { id: "cmd.a".into(), title: long_title }],
             ..Default::default()
         };
         let err = c.validate(&id).unwrap_err();
@@ -1503,10 +1414,7 @@ mod tests {
         let id = contributes_plugin_id();
         let max_title = "x".repeat(64);
         let c = Contributes {
-            commands: vec![CommandContribute {
-                id: "cmd.a".into(),
-                title: max_title,
-            }],
+            commands: vec![CommandContribute { id: "cmd.a".into(), title: max_title }],
             ..Default::default()
         };
         assert!(c.validate(&id).is_ok());
@@ -1597,10 +1505,7 @@ mod tests {
         let id = contributes_plugin_id();
         let c = Contributes {
             commands: vec![CommandContribute { id: "cmd.a".into(), title: "A".into() }],
-            shortcuts: vec![ShortcutContribute {
-                accelerator: "".into(),
-                command: "cmd.a".into(),
-            }],
+            shortcuts: vec![ShortcutContribute { accelerator: "".into(), command: "cmd.a".into() }],
             ..Default::default()
         };
         let err = c.validate(&id).unwrap_err();
@@ -1732,10 +1637,8 @@ mod tests {
     #[test]
     fn unique_permissions_are_accepted() {
         let mut m = js_manifest();
-        m.permissions = vec![
-            Permission::new("store:allow-get"),
-            Permission::new("store:allow-set"),
-        ];
+        m.permissions =
+            vec![Permission::new("store:allow-get"), Permission::new("store:allow-set")];
         let mut scopes = serde_json::Map::new();
         scopes.insert(
             "store:allow-set".to_string(),

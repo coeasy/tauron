@@ -54,10 +54,7 @@ pub enum PluginErrorCode {
 impl PluginErrorCode {
     /// 是否可重试
     pub fn retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Timeout | Self::ChannelBroken | Self::Internal
-        )
+        matches!(self, Self::Timeout | Self::ChannelBroken | Self::Internal)
     }
 }
 
@@ -87,10 +84,7 @@ impl std::fmt::Display for PluginErrorCode {
 #[derive(Debug, Error)]
 pub enum PluginError {
     #[error("{code}: {message}")]
-    Plugin {
-        code: PluginErrorCode,
-        message: String,
-    },
+    Plugin { code: PluginErrorCode, message: String },
 
     #[error("{0}")]
     Internal(String),
@@ -114,10 +108,7 @@ impl From<PluginErrorCode> for PluginError {
             PluginErrorCode::PluginExited => "Process plugin exited unexpectedly",
             PluginErrorCode::Internal => "Internal error",
         };
-        Self::Plugin {
-            code,
-            message: message.to_string(),
-        }
+        Self::Plugin { code, message: message.to_string() }
     }
 }
 
@@ -192,4 +183,3 @@ mod tests {
         assert_eq!(count, 14);
     }
 }
-

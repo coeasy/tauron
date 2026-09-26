@@ -32,11 +32,7 @@ mod tests {
     #[test]
     fn error_messages_are_specific() {
         assert!(NotifyError::ZeroCapacity.to_string().contains("0"));
-        assert!(NotifyError::DuplicateId("n1".into())
-            .to_string()
-            .contains("n1"));
-        assert!(NotifyError::InvalidGroup("bad".into())
-            .to_string()
-            .contains("bad"));
+        assert!(NotifyError::DuplicateId("n1".into()).to_string().contains("n1"));
+        assert!(NotifyError::InvalidGroup("bad".into()).to_string().contains("bad"));
     }
 }

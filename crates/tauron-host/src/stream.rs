@@ -109,14 +109,17 @@ impl StreamSink for NullSink {
     }
 }
 
-/// 单个宿主进程内可同时打开的流句柄上限。
+/// 单插件可同时打开的流句柄上限。
+pub const MAX_STREAMS_PER_PLUGIN: usize = 32;
+
+/// 单个宿主进程内可同时打开的流句柄总上限。
 ///
 /// 与 [`crate::eventbus::MAX_QUEUE`] / [`crate::eventbus::MAX_SUBSCRIPTIONS`] 同属
 /// "容量闸"族：没有它，一个不主动 `host_stream_close` 的插件可以无界地开流，
 /// 句柄表（`handles`）与每个句柄持有的 `Arc<dyn StreamSink>` 都会线性增长，
 /// 直到宿主 OOM。达到上限时 [`StreamRegistry::open`] 返回
 /// `ErrorCode::E_STREAM_FULL`（**不是**静默丢弃已有句柄）。
-pub const MAX_STREAMS: usize = 1024;
+pub const MAX_STREAMS: usize = 256;
 
 /// 一次调用的帧载体登记项。
 struct CallBinding {
@@ -150,13 +153,8 @@ impl StreamRegistry {
     /// 重复登记**覆盖**旧载体：一次调用只有一个接收方，后到的载体是更准确的
     /// （例如前端重连时换了一个 Channel）。
     pub fn bind(&mut self, call_id: &str, subscriber: &str, sink: Arc<dyn StreamSink>) {
-        self.call_bindings.insert(
-            call_id.to_string(),
-            CallBinding {
-                subscriber: subscriber.to_string(),
-                sink,
-            },
-        );
+        self.call_bindings
+            .insert(call_id.to_string(), CallBinding { subscriber: subscriber.to_string(), sink });
     }
 
     /// 该调用是否挂了帧载体。
@@ -181,13 +179,19 @@ impl StreamRegistry {
                 ),
             ));
         }
-        // 容量闸：未关闭的句柄会一直占着 sink，必须拒而不是无限收。
-        if self.handles.len() >= MAX_STREAMS {
+        // 容量闸按插件隔离，同时保留宿主级总上限。只计算活句柄；已关闭句柄
+        // 会在正常 close 路径移除，但仍以状态作为防御性约束。
+        let plugin_streams = self
+            .handles
+            .values()
+            .filter(|handle| handle.subscriber == subscriber && !handle.closed)
+            .count();
+        let total_streams = self.handles.values().filter(|handle| !handle.closed).count();
+        if plugin_streams >= MAX_STREAMS_PER_PLUGIN || total_streams >= MAX_STREAMS {
             return Err(HostError::new(
                 ErrorCode::E_STREAM_FULL,
                 format!(
-                    "流句柄已达上限 {MAX_STREAMS}（当前 {}）：请先 `host_stream_close` 再开流",
-                    self.handles.len()
+                    "流句柄容量已达上限（插件 {plugin_streams}/{MAX_STREAMS_PER_PLUGIN}，宿主 {total_streams}/{MAX_STREAMS}）：请先 `host_stream_close` 再开流"
                 ),
             ));
         }
@@ -266,12 +270,7 @@ impl StreamRegistry {
             handle.seq += 1;
             (handle.sink.clone(), handle.seq, kind.is_terminal())
         };
-        let frame = StreamFrame {
-            seq,
-            kind,
-            args_json,
-            args_raw,
-        };
+        let frame = StreamFrame { seq, kind, args_json, args_raw };
         sink.send(&frame)?;
 
         // 终帧即回收句柄。
@@ -315,11 +314,7 @@ impl StreamRegistry {
         kind: StreamKind,
         reason: Option<serde_json::Value>,
     ) -> usize {
-        let kind = if kind.is_terminal() {
-            kind
-        } else {
-            StreamKind::End
-        };
+        let kind = if kind.is_terminal() { kind } else { StreamKind::End };
         let ids: Vec<String> = self
             .handles
             .iter()
@@ -328,15 +323,9 @@ impl StreamRegistry {
             .collect();
         let mut closed = 0;
         for id in ids {
-            let subscriber = self
-                .handles
-                .get(&id)
-                .map(|h| h.subscriber.clone())
-                .unwrap_or_default();
-            if self
-                .push(&id, &subscriber, kind, reason.clone(), None)
-                .is_ok()
-            {
+            let subscriber =
+                self.handles.get(&id).map(|h| h.subscriber.clone()).unwrap_or_default();
+            if self.push(&id, &subscriber, kind, reason.clone(), None).is_ok() {
                 closed += 1;
             }
         }
@@ -376,6 +365,19 @@ impl StreamRegistry {
     /// 已开过的流总数（诊断）。
     pub fn opened_total(&self) -> u64 {
         self.opened
+    }
+
+    /// 活跃流数（插件维度）；配额监控使用，与累计开流数分开计量。
+    pub fn active_for(&self, subscriber: &str) -> usize {
+        self.handles
+            .values()
+            .filter(|handle| handle.subscriber == subscriber && !handle.closed)
+            .count()
+    }
+
+    /// 宿主当前活跃流数。
+    pub fn active_total(&self) -> usize {
+        self.handles.values().filter(|handle| !handle.closed).count()
     }
 }
 
@@ -432,9 +434,7 @@ mod tests {
         let (mut reg, id) = registry_with_sink(sink.clone());
 
         for i in 1..=3 {
-            let f = reg
-                .write(&id, "p1", Some(serde_json::json!({ "i": i })), None)
-                .expect("写帧");
+            let f = reg.write(&id, "p1", Some(serde_json::json!({ "i": i })), None).expect("写帧");
             assert_eq!(f.seq, i as u64, "seq 从 1 起连续");
             assert_eq!(f.kind, StreamKind::Data);
         }
@@ -453,10 +453,7 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let (mut reg, id) = registry_with_sink(sink);
         assert_eq!(reg.write(&id, "p1", None, None).unwrap().seq, 1);
-        assert_eq!(
-            reg.write(&id, "p1", None, Some(vec![1, 2, 3])).unwrap().seq,
-            2
-        );
+        assert_eq!(reg.write(&id, "p1", None, Some(vec![1, 2, 3])).unwrap().seq, 2);
         let err = reg.close(&id, "p1", StreamKind::Error).unwrap();
         assert_eq!(err.seq, 3, "跨 kind 连续：data→data→error = 1,2,3");
         assert_eq!(err.kind, StreamKind::Error);
@@ -511,8 +508,7 @@ mod tests {
     fn call_end_sweeps_streams_with_terminal_frame() {
         let sink = Arc::new(RecordingSink::default());
         let (mut reg, id) = registry_with_sink(sink.clone());
-        reg.write(&id, "p1", Some(serde_json::json!(1)), None)
-            .unwrap();
+        reg.write(&id, "p1", Some(serde_json::json!(1)), None).unwrap();
         // handler 忘了关流：调用结束时必须补终帧，否则接收方永远等下去。
         assert_eq!(reg.close_for_call("c-1", StreamKind::End, None), 1);
         let frames = sink.frames();
@@ -594,21 +590,21 @@ mod tests {
         }
     }
 
-    /// 容量闸：开流数达 `MAX_STREAMS` 后**拒绝**而不是无限收。
+    /// 插件配额闸：开流数达每插件上限后拒绝，其他插件仍可使用自己的配额。
     ///
     /// 此前 `open()` 无上限——一个不主动 `host_stream_close` 的插件可以无界开流，
     /// 句柄表与每个句柄持有的 `Arc<dyn StreamSink>` 线性增长到宿主 OOM。
     #[test]
-    fn open_is_bounded_by_max_streams() {
+    fn stream_quota_is_per_plugin_and_isolated() {
         let sink = Arc::new(RecordingSink::default());
         let mut reg = StreamRegistry::new();
         // 同一个调用可以开多条流（语义允许），正好用来顶到上限。
         reg.bind("c-1", "p1", sink);
 
-        for _ in 0..MAX_STREAMS {
-            reg.open("c-1", "p1").expect("未达上限时应能开流");
+        for _ in 0..MAX_STREAMS_PER_PLUGIN {
+            reg.open("c-1", "p1").expect("插件未达上限时应能开流");
         }
-        assert_eq!(reg.handles.len(), MAX_STREAMS);
+        assert_eq!(reg.active_for("p1"), MAX_STREAMS_PER_PLUGIN);
 
         let err = reg.open("c-1", "p1").unwrap_err();
         assert_eq!(err.code, ErrorCode::E_STREAM_FULL);
@@ -618,12 +614,37 @@ mod tests {
             err.message
         );
         // 拒绝路径不得留下半成品句柄。
-        assert_eq!(reg.handles.len(), MAX_STREAMS);
+        assert_eq!(reg.active_for("p1"), MAX_STREAMS_PER_PLUGIN);
+
+        reg.bind("c-2", "p2", Arc::new(RecordingSink::default()));
+        assert!(reg.open("c-2", "p2").is_ok(), "p1 达到配额不得影响 p2");
+        assert_eq!(reg.active_total(), MAX_STREAMS_PER_PLUGIN + 1);
 
         // 关掉一条后应能再开——闸是"容量"，不是"一次性熔断"。
         let victim = reg.handles.keys().next().unwrap().clone();
         reg.close(&victim, "p1", StreamKind::End).expect("关流");
         assert!(reg.open("c-1", "p1").is_ok(), "腾出容量后应可再开");
+        assert_eq!(reg.active_for("p1"), MAX_STREAMS_PER_PLUGIN);
+    }
+
+    #[test]
+    fn host_stream_quota_is_bounded_after_per_plugin_quotas() {
+        let mut reg = StreamRegistry::new();
+        for plugin in 0..MAX_STREAMS / MAX_STREAMS_PER_PLUGIN {
+            let id = format!("p{plugin}");
+            let call = format!("c{plugin}");
+            reg.bind(&call, &id, Arc::new(RecordingSink::default()));
+            for _ in 0..MAX_STREAMS_PER_PLUGIN {
+                reg.open(&call, &id).expect("插件配额内且宿主未满");
+            }
+        }
+        assert_eq!(reg.active_total(), MAX_STREAMS);
+        assert_eq!(reg.active_for("p0"), MAX_STREAMS_PER_PLUGIN);
+
+        reg.bind("last-call", "last-plugin", Arc::new(RecordingSink::default()));
+        let error = reg.open("last-call", "last-plugin").unwrap_err();
+        assert_eq!(error.code, ErrorCode::E_STREAM_FULL);
+        assert_eq!(reg.active_total(), MAX_STREAMS, "拒绝不能残留半个句柄");
     }
 
     /// `opened_total()` 是**累计**计数，不随 close 回退（诊断口径）。

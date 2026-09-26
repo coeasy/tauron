@@ -32,6 +32,25 @@
         <button id="btn-toast">推送 oc-toast 通知</button>
         <oc-toast id="toast"></oc-toast>
       </section>
+
+      <section>
+        <h2>4. 已签名插件管理</h2>
+        <p>安装需宿主配置可信签名密钥；权限会在安装前逐项确认。</p>
+        <oc-plugin-manager></oc-plugin-manager>
+      </section>
+
+      <section>
+        <h2>5. 跨主体调用（0.4-A1 投递 + 0.4-A2 主推 SDK）</h2>
+        <p>插件面板窗口（<code>plugin-com.example.formatter</code>）内运行
+        <code>@tauron/app-plugin-sdk</code> 插件：注册命令即开执行泵。调用经
+        宿主事件总线投递，结果由插件自动回填、发起方取走——全程无需宿主侧
+        写任何桥接代码。</p>
+        <p><strong>先装并启用插件，再按顺序点：</strong></p>
+        <button id="btn-open-plugin-window">① 打开插件面板窗口</button>
+        <input id="cross-input" value="  let  x = 1;  " style="width:12rem" />
+        <button id="btn-cross-call">② 跨主体调用 format</button>
+        <pre id="cross-out"></pre>
+      </section>
     </main>
     <script type="module" src="/src/main.ts"></script>
   </body>

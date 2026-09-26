@@ -79,6 +79,22 @@ export interface PendingCallInfo {
   /** 进程启动参考时间的毫秒时间戳。 */
   createdAt: number;
   expiresAt: number;
+  /**
+   * 发起主体（0.4-A1 跨主体调用）：`"main"`（主窗）或插件 id。
+   * self 档调用时等于 `pluginId`；跨主体调用时配额仍记在发起方名下。
+   */
+  caller?: string;
+  /** 执行主体（0.4-A1 跨主体调用）：插件 id。self 档调用时等于 `pluginId`。 */
+  target?: string;
+  /**
+   * 结算状态（0.4-A1）：`pending` = 已登记等待执行方回填；`settled` = 结果已在此。
+   * 只有两态——宿主不区分「执行中」（那是执行方的私事），TTL 兜底回收。
+   */
+  state?: 'pending' | 'settled';
+  /** 执行方回填的结果载荷（仅 `settled` 且成功时存在）。 */
+  result?: JsonValue;
+  /** 执行方回填的失败码（仅 `settled` 且失败时存在）。 */
+  errorCode?: string;
 }
 
 /** 插件 descriptor（`host_registry_list` 的返回项）。 */

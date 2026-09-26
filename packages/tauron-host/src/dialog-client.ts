@@ -3,10 +3,7 @@
 //
 // ⚠️ 接入状态（读这一节再调用）：宿主**尚未**接入原生对话框与系统剪贴板，
 //    因此当前语义如下——它们是**契约**，不是待修 bug：
-//    - `openFile` / `openDirectory` / `saveFile` 恒返回 `null`（等同"用户取消"）；
-//    - `message` / `error` / `warn` 不弹窗，直接返回（`Ok`）；
-//    - `confirm` 恒返回 `false`——**它绝不表示用户点了取消，也永不为 true**：
-//      不得作为真实用户确认（destructive 操作前请自行设计确认 UI）；
+//    - 原生 dialog provider 未接入时，上述方法返回 `UnsupportedBody`，不伪装成用户取消或成功；
 //    - 剪贴板是**进程内字符串**，不读写系统剪贴板：`clipboardRead()` 只能读回
 //      本 App 自己 `clipboardWrite()` 写过的内容。
 //
@@ -30,6 +27,33 @@
 // ──────────────────────────────────────────────────────────────────────────
 
 import type { Backend } from './backend.js';
+
+/** 平台能力缺失时宿主返回的结构化结果。 */
+export interface UnsupportedBody {
+  supported: false;
+  reason: string;
+  fallback: string | null;
+}
+
+export interface DegradedValue<T> {
+  supported: false;
+  reason: string;
+  fallback: string;
+  value: T;
+}
+
+export type ProviderResult<T> = T | UnsupportedBody;
+
+export function isUnsupportedBody(value: unknown): value is UnsupportedBody {
+  return typeof value === 'object' && value !== null && 'supported' in value && value.supported === false &&
+    'reason' in value && typeof value.reason === 'string';
+}
+
+export function isDegradedValue<T = unknown>(value: unknown): value is DegradedValue<T> {
+  return typeof value === 'object' && value !== null && 'supported' in value && value.supported === false &&
+    'reason' in value && typeof value.reason === 'string' && 'fallback' in value &&
+    typeof value.fallback === 'string' && 'value' in value;
+}
 
 /** 文件过滤器 */
 export interface FileFilter {
@@ -98,12 +122,10 @@ export class DialogClient {
   /**
    * 打开文件对话框。
    *
-   * 返回选中文件路径，取消返回 null。
-   *
-   * ⚠️ 原生对话框尚未接入：**恒返回 `null`**（见文件头接入状态）。
+   * 返回选中文件路径，真实取消返回 null；缺少 provider 时返回 UnsupportedBody。
    */
-  async openFile(options: OpenFileOptions = {}): Promise<string | null> {
-    return this._backend.invoke<string | null>('host_dialog_open', {
+  async openFile(options: OpenFileOptions = {}): Promise<ProviderResult<string | null>> {
+    return this._backend.invoke<ProviderResult<string | null>>('host_dialog_open', {
       multiple: options.multiple ?? false,
       directory: options.directory ?? false,
       filters: options.filters,
@@ -114,12 +136,10 @@ export class DialogClient {
   /**
    * 打开目录对话框。
    *
-   * 返回选中目录路径，取消返回 null。
-   *
-   * ⚠️ 原生对话框尚未接入：**恒返回 `null`**（见文件头接入状态）。
+   * 返回选中目录路径，真实取消返回 null；缺少 provider 时返回 UnsupportedBody。
    */
-  async openDirectory(options: { defaultPath?: string } = {}): Promise<string | null> {
-    return this._backend.invoke<string | null>('host_dialog_open', {
+  async openDirectory(options: { defaultPath?: string } = {}): Promise<ProviderResult<string | null>> {
+    return this._backend.invoke<ProviderResult<string | null>>('host_dialog_open', {
       directory: true,
       defaultPath: options.defaultPath,
     });
@@ -128,12 +148,10 @@ export class DialogClient {
   /**
    * 保存文件对话框。
    *
-   * 返回选中文件路径，取消返回 null。
-   *
-   * ⚠️ 原生对话框尚未接入：**恒返回 `null`**（见文件头接入状态）。
+   * 返回选中文件路径，真实取消返回 null；缺少 provider 时返回 UnsupportedBody。
    */
-  async saveFile(options: SaveFileOptions = {}): Promise<string | null> {
-    return this._backend.invoke<string | null>('host_dialog_save', {
+  async saveFile(options: SaveFileOptions = {}): Promise<ProviderResult<string | null>> {
+    return this._backend.invoke<ProviderResult<string | null>>('host_dialog_save', {
       filters: options.filters,
       defaultName: options.defaultName,
       defaultPath: options.defaultPath,
@@ -143,10 +161,10 @@ export class DialogClient {
   /**
    * 消息对话框（仅 OK 按钮）。
    *
-   * ⚠️ 原生对话框尚未接入：**不弹窗**，直接返回（见文件头接入状态）。
+   * 缺少原生 provider 时返回 UnsupportedBody。
    */
-  async message(options: MessageOptions): Promise<void> {
-    await this._backend.invoke('host_dialog_message', {
+  async message(options: MessageOptions): Promise<ProviderResult<void>> {
+    return this._backend.invoke<ProviderResult<void>>('host_dialog_message', {
       title: options.title,
       message: options.message,
     });
@@ -155,10 +173,10 @@ export class DialogClient {
   /**
    * 错误对话框。
    *
-   * ⚠️ 原生对话框尚未接入：**不弹窗**，直接返回（见文件头接入状态）。
+   * 缺少原生 provider 时返回 UnsupportedBody。
    */
-  async error(options: MessageOptions): Promise<void> {
-    await this._backend.invoke('host_dialog_message', {
+  async error(options: MessageOptions): Promise<ProviderResult<void>> {
+    return this._backend.invoke<ProviderResult<void>>('host_dialog_message', {
       title: options.title,
       message: options.message,
       kind: 'error',
@@ -168,10 +186,10 @@ export class DialogClient {
   /**
    * 警告对话框。
    *
-   * ⚠️ 原生对话框尚未接入：**不弹窗**，直接返回（见文件头接入状态）。
+   * 缺少原生 provider 时返回 UnsupportedBody。
    */
-  async warn(options: MessageOptions): Promise<void> {
-    await this._backend.invoke('host_dialog_message', {
+  async warn(options: MessageOptions): Promise<ProviderResult<void>> {
+    return this._backend.invoke<ProviderResult<void>>('host_dialog_message', {
       title: options.title,
       message: options.message,
       kind: 'warning',
@@ -181,13 +199,10 @@ export class DialogClient {
   /**
    * 确认对话框。
    *
-   * 返回 true 表示确认，false 表示取消。
-   *
-   * ⚠️ 原生对话框尚未接入：**恒返回 `false`**。它**不代表用户取消**，更不会
-   * 为 `true`——不得用它做真实用户确认（destructive 操作请自备确认 UI）。
+   * true/false 表示真实 provider 收到的选择；缺少 provider 时返回 UnsupportedBody。
    */
-  async confirm(options: ConfirmOptions): Promise<boolean> {
-    return this._backend.invoke<boolean>('host_dialog_confirm', {
+  async confirm(options: ConfirmOptions): Promise<ProviderResult<boolean>> {
+    return this._backend.invoke<ProviderResult<boolean>>('host_dialog_confirm', {
       title: options.title,
       message: options.message,
       confirmLabel: options.confirmLabel ?? 'OK',
@@ -201,8 +216,13 @@ export class DialogClient {
    * ⚠️ **不是系统剪贴板**：只读回本 App 自己 `clipboardWrite()` 写过的进程内
    * 字符串（未写过则为 `''`）；用户在其它 App 里复制的内容读不到。
    */
+  async clipboardReadDetailed(): Promise<DegradedValue<string>> {
+    return this._backend.invoke<DegradedValue<string>>('host_clipboard_read');
+  }
+
+  /** 兼容便捷读取；需要区分系统剪贴板与进程内回退时请使用 clipboardReadDetailed。 */
   async clipboardRead(): Promise<string> {
-    return this._backend.invoke<string>('host_clipboard_read');
+    return (await this.clipboardReadDetailed()).value;
   }
 
   /**
@@ -210,8 +230,8 @@ export class DialogClient {
    *
    * ⚠️ **不写入系统剪贴板**：只写进程内字符串，其它 App 粘贴不到。
    */
-  async clipboardWrite(text: string): Promise<void> {
-    await this._backend.invoke('host_clipboard_write', { text });
+  async clipboardWrite(text: string): Promise<UnsupportedBody> {
+    return this._backend.invoke<UnsupportedBody>('host_clipboard_write', { text });
   }
 
   /**

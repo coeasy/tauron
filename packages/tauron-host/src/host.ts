@@ -231,6 +231,60 @@ export class HostClient {
     return this.call<T>(cmd, args);
   }
 
+  // ── 跨主体调用（0.4-A1）───────────────────────────────────────
+
+  /**
+   * 发起一次**跨主体**调用（宿主 → 插件 / 插件 → 插件，0.4-A1）。
+   *
+   * 与 {@link pluginCall}（调自己的 C/D 后端）不同，本方法的执行方是**另一个
+   * 插件**：宿主按目标插件的形态选投递通路（js → 事件总线 request 通道、
+   * process → sidecar stdin 帧回路），无通路时以结构化 `Unsupported` 失败。
+   * 发起主体由宿主从 webview label 解析（防冒充），主窗即 `"main"`。
+   *
+   * 返回宿主铸造的权威簿记：`takeCallResult` 用其中的 `callId` 取件。
+   */
+  async callPlugin(target: string, method: string, argsJson?: JsonValue): Promise<PendingCallInfo> {
+    return this.call<PendingCallInfo>('host_call_plugin', {
+      req: {
+        target,
+        method,
+        ...(argsJson !== undefined ? { argsJson } : {}),
+      },
+    });
+  }
+
+  /**
+   * 执行方回填一次跨主体调用的结果（0.4-A1 的结算入口，self 档）。
+   *
+   * 只有该调用的 `target` 插件能回填（宿主校验身份 == target）；对已结算的
+   * 调用重复回填返回 `E_CALL_ALREADY_SETTLED`（幂等拒绝，不覆盖）。
+   */
+  async reportCallResult(req: {
+    callId: string;
+    ok: boolean;
+    result?: JsonValue;
+    errorCode?: string;
+  }): Promise<PendingCallInfo> {
+    return this.call<PendingCallInfo>('host_call_result', {
+      req: {
+        callId: req.callId,
+        ok: req.ok,
+        ...(req.result !== undefined ? { result: req.result } : {}),
+        ...(req.errorCode !== undefined ? { errorCode: req.errorCode } : {}),
+      },
+    });
+  }
+
+  /**
+   * 发起方取走一次已结算的结果（0.4-A1 的回执取件，self 档）。
+   *
+   * 只有发起方（`call.caller`）能取。`settled` 取走即删（一次性语义）；
+   * `pending` 返回副本、条目保留（调用方据此知道「还没好」，可稍后再取）。
+   */
+  async takeCallResult(callId: string): Promise<PendingCallInfo> {
+    return this.call<PendingCallInfo>('host_call_take', { req: { callId } });
+  }
+
   /** stream 模式的终帧确认。 */
   async callEnd(req: {
     callId: string;
@@ -377,6 +431,30 @@ export class AdminClient {
         // R2-c：管理面同属插件 webview → 宿主的边界，走同一条显式翻译。
         throw translate_at_boundary(err, 'plugin-webview→host').error;
       });
+  }
+
+  /** Install a verified local package after the host UI has shown and collected approval. */
+  async registryInstall(packagePath: string, approvedPermissions: string[]): Promise<{
+    pluginId: string; version: string; installPath: string; approvedPermissions: string[];
+  }> {
+    return this.backend.invoke<{
+      pluginId: string; version: string; installPath: string; approvedPermissions: string[];
+    }>('host_registry_install', { packagePath, approvedPermissions })
+      .catch((err: unknown) => {
+        throw translate_at_boundary(err, 'plugin-webview→host').error;
+      });
+  }
+
+  async registryInstallPreview(packagePath: string): Promise<{
+    pluginId: string; pluginName: string; version: string;
+    permissions: Array<{ permission: string; risk: string; description: string; defaultChecked: boolean }>;
+  }> {
+    return this.backend.invoke<{
+      pluginId: string; pluginName: string; version: string;
+      permissions: Array<{ permission: string; risk: string; description: string; defaultChecked: boolean }>;
+    }>('host_registry_install_preview', { packagePath }).catch((err: unknown) => {
+      throw translate_at_boundary(err, 'plugin-webview→host').error;
+    });
   }
 }
 

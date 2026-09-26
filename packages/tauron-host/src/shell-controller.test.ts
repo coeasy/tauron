@@ -4,6 +4,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ShellController } from './shell-controller.js';
 import { MockBackend } from './backend.js';
+import { AdminClient } from './host.js';
+import { ShellClient } from './shell-client.js';
 
 /** 控制器用到的命令面（与 `ShellClient` 的调用点一一对应）。 */
 const CONTROLLER_CAPS = [
@@ -16,6 +18,7 @@ const CONTROLLER_CAPS = [
   'host_market_download',
   'host_market_install',
   'host_registry_admin',
+  'host_window_create',
 ];
 
 describe('ShellController', () => {
@@ -224,5 +227,42 @@ describe('ShellController', () => {
     await new Promise(r => setTimeout(r, 10));
     const inv = backend.invocations.find(i => i.cmd === 'host_registry_admin');
     expect(inv?.args).toEqual({ op: { op: 'uninstall', id: 'com.a' } });
+  });
+
+  it('安装先展示签名包权限，再以完整批准集调用安装', async () => {
+    const preview = vi.spyOn(AdminClient.prototype, 'registryInstallPreview').mockResolvedValue({
+      pluginId: 'com.install', pluginName: 'Install Me', version: '1.0.0',
+      permissions: [{ permission: 'host:notify', risk: 'low', description: '发送通知', defaultChecked: true }],
+    });
+    const install = vi.spyOn(AdminClient.prototype, 'registryInstall').mockResolvedValue({
+      pluginId: 'com.install', version: '1.0.0', installPath: '/plugins/com.install', approvedPermissions: ['host:notify'],
+    });
+    const admin = vi.spyOn(AdminClient.prototype, 'registryAdmin').mockResolvedValue();
+    const launch = vi.spyOn(ShellClient.prototype, 'windowCreate').mockResolvedValue({ created: true, label: 'plugin-com.install', pluginId: 'com.install', reason: null });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    controller.start([container]);
+    container.dispatchEvent(new CustomEvent('oc-plugin-install', { detail: { packagePath: '/tmp/install.tpkg' } }));
+    await new Promise(r => setTimeout(r, 10));
+    expect(preview).toHaveBeenCalledWith('/tmp/install.tpkg');
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(install).toHaveBeenCalledWith('/tmp/install.tpkg', ['host:notify']);
+    expect(admin).toHaveBeenCalledWith({ op: 'enable', id: 'com.install' });
+    expect(launch).toHaveBeenCalledWith('com.install');
+    expect(alert).toHaveBeenCalledOnce();
+  });
+
+  it('拒绝任一声明权限时不调用安装', async () => {
+    vi.spyOn(AdminClient.prototype, 'registryInstallPreview').mockResolvedValue({
+      pluginId: 'com.install', pluginName: 'Install Me', version: '1.0.0',
+      permissions: [{ permission: 'host:notify', risk: 'low', description: '发送通知', defaultChecked: true }],
+    });
+    const install = vi.spyOn(AdminClient.prototype, 'registryInstall');
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    controller.start([container]);
+    container.dispatchEvent(new CustomEvent('oc-plugin-install', { detail: { packagePath: '/tmp/install.tpkg' } }));
+    await new Promise(r => setTimeout(r, 10));
+    expect(install).not.toHaveBeenCalled();
+    expect(backend.invocations.some(invocation => invocation.cmd === 'host_registry_install')).toBe(false);
   });
 });

@@ -10,9 +10,9 @@
 
 | 形态 | 用法 | 命令面 | 插件名 |
 | --- | --- | --- | --- |
-| root 注册（全量） | `state_init()` + `tauri::generate_context` 外的 `tauron_generate_handler![]`（= `tauron_plugin_handler![]`） | 54 条 | 无（裸命令） |
-| **底座-only root 注册** | 自己 `manage(SubstrateState)` + `tauron_substrate_handler![]` | 38 条（不含插件运行时 16 条） | 无（裸命令） |
-| 插件注册（需 capability/ACL） | `init()` / `init_with_adapter_config(cfg)` | 54 条 | `tauron` |
+| root 注册（全量） | `state_init()` + `tauri::generate_context` 外的 `tauron_generate_handler![]`（= `tauron_plugin_handler![]`） | 59 条（底座 39 + 插件运行时 20；`plugin-install` feature 另注册 2 条） | 无（裸命令） |
+| **底座-only root 注册** | 自己 `manage(SubstrateState)` + `tauron_substrate_handler![]` | 39 条（不含插件运行时 20 条） | 无（裸命令） |
+| 插件注册（需 capability/ACL） | `init()` / `init_with_adapter_config(cfg)` | 59 条（同上，install 2 条 feature-gated） | `tauron` |
 
 > ⚠️ **三种形态都不是"零配置"**（轮 12 改判，此前本表把 root 形态写成"零配置"是错的）：
 > Tauri v2 的规则是**不匹配任何 capability 的 webview 完全没有 IPC 访问**（原文见
@@ -145,8 +145,8 @@ export interface HostRpc {
   - `ContributeEntry` 线形 `{pluginId,kind,id,label}`（camelCase，双向）；
   - `host_recover_boot` 手拼 JSON 的键必须 camelCase
     （`phaseName`/`counter.consecutiveFailures`…，对齐 TS `RecoveryBootResult`）；
-  - 更新源/品牌桩必须返回可消费形状（`{available:false}` / `{}`），
-    返回 Null 会让前端对 null 取属性而崩溃。
+  - 更新源返回有类型的 `simulated` 标记；品牌 provider 缺失时返回
+    `UnsupportedBody`，不得用 `{}` 冒充已接线数据。
 - **生命周期上报的是事件不是状态**：`event` 取 `LIFECYCLE_EVENTS`
   （Rust `Event` 的 SCREAMING_SNAKE_CASE 线名，如 `ATTACH`）；状态由宿主单一写入
   （§4.3），上报状态线名（如 `RUNNING`）会被反序列化确定性拒绝。
@@ -162,16 +162,19 @@ export interface HostRpc {
   用户 `enable` 会一并清掉 `disabledBySafemode`（显式启用是权威放行）；若恢复
   引擎仍判定该插件应禁用，阶段对账会在下一拍重新 `SafemodeEnter`，安全模式
   权威不因此旁路。
-- **对话框 / 更新源 / 剪贴板当前的可观测语义**（原生后端未接入，属**契约**）：
-  - `host_dialog_open` / `host_dialog_save` **恒返回 `null`**（等同"用户取消"）；
-  - `host_dialog_message` 不弹窗、直接 `Ok`；
-  - `host_dialog_confirm` **恒返回 `false`**（fail-closed：绝不为真，故不得当作
-    真实用户确认）；
-  - `host_clipboard_read` / `host_clipboard_write` 是**进程内字符串**，
-    不碰系统剪贴板（`read` 只能读回本 App 写过的东西）；
+- **对话框 / 更新源 / 剪贴板当前的可观测语义**（原生 provider 未接入）：
+  - 四条 `host_dialog_*` 在无 provider 时返回统一 `UnsupportedBody`；真实 provider
+    返回值 `null` / `false` 才分别表示用户取消或拒绝；
+  - `host_clipboard_read` 返回带原因、`fallback: in-process-buffer` 和当前缓冲值的
+    `DegradedValue`；`write` 返回 `UnsupportedBody` 并说明进程内回退；
+  - `host_deep_link_register` 保留内部事件路由，但无 OS provider 时返回
+    `UnsupportedBody`，fallback 为 `internal-event-routing`；
+  - `host_brand_info` 返回 `UnsupportedBody`，品牌数据尚未接入；
+  - `host_market_*` 返回有类型的 `simulated` 标记；AutoUpdateClient 不把模拟结果
+    显示为可用更新，也不继续下载/安装；
   - `filters`/`defaultPath`/`confirmLabel`/`cancelLabel`/`endpoints`/`pubkey`
     属线格式一部分（Rust 侧已接受），在原生后端落地前无效果。
-  接入方式：宿主加 `tauri-plugin-dialog` / `tauri-plugin-clipboard-manager` 后在
+  接入方式：宿主为对应领域装配 provider 后在
   适配器命令里转调；窗口命令（`host_window_*`）已是真实原生调用，可作参照。
   TS 侧 JSDoc（`packages/tauron-host/src/dialog-client.ts` 文件头）与本节同源。
 - **`kind` 是闭集**：只接受 `unary` / `stream`，表外值返回 `E_AUTH_DENIED`
@@ -410,16 +413,17 @@ clipboard / brand 等）由 Tauri ACL 按窗口 label 管辖，不在表内。�
 `src/capabilities.json`），于是这 4 条在脚手架应用里根本无法启用。已补登记，并加门禁锁死
 「`HostClient` 触达的每条命令都必须在表内且档位合法」。
 
-3 条特权命令及**为什么必须特权**：
+4 条特权命令及**为什么必须特权**：
 
 | 命令 | 档位 | 理由 |
 |---|---|---|
 | `host_registry_admin` | privileged | 管理操作（disable/enable/uninstall/purge）改变别的插件的状态 |
 | `host_runtime_spawn` | privileged | **进程执行原语**：按入参 `pluginId` 启动可执行文件。插件 webview 若能调用，任何插件都能起别人的 sidecar |
 | `host_runtime_health` | privileged | 暴露 pid 与崩溃计数（同样的信息面） |
+| `host_resource_stats` | privileged | 返回所有插件的资源占用快照；插件侧不能读取邻居活动量 |
 
 档位的**强制点**分两种注册形态（§1）：`plugin:tauron|<cmd>` 形态由 Tauri v2
-capability/ACL 强制（生产客户端应采用——把 3 条特权命令只授予主窗、
+capability/ACL 强制（生产客户端应采用——把 4 条特权命令只授予主窗、
 不给插件 webview）；裸命令形态下 origin ACL 是唯一咽喉点。
 **轮 11 起**代码层再叠一层判定，把"特权 = 仅主窗"从"只靠部署配置"变成**代码里的真判定**。
 三类判定、两个函数（都在 `crates/tauron-adapter/src/lib.rs`，拒绝码一律是既有的
@@ -453,7 +457,7 @@ capability/ACL 强制（生产客户端应采用——把 3 条特权命令只�
 
 **安全边界（如实说明）**：这三个判定只回答"**你能不能以这个主体身份做这件事**"，
 **不判**目标是否存在/是否已安装（那是 `E_UNKNOWN_PLUGIN` 的语义），也**不替代** ACL——
-部署期仍需把 3 条特权命令只授予主窗。另外 `crates/tauron-adapter` 目前**没有
+部署期仍需把 4 条特权命令只授予主窗。另外 `crates/tauron-adapter` 目前**没有
 `permissions/` 目录**，走 `plugin:tauron|…` 路由的宿主在启用能力检查时会因缺权限条目被拒
 （部署配置缺口，见 §1 的告警）。
 

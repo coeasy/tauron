@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // auto-update-client.ts 测试（P2-12：自动更新客户端）
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { AutoUpdateClient, createAutoUpdateClient } from './auto-update-client.js';
 import { MockBackend } from './backend.js';
 
@@ -34,15 +34,15 @@ describe('AutoUpdateClient', () => {
       cases: [
         {
           cmd: 'host_market_check',
-          result: { available: true, version: '2.0.0', currentVersion: '1.0.0' },
+          result: { available: true, simulated: false, version: '2.0.0', currentVersion: '1.0.0' },
         },
         {
           cmd: 'host_market_download',
-          result: undefined,
+          result: { ok: true, simulated: false, version: '2.0.0', reason: null },
         },
         {
           cmd: 'host_market_install',
-          result: undefined,
+          result: { ok: true, simulated: false, version: '2.0.0', reason: null },
         },
         {
           cmd: 'host_window_relaunch',
@@ -97,6 +97,39 @@ describe('AutoUpdateClient', () => {
       expect(client2.status).toBe('error');
     });
 
+    it('保留宿主模拟检查结果供界面判断', async () => {
+      const backend2 = new MockBackend({
+        capabilities: ['host_market_check'],
+        cases: [
+          {
+            cmd: 'host_market_check',
+            result: { available: false, simulated: true, version: null, currentVersion: '1.0.0', reason: '未接入更新源' },
+          },
+        ],
+      });
+      const client2 = new AutoUpdateClient({ backend: backend2 });
+      const info = await client2.checkUpdate();
+      expect(info.simulated).toBe(true);
+      expect(info.reason).toBe('未接入更新源');
+      expect(client2.status).toBe('idle');
+    });
+
+    it('available 与 simulated 同时为真时仍拒绝进入更新链', async () => {
+      const backend2 = new MockBackend({
+        capabilities: ['host_market_check', 'host_market_download'],
+        cases: [
+          { cmd: 'host_market_check', result: { available: true, simulated: true, reason: '模拟数据' } },
+          { cmd: 'host_market_download', result: { ok: true, simulated: true } },
+        ],
+      });
+      const client2 = new AutoUpdateClient({ backend: backend2, config: { autoDownload: true } });
+      const info = await client2.checkUpdate();
+      expect(info.available).toBe(false);
+      expect(client2.status).toBe('idle');
+      await expect(client2.downloadUpdate()).rejects.toThrow('模拟数据');
+      expect(backend2.invocations.map(({ cmd }) => cmd)).toEqual(['host_market_check']);
+    });
+
     it('autoDownload: true 时自动下载', async () => {
       const client2 = new AutoUpdateClient({
         backend,
@@ -115,7 +148,7 @@ describe('AutoUpdateClient', () => {
         cases: [
           {
             cmd: 'host_market_check',
-            result: { available: true, version: '2.0.0', currentVersion: '1.0.0' },
+            result: { available: true, simulated: false, version: '2.0.0', currentVersion: '1.0.0' },
           },
           { cmd: 'host_market_download', error: new Error('download failed') },
         ],
@@ -148,7 +181,7 @@ describe('AutoUpdateClient', () => {
         cases: [
           {
             cmd: 'host_market_check',
-            result: { available: true, version: '2.0.0', currentVersion: '1.0.0' },
+            result: { available: true, simulated: false, version: '2.0.0', currentVersion: '1.0.0' },
           },
           {
             cmd: 'host_market_download',
@@ -159,6 +192,20 @@ describe('AutoUpdateClient', () => {
       const client2 = new AutoUpdateClient({ backend: backend2 });
       await client2.checkUpdate();
       await expect(client2.downloadUpdate()).rejects.toThrow('download failed');
+      expect(client2.status).toBe('error');
+    });
+
+    it('宿主返回模拟结果时不得推进为已下载', async () => {
+      const backend2 = new MockBackend({
+        capabilities: ['host_market_check', 'host_market_download'],
+        cases: [
+          { cmd: 'host_market_check', result: { available: true, version: '2.0.0', currentVersion: '1.0.0' } },
+          { cmd: 'host_market_download', result: { ok: true, simulated: true, reason: '未接入下载器' } },
+        ],
+      });
+      const client2 = new AutoUpdateClient({ backend: backend2 });
+      await client2.checkUpdate();
+      await expect(client2.downloadUpdate()).rejects.toThrow('未接入下载器');
       expect(client2.status).toBe('error');
     });
   });
@@ -181,11 +228,11 @@ describe('AutoUpdateClient', () => {
         cases: [
           {
             cmd: 'host_market_check',
-            result: { available: true, version: '2.0.0', currentVersion: '1.0.0' },
+            result: { available: true, simulated: false, version: '2.0.0', currentVersion: '1.0.0' },
           },
           {
             cmd: 'host_market_download',
-            result: undefined,
+            result: { ok: true, simulated: false, version: '2.0.0', reason: null },
           },
           {
             cmd: 'host_market_install',
@@ -197,6 +244,22 @@ describe('AutoUpdateClient', () => {
       await client2.checkUpdate();
       await client2.downloadUpdate();
       await expect(client2.installUpdate()).rejects.toThrow('install failed');
+      expect(client2.status).toBe('error');
+    });
+
+    it('宿主返回模拟结果时不得推进为已安装', async () => {
+      const backend2 = new MockBackend({
+        capabilities: ['host_market_check', 'host_market_download', 'host_market_install'],
+        cases: [
+          { cmd: 'host_market_check', result: { available: true, version: '2.0.0', currentVersion: '1.0.0' } },
+          { cmd: 'host_market_download', result: { ok: true, simulated: false, reason: null } },
+          { cmd: 'host_market_install', result: { ok: true, simulated: true, reason: '未接入安装器' } },
+        ],
+      });
+      const client2 = new AutoUpdateClient({ backend: backend2 });
+      await client2.checkUpdate();
+      await client2.downloadUpdate();
+      await expect(client2.installUpdate()).rejects.toThrow('未接入安装器');
       expect(client2.status).toBe('error');
     });
   });

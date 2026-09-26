@@ -5,7 +5,9 @@
     <title>formatter plugin (sandboxed)</title>
   </head>
   <body>
-    <!-- 沙箱 iframe 插件页：仅由 registerPlugin 与宿主通信，无 UI -->
-    <script type="module" src="/src/plugin/first.ts"></script>
+    <!-- 沙箱 iframe 插件页（legacy）：仅由 registerPlugin 与宿主通信，无 UI。
+         0.4-A2 起主推路径是 plugin-window.html + first.ts（app-plugin-sdk），
+         本页仅作 legacy 对照，入口 legacy-first.ts 已标注 deprecated。 -->
+    <script type="module" src="/src/plugin/legacy-first.ts"></script>
   </body>
 </html>

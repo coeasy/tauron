@@ -376,7 +376,14 @@ macro_rules! rule {
     };
     // (from, event, to, actions)
     ($from:expr, $event:expr, $to:expr, $actions:expr) => {
-        Rule { from: $from, event: $event, guard: Guard::None, to: $to, actions: $actions, chain: None }
+        Rule {
+            from: $from,
+            event: $event,
+            guard: Guard::None,
+            to: $to,
+            actions: $actions,
+            chain: None,
+        }
     };
     // (from, event, guard, to, actions) —— 有守卫的规则必须带 actions（可为 &[]）
     ($from:expr, $event:expr, $guard:expr, $to:expr, $actions:expr) => {
@@ -391,12 +398,10 @@ macro_rules! rule {
 pub static TRANSITIONS: &[Rule] = &[
     // ── DISCOVERED ──────────────────────────────────────────────
     rule!(State::Discovered, Event::InstallStart, State::Installing),
-
     // ── INSTALLING ──────────────────────────────────────────────
     rule!(State::Installing, Event::InstallOk, State::Installed),
     // D3：安装期失败落终态，不自动重试。
     rule!(State::Installing, Event::InstallFail, State::InstallFailed),
-
     // ── INSTALLED ───────────────────────────────────────────────
     rule!(State::Installed, Event::Enable, State::Enabled, &[Action::ResetCounters]),
     // 未启用过的插件也允许直接禁用（UI 常见操作；无害的补边）。
@@ -404,59 +409,168 @@ pub static TRANSITIONS: &[Rule] = &[
     rule!(State::Installed, Event::Uninstall, State::Uninstalled),
     rule!(State::Installed, Event::Purge, State::Uninstalled),
     rule!(State::Installed, Event::SafemodeEnter, State::Disabled, &[Action::SetSafemodeDisabled]),
-
     // ── ENABLED ─────────────────────────────────────────────────
     // D25/D28：试验性启用中的插件出错 → 回落 disabled-by-safemode，
     // 单独计失败，不累入应用级启动计数。必须先于宽泛错误规则。
-    rule!(State::Enabled, Event::ErrorRetryable, Guard::TrialActive, State::Disabled, &[Action::IncrementTrialFailure, Action::SetSafemodeDisabled, Action::ClearTrial]),
-    rule!(State::Enabled, Event::ErrorFatal, Guard::TrialActive, State::Disabled, &[Action::IncrementTrialFailure, Action::SetSafemodeDisabled, Action::ClearTrial]),
+    rule!(
+        State::Enabled,
+        Event::ErrorRetryable,
+        Guard::TrialActive,
+        State::Disabled,
+        &[Action::IncrementTrialFailure, Action::SetSafemodeDisabled, Action::ClearTrial]
+    ),
+    rule!(
+        State::Enabled,
+        Event::ErrorFatal,
+        Guard::TrialActive,
+        State::Disabled,
+        &[Action::IncrementTrialFailure, Action::SetSafemodeDisabled, Action::ClearTrial]
+    ),
     // 熔断已打开 → **不再自动重试**，直接交人工确认。这是 `Guard::CircuitOpen`
     // 的归属规则：`IncrementFailure` 把 `failure_count` 累积到 `CIRCUIT_THRESHOLD`
     // 会置 `circuit_open`，若此处仍按预算放行自动重试，熔断器就成了只写不读的
     // 死标志（本仓曾如此——`circuit_open` 无任何生产读取点）。
     // 必须声明在 `RetryBudgetAvailable` 之前：表内顺序即匹配优先级。
-    rule!(State::Enabled, Event::ErrorRetryable, Guard::CircuitOpen, State::ErroredUserConfirm, &[Action::IncrementFailure]),
+    rule!(
+        State::Enabled,
+        Event::ErrorRetryable,
+        Guard::CircuitOpen,
+        State::ErroredUserConfirm,
+        &[Action::IncrementFailure]
+    ),
     // 自动重试预算内 → 可重试档；预算耗尽 → 直接升级为需用户确认。
-    rule!(State::Enabled, Event::ErrorRetryable, Guard::RetryBudgetAvailable, State::ErroredRetryable, &[Action::IncrementRetry]),
-    rule!(State::Enabled, Event::ErrorRetryable, Guard::RetryBudgetExhausted, State::ErroredUserConfirm, &[Action::IncrementFailure]),
-    rule!(State::Enabled, Event::ErrorFatal, State::ErroredUserConfirm, &[Action::IncrementFailure]),
+    rule!(
+        State::Enabled,
+        Event::ErrorRetryable,
+        Guard::RetryBudgetAvailable,
+        State::ErroredRetryable,
+        &[Action::IncrementRetry]
+    ),
+    rule!(
+        State::Enabled,
+        Event::ErrorRetryable,
+        Guard::RetryBudgetExhausted,
+        State::ErroredUserConfirm,
+        &[Action::IncrementFailure]
+    ),
+    rule!(
+        State::Enabled,
+        Event::ErrorFatal,
+        State::ErroredUserConfirm,
+        &[Action::IncrementFailure]
+    ),
     // P0-2：进程插件（sidecar）意外退出。语义与 `ErrorRetryable` 一致——崩溃重启
     // 是**有预算的自动重试**（`CrashLimit`），预算耗尽才升级为需用户确认；
     // 试验启用期间则按 D28 试验失败回落（必须先于无守卫的规则）。
-    rule!(State::Enabled, Event::RuntimeCrash, Guard::TrialActive, State::Disabled, &[Action::IncrementTrialFailure, Action::SetSafemodeDisabled, Action::ClearTrial]),
-    rule!(State::Enabled, Event::RuntimeCrash, Guard::RetryBudgetAvailable, State::ErroredRetryable, &[Action::IncrementRetry]),
-    rule!(State::Enabled, Event::RuntimeCrash, Guard::RetryBudgetExhausted, State::ErroredUserConfirm, &[Action::IncrementFailure]),
+    rule!(
+        State::Enabled,
+        Event::RuntimeCrash,
+        Guard::TrialActive,
+        State::Disabled,
+        &[Action::IncrementTrialFailure, Action::SetSafemodeDisabled, Action::ClearTrial]
+    ),
+    rule!(
+        State::Enabled,
+        Event::RuntimeCrash,
+        Guard::RetryBudgetAvailable,
+        State::ErroredRetryable,
+        &[Action::IncrementRetry]
+    ),
+    rule!(
+        State::Enabled,
+        Event::RuntimeCrash,
+        Guard::RetryBudgetExhausted,
+        State::ErroredUserConfirm,
+        &[Action::IncrementFailure]
+    ),
     rule!(State::Enabled, Event::Attach, State::Running),
     rule!(State::Enabled, Event::Disable, State::Disabled),
     rule!(State::Enabled, Event::SafemodeEnter, State::Disabled, &[Action::SetSafemodeDisabled]),
     rule!(State::Enabled, Event::HealthOk, State::Enabled, &[Action::DecayRetry]),
     rule!(State::Enabled, Event::Uninstall, State::Uninstalled),
     rule!(State::Enabled, Event::Purge, State::Uninstalled),
-
     // ── RUNNING ─────────────────────────────────────────────────
-    rule!(State::Running, Event::ErrorRetryable, Guard::TrialActive, State::Disabled, &[Action::IncrementTrialFailure, Action::SetSafemodeDisabled, Action::ClearTrial]),
-    rule!(State::Running, Event::ErrorFatal, Guard::TrialActive, State::Disabled, &[Action::IncrementTrialFailure, Action::SetSafemodeDisabled, Action::ClearTrial]),
+    rule!(
+        State::Running,
+        Event::ErrorRetryable,
+        Guard::TrialActive,
+        State::Disabled,
+        &[Action::IncrementTrialFailure, Action::SetSafemodeDisabled, Action::ClearTrial]
+    ),
+    rule!(
+        State::Running,
+        Event::ErrorFatal,
+        Guard::TrialActive,
+        State::Disabled,
+        &[Action::IncrementTrialFailure, Action::SetSafemodeDisabled, Action::ClearTrial]
+    ),
     // 熔断已打开 → 不再自动重试（与 ENABLED 同形，理由见该段注释）。
-    rule!(State::Running, Event::ErrorRetryable, Guard::CircuitOpen, State::ErroredUserConfirm, &[Action::IncrementFailure]),
-    rule!(State::Running, Event::ErrorRetryable, Guard::RetryBudgetAvailable, State::ErroredRetryable, &[Action::IncrementRetry]),
-    rule!(State::Running, Event::ErrorRetryable, Guard::RetryBudgetExhausted, State::ErroredUserConfirm, &[Action::IncrementFailure]),
+    rule!(
+        State::Running,
+        Event::ErrorRetryable,
+        Guard::CircuitOpen,
+        State::ErroredUserConfirm,
+        &[Action::IncrementFailure]
+    ),
+    rule!(
+        State::Running,
+        Event::ErrorRetryable,
+        Guard::RetryBudgetAvailable,
+        State::ErroredRetryable,
+        &[Action::IncrementRetry]
+    ),
+    rule!(
+        State::Running,
+        Event::ErrorRetryable,
+        Guard::RetryBudgetExhausted,
+        State::ErroredUserConfirm,
+        &[Action::IncrementFailure]
+    ),
     // D3：补全出边 RUNNING → ERRORED（sidecar 意外退出等运行期崩溃）。
-    rule!(State::Running, Event::ErrorFatal, State::ErroredUserConfirm, &[Action::IncrementFailure]),
+    rule!(
+        State::Running,
+        Event::ErrorFatal,
+        State::ErroredUserConfirm,
+        &[Action::IncrementFailure]
+    ),
     // P0-2：RUNNING 上的 sidecar 崩溃（与 ENABLED 同形；RUNNING 才是进程插件的常态）。
-    rule!(State::Running, Event::RuntimeCrash, Guard::TrialActive, State::Disabled, &[Action::IncrementTrialFailure, Action::SetSafemodeDisabled, Action::ClearTrial]),
-    rule!(State::Running, Event::RuntimeCrash, Guard::RetryBudgetAvailable, State::ErroredRetryable, &[Action::IncrementRetry]),
-    rule!(State::Running, Event::RuntimeCrash, Guard::RetryBudgetExhausted, State::ErroredUserConfirm, &[Action::IncrementFailure]),
+    rule!(
+        State::Running,
+        Event::RuntimeCrash,
+        Guard::TrialActive,
+        State::Disabled,
+        &[Action::IncrementTrialFailure, Action::SetSafemodeDisabled, Action::ClearTrial]
+    ),
+    rule!(
+        State::Running,
+        Event::RuntimeCrash,
+        Guard::RetryBudgetAvailable,
+        State::ErroredRetryable,
+        &[Action::IncrementRetry]
+    ),
+    rule!(
+        State::Running,
+        Event::RuntimeCrash,
+        Guard::RetryBudgetExhausted,
+        State::ErroredUserConfirm,
+        &[Action::IncrementFailure]
+    ),
     rule!(State::Running, Event::Detach, State::Enabled),
     rule!(State::Running, Event::Disable, State::Disabled),
     rule!(State::Running, Event::SafemodeEnter, State::Disabled, &[Action::SetSafemodeDisabled]),
     rule!(State::Running, Event::HealthOk, State::Running, &[Action::DecayRetry]),
     rule!(State::Running, Event::Uninstall, State::Uninstalled),
     rule!(State::Running, Event::Purge, State::Uninstalled),
-
     // ── DISABLED ────────────────────────────────────────────────
     // D28：试验性启用仅对 safemode 禁用者有效，且受独立预算限制
     //（两条件必须同时成立，否则 MAX_TRIAL_ATTEMPTS 形同虚设）。
-    rule!(State::Disabled, Event::TrialEnable, Guard::InSafemodeWithTrialBudget, State::Enabled, &[Action::ClearSafemode, Action::SetTrial, Action::ResetRuntimeCounters]),
+    rule!(
+        State::Disabled,
+        Event::TrialEnable,
+        Guard::InSafemodeWithTrialBudget,
+        State::Enabled,
+        &[Action::ClearSafemode, Action::SetTrial, Action::ResetRuntimeCounters]
+    ),
     // D27：任何 Enable 都清零计数（防"启用即再熔断"死循环）。
     // ClearSafemode 必须随行：DISABLED 可能来自 SafemodeEnter（`disabled_by_safemode`
     // 置位）。若只迁移状态不清标志，插件会停在「state=Enabled 但标志仍 true」的
@@ -466,37 +580,60 @@ pub static TRANSITIONS: &[Rule] = &[
     // 若恢复引擎仍判定该插件应禁用，对账会在下一拍重新 `SafemodeEnter`（从
     // ENABLED 态合法），安全模式权威不因此旁路。对标志本就为 false 的普通禁用，
     // 清除是无害幂等操作。
-    rule!(State::Disabled, Event::Enable, State::Enabled, &[Action::ClearSafemode, Action::ResetCounters]),
-    rule!(State::Disabled, Event::SafemodeExit, Guard::InSafemode, State::Enabled, &[Action::ClearSafemode, Action::ResetRuntimeCounters]),
+    rule!(
+        State::Disabled,
+        Event::Enable,
+        State::Enabled,
+        &[Action::ClearSafemode, Action::ResetCounters]
+    ),
+    rule!(
+        State::Disabled,
+        Event::SafemodeExit,
+        Guard::InSafemode,
+        State::Enabled,
+        &[Action::ClearSafemode, Action::ResetRuntimeCounters]
+    ),
     // D3：补全出边 DISABLED → UNINSTALLED。
     rule!(State::Disabled, Event::Uninstall, State::Uninstalled),
     rule!(State::Disabled, Event::Purge, State::Uninstalled),
-
     // ── ERRORED_RETRYABLE ───────────────────────────────────────
     // 自动重试：预算内可再试（不清零计数，保留预算消耗痕迹）。
     rule!(State::ErroredRetryable, Event::Enable, Guard::RetryBudgetAvailable, State::Enabled, &[]),
     // 预算耗尽时的启用尝试 → 升级需用户确认（而非静默忽略）。
-    rule!(State::ErroredRetryable, Event::Enable, Guard::RetryBudgetExhausted, State::ErroredUserConfirm, &[Action::IncrementFailure]),
+    rule!(
+        State::ErroredRetryable,
+        Event::Enable,
+        Guard::RetryBudgetExhausted,
+        State::ErroredUserConfirm,
+        &[Action::IncrementFailure]
+    ),
     rule!(State::ErroredRetryable, Event::RetryOk, State::Enabled, &[Action::ResetCounters]),
-    rule!(State::ErroredRetryable, Event::RetryExhausted, State::ErroredUserConfirm, &[Action::IncrementFailure]),
+    rule!(
+        State::ErroredRetryable,
+        Event::RetryExhausted,
+        State::ErroredUserConfirm,
+        &[Action::IncrementFailure]
+    ),
     rule!(State::ErroredRetryable, Event::Disable, State::Disabled),
     // D3：补全出边 ERRORED → {ENABLED, DISABLED, UNINSTALLED}。
     rule!(State::ErroredRetryable, Event::Uninstall, State::Uninstalled),
     rule!(State::ErroredRetryable, Event::Purge, State::Uninstalled),
-
     // ── ERRORED_USER_CONFIRM ────────────────────────────────────
     // §7-4：不自动重试，需用户确认。
     rule!(State::ErroredUserConfirm, Event::Enable, State::Enabled, &[Action::ResetCounters]),
     // 等待确认期间再出错：留在原地但继续累计失败，喂熔断计数。
-    rule!(State::ErroredUserConfirm, Event::ErrorFatal, State::ErroredUserConfirm, &[Action::IncrementFailure]),
+    rule!(
+        State::ErroredUserConfirm,
+        Event::ErrorFatal,
+        State::ErroredUserConfirm,
+        &[Action::IncrementFailure]
+    ),
     rule!(State::ErroredUserConfirm, Event::Disable, State::Disabled),
     rule!(State::ErroredUserConfirm, Event::Uninstall, State::Uninstalled),
     rule!(State::ErroredUserConfirm, Event::Purge, State::Uninstalled),
-
     // ── INSTALL_FAILED（准终态：仅可卸载，D3）────────────────────
     rule!(State::InstallFailed, Event::Uninstall, State::Uninstalled),
     rule!(State::InstallFailed, Event::Purge, State::Uninstalled),
-
     // ── UNINSTALLED（终态：无出边）──────────────────────────────
 ];
 
@@ -591,9 +728,7 @@ fn step_with(
         };
     }
 
-    let rule = table
-        .iter()
-        .find(|r| r.from == s.state && r.event == event && r.guard.holds(s));
+    let rule = table.iter().find(|r| r.from == s.state && r.event == event && r.guard.holds(s));
 
     let Some(rule) = rule else {
         // 未匹配 = 非法迁移。计数但绝不 panic（计划 §4.1）。
@@ -638,14 +773,7 @@ fn step_with(
         return r;
     }
 
-    TransitionOutcome {
-        event,
-        from,
-        to: s.state,
-        depth,
-        illegal: false,
-        actions,
-    }
+    TransitionOutcome { event, from, to: s.state, depth, illegal: false, actions }
 }
 
 /// 从当前状态可达的事件集合（按表推导）。
@@ -682,10 +810,7 @@ pub fn validate_table() -> HostResult<()> {
         if !seen.insert(k) {
             return Err(HostError::new(
                 ErrorCode::E_STATE_INVALID_TRANSITION,
-                format!(
-                    "迁移表存在重复键：{} + {} (guard={:?})",
-                    r.from, r.event, r.guard
-                ),
+                format!("迁移表存在重复键：{} + {} (guard={:?})", r.from, r.event, r.guard),
             ));
         }
     }
@@ -713,9 +838,7 @@ pub fn validate_table() -> HostResult<()> {
 
     // 4. INSTALL_FAILED 仅可卸载
     for r in TRANSITIONS {
-        if r.from == State::InstallFailed
-            && !matches!(r.event, Event::Uninstall | Event::Purge)
-        {
+        if r.from == State::InstallFailed && !matches!(r.event, Event::Uninstall | Event::Purge) {
             return Err(HostError::new(
                 ErrorCode::E_STATE_INVALID_TRANSITION,
                 format!(
@@ -727,9 +850,7 @@ pub fn validate_table() -> HostResult<()> {
     }
 
     // 5. 无零耗环
-    if let Err(e) = check_no_zero_cost_cycle_in(TRANSITIONS) {
-        return Err(e);
-    }
+    check_no_zero_cost_cycle_in(TRANSITIONS)?;
 
     // 6. 链深上限
     for r in TRANSITIONS {
@@ -783,12 +904,10 @@ fn chain_depth(rule: &Rule) -> usize {
 /// 计算所有强连通分量（|states| 很小，用可达性矩阵判定即可）。
 fn strongly_connected_components_of(rules: &[Rule]) -> Vec<Vec<State>> {
     let states = State::ALL;
-    let edges: HashMap<State, Vec<State>> = rules
-        .iter()
-        .fold(HashMap::new(), |mut m, r| {
-            m.entry(r.from).or_default().push(r.to);
-            m
-        });
+    let edges: HashMap<State, Vec<State>> = rules.iter().fold(HashMap::new(), |mut m, r| {
+        m.entry(r.from).or_default().push(r.to);
+        m
+    });
 
     // 可达性矩阵。
     let mut reach = vec![vec![false; states.len()]; states.len()];
@@ -920,11 +1039,7 @@ mod tests {
 
     #[test]
     fn table_is_well_formed() {
-        assert!(
-            validate_table().is_ok(),
-            "{}",
-            validate_table().unwrap_err().message
-        );
+        assert!(validate_table().is_ok(), "{}", validate_table().unwrap_err().message);
     }
 
     #[test]
@@ -943,8 +1058,7 @@ mod tests {
     fn full_state_event_matrix_never_panics() {
         for st in State::ALL {
             for ev in Event::ALL {
-                let mut s = PluginState::default();
-                s.state = st;
+                let mut s = PluginState { state: st, ..PluginState::default() };
                 let before_illegal = s.illegal_transitions;
                 // 必须不 panic、不悬挂。
                 let out = transition(&mut s, ev);
@@ -952,15 +1066,14 @@ mod tests {
                 if out.illegal {
                     assert_eq!(out.from, out.to, "非法迁移不得改变状态：{st} + {ev}");
                     assert!(
-                        s.illegal_transitions >= before_illegal + 1,
+                        s.illegal_transitions > before_illegal,
                         "非法迁移必须计数：{st} + {ev}"
                     );
                 } else {
                     assert_ne!(out.depth, 0);
                     assert_eq!(s.state, out.to);
                     assert_eq!(
-                        s.illegal_transitions,
-                        before_illegal,
+                        s.illegal_transitions, before_illegal,
                         "合法迁移不得增加非法计数：{st} + {ev}"
                     );
                 }
@@ -974,10 +1087,7 @@ mod tests {
             if st.is_terminal() {
                 continue;
             }
-            assert!(
-                !reachable_events(st).is_empty(),
-                "{st} 无出边"
-            );
+            assert!(!reachable_events(st).is_empty(), "{st} 无出边");
         }
     }
 
@@ -1342,10 +1452,12 @@ mod tests {
     #[test]
     fn open_circuit_short_circuits_automatic_retry() {
         for start in [State::Enabled, State::Running] {
-            let mut s = PluginState::default();
-            s.state = start;
-            s.circuit_open = true;
-            s.retry_count = 0; // 预算充足——被拒只能是因为熔断
+            let mut s = PluginState {
+                state: start,
+                circuit_open: true,
+                retry_count: 0, // 预算充足——被拒只能是因为熔断
+                ..PluginState::default()
+            };
             let o = transition(&mut s, Event::ErrorRetryable);
             assert!(!o.illegal, "熔断短路必须有匹配规则");
             assert_eq!(o.to, State::ErroredUserConfirm, "{start:?} 熔断后应直接交人工");
@@ -1356,10 +1468,12 @@ mod tests {
     /// 熔断关闭时行为不变（回归保护：新规则不得吃掉原来的预算分支）。
     #[test]
     fn closed_circuit_keeps_retry_budget_path() {
-        let mut s = PluginState::default();
-        s.state = State::Enabled;
-        s.circuit_open = false;
-        s.retry_count = 0;
+        let mut s = PluginState {
+            state: State::Enabled,
+            circuit_open: false,
+            retry_count: 0,
+            ..PluginState::default()
+        };
         let o = transition(&mut s, Event::ErrorRetryable);
         assert_eq!(o.to, State::ErroredRetryable, "熔断关闭时预算内仍走自动重试");
     }
@@ -1373,10 +1487,8 @@ mod tests {
     #[test]
     fn every_guard_and_action_is_referenced_by_a_rule() {
         let used_guards: HashSet<Guard> = TRANSITIONS.iter().map(|r| r.guard).collect();
-        let used_actions: HashSet<Action> = TRANSITIONS
-            .iter()
-            .flat_map(|r| r.actions.iter().copied())
-            .collect();
+        let used_actions: HashSet<Action> =
+            TRANSITIONS.iter().flat_map(|r| r.actions.iter().copied()).collect();
 
         for g in Guard::ALL {
             // `Guard::None` 是"无守卫"的默认值，`rule!` 宏不显式写它。
@@ -1412,11 +1524,7 @@ mod tests {
         }];
         let err = check_no_zero_cost_cycle_in(BAD).unwrap_err();
         assert_eq!(err.code, ErrorCode::E_STATE_INVALID_TRANSITION);
-        assert!(
-            err.message.contains("零耗自环"),
-            "错误信息应指明是自环，实际：{}",
-            err.message
-        );
+        assert!(err.message.contains("零耗自环"), "错误信息应指明是自环，实际：{}", err.message);
 
         // 同一条规则去掉 chain（每步都需外部事件）→ 构不成自转，放行。
         const OK_NO_CHAIN: &[Rule] = &[Rule {
@@ -1619,11 +1727,13 @@ mod tests {
             Action::SetTrial,
             Action::ClearTrial,
         ] {
-            let mut s = PluginState::default();
-            s.state = State::Running;
-            s.retry_count = 2;
-            s.failure_count = 2;
-            s.trial_failures = 1;
+            let mut s = PluginState {
+                state: State::Running,
+                retry_count: 2,
+                failure_count: 2,
+                trial_failures: 1,
+                ..PluginState::default()
+            };
             apply(&mut s, a);
             assert_eq!(s.state, State::Running, "动作 {a:?} 不得改变 state");
         }
@@ -1655,9 +1765,14 @@ mod tests {
     #[test]
     fn chain_depth_capped() {
         // 构造一条自链到爆炸的表，验证深度上限生效。
-        let cyclic = &[
-            Rule { from: State::Discovered, event: Event::InstallStart, guard: Guard::None, to: State::Discovered, actions: &[], chain: Some(Event::InstallStart) },
-        ];
+        let cyclic = &[Rule {
+            from: State::Discovered,
+            event: Event::InstallStart,
+            guard: Guard::None,
+            to: State::Discovered,
+            actions: &[],
+            chain: Some(Event::InstallStart),
+        }];
         let mut s = PluginState::default();
         let o = transition_with(cyclic, &mut s, Event::InstallStart, None);
         assert!(o.illegal, "链深超限应记非法");

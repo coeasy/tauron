@@ -34,7 +34,14 @@
 fn load_adapter_config() -> tauron_adapter::AdapterConfig {
     let Some(path) = std::env::var("TAURON_CLIENT_CONFIG").ok().filter(|p| !p.trim().is_empty())
     else {
-        return tauron_adapter::AdapterConfig::default();
+        let adapter = tauron_adapter::AdapterConfig::default();
+        #[cfg(feature = "plugin-install")]
+        if let Some(install) = load_plugin_install_config() {
+            return adapter.with_plugin_install(install.0, install.1, install.2);
+        }
+        #[cfg(feature = "plugin-install")]
+        eprintln!("[tauron] 缺少 TAURON_PLUGIN_INSTALL_DIR、TAURON_PLUGIN_SIGNER_KEYS 或有效 TAURON_ACL_SIGNING_KEY，签名插件安装已关闭");
+        return adapter;
     };
 
     match tauron_adapter::ClientConfig::from_file(std::path::Path::new(&path)) {
@@ -47,13 +54,45 @@ fn load_adapter_config() -> tauron_adapter::AdapterConfig {
                 cfg.log_level(),
                 cfg.plugin_paths.as_ref().map_or(0, Vec::len),
             );
-            tauron_adapter::AdapterConfig::from_client_config(&cfg, None)
+            let adapter = tauron_adapter::AdapterConfig::from_client_config(&cfg, None);
+            #[cfg(feature = "plugin-install")]
+            if let Some(install) = load_plugin_install_config() {
+                return adapter.with_plugin_install(install.0, install.1, install.2);
+            }
+            #[cfg(feature = "plugin-install")]
+            eprintln!("[tauron] 缺少 TAURON_PLUGIN_INSTALL_DIR、TAURON_PLUGIN_SIGNER_KEYS 或有效 TAURON_ACL_SIGNING_KEY，签名插件安装已关闭");
+            adapter
         }
         Err(e) => {
             eprintln!("[tauron] 客户端配置 `{path}` 加载失败，回落默认装配：{}", e.message);
             tauron_adapter::AdapterConfig::default()
         }
     }
+}
+
+#[cfg(all(not(feature = "substrate-only"), feature = "plugin-install"))]
+fn load_plugin_install_config() -> Option<(std::path::PathBuf, std::collections::BTreeMap<String, Vec<u8>>, Vec<u8>)> {
+    let root = std::env::var_os("TAURON_PLUGIN_INSTALL_DIR").map(std::path::PathBuf::from)?;
+    let signer_hex = std::env::var("TAURON_PLUGIN_SIGNER_KEYS").ok()?;
+    let acl_hex = std::env::var("TAURON_ACL_SIGNING_KEY").ok()?;
+    let mut keys = std::collections::BTreeMap::new();
+    for entry in signer_hex.split(';').filter(|entry| !entry.trim().is_empty()) {
+        let (kid, encoded) = entry.split_once(':')?;
+        if kid.trim().is_empty() { return None; }
+        keys.insert(kid.trim().to_string(), decode_hex(encoded.trim())?);
+    }
+    let acl = decode_hex(acl_hex.trim())?;
+    if keys.is_empty() || acl.len() < 32 { return None; }
+    Some((root, keys, acl))
+}
+
+#[cfg(all(not(feature = "substrate-only"), feature = "plugin-install"))]
+fn decode_hex(raw: &str) -> Option<Vec<u8>> {
+    if raw.is_empty() || raw.len() % 2 != 0 { return None; }
+    raw.as_bytes().chunks_exact(2).map(|pair| {
+        let value = std::str::from_utf8(pair).ok()?;
+        u8::from_str_radix(value, 16).ok()
+    }).collect()
 }
 
 /// 示例插件的 manifest（与 `src/plugin/first.ts` 的 `name` 一致）。
@@ -76,6 +115,14 @@ const DEMO_PLUGIN_MANIFEST: &str = r#"{
 }"#;
 
 fn main() {
+    #[cfg(feature = "plugin-install")]
+    let builder = {
+        let root = std::env::var_os("TAURON_PLUGIN_INSTALL_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("tauron-plugins"));
+        tauron_adapter::tauri::with_plugin_asset_protocol(tauri::Builder::default(), root)
+    };
+    #[cfg(not(feature = "plugin-install"))]
     let builder = tauri::Builder::default();
 
     // ── 默认：底座 + 插件运行时 ──
@@ -88,9 +135,7 @@ fn main() {
         // 用 `state_init_with_adapter_config` 而不是 `state_init`：前者把
         // `ClientConfig`（`TAURON_CLIENT_CONFIG` 指向的 JSON）真正接进注册表配置，
         // 「配置化选择加载」（`plugin_filter`）才会生效。
-        .plugin(tauron_adapter::tauri::state_init_with_adapter_config(
-            load_adapter_config(),
-        ))
+        .plugin(tauron_adapter::tauri::state_init_with_adapter_config(load_adapter_config()))
         // 54 条 host_* 命令：root 注册（裸名调用，不依赖插件 ACL capability）
         .invoke_handler(tauron_adapter::tauron_generate_handler![])
         // ── 装配期插件安装（插件的「发现 → 注册表」这一段）─────────────

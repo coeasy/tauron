@@ -15,11 +15,18 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub mod error;
 pub mod api;
+pub mod error;
+#[cfg(feature = "signing")]
+pub mod package_signature;
 
+pub use api::{
+    create_default_marketplace_api, create_marketplace_api, ApiResponseError, InstallRequest,
+    InstallResponse, MarketplaceApi, PluginDetailResponse, PluginSummary, RevokeRequest,
+    RevokeResponse, SearchRequest, SearchResponse, SortOrder, UninstallRequest, UninstallResponse,
+    UpdateCheckRequest, UpdateCheckResponse, UpdateCheckResult, VersionInfo,
+};
 pub use error::{MarketError, MarketResult};
-pub use api::{MarketplaceApi, SearchRequest, SearchResponse, PluginSummary, PluginDetailResponse, VersionInfo, InstallRequest, InstallResponse, UpdateCheckRequest, UpdateCheckResponse, UpdateCheckResult, UninstallRequest, UninstallResponse, RevokeRequest, RevokeResponse, ApiResponseError, SortOrder, create_marketplace_api, create_default_marketplace_api};
 
 /// 解压常量（计划 §4.18 固定值）。
 pub const MAX_ENTRIES: usize = 2000;
@@ -78,11 +85,8 @@ impl FrameworkRange {
 /// 比较两个语义化版本号。
 /// 返回负数表示 a < b，0 表示 a == b，正数表示 a > b。
 pub fn cmp_version(a: &str, b: &str) -> i32 {
-    let parse = |s: &str| -> Vec<u64> {
-        s.split('.')
-            .map(|p| p.parse::<u64>().unwrap_or(0))
-            .collect()
-    };
+    let parse =
+        |s: &str| -> Vec<u64> { s.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect() };
     let av = parse(a);
     let bv = parse(b);
     let max_len = av.len().max(bv.len());
@@ -156,15 +160,10 @@ pub fn sanitize_entry_path(name: &str, entry: &ZipEntryInfo) -> MarketResult<Str
 }
 
 /// 校验压缩包常量。
-pub fn validate_zip_constants(
-    entries: &[ZipEntryInfo],
-) -> MarketResult<(u64, u64, u32)> {
+pub fn validate_zip_constants(entries: &[ZipEntryInfo]) -> MarketResult<(u64, u64, u32)> {
     // 条目数。
     if entries.len() > MAX_ENTRIES {
-        return Err(MarketError::EntryCountExceeded {
-            actual: entries.len(),
-            limit: MAX_ENTRIES,
-        });
+        return Err(MarketError::EntryCountExceeded { actual: entries.len(), limit: MAX_ENTRIES });
     }
     // 解压后总大小。
     let total_uncompressed: u64 = entries.iter().map(|e| e.uncompressed_size).sum();
@@ -251,18 +250,10 @@ impl std::fmt::Display for AuditAction {
 }
 
 /// 审计日志（追加式 + 链式 hash）。
+#[derive(Default)]
 pub struct AuditLog {
     entries: Vec<AuditEntry>,
     current_hash: String,
-}
-
-impl Default for AuditLog {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            current_hash: String::new(),
-        }
-    }
 }
 
 impl AuditLog {
@@ -325,11 +316,8 @@ impl AuditLog {
     pub fn verify_chain(&self) -> bool {
         for (i, entry) in self.entries.iter().enumerate() {
             // 验证 prev_hash 链。
-            let expected_prev = if i == 0 {
-                String::new()
-            } else {
-                self.entries[i - 1].hash.clone()
-            };
+            let expected_prev =
+                if i == 0 { String::new() } else { self.entries[i - 1].hash.clone() };
             if entry.prev_hash != expected_prev {
                 return false;
             }
@@ -365,14 +353,8 @@ impl AuditLog {
     pub fn from_json(v: &serde_json::Value) -> MarketResult<Self> {
         let entries = serde_json::from_value(v["entries"].clone())
             .map_err(|e| MarketError::ManifestFormat(e.to_string()))?;
-        let current_hash = v["current_hash"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        Ok(Self {
-            entries,
-            current_hash,
-        })
+        let current_hash = v["current_hash"].as_str().unwrap_or("").to_string();
+        Ok(Self { entries, current_hash })
     }
 }
 
@@ -386,18 +368,12 @@ pub struct RevocationList {
 impl RevocationList {
     /// 检查插件是否被吊销。
     pub fn is_revoked(&self, kid: &str, plugin_id: &str) -> bool {
-        self.revoked
-            .get(kid)
-            .and_then(|m| m.get(plugin_id))
-            .is_some()
+        self.revoked.get(kid).and_then(|m| m.get(plugin_id)).is_some()
     }
 
     /// 添加吊销记录。
     pub fn revoke(&mut self, kid: &str, plugin_id: &str, ts: u64) {
-        self.revoked
-            .entry(kid.to_string())
-            .or_default()
-            .insert(plugin_id.to_string(), ts);
+        self.revoked.entry(kid.to_string()).or_default().insert(plugin_id.to_string(), ts);
     }
 
     /// 检查 kid 是否存在。
@@ -623,18 +599,13 @@ mod tests {
 
     #[test]
     fn zip_constants_accept_normal_package() {
-        let entries = vec![
-            entry("a.js", 1000, 500),
-            entry("b.js", 2000, 1000),
-        ];
+        let entries = vec![entry("a.js", 1000, 500), entry("b.js", 2000, 1000)];
         assert!(validate_zip_constants(&entries).is_ok());
     }
 
     #[test]
     fn zip_constants_rejects_too_many_entries() {
-        let entries: Vec<_> = (0..=MAX_ENTRIES)
-            .map(|i| entry(&format!("f{i}"), 100, 50))
-            .collect();
+        let entries: Vec<_> = (0..=MAX_ENTRIES).map(|i| entry(&format!("f{i}"), 100, 50)).collect();
         assert!(matches!(
             validate_zip_constants(&entries),
             Err(MarketError::EntryCountExceeded { limit: 2000, .. })
@@ -735,7 +706,7 @@ mod tests {
             AuditAction::Revoke,
             AuditAction::Restore,
         ] {
-            let v = serde_json::to_value(action.clone()).unwrap();
+            let v = serde_json::to_value(action).unwrap();
             let a2 = serde_json::from_value::<AuditAction>(v).unwrap();
             assert_eq!(a2, action);
         }
@@ -850,13 +821,7 @@ mod tests {
         assert!(rl.is_revoked("kid1", "p.audio"));
         // 审计日志记录吊销。
         let mut log = AuditLog::new();
-        log.append(
-            1000,
-            AuditAction::Revoke,
-            "p.audio",
-            None,
-            None,
-        );
+        log.append(1000, AuditAction::Revoke, "p.audio", None, None);
         assert!(log.verify_chain());
         assert!(matches!(log.entries()[0].action, AuditAction::Revoke));
     }
@@ -864,10 +829,7 @@ mod tests {
     /// 计划 §4.18 测试项：恶意样本 — 路径穿越。
     #[test]
     fn end_to_end_malicious_path_traversal() {
-        let entries = vec![
-            entry("safe/index.js", 100, 50),
-            entry("../../etc/passwd", 200, 100),
-        ];
+        let entries = vec![entry("safe/index.js", 100, 50), entry("../../etc/passwd", 200, 100)];
         // 校验常量先通过（大小没问题）。
         assert!(validate_zip_constants(&entries).is_ok());
         // 但路径清洗应拒绝。
@@ -909,7 +871,7 @@ mod tests {
         hasher.update(b"file content");
         let hash = hex_encode(&hasher.finalize());
         assert_eq!(hash.len(), 64); // SHA-256 = 64 hex chars。
-        // 3. 解包常量。
+                                    // 3. 解包常量。
         let entries = vec![entry("index.js", 100, 50)];
         assert!(validate_zip_constants(&entries).is_ok());
         // 4. 权限审批（检查权限列表非空）。

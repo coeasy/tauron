@@ -80,13 +80,17 @@ describe('门禁：命令面与 Rust 授权表完全一致', () => {
   const src = read('crates/tauron-host/src/authz.rs');
   const beforeTests = src.slice(0, src.indexOf('mod tests'));
   const rustCommands = [...beforeTests.matchAll(/command:\s*"([^"]+)"/g)].map((m) => m[1]!);
+  const adapter = read('crates/tauron-adapter/src/lib.rs');
+  const optionalAuth = adapter.slice(adapter.indexOf('pub const PLUGIN_INSTALL_AUTH'), adapter.indexOf('/// 命令状态'));
+  const optionalCommands = [...optionalAuth.matchAll(/command:\s*"(host_[^"]+)"/g)].map((m) => m[1]!);
+  const rustAllCommands = [...new Set([...beforeTests.matchAll(/command:\s*"(host_[^"]+)"/g)].map((m) => m[1]!).concat(optionalCommands))];
 
   it('命令数量一致', () => {
-    expect(rustCommands.length).toBe(CAPABILITIES.length);
+    expect(rustAllCommands.length).toBe(CAPABILITIES.length);
   });
 
   it('命令名逐个一致（含主窗特权命令）', () => {
-    expect(CAPABILITIES.map((c) => c.command)).toEqual(rustCommands);
+    expect([...CAPABILITIES.map((c) => c.command)].sort()).toEqual([...rustAllCommands].sort());
   });
 
   it('禁止的 v1 命令两侧都不存在', () => {

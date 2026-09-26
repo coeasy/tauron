@@ -8,8 +8,15 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[features]
+default = []
+signing = ["dep:ed25519-dalek", "dep:zip", "dep:tauron-host"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 sha2 = "0.10"
+ed25519-dalek = { version = "3", optional = true }
+zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
+tauron-host = { path = "../tauron-host", optional = true }

@@ -75,7 +75,12 @@ mod tests {
             SchemaError::UnexpandedRef("#/$defs/A".into()),
             SchemaError::UnknownExtension("lbel".into(), "/properties/name".into()),
             SchemaError::UnsupportedVersion(99, 1, "/".into()),
-            SchemaError::ExtensionType("widget".into(), "string".into(), "object".into(), "/".into()),
+            SchemaError::ExtensionType(
+                "widget".into(),
+                "string".into(),
+                "object".into(),
+                "/".into(),
+            ),
             SchemaError::Structure("root 不是对象".into()),
             SchemaError::Validation("/duration 超出范围".into()),
         ];

@@ -9,6 +9,7 @@
 
 import { TauriBackend } from '@tauron/host/tauri';
 import { ShellClient, DialogClient, AutoUpdateClient } from '@tauron/host';
+import type { PendingCallInfo } from '@tauron/host';
 import { PluginBridge, callPluginMethod } from '@tauron/plugin-sdk';
 import '@tauron/ui/wc'; // 注册 <oc-toast> 等自定义元素
 
@@ -19,7 +20,18 @@ import '@tauron/ui/wc'; // 注册 <oc-toast> 等自定义元素
 // 此处恢复默认前缀 'plugin:tauron|'。
 const backend = new TauriBackend({ commandPrefix: '' });
 const shell = new ShellClient({ backend });
+
+// 0.4-A2 能力真相：启动即拉取 `host_capabilities` 并回填传输层能力缓存——
+// `host_registry_install*` 是否存在由 Rust 侧 `cfg!(feature = "plugin-install")`
+// 推导，前端不猜。此后 `shell.supports('host_registry_install')` 反映宿主
+// **真实**构建形态（默认构建 = false，安装按钮给出明确失败而不是 invoke 报
+// command not found）。
+void shell.refreshCapabilities().catch((err: Error) => {
+  // 老宿主没有 host_capabilities 时能力表保持静态全集——降级方向安全。
+  console.warn('[tauron] 能力快照拉取失败，能力表按静态全集降级：', err.message);
+});
 const dialog = new DialogClient({ backend });
+const admin = new (await import('@tauron/host')).AdminClient({ backend });
 const updater = new AutoUpdateClient({
   backend,
   config: {
@@ -107,9 +119,9 @@ el<HTMLButtonElement>('btn-minimize').addEventListener('click', () => {
 
 el<HTMLButtonElement>('btn-clipboard').addEventListener('click', () => {
   dialog
-    .clipboardRead()
-    .then((text) =>
-      log('host-out', `剪贴板：${text === null || text === '' ? '（空）' : JSON.stringify(text)}`),
+    .clipboardReadDetailed()
+    .then((result) =>
+      log('host-out', `${result.reason}；进程内回退值：${result.value === '' ? '（空）' : JSON.stringify(result.value)}`),
     )
     .catch((err: Error) => log('host-out', err.message));
 });
@@ -120,9 +132,11 @@ el<HTMLButtonElement>('btn-update').addEventListener('click', () => {
     .then((info) =>
       log(
         'host-out',
-        info.available
-          ? `发现新版本 ${info.version ?? '?'}（当前 ${info.currentVersion}）——可 downloadUpdate()/installUpdate()`
-          : `已是最新版本（${info.currentVersion}）`,
+        info.simulated
+          ? `更新检查未实际执行：${info.reason ?? '宿主更新源尚未接入'}`
+          : info.available
+            ? `发现新版本 ${info.version ?? '?'}（当前 ${info.currentVersion}）——下载和安装能力需宿主真实接入后使用`
+            : `已是最新版本（${info.currentVersion}）`,
       ),
     )
     .catch((err: Error) => log('host-out', err.message));
@@ -133,6 +147,44 @@ el<HTMLButtonElement>('btn-update').addEventListener('click', () => {
 el<HTMLButtonElement>('btn-toast').addEventListener('click', () => {
   toast.push?.({ title: 'tauron', message: '来自 @tauron/ui 的通知', level: 'success' });
 });
+
+// ── 本地已签名插件安装、启用、窗口和管理器入口 ─────────────────────────
+const pluginManager = document.querySelector('oc-plugin-manager');
+if (pluginManager) {
+  const refreshPlugins = async (): Promise<void> => {
+    const rows = await shell.registryListAll();
+    (pluginManager as HTMLElement & { plugins: unknown[] }).plugins = rows.map((row) => ({
+      id: row.id, name: row.name, version: row.version,
+      enabled: row.state === 'enabled' || row.state === 'running',
+      type: row.pluginType, description: row.disabledBySafemode ? '安全模式已禁用' : undefined,
+    }));
+  };
+  document.addEventListener('oc-plugin-install', (event) => {
+    const detail = (event as CustomEvent<{ packagePath: string }>).detail;
+    // 0.4-A2：安装命令是 feature-gated 的——能力表说没有就明确拒绝，
+    // 不发一条注定 command not found 的 invoke。
+    if (!shell.supports('host_registry_install')) {
+      setStatus('当前宿主未启用 plugin-install 特性，无法安装插件包', false);
+      return;
+    }
+    if (detail?.packagePath) void admin.registryInstallPreview(detail.packagePath).then(async (preview) => {
+      const approved = preview.permissions.filter((p) => p.defaultChecked || window.confirm(`是否授予 ${preview.pluginName} 的权限 ${p.permission}？`)).map((p) => p.permission);
+      await admin.registryInstall(detail.packagePath, approved);
+      await refreshPlugins();
+    }).catch((error: Error) => setStatus(`安装失败：${error.message}`, false));
+  });
+  document.addEventListener('oc-plugin-toggle', (event) => {
+    const detail = (event as CustomEvent<{ id: string; enabled: boolean }>).detail;
+    void admin.registryAdmin({ op: detail.enabled ? 'enable' : 'disable', id: detail.id }).then(refreshPlugins)
+      .catch((error: Error) => setStatus(`插件状态更新失败：${error.message}`, false));
+  });
+  document.addEventListener('oc-plugin-uninstall', (event) => {
+    const detail = (event as CustomEvent<{ id: string }>).detail;
+    void admin.registryAdmin({ op: 'uninstall', id: detail.id }).then(refreshPlugins)
+      .catch((error: Error) => setStatus(`卸载失败：${error.message}`, false));
+  });
+  void refreshPlugins().catch((error: Error) => setStatus(`插件列表加载失败：${error.message}`, false));
+}
 
 // ── 5. 启动恢复（§4.14）─────────────────────────────────────────────────
 
@@ -157,6 +209,50 @@ void shell
     }
   })
   .catch((err: Error) => setStatus(`恢复上报失败：${err.message}`, false));
+
+// ── 6. 跨主体调用（0.4-A1 投递 + 0.4-A2 主推 SDK 端到端）────────────────
+//
+// 完整链路：本窗 `callPlugin` 受理 → `JsCallDelivery` 把调用帧投进插件队列 →
+// 插件 webview（label `plugin-com.example.formatter`，页面 plugin-window.html，
+// 由主推 SDK 的 createPlugin + 内置执行泵驱动）自动执行 `format` 并回填 →
+// 本窗 `callTakeResult` 取走结果。
+//
+// 前置条件（诚实边界）：插件 `com.example.formatter` 已安装并启用。执行泵必须
+// 运行在**插件自己的 webview** 里——主窗 drain 的是自己的队列，取不到投给插件
+// 的帧；所以先点「打开插件面板窗口」，再点「跨主体调用」。
+el<HTMLButtonElement>('btn-open-plugin-window').addEventListener('click', () => {
+  void shell.windowCreate('com.example.formatter').then(
+    (out) =>
+      log(
+        'cross-out',
+        out.created
+          ? `插件面板窗口已创建（label ${out.label}），执行泵就绪`
+          : `窗口未创建：${out.reason ?? '宿主未实现创建原语'}`,
+      ),
+    (err: Error) => log('cross-out', `开窗失败：${err.message}`),
+  );
+});
+
+el<HTMLButtonElement>('btn-cross-call').addEventListener('click', () => {
+  const code = el<HTMLInputElement>('cross-input').value;
+  const run = async (): Promise<PendingCallInfo> => {
+    const accepted = await shell.callPlugin('com.example.formatter', 'format', { code });
+    if (!accepted.callId) {
+      throw new Error(`宿主未受理：${accepted.errorCode ?? '（无错误码）'}`);
+    }
+    // 轮询取件：settled 取走即删；pending = 执行泵还没回帧，稍后再取。
+    for (let i = 0; i < 50; i++) {
+      const info = await shell.callTakeResult(accepted.callId);
+      if (info.state === 'settled') return info;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error('取件超时（5s）：执行泵未回帧——检查插件面板窗口是否已打开');
+  };
+  void run().then(
+    (info) => log('cross-out', JSON.stringify({ state: info.state, result: info.result, errorCode: info.errorCode }, null, 2)),
+    (err: Error) => log('cross-out', `跨主体调用失败：${err.message}`),
+  );
+});
 
 // ── 启动 ─────────────────────────────────────────────────────────────────
 

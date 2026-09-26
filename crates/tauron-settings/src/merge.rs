@@ -140,9 +140,7 @@ pub fn write_path(root: &mut Value, dotted: &str, value: Value) {
     if !cur.is_object() {
         *cur = Value::Object(Map::new());
     }
-    cur.as_object_mut()
-        .expect("上一行已保证是对象")
-        .insert(last, value);
+    cur.as_object_mut().expect("上一行已保证是对象").insert(last, value);
 }
 
 /// 校验点路径合法性：非空、无空段、不以 `.` 开头/结尾、无 `$` 保留前缀。
@@ -155,9 +153,7 @@ pub fn validate_path(dotted: &str) -> SettingsResult<()> {
     }
     for seg in dotted.split('.') {
         if seg.starts_with('$') {
-            return Err(SettingsError::InvalidPath(
-                format!("路径段 `{seg}` 以保留前缀 `$` 开头"),
-            ));
+            return Err(SettingsError::InvalidPath(format!("路径段 `{seg}` 以保留前缀 `$` 开头")));
         }
     }
     Ok(())
@@ -254,11 +250,7 @@ fn remove_unset(user_layer: &mut Map<String, Value>, path: &str) {
     let Some(Value::Array(list)) = user_layer.get(UNSET_KEY) else {
         return;
     };
-    let filtered: Vec<Value> = list
-        .iter()
-        .filter(|v| v.as_str() != Some(path))
-        .cloned()
-        .collect();
+    let filtered: Vec<Value> = list.iter().filter(|v| v.as_str() != Some(path)).cloned().collect();
     if filtered.is_empty() {
         user_layer.remove(UNSET_KEY);
     } else {
@@ -457,10 +449,8 @@ mod tests {
         let builtin = json!({"volume": 10});
         let plugin = json!({"volume": 10});
         let mut user = Map::new();
-        let layers = [
-            layer(LayerKind::Builtin, builtin.clone()),
-            layer(LayerKind::Plugin, plugin.clone()),
-        ];
+        let layers =
+            [layer(LayerKind::Builtin, builtin.clone()), layer(LayerKind::Plugin, plugin.clone())];
         let op = decide_write("volume", &json!(10), &inherited_at(&layers, "volume"));
         apply_op(&mut user, &op);
         let out = merge_layers(&[

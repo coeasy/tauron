@@ -125,12 +125,16 @@ pub struct DispatchRecord {
 /// 通知存储：环形缓冲 + 分组索引 + 未读计数。
 pub struct NotifyStore {
     capacity: usize,
+    /// 单插件通知历史上限；插件超限时仅裁剪该插件最旧记录。
+    plugin_capacity: usize,
     /// 按 id 索引（id → 条目）。BTreeMap 保证顺序稳定、快照可复现。
     entries: BTreeMap<String, NotifyEntry>,
     /// 插入顺序（最旧在前）。用于环形裁剪。
     order: Vec<String>,
     /// 分组计数（分组键 → 条目数）。用于快速归组统计。
     groups: BTreeMap<String, usize>,
+    /// 当前安装会话中因容量限制被裁剪的通知数（插件 id → 累计数）。
+    evictions: BTreeMap<String, u64>,
     /// 未读计数。
     unread: usize,
     /// 分发记录（最旧在前，用于降级矩阵审计）。
@@ -148,19 +152,32 @@ impl Default for NotifyStore {
 /// 默认历史条目上限。
 pub const DEFAULT_CAPACITY: usize = 500;
 
+/// 单插件通知历史上限。
+pub const DEFAULT_PLUGIN_CAPACITY: usize = 64;
+
 /// 默认分发日志上限。
 pub const DEFAULT_DISPATCH_LOG_CAPACITY: usize = 200;
 
 impl NotifyStore {
     pub fn new(capacity: usize) -> NotifyResult<Self> {
+        Self::with_plugin_capacity(capacity, DEFAULT_PLUGIN_CAPACITY)
+    }
+
+    /// 设置全局与单插件通知历史上限。
+    pub fn with_plugin_capacity(capacity: usize, plugin_capacity: usize) -> NotifyResult<Self> {
         if capacity == 0 {
+            return Err(NotifyError::ZeroCapacity);
+        }
+        if plugin_capacity == 0 {
             return Err(NotifyError::ZeroCapacity);
         }
         Ok(Self {
             capacity,
+            plugin_capacity,
             entries: BTreeMap::new(),
             order: Vec::new(),
             groups: BTreeMap::new(),
+            evictions: BTreeMap::new(),
             unread: 0,
             dispatch_log: Vec::new(),
             dispatch_log_capacity: DEFAULT_DISPATCH_LOG_CAPACITY,
@@ -181,12 +198,28 @@ impl NotifyStore {
         self.capacity
     }
 
+    /// 单插件历史容量。
+    pub fn plugin_capacity(&self) -> usize {
+        self.plugin_capacity
+    }
+
+    /// 每个插件因容量限制被裁剪的历史条数。
+    pub fn eviction_counts(&self) -> BTreeMap<String, u64> {
+        self.evictions.clone()
+    }
+
+    /// 容量裁剪总次数。
+    pub fn eviction_total(&self) -> u64 {
+        self.evictions.values().copied().fold(0, u64::saturating_add)
+    }
+
     /// 未读条目数。
     pub fn unread_count(&self) -> usize {
         self.unread
     }
 
-    /// 写入一条通知。满时**丢最旧**（环形裁剪）后再插入。
+    /// 写入一条通知。单插件满时裁剪该插件最旧条目；全局满时先裁剪占用最多的
+    /// 插件，再裁剪该插件最旧条目，避免单个高频插件挤掉所有邻居的历史。
     ///
     /// 循环带**收敛保护**：`evict_one` 只能移除同时存在于 `order` 与
     /// `entries` 的条目，一旦两者失同步（`order` 里的 id 在 `entries` 中已不存在，
@@ -194,7 +227,22 @@ impl NotifyStore {
     /// 而是宿主被挂死。因此每次迭代校验 `entries` 是否真的缩小，没有就中止。
     /// 宁可让通知短暂超容，也不让整个客户端失去响应。
     pub fn push(&mut self, entry: NotifyEntry) -> NotifyResult<Vec<String>> {
+        // 重复 ID 必须在任何容量裁剪前拒绝；否则满环上重放一条已存在的通知
+        // 会先驱逐真实历史，再由 `insert_no_evict` 报重复，失败操作却产生副作用。
+        if self.entries.contains_key(&entry.id) {
+            return Err(NotifyError::DuplicateId(entry.id));
+        }
         let mut evicted = Vec::new();
+        let plugin_id = entry.plugin_id.clone();
+        while self.groups.get(&entry.group_key()).copied().unwrap_or_default()
+            >= self.plugin_capacity
+        {
+            let before = self.entries.len();
+            evicted.extend(self.evict_oldest_for(&plugin_id));
+            if self.entries.len() == before {
+                break;
+            }
+        }
         while self.entries.len() >= self.capacity {
             let before = self.entries.len();
             evicted.extend(self.evict_one());
@@ -216,9 +264,7 @@ impl NotifyStore {
             self.unread += 1;
         }
         let slot = self.groups.entry(group).or_insert(0);
-        *slot = slot
-            .checked_add(1)
-            .ok_or_else(|| NotifyError::Store("分组计数溢出".into()))?;
+        *slot = slot.checked_add(1).ok_or_else(|| NotifyError::Store("分组计数溢出".into()))?;
         self.order.push(entry.id.clone());
         self.entries.insert(entry.id.clone(), entry);
         Ok(Vec::new())
@@ -226,24 +272,60 @@ impl NotifyStore {
 
     /// 丢最旧一条，返回被丢的 id 列表。
     fn evict_one(&mut self) -> Vec<String> {
-        let mut evicted = Vec::new();
-        if let Some(id) = self.order.first().cloned() {
-            self.order.remove(0);
-            if let Some(entry) = self.entries.remove(&id) {
-                if !entry.read {
-                    self.unread = self.unread.saturating_sub(1);
-                }
-                let group = entry.group_key();
-                if let Some(count) = self.groups.get_mut(&group) {
-                    *count = count.saturating_sub(1);
-                    if *count == 0 {
-                        self.groups.remove(&group);
-                    }
-                }
-                evicted.push(id);
+        // 分组选出当前占用最多的插件，平手时按 BTreeMap 的稳定字典序选择；
+        // 再沿全局插入顺序移除该插件最旧的一条。每次都从真实索引重算，
+        // 因此损坏/失同步时仍由外层 entries 长度收敛保护兜底。
+        let group = self
+            .groups
+            .iter()
+            .max_by(|(left_key, left_count), (right_key, right_count)| {
+                left_count.cmp(right_count).then_with(|| right_key.cmp(left_key))
+            })
+            .map(|(key, _)| key.clone());
+        let Some(group) = group else { return Vec::new() };
+        let plugin_id = group.strip_prefix("plugin:").unwrap_or(&group);
+        let oldest = self
+            .order
+            .iter()
+            .find(|id| self.entries.get(*id).is_some_and(|entry| entry.plugin_id == plugin_id))
+            .cloned();
+        oldest.map_or_else(Vec::new, |id| self.remove_entry_from_ring(&id))
+    }
+
+    fn evict_oldest_for(&mut self, plugin_id: &str) -> Vec<String> {
+        let oldest = self
+            .order
+            .iter()
+            .find(|id| self.entries.get(*id).is_some_and(|entry| entry.plugin_id == plugin_id));
+        match oldest {
+            Some(id) => {
+                let id = id.clone();
+                self.remove_entry_from_ring(&id)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    fn remove_entry_from_ring(&mut self, id: &str) -> Vec<String> {
+        if let Some(index) = self.order.iter().position(|ordered_id| ordered_id == id) {
+            self.order.remove(index);
+        }
+        let Some(entry) = self.entries.remove(id) else {
+            return Vec::new();
+        };
+        let evictions = self.evictions.entry(entry.plugin_id.clone()).or_default();
+        *evictions = evictions.saturating_add(1);
+        if !entry.read {
+            self.unread = self.unread.saturating_sub(1);
+        }
+        let group = entry.group_key();
+        if let Some(count) = self.groups.get_mut(&group) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.groups.remove(&group);
             }
         }
-        evicted
+        vec![id.to_string()]
     }
 
     /// 批量裁剪到目标容量（供外部缩容使用）。
@@ -294,10 +376,7 @@ impl NotifyStore {
 
     /// 按分组取条目。
     pub fn by_group(&self, group_key: &str) -> Vec<&NotifyEntry> {
-        self.entries
-            .values()
-            .filter(|e| e.group_key() == group_key)
-            .collect()
+        self.entries.values().filter(|e| e.group_key() == group_key).collect()
     }
 
     /// 分组统计：分组键 → 条目数。
@@ -307,6 +386,7 @@ impl NotifyStore {
 
     /// **卸载清理**：删除某插件的所有通知。返回被删的条目数。
     pub fn cleanup_plugin(&mut self, plugin_id: &str) -> usize {
+        self.evictions.remove(plugin_id);
         let group = format!("plugin:{plugin_id}");
         let ids: Vec<String> = self
             .entries
@@ -339,18 +419,14 @@ impl NotifyStore {
         self.entries.clear();
         self.order.clear();
         self.groups.clear();
+        self.evictions.clear();
         self.unread = 0;
         n
     }
 
     /// 最近 N 条（按时间倒序）。
     pub fn recent(&self, n: usize) -> Vec<&NotifyEntry> {
-        self.order
-            .iter()
-            .rev()
-            .take(n)
-            .filter_map(|id| self.entries.get(id))
-            .collect()
+        self.order.iter().rev().take(n).filter_map(|id| self.entries.get(id)).collect()
     }
 
     /// 记录一次分发（供降级矩阵审计）。
@@ -372,11 +448,8 @@ impl NotifyStore {
         if total == 0 {
             return 0.0;
         }
-        let degraded = self
-            .dispatch_log
-            .iter()
-            .filter(|r| r.outcome == DispatchOutcome::Degraded)
-            .count();
+        let degraded =
+            self.dispatch_log.iter().filter(|r| r.outcome == DispatchOutcome::Degraded).count();
         degraded as f64 / total as f64
     }
 }
@@ -410,11 +483,7 @@ pub fn dispatch(
         Ok(false) | Err(_) => DispatchOutcome::Degraded,
     };
     // 3) 最后落一条分发记录（是「尝试」的日志，不是通知本身）。
-    store.log_dispatch(DispatchRecord {
-        outcome,
-        entry_id: entry.id.clone(),
-        ts: entry.ts,
-    });
+    store.log_dispatch(DispatchRecord { outcome, entry_id: entry.id.clone(), ts: entry.ts });
     outcome
 }
 
@@ -475,6 +544,19 @@ mod tests {
         s.push(entry("n1", "p.a", NotifyKind::Info)).unwrap();
         let e = s.push(entry("n1", "p.b", NotifyKind::Info)).unwrap_err();
         assert!(matches!(e, NotifyError::DuplicateId(ref id) if id == "n1"));
+    }
+
+    #[test]
+    fn duplicate_id_at_capacity_does_not_evict_existing_history() {
+        let mut store = NotifyStore::with_plugin_capacity(2, 2).unwrap();
+        store.push(entry("a-1", "p.a", NotifyKind::Info)).unwrap();
+        store.push(entry("b-1", "p.b", NotifyKind::Info)).unwrap();
+
+        let error = store.push(entry("a-1", "p.a", NotifyKind::Error)).unwrap_err();
+        assert!(matches!(error, NotifyError::DuplicateId(_)));
+        assert!(store.get("a-1").is_some());
+        assert!(store.get("b-1").is_some());
+        assert_eq!(store.len(), 2);
     }
 
     #[test]
@@ -660,6 +742,41 @@ mod tests {
     }
 
     #[test]
+    fn per_plugin_ring_does_not_evict_neighbor_history() {
+        let mut store = NotifyStore::with_plugin_capacity(128, 64).unwrap();
+        for i in 0..65 {
+            store.push(entry(&format!("a-{i}"), "p.a", NotifyKind::Info)).unwrap();
+        }
+        assert!(store.get("a-0").is_none(), "p.a 只裁剪自己的最旧历史");
+        assert!(store.get("a-64").is_some());
+        store.push(entry("b-0", "p.b", NotifyKind::Warning)).unwrap();
+
+        assert_eq!(store.group_counts()["plugin:p.a"], 64);
+        assert_eq!(store.group_counts()["plugin:p.b"], 1);
+        assert!(store.get("b-0").is_some(), "A 的配额裁剪不得影响 B");
+        assert_eq!(store.capacity(), 128);
+        assert_eq!(store.plugin_capacity(), 64);
+    }
+
+    #[test]
+    fn global_overflow_evicts_oldest_entry_from_noisiest_plugin() {
+        let mut store = NotifyStore::with_plugin_capacity(6, 6).unwrap();
+        for i in 0..4 {
+            store.push(entry(&format!("a-{i}"), "p.a", NotifyKind::Info)).unwrap();
+        }
+        store.push(entry("b-0", "p.b", NotifyKind::Warning)).unwrap();
+        store.push(entry("c-0", "p.c", NotifyKind::Info)).unwrap();
+
+        let evicted = store.push(entry("d-0", "p.d", NotifyKind::Info)).unwrap();
+        assert_eq!(evicted, vec!["a-0"]);
+        assert!(store.get("b-0").is_some(), "较安静插件的历史必须保留");
+        assert_eq!(store.group_counts()["plugin:p.a"], 3);
+        assert_eq!(store.len(), 6);
+        assert_eq!(store.eviction_counts()["p.a"], 1);
+        assert_eq!(store.eviction_total(), 1);
+    }
+
+    #[test]
     fn validate_group_key_rejects_empty_and_dollar() {
         assert!(validate_group_key("").is_err());
         assert!(validate_group_key("$bad").is_err());
@@ -701,7 +818,7 @@ mod tests {
         s.push(entry("n1", "p.audio", NotifyKind::Info)).unwrap();
         assert!(s.group_counts().contains_key("plugin:p.audio"));
         s.cleanup_plugin("p.audio");
-        assert!(s.group_counts().get("plugin:p.audio").is_none(), "清空后分组键应消失");
+        assert!(!s.group_counts().contains_key("plugin:p.audio"), "清空后分组键应消失");
     }
 
     #[test]
@@ -837,10 +954,7 @@ mod tests {
             dispatch(&mut s, &sink, entry("n1", "p.a", NotifyKind::Info))
         }));
         assert!(result.is_err(), "sink 的 panic 必须冒泡，不被 dispatch 吞掉");
-        assert!(
-            s.get("n1").is_some(),
-            "先入缓冲：sink 还没返回时通知就必须已经入库"
-        );
+        assert!(s.get("n1").is_some(), "先入缓冲：sink 还没返回时通知就必须已经入库");
         assert_eq!(s.len(), 1);
     }
 
@@ -948,8 +1062,8 @@ mod tests {
         assert_eq!(a.group_counts(), b.group_counts());
         assert_eq!(a.len(), b.len());
         // by_group 按 id 排序（BTreeMap 序），故同集合必同序。
-        let ca = serde_json::to_value(&a.by_group("plugin:p.a")).unwrap();
-        let cb = serde_json::to_value(&b.by_group("plugin:p.a")).unwrap();
+        let ca = serde_json::to_value(a.by_group("plugin:p.a")).unwrap();
+        let cb = serde_json::to_value(b.by_group("plugin:p.a")).unwrap();
         assert_eq!(ca, cb);
     }
 
@@ -990,11 +1104,8 @@ mod tests {
         assert!(s.get("n6").is_some());
 
         // 2. 降级矩阵：偶数条走系统，奇数条降级。
-        let degraded = s
-            .dispatch_log()
-            .iter()
-            .filter(|r| r.outcome == DispatchOutcome::Degraded)
-            .count();
+        let degraded =
+            s.dispatch_log().iter().filter(|r| r.outcome == DispatchOutcome::Degraded).count();
         assert!(degraded >= 1, "应至少有降级记录");
 
         // 3. 卸载清理：删除 p.audio 的所有通知。
@@ -1005,11 +1116,7 @@ mod tests {
         assert_eq!(s.unread_count(), 0);
 
         // 4. 清理后同插件可继续写入。
-        dispatch(
-            &mut s,
-            &MockSink::new(true, false),
-            entry("n7", "p.audio", NotifyKind::Info),
-        );
+        dispatch(&mut s, &MockSink::new(true, false), entry("n7", "p.audio", NotifyKind::Info));
         assert_eq!(s.len(), 1);
     }
 }

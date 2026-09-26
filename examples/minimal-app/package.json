@@ -10,6 +10,7 @@
     "tauri": "pnpm dlx @tauri-apps/cli@2"
   },
   "dependencies": {
+    "@tauron/app-plugin-sdk": "workspace:*",
     "@tauron/core": "workspace:*",
     "@tauron/host": "workspace:*",
     "@tauron/plugin-sdk": "workspace:*",

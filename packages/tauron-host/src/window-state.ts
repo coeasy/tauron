@@ -94,7 +94,7 @@ export class WindowState {
    */
   private _loadState(): WindowStateData {
     try {
-      const raw = localStorage.getItem(this._config.storageKey);
+      const raw = window.localStorage.getItem(this._config.storageKey);
       if (raw) {
         const parsed = JSON.parse(raw);
         return {
@@ -134,7 +134,7 @@ export class WindowState {
       ...state,
     };
     try {
-      localStorage.setItem(this._config.storageKey, JSON.stringify(this._currentState));
+      window.localStorage.setItem(this._config.storageKey, JSON.stringify(this._currentState));
       this._lastError = null;
       return true;
     } catch (err) {
@@ -153,7 +153,7 @@ export class WindowState {
   clear(): boolean {
     let ok = true;
     try {
-      localStorage.removeItem(this._config.storageKey);
+      window.localStorage.removeItem(this._config.storageKey);
       this._lastError = null;
     } catch (err) {
       this._fail(err);

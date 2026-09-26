@@ -23,12 +23,7 @@ pub enum BrandError {
 
     /// 唯一性违规。
     #[error("品牌唯一性违规：字段 `{field}` 值 `{value}` 在 `{brand_a}` 和 `{brand_b}` 中重复")]
-    UniquenessViolation {
-        field: String,
-        value: String,
-        brand_a: String,
-        brand_b: String,
-    },
+    UniquenessViolation { field: String, value: String, brand_a: String, brand_b: String },
 
     /// 配置解析错误。
     #[error("配置解析错误：{0}")]
@@ -43,11 +38,7 @@ mod tests {
 
     #[test]
     fn error_messages_are_specific() {
-        assert!(BrandError::EmptyField("identifier".into())
-            .to_string()
-            .contains("identifier"));
-        assert!(BrandError::MissingIcon { platform: "web".into() }
-            .to_string()
-            .contains("web"));
+        assert!(BrandError::EmptyField("identifier".into()).to_string().contains("identifier"));
+        assert!(BrandError::MissingIcon { platform: "web".into() }.to_string().contains("web"));
     }
 }

@@ -7,12 +7,19 @@
 // - 不持有状态，每次调用都是一次 invoke
 // ──────────────────────────────────────────────────────────────────────────
 
-import type { Backend } from './backend.js';
+import { adoptRuntimeCapabilities, type Backend } from './backend.js';
 import { translate_at_boundary } from './errors.js';
-import type { JsonValue } from './events.js';
+import type { JsonValue, PendingCallInfo } from './events.js';
 
 export interface ShellClientOptions {
   backend: Backend;
+}
+
+export interface HostCapabilities {
+  families: string[];
+  commands: string[];
+  unsupported: Array<{ domain: string; reason: string }>;
+  pluginRuntime: boolean;
 }
 
 /** 窗口操作结果。 */
@@ -88,6 +95,12 @@ export interface NotificationsListResult {
    * 不伪造 `degraded`。
    */
   dispatchLog: DispatchRecord[];
+  /** 宿主全局通知历史容量。 */
+  capacity: number;
+  /** 单插件通知历史容量。 */
+  pluginCapacity: number;
+  /** 各插件当前历史占用；插件调用者只收到自身条目。 */
+  pluginUsage: Record<string, number>;
 }
 
 /** 启动恢复标记的加载来源（Rust `LoadSource::as_str()` 逐字对齐）。 */
@@ -401,6 +414,29 @@ export interface RuntimeHealth {
   reap: ReapStats;
 }
 
+/** 主窗资源配额快照（`host_resource_stats`）。 */
+export interface ResourceStats {
+  global: {
+    pendingCalls: { used: number; limit: number };
+    streams: { used: number; limit: number };
+    subscriptions: { used: number; limit: number };
+    notifications: { used: number; limit: number; perPluginLimit: number; evictedTotal: number };
+  };
+  perPlugin: {
+    pendingCallsLimit: number;
+    streamsLimit: number;
+    subscriptionsLimit: number;
+    plugins: Array<{
+      pluginId: string;
+      pendingCalls: number;
+      streams: number;
+      subscriptions: number;
+      notifications: number;
+      notificationEvictions: number;
+    }>;
+  };
+}
+
 /**
  * 主窗特权客户端。
  *
@@ -417,6 +453,33 @@ export class ShellClient {
 
   constructor(options: ShellClientOptions) {
     this.backend = options.backend;
+  }
+
+  /** 主窗能力协商快照：内容由宿主实际装配的 handler/provider 推导。 */
+  async capabilities(): Promise<HostCapabilities> {
+    return this.call('host_capabilities');
+  }
+
+  /**
+   * 拉取能力快照并**回填**传输层的 capability 缓存（0.4-A2）。
+   *
+   * 不开这一下，{@link supports} 只能报静态表里写死的那份，而 Rust 侧
+   * feature-gated 的命令（当前是插件安装两条）在默认构建下并不存在——
+   * 能力表会说"有"、invoke 才说"没有"。调用一次本方法即可让
+   * `supports('host_registry_install')` 反映宿主**真实**的构建形态。
+   *
+   * @returns 快照本体，以及 `adopted` —— 传输层是否吃下了这份命令集
+   *          （`false` = 该传输层不支持回填，`supports()` 仍按静态表走）。
+   */
+  async refreshCapabilities(): Promise<HostCapabilities & { adopted: boolean }> {
+    const caps = await this.capabilities();
+    const adopted = adoptRuntimeCapabilities(this.backend, caps.commands);
+    return { ...caps, adopted };
+  }
+
+  /** 查询当前传输层是否注册指定命令。 */
+  supports(command: string): boolean {
+    return this.backend.capabilities().has(command);
   }
 
   private call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -724,8 +787,8 @@ export class ShellClient {
   // ── 注册表（全量）──
 
   /** 列出所有插件（privileged 档，仅主窗可用）。 */
-  async registryListAll(): Promise<unknown[]> {
-    return this.call<unknown[]>('host_registry_list_all');
+  async registryListAll(): Promise<Array<{ id: string; name: string; version: string; state: string; pluginType: string; disabledBySafemode: boolean }>> {
+    return this.call<Array<{ id: string; name: string; version: string; state: string; pluginType: string; disabledBySafemode: boolean }>>('host_registry_list_all');
   }
 
   // ── 进程插件运行时（P0-2，privileged 档，仅主窗可用）──
@@ -753,5 +816,40 @@ export class ShellClient {
    */
   async runtimeHealth(lease: string): Promise<RuntimeHealth> {
     return this.call<RuntimeHealth>('host_runtime_health', { lease });
+  }
+
+  /** 主窗配额诊断：列出全局占用与逐插件资源计数。 */
+  async resourceStats(): Promise<ResourceStats> {
+    return this.call<ResourceStats>('host_resource_stats');
+  }
+
+  // ── 跨主体调用（0.4-A1，主窗 → 插件）──
+
+  /**
+   * 发起一次宿主 → 插件的跨主体调用（0.4-A1）。
+   *
+   * 主窗发起主体恒为 `"main"`（宿主从 webview label 解析，不信任入参）。
+   * 宿主按目标插件形态选投递通路（js → 事件总线 request 通道、process →
+   * sidecar stdin 帧回路）；无通路时以结构化 `Unsupported` 失败。
+   *
+   * 结果用 {@link ShellClient.callTakeResult} 取件（一次性语义）。
+   */
+  async callPlugin(target: string, method: string, argsJson?: JsonValue): Promise<PendingCallInfo> {
+    return this.call<PendingCallInfo>('host_call_plugin', {
+      req: {
+        target,
+        method,
+        ...(argsJson !== undefined ? { argsJson } : {}),
+      },
+    });
+  }
+
+  /**
+   * 发起方取走一次已结算的跨主体调用结果（0.4-A1，主窗即发起方）。
+   *
+   * `settled` 取走即删；`pending` 返回副本、条目保留（「还没好」，可稍后再取）。
+   */
+  async callTakeResult(callId: string): Promise<PendingCallInfo> {
+    return this.call<PendingCallInfo>('host_call_take', { req: { callId } });
   }
 }

@@ -12,7 +12,8 @@ import { pluginScaffold, validatePluginConfig, validatePluginType } from './plug
 import { themeGenerate, builtinLightTheme, builtinDarkTheme } from './theme.js';
 import {
   collectPluginFiles,
-  generatePackManifest,
+  createPluginArchive,
+  readPluginArchive,
   pluginPack,
   pluginSign,
   pluginPublish,
@@ -50,6 +51,9 @@ interface PluginManifestFile {
   /** 插件类型（manifest 中字段名为 `type`）。 */
   type?: string;
   permissions?: string[];
+  framework?: string;
+  entry?: { js?: string; sidecar?: string; wasm?: string };
+  platforms?: string[];
 }
 
 /** 打包清单（见 pack.ts 的 generatePackManifest）。 */
@@ -142,7 +146,14 @@ function loadPackFiles(
   file: string,
 ): { ok: true; files: PluginFileInfo[] } | { ok: false; error: string } {
   if (!pathExists(file)) {
-    return { ok: false, error: `打包清单不存在：${file}` };
+    return { ok: false, error: `插件安装包或打包清单不存在：${file}` };
+  }
+  if (file.toLowerCase().endsWith('.tpkg')) {
+    try {
+      return { ok: true, files: readPluginArchive(fs.readFileSync(path.resolve(file))) };
+    } catch (err) {
+      return { ok: false, error: `插件安装包校验失败：${err instanceof Error ? err.message : String(err)}` };
+    }
   }
   const manifest = readJsonFile<PackManifestFile>(file);
   if (!manifest.ok || manifest.data === undefined) {
@@ -336,7 +347,7 @@ const HELP_COMMANDS: CommandDef[] = [
         }
         case 'pack': {
           const dir = (options.dir as string) ?? '.';
-          const output = (options.output as string) ?? `${dir}-pack.json`;
+          const output = (options.output as string) ?? `${dir}.tpkg`;
 
           const pluginConfig = loadPluginConfig(dir);
           if (!pluginConfig.ok) {
@@ -345,9 +356,16 @@ const HELP_COMMANDS: CommandDef[] = [
             return;
           }
 
-          const scanned = collectPluginFiles(dir);
+          const scanned = collectPluginFiles(dir, [output]);
           if (!scanned.ok) {
             printError(scanned.error ?? `扫描插件目录失败：${dir}`);
+            process.exitCode = 1;
+            return;
+          }
+          const packFiles = scanned.files.filter((file) => file.path !== 'manifest.json');
+          const sourceManifest = readJsonFile<Record<string, unknown>>(path.join(dir, 'manifest.json'));
+          if (!sourceManifest.ok || sourceManifest.data === undefined) {
+            printError(sourceManifest.error ?? '插件 manifest 读取失败');
             process.exitCode = 1;
             return;
           }
@@ -357,8 +375,9 @@ const HELP_COMMANDS: CommandDef[] = [
             outputPath: output,
             includeSource: options['include-source'] === true,
             compress: options['compress'] === true,
-            files: scanned.files,
+            files: packFiles,
             pluginConfig: pluginConfig.config,
+            pluginManifest: sourceManifest.data,
           };
 
           let resolved: ResolvedPackConfig;
@@ -377,14 +396,22 @@ const HELP_COMMANDS: CommandDef[] = [
             return;
           }
 
-          const written = writeFile(output, generatePackManifest(resolved));
+          let archive: Buffer;
+          try {
+            archive = createPluginArchive(resolved);
+          } catch (err) {
+            printError(err instanceof Error ? err.message : String(err));
+            process.exitCode = 1;
+            return;
+          }
+          const written = writeFile(output, archive);
           if (!written.ok) {
-            printError(written.error ?? `写入打包清单失败：${output}`);
+            printError(written.error ?? `写入插件安装包失败：${output}`);
             process.exitCode = 1;
             return;
           }
 
-          printSuccess(`打包成功：${output}`);
+          printSuccess(`插件安装包已生成：${output}`);
           break;
         }
         case 'sign': {

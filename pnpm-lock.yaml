@@ -32,6 +32,9 @@ importers:
       '@tauri-apps/api':
         specifier: ^2.11.1
         version: 2.11.1
+      '@tauron/app-plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/tauron-app-plugin-sdk
       '@tauron/core':
         specifier: workspace:*
         version: link:../../packages/tauron-core

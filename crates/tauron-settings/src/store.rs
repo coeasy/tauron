@@ -74,11 +74,7 @@ pub struct Migration {
 
 impl Migration {
     pub fn new(from: &str, to: &str, apply: fn(&Value) -> Value) -> Self {
-        Self {
-            from: from.to_string(),
-            to: to.to_string(),
-            apply,
-        }
+        Self { from: from.to_string(), to: to.to_string(), apply }
     }
 }
 
@@ -157,7 +153,7 @@ impl Watcher {
 
     /// 取出某订阅者的全部待消费事件（消费即清空）。
     pub fn drain(&mut self, id: u64) -> Vec<ChangeEvent> {
-        self.queues.get_mut(&id).map(|q| std::mem::take(q)).unwrap_or_default()
+        self.queues.get_mut(&id).map(std::mem::take).unwrap_or_default()
     }
 
     /// 活跃订阅者数（用于"卸载零悬挂"类门禁）。
@@ -207,10 +203,7 @@ impl SettingsStore {
 
     /// 取合并后的当前值。
     pub fn get(&self, plugin_id: &str) -> SettingsResult<Value> {
-        Ok(self
-            .state_ref(plugin_id)
-            .map(PluginState::merged)
-            .unwrap_or(Value::Object(Map::new())))
+        Ok(self.state_ref(plugin_id).map(PluginState::merged).unwrap_or(Value::Object(Map::new())))
     }
 
     /// 取某键的当前值（点路径）。
@@ -241,9 +234,10 @@ impl SettingsStore {
         value: &Value,
     ) -> SettingsResult<merge::WriteOp> {
         // 门禁 1：schema 已注册。
-        let entry = self.registry.get(plugin_id).ok_or_else(|| {
-            SettingsError::SchemaNotRegistered(plugin_id.to_string())
-        })?;
+        let entry = self
+            .registry
+            .get(plugin_id)
+            .ok_or_else(|| SettingsError::SchemaNotRegistered(plugin_id.to_string()))?;
 
         // 门禁 2：命名空间隔离。
         if writer != plugin_id {
@@ -393,9 +387,7 @@ impl SettingsStore {
 
     /// 已存数据的 schema 版本（`None` = 既无数据也无标注）。
     pub fn data_version(&self, plugin_id: &str) -> Option<&str> {
-        self.state_ref(plugin_id)
-            .map(|s| s.schema_version.as_str())
-            .filter(|v| !v.is_empty())
+        self.state_ref(plugin_id).map(|s| s.schema_version.as_str()).filter(|v| !v.is_empty())
     }
 
     /// 沿迁移链把该命名空间的**用户层**从已标注版本迁到 `to_version`。
@@ -426,10 +418,7 @@ impl SettingsStore {
 
         // 在副本上走完整条链。
         let mut current = from.clone();
-        let mut data = self
-            .state_ref(plugin_id)
-            .map(|s| s.user.clone())
-            .unwrap_or(Value::Null);
+        let mut data = self.state_ref(plugin_id).map(|s| s.user.clone()).unwrap_or(Value::Null);
         let mut applied = 0usize;
         while current != to_version {
             let step = self
@@ -728,10 +717,7 @@ mod tests {
         assert_eq!(drained.len(), MAX_PENDING_EVENTS, "队列必须有上限");
         // 丢的是**最旧**的：留下的是最后 MAX_PENDING_EVENTS 条。
         assert_eq!(drained[0].key, format!("k{}", 25));
-        assert_eq!(
-            drained[MAX_PENDING_EVENTS - 1].key,
-            format!("k{}", MAX_PENDING_EVENTS + 24)
-        );
+        assert_eq!(drained[MAX_PENDING_EVENTS - 1].key, format!("k{}", MAX_PENDING_EVENTS + 24));
     }
 
     #[test]
@@ -838,7 +824,8 @@ mod tests {
         let merged = s.get("p.audio").unwrap();
         assert_eq!(merged["volume"], "not-a-number");
         // 校验能定位到具体路径。
-        let errs = validate(&s.registry().get("p.audio").unwrap().compiled.schema, &merged).unwrap_err();
+        let errs =
+            validate(&s.registry().get("p.audio").unwrap().compiled.schema, &merged).unwrap_err();
         assert_eq!(errs[0].path, "/volume");
     }
 
@@ -873,18 +860,11 @@ mod tests {
     fn explicit_open_object_schema_accepts_undeclared_keys() {
         // 宿主级设置文档的键是开放集合；schema 显式声明 true 时必须被尊重。
         let mut s = SettingsStore::new();
-        s.register(
-            "host",
-            "1.0.0",
-            &json!({"type": "object", "additionalProperties": true}),
-        )
-        .unwrap();
+        s.register("host", "1.0.0", &json!({"type": "object", "additionalProperties": true}))
+            .unwrap();
         s.set("host", "host", "plugin%3Ap.theme", &json!("dark")).unwrap();
         s.set("host", "host", "other-key", &json!(1)).unwrap();
-        assert_eq!(
-            s.get_key("host", "plugin%3Ap.theme").unwrap(),
-            Some(json!("dark"))
-        );
+        assert_eq!(s.get_key("host", "plugin%3Ap.theme").unwrap(), Some(json!("dark")));
         assert_eq!(s.get_key("host", "other-key").unwrap(), Some(json!(1)));
     }
 
@@ -1035,15 +1015,18 @@ mod tests {
         )
         .unwrap();
         s.register_migration("p.app", Migration::new("1.0.0", "2.0.0", migrate_v1_to_v2));
-        s.register_migration("p.app", Migration::new("2.0.0", "3.0.0", |user| {
-            let mut out = user.clone();
-            if let Value::Object(m) = &mut out {
-                if let Some(v) = m.remove("appearance") {
-                    m.insert("palette".to_string(), v);
+        s.register_migration(
+            "p.app",
+            Migration::new("2.0.0", "3.0.0", |user| {
+                let mut out = user.clone();
+                if let Value::Object(m) = &mut out {
+                    if let Some(v) = m.remove("appearance") {
+                        m.insert("palette".to_string(), v);
+                    }
                 }
-            }
-            out
-        }));
+                out
+            }),
+        );
         assert_eq!(s.migrate("p.app", "3.0.0").unwrap(), 2, "两步链应走两步");
         assert_eq!(s.get_key("p.app", "palette").unwrap(), Some(json!("dark")));
         assert_eq!(s.data_version("p.app"), Some("3.0.0"));

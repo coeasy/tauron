@@ -5,7 +5,7 @@
 // 这里**不**定义任何 Tauri 依赖；所有错误对象都可被 JSON 序列化。
 // ──────────────────────────────────────────────────────────────────────────
 
-/** 线上错误码全集（与 Rust `ErrorCode` 枚举同序，共 19 个）。 */
+/** 线上错误码全集（与 Rust `ErrorCode` 枚举同序，共 20 个）。 */
 export const HOST_ERROR_CODES = [
   'E_HOST_PANIC',
   'E_UNKNOWN_PLUGIN',
@@ -46,6 +46,16 @@ export const HOST_ERROR_CODES = [
    * ⚠️ 追加码必须加在数组**末尾**：wire-gate 按声明顺序与 Rust 枚举比对。
    */
   'E_STREAM_FULL',
+  /**
+   * 一次跨主体调用已被结算，重复回填被拒（0.4-A1）。
+   *
+   * 不接受覆盖：允许重复回填等于让"第一次的结果"可被第二次悄悄改写——
+   * 调用方拿到哪个结果取决于时序而不是事实。宁可显式失败。
+   *
+   * **不是** `E_CALL_NOT_FOUND`：条目**还在**（还没被发起方取走），只是不再
+   * 接受新结果；下一步动作是去 `takeCallResult` 取已结算的结果。
+   */
+  'E_CALL_ALREADY_SETTLED',
 ] as const;
 
 export type HostErrorCode = (typeof HOST_ERROR_CODES)[number];

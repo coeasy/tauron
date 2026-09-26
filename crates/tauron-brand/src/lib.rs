@@ -14,11 +14,14 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-pub mod error;
 pub mod build;
+pub mod error;
 
+pub use build::{
+    create_brand_builder, create_default_builder, BrandBuilder, BuildInfo, BuildOptions,
+    BuildResult,
+};
 pub use error::{BrandError, BrandResult};
-pub use build::{BrandBuilder, BuildOptions, BuildResult, BuildInfo, create_brand_builder, create_default_builder};
 
 /// 平台标识。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -31,12 +34,8 @@ pub enum Platform {
 }
 
 impl Platform {
-    pub const ALL: [Platform; 4] = [
-        Platform::Win32,
-        Platform::Macos,
-        Platform::Linux,
-        Platform::Web,
-    ];
+    pub const ALL: [Platform; 4] =
+        [Platform::Win32, Platform::Macos, Platform::Linux, Platform::Web];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -148,14 +147,10 @@ impl BrandConfig {
     pub fn validate_icons(&self, required: &[Platform]) -> BrandResult<()> {
         for platform in required {
             if !self.icons.contains_key(platform) {
-                return Err(BrandError::MissingIcon {
-                    platform: platform.as_str().to_string(),
-                });
+                return Err(BrandError::MissingIcon { platform: platform.as_str().to_string() });
             }
             if self.icons[platform].trim().is_empty() {
-                return Err(BrandError::EmptyIconPath {
-                    platform: platform.as_str().to_string(),
-                });
+                return Err(BrandError::EmptyIconPath { platform: platform.as_str().to_string() });
             }
         }
         Ok(())
@@ -213,10 +208,7 @@ pub fn apply_env_overrides(config: &Value, env_str: &str) -> Value {
 /// `productName.foo=1`——`productName` 已是字符串，写不进去）。此前这条路径被
 /// `let _ = set_path(...)` 静默吞掉：CI 注入的覆盖没生效，却没有任何痕迹。
 /// 调用方（宿主启动装配）应把返回的键列表记进日志/诊断，而不是当作成功。
-pub fn apply_env_overrides_reporting(
-    config: &Value,
-    env_str: &str,
-) -> (Value, Vec<String>) {
+pub fn apply_env_overrides_reporting(config: &Value, env_str: &str) -> (Value, Vec<String>) {
     if env_str.trim().is_empty() {
         return (config.clone(), Vec::new());
     }
@@ -280,13 +272,7 @@ pub fn validate_uniqueness(brands: &[&BrandConfig]) -> BrandResult<()> {
                     brand_b: prev_field.clone(),
                 });
             }
-            seen.insert(
-                key,
-                (
-                    format!("{}|{}", brand.identifier, brand.data_dir),
-                    field,
-                ),
-            );
+            seen.insert(key, (format!("{}|{}", brand.identifier, brand.data_dir), field));
         }
     }
     Ok(())
@@ -323,10 +309,7 @@ impl std::fmt::Display for BuildType {
 }
 
 /// 展开 CI 矩阵。
-pub fn expand_matrix(
-    brands: &[&BrandConfig],
-    platforms: &[Platform],
-) -> Vec<MatrixEntry> {
+pub fn expand_matrix(brands: &[&BrandConfig], platforms: &[Platform]) -> Vec<MatrixEntry> {
     let mut entries = Vec::new();
     for brand in brands {
         for platform in platforms {
@@ -404,7 +387,9 @@ mod tests {
     #[test]
     fn validate_required_rejects_empty() {
         let b = test_brand("", "proto", "autostart", "dir");
-        assert!(matches!(b.validate_required(), Err(BrandError::EmptyField(ref f)) if f == "identifier"));
+        assert!(
+            matches!(b.validate_required(), Err(BrandError::EmptyField(ref f)) if f == "identifier")
+        );
     }
 
     #[test]
@@ -443,10 +428,7 @@ mod tests {
         let mut b = full_brand();
         b.shortcuts.insert("a".into(), "Ctrl+1".into());
         b.shortcuts.insert("b".into(), "Ctrl+1".into());
-        assert!(matches!(
-            b.validate_shortcuts(),
-            Err(BrandError::DuplicateShortcut { .. })
-        ));
+        assert!(matches!(b.validate_shortcuts(), Err(BrandError::DuplicateShortcut { .. })));
     }
 
     #[test]
@@ -613,8 +595,7 @@ mod tests {
         // `productName` 已是字符串，`productName.foo=1` 写不进去。此前被
         // `let _ =` 静默吞掉——覆盖没生效却毫无痕迹。诊断版必须如实报告。
         let base = serde_json::json!({"productName": "Base"});
-        let (result, dropped) =
-            apply_env_overrides_reporting(&base, "productName.foo=1;ok=5");
+        let (result, dropped) = apply_env_overrides_reporting(&base, "productName.foo=1;ok=5");
         assert_eq!(dropped, vec!["productName.foo".to_string()]);
         assert_eq!(result["ok"], 5);
         // 兼容版行为不变（返回值仍是合并后的配置）。

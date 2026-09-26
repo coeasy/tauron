@@ -74,6 +74,7 @@ export const SHELL_EVENTS = {
    * `host_registry_admin({op:'uninstall'})` 都在，但此前没有任何按钮能触发。
    */
   pluginUninstall: 'oc-plugin-uninstall',
+  pluginInstall: 'oc-plugin-install',
 
   // ── 主题选择器（<oc-theme-picker>）────────────────────────────────────
   /**
@@ -128,6 +129,11 @@ export interface PluginToggleEventDetail {
 export interface PluginUninstallEventDetail {
   /** 插件 ID。 */
   id: string;
+}
+
+/** Main-window local package install request; permission approval follows separately. */
+export interface PluginInstallEventDetail {
+  packagePath: string;
 }
 
 /** `oc-theme-change` 事件详情。 */

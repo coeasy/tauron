@@ -64,12 +64,8 @@ pub enum LayerKind {
 }
 
 impl LayerKind {
-    pub const ALL: [LayerKind; 4] = [
-        LayerKind::Builtin,
-        LayerKind::Brand,
-        LayerKind::Plugin,
-        LayerKind::User,
-    ];
+    pub const ALL: [LayerKind; 4] =
+        [LayerKind::Builtin, LayerKind::Brand, LayerKind::Plugin, LayerKind::User];
 
     pub fn priority(self) -> u8 {
         self as u8
@@ -122,19 +118,12 @@ mod tests {
     #[test]
     fn error_messages_are_specific() {
         assert!(SettingsError::SchemaNotRegistered("p".into()).to_string().contains("p"));
-        assert!(SettingsError::FieldLimitExceeded {
-            plugin: "p".into(),
-            fields: 41,
-            limit: 40,
-        }
-        .to_string()
-        .contains("41"));
-        assert!(SettingsError::NamespaceViolation {
-            writer: "a".into(),
-            target: "b".into(),
-        }
-        .to_string()
-        .contains("b"));
+        assert!(SettingsError::FieldLimitExceeded { plugin: "p".into(), fields: 41, limit: 40 }
+            .to_string()
+            .contains("41"));
+        assert!(SettingsError::NamespaceViolation { writer: "a".into(), target: "b".into() }
+            .to_string()
+            .contains("b"));
     }
 
     #[test]

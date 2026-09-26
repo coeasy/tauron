@@ -30,8 +30,12 @@ export type UpdateStatus = 'idle' | 'checking' | 'available' | 'downloading' | '
 export interface UpdateInfo {
   /** 是否有可用更新 */
   available: boolean;
+  /** 是否为宿主模拟结果；true 时不得解释为真实检查结论。 */
+  simulated?: boolean;
+  /** 模拟或不可用时的宿主说明。 */
+  reason?: string | null;
   /** 最新版本号 */
-  version: string;
+  version: string | null;
   /** 当前版本号 */
   currentVersion: string;
   /** 更新大小（字节） */
@@ -132,10 +136,11 @@ export class AutoUpdateClient {
         endpoints: this._config.endpoints,
         pubkey: this._config.pubkey,
       });
+      const info = result?.simulated === true ? { ...result, available: false } : result;
 
       // 桩实现返回 { available: false }；可选链兜底，防宿主返回 Null 时崩溃。
-      if (result?.available === true) {
-        this._setStatus('available', result);
+      if (info?.available === true) {
+        this._setStatus('available', info);
 
         // 自动下载。downloadUpdate 内部已把失败落为 'error' 并 rethrow——
         // 这里必须接住，否则就是 unhandled rejection（后台自动检查把进程
@@ -144,10 +149,10 @@ export class AutoUpdateClient {
           void this.downloadUpdate().catch(() => undefined);
         }
       } else {
-        this._setStatus('idle', result);
+        this._setStatus('idle', info);
       }
 
-      return result;
+      return info;
     } catch (err) {
       this._setStatus('error', {
         available: false,
@@ -165,19 +170,33 @@ export class AutoUpdateClient {
    * 尚未实现进度通道（下载是一次性命令，成功即完成）。参数保留是为了
    * 接线后不加签名；接入进度通道前不要依赖它。
    */
-  async downloadUpdate(onProgress?: (progress: DownloadProgress) => void): Promise<void> {
-    if (!this._info?.available) {
+  async downloadUpdate(_onProgress?: (progress: DownloadProgress) => void): Promise<void> {
+    if (!this._info?.available || this._info.simulated === true) {
+      if (this._info?.simulated === true) {
+        throw new Error(this._info.reason ?? 'Update check is simulated by the host.');
+      }
       throw new Error('No update available. Call checkUpdate() first.');
     }
 
     this._setStatus('downloading');
 
     try {
-      await this._backend.invoke('host_market_download', {
-        version: this._info.version,
+      const result = await this._backend.invoke<{
+        ok: boolean;
+        simulated?: boolean;
+        reason?: string | null;
+      }>('host_market_download', {
+        version: this._info.version ?? undefined,
         endpoints: this._config.endpoints,
         pubkey: this._config.pubkey,
       });
+
+      if (result?.simulated) {
+        throw new Error(result.reason ?? 'Update download is simulated by the host.');
+      }
+      if (result && result.ok === false) {
+        throw new Error(result.reason ?? 'Update download failed.');
+      }
 
       this._setStatus('downloaded');
     } catch (err) {
@@ -190,16 +209,30 @@ export class AutoUpdateClient {
    * 安装更新。
    */
   async installUpdate(): Promise<void> {
-    if (this._status !== 'downloaded') {
+    if (this._status !== 'downloaded' || this._info?.simulated === true) {
+      if (this._info?.simulated === true) {
+        throw new Error(this._info.reason ?? 'Update check is simulated by the host.');
+      }
       throw new Error('Update not downloaded. Call downloadUpdate() first.');
     }
 
     this._setStatus('installing');
 
     try {
-      await this._backend.invoke('host_market_install', {
+      const result = await this._backend.invoke<{
+        ok: boolean;
+        simulated?: boolean;
+        reason?: string | null;
+      }>('host_market_install', {
         version: this._info?.version,
       });
+
+      if (result?.simulated) {
+        throw new Error(result.reason ?? 'Update installation is simulated by the host.');
+      }
+      if (result && result.ok === false) {
+        throw new Error(result.reason ?? 'Update installation failed.');
+      }
 
       this._setStatus('ready');
     } catch (err) {

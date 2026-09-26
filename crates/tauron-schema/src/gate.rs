@@ -34,9 +34,7 @@ fn walk(node: &Value, path: &str, in_combo: bool) -> SchemaResult<()> {
         }
         Value::Object(m) => {
             if let Some(r) = m.get("$ref") {
-                return Err(SchemaError::UnexpandedRef(
-                    r.as_str().unwrap_or_default().to_string(),
-                ));
+                return Err(SchemaError::UnexpandedRef(r.as_str().unwrap_or_default().to_string()));
             }
 
             for k in m.keys() {
@@ -165,7 +163,8 @@ mod tests {
 
     #[test]
     fn combo_inside_properties_is_allowed() {
-        let doc = json!({"type":"object","properties":{"theme":{"oneOf":[{"const":"a"},{"const":"b"}]}}});
+        let doc =
+            json!({"type":"object","properties":{"theme":{"oneOf":[{"const":"a"},{"const":"b"}]}}});
         assert!(assert_flat(&doc).is_ok());
         let r = report(&doc);
         assert_eq!(r.top_level_combos, 1);
@@ -254,7 +253,8 @@ mod tests {
 
     #[test]
     fn report_counts_extensions() {
-        let doc = json!({"type":"object","properties":{"a":{"type":"string","x-tauron":{"version":1}}}});
+        let doc =
+            json!({"type":"object","properties":{"a":{"type":"string","x-tauron":{"version":1}}}});
         let r = report(&doc);
         assert_eq!(r.remaining_extensions, 1);
     }
@@ -292,7 +292,8 @@ mod tests {
 
     #[test]
     fn deeply_nested_combo_reports_the_full_path() {
-        let doc = json!({"type":"object","properties":{"a":{"oneOf":[{"anyOf":[{"type":"string"}]}]}}});
+        let doc =
+            json!({"type":"object","properties":{"a":{"oneOf":[{"anyOf":[{"type":"string"}]}]}}});
         match assert_flat(&doc).unwrap_err() {
             SchemaError::NestedCombo(k, p) => {
                 assert_eq!(k, "anyOf");

@@ -10,11 +10,7 @@ pub enum DistributeError {
 
     /// 灰度批次未就绪（未到最小停留时间）。
     #[error("灰度批次 `{current}` 未就绪（已等待 {elapsed}s，需 {required}s）")]
-    GrayscaleNotReady {
-        current: String,
-        elapsed: u64,
-        required: u64,
-    },
+    GrayscaleNotReady { current: String, elapsed: u64, required: u64 },
 
     /// 签名校验失败。
     #[error("更新签名校验失败")]
@@ -37,9 +33,7 @@ mod tests {
 
     #[test]
     fn error_messages() {
-        assert!(DistributeError::EndpointError("500".into())
-            .to_string()
-            .contains("500"));
+        assert!(DistributeError::EndpointError("500".into()).to_string().contains("500"));
         assert!(DistributeError::SignatureInvalid.to_string().contains("签名"));
     }
 }

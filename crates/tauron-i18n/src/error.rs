@@ -25,8 +25,6 @@ mod tests {
 
     #[test]
     fn error_messages() {
-        assert!(I18nError::InvalidLocale("xx-XX-XXX".into())
-            .to_string()
-            .contains("xx-XX-XXX"));
+        assert!(I18nError::InvalidLocale("xx-XX-XXX".into()).to_string().contains("xx-XX-XXX"));
     }
 }

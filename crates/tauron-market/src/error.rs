@@ -66,11 +66,8 @@ mod tests {
         assert!(MarketError::PathTraversal("../../etc/passwd".into())
             .to_string()
             .contains("../../etc/passwd"));
-        assert!(MarketError::DowngradeRejected {
-            current: "2.0.0".into(),
-            target: "1.0.0".into()
-        }
-        .to_string()
-        .contains("拒绝降级"));
+        assert!(MarketError::DowngradeRejected { current: "2.0.0".into(), target: "1.0.0".into() }
+            .to_string()
+            .contains("拒绝降级"));
     }
 }

@@ -5,7 +5,11 @@
 // ──────────────────────────────────────────────────────────────────────────
 
 import { describe, expect, it } from 'vitest';
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { inflateRawSync } from 'node:zlib';
 import {
   pluginPack,
   pluginSign,
@@ -21,6 +25,8 @@ import {
   verifySignature,
   verifySignatureCrypto,
   generatePackManifest,
+  createPluginArchive,
+  readPluginArchive,
   SUPPORTED_SIGN_ALGORITHMS,
   MAX_FILE_SIZE,
   MAX_FILE_COUNT,
@@ -207,14 +213,14 @@ describe('validatePackConfig', () => {
   it('完整配置', () => {
     const config = validatePackConfig({
       dir: '/project/plugin',
-      outputPath: '/project/plugin/dist/plugin.zip',
+      outputPath: '/project/plugin/dist/plugin.tpkg',
       includeSource: true,
       compress: true,
       files: makeFiles(),
       pluginConfig: makePluginConfig(),
     });
     expect(config.dir).toBe('/project/plugin');
-    expect(config.outputPath).toBe('/project/plugin/dist/plugin.zip');
+    expect(config.outputPath).toBe('/project/plugin/dist/plugin.tpkg');
     expect(config.includeSource).toBe(true);
     expect(config.compress).toBe(true);
     expect(config.files).toHaveLength(3);
@@ -227,7 +233,7 @@ describe('validatePackConfig', () => {
       files: makeFiles(),
       pluginConfig: makePluginConfig(),
     });
-    expect(config.outputPath).toBe('/project/plugin/dist/com.example.plugin.zip');
+    expect(config.outputPath).toBe('/project/plugin/dist/com.example.plugin.tpkg');
     expect(config.includeSource).toBe(false);
     expect(config.compress).toBe(true);
   });
@@ -403,7 +409,7 @@ describe('pluginPack', () => {
       pluginConfig: makePluginConfig(),
     });
     expect(result.ok).toBe(true);
-    expect(result.outputPath).toBe('/project/plugin/dist/com.example.plugin.zip');
+    expect(result.outputPath).toBe('/project/plugin/dist/com.example.plugin.tpkg');
     expect(result.files).toHaveLength(5);
     expect(result.totalSize).toBeGreaterThan(0);
   });
@@ -418,6 +424,61 @@ describe('pluginPack', () => {
     });
     expect(result.ok).toBe(false);
     expect(result.error).toBeDefined();
+  });
+});
+
+describe('createPluginArchive', () => {
+  it('写出可解压的标准安装包并校验扫描时的文件哈希', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tauron-tpkg-'));
+    try {
+      const manifest = Buffer.from('{"id":"com.example.plugin"}', 'utf8');
+      fs.writeFileSync(path.join(dir, 'manifest.json'), manifest);
+      const file = {
+        path: 'manifest.json',
+        size: manifest.length,
+        hash: createHash('sha256').update(manifest).digest('hex'),
+      };
+      const archive = createPluginArchive({
+        dir,
+        outputPath: path.join(dir, 'plugin.tpkg'),
+        includeSource: false,
+        compress: true,
+        files: [file],
+        pluginConfig: makePluginConfig(),
+        pluginManifest: { id: 'com.example.plugin', name: 'My Plugin', version: '1.0.0', type: 'js', framework: '^0.1.0', entry: { js: 'manifest.json' } },
+      });
+      expect(archive.readUInt32LE(0)).toBe(0x04034b50);
+      const nameLength = archive.readUInt16LE(26);
+      const compressedSize = archive.readUInt32LE(18);
+      const data = inflateRawSync(archive.subarray(30 + nameLength, 30 + nameLength + compressedSize));
+      expect(archive.toString('utf8', 30, 30 + nameLength)).toBe('manifest.json');
+      expect(JSON.parse(data.toString('utf8'))).toMatchObject({ id: 'com.example.plugin', type: 'js' });
+      expect(readPluginArchive(archive)).toHaveLength(1);
+      expect(readPluginArchive(archive).find((item) => item.path === 'manifest.json')?.hash)
+        .toBe(createHash('sha256').update(data).digest('hex'));
+      const tampered = Buffer.from(archive);
+      const centralOffset = 30 + nameLength + compressedSize;
+      tampered.writeUInt32LE(0, centralOffset + 16);
+      expect(() => readPluginArchive(tampered)).toThrow('头不匹配');
+
+      fs.writeFileSync(path.join(dir, 'payload.txt'), 'original');
+      const payload = Buffer.from('original');
+      const payloadFile = {
+        path: 'payload.txt', size: payload.length,
+        hash: createHash('sha256').update(payload).digest('hex'),
+      };
+      fs.writeFileSync(path.join(dir, 'payload.txt'), 'changed');
+      expect(() => createPluginArchive({
+        dir,
+        outputPath: path.join(dir, 'plugin.tpkg'),
+        includeSource: false,
+        compress: true,
+        files: [payloadFile],
+        pluginConfig: makePluginConfig(),
+      })).toThrow('文件在扫描后发生变化');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

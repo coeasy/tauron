@@ -56,9 +56,7 @@ pub fn build_approval_rows(grant_set: &GrantSet, index: &PermissionIndex) -> Vec
             human_text: h.description,
             permission: h.permission.clone(),
             risk: h.risk,
-            scope: grant_set
-                .scope_of(&h.permission)
-                .map(scope_to_string),
+            scope: grant_set.scope_of(&h.permission).map(scope_to_string),
         })
         .collect()
 }
@@ -76,14 +74,12 @@ pub fn validate_grants(grant_set: &GrantSet, index: &PermissionIndex) -> HostRes
 
         index.check_permitted(&p)?;
 
-        let expected_risk = index
-            .risk_of(&g.permission)
-            .ok_or_else(|| {
-                HostError::new(
-                    ErrorCode::E_INVALID_MANIFEST,
-                    format!("权限 `{}` 不在权限词表内", g.permission),
-                )
-            })?;
+        let expected_risk = index.risk_of(&g.permission).ok_or_else(|| {
+            HostError::new(
+                ErrorCode::E_INVALID_MANIFEST,
+                format!("权限 `{}` 不在权限词表内", g.permission),
+            )
+        })?;
         if expected_risk != g.risk {
             return Err(HostError::new(
                 ErrorCode::E_INVALID_MANIFEST,
@@ -96,10 +92,7 @@ pub fn validate_grants(grant_set: &GrantSet, index: &PermissionIndex) -> HostRes
             ));
         }
 
-        let declared_scoped = index
-            .entry_of(&g.permission)
-            .map(|e| e.scoped)
-            .unwrap_or(false);
+        let declared_scoped = index.entry_of(&g.permission).map(|e| e.scoped).unwrap_or(false);
         if declared_scoped != g.scoped {
             return Err(HostError::new(
                 ErrorCode::E_INVALID_MANIFEST,
@@ -130,12 +123,15 @@ pub fn draft_grant_set(
 ) -> HostResult<GrantSet> {
     let mut grants = Vec::new();
     for p in perms {
-        let entry = index.entry_of(p.as_str()).ok_or_else(|| {
-            HostError::new(
-                ErrorCode::E_INVALID_MANIFEST,
-                format!("权限 `{}` 不在权限词表内（R3）", p.as_str()),
-            )
-        })?.clone();
+        let entry = index
+            .entry_of(p.as_str())
+            .ok_or_else(|| {
+                HostError::new(
+                    ErrorCode::E_INVALID_MANIFEST,
+                    format!("权限 `{}` 不在权限词表内（R3）", p.as_str()),
+                )
+            })?
+            .clone();
         grants.push(GrantEntry {
             permission: p.as_str().to_string(),
             risk: entry.risk,
@@ -165,10 +161,8 @@ mod tests {
     use super::*;
     use crate::grant::GrantEntry;
 
-    const INDEX_PATH: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../schema/permissions.index.json"
-    );
+    const INDEX_PATH: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../schema/permissions.index.json");
 
     fn index() -> PermissionIndex {
         PermissionIndex::load(INDEX_PATH).expect("仓库内的权限词表必须可加载")
@@ -239,20 +233,30 @@ mod tests {
         let idx = index();
         let g = gs(&[
             ("store:allow-get".into(), Risk::Low, false, None),
-            ("http:allow-fetch".into(), Risk::Elevated, true, Some("https://api.example.com/**".to_string())),
+            (
+                "http:allow-fetch".into(),
+                Risk::Elevated,
+                true,
+                Some("https://api.example.com/**".to_string()),
+            ),
         ]);
         let rows = build_approval_rows(&g, &idx);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].permission, "store:allow-get");
         assert_eq!(rows[1].permission, "http:allow-fetch");
-        assert_eq!(rows[1].default_checked, true);
+        assert!(rows[1].default_checked);
         assert!(rows[1].scope.as_deref().unwrap().contains("api.example.com"));
     }
 
     #[test]
     fn validate_accepts_conformant_set() {
         let idx = index();
-        let mut g = gs(&[("http:allow-fetch".into(), Risk::Elevated, true, Some("https://api.example.com/**".to_string()))]);
+        let mut g = gs(&[(
+            "http:allow-fetch".into(),
+            Risk::Elevated,
+            true,
+            Some("https://api.example.com/**".to_string()),
+        )]);
         g.grants[0].description = "占位".into();
         assert!(validate_grants(&g, &idx).is_ok());
     }
@@ -317,12 +321,8 @@ mod tests {
     #[test]
     fn validate_rejects_fs_scope_outside_app_dirs() {
         let idx = index();
-        let g = gs(&[(
-            "fs:allow-app-read".into(),
-            Risk::Low,
-            true,
-            Some("C:/Windows/**".to_string()),
-        )]);
+        let g =
+            gs(&[("fs:allow-app-read".into(), Risk::Low, true, Some("C:/Windows/**".to_string()))]);
         let e = validate_grants(&g, &idx).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_FORBIDDEN_PERMISSION);
         assert!(e.message.contains("应用目录引用"));
@@ -334,12 +334,11 @@ mod tests {
         let mut scopes = serde_json::Map::new();
         scopes.insert(
             "http:allow-fetch".to_string(),
-            serde_json::Value::Array(vec![serde_json::Value::String("https://api.example.com/**".into())]),
+            serde_json::Value::Array(vec![serde_json::Value::String(
+                "https://api.example.com/**".into(),
+            )]),
         );
-        let perms = vec![
-            Permission::new("store:allow-get"),
-            Permission::new("http:allow-fetch"),
-        ];
+        let perms = vec![Permission::new("store:allow-get"), Permission::new("http:allow-fetch")];
         let draft = draft_grant_set(
             "com.example.formatter",
             "1.2.3",
@@ -355,14 +354,8 @@ mod tests {
 
         assert_eq!(draft.grants.len(), 2);
         // 风险档位必须与词表一致，不允许调用方手写。
-        assert_eq!(
-            draft.grants[1].risk,
-            idx.risk_of("http:allow-fetch").unwrap()
-        );
-        assert!(
-            !draft.grants[1].description.is_empty(),
-            "描述必须来自词表"
-        );
+        assert_eq!(draft.grants[1].risk, idx.risk_of("http:allow-fetch").unwrap());
+        assert!(!draft.grants[1].description.is_empty(), "描述必须来自词表");
         // 产物通过完整校验。
         assert!(validate_grants(&draft, &idx).is_ok());
         // 审批行数量与授予集一致。

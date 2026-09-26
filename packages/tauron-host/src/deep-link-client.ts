@@ -18,6 +18,7 @@
 // ──────────────────────────────────────────────────────────────────────────
 
 import type { Backend } from './backend.js';
+import type { ProviderResult } from './dialog-client.js';
 
 /** 深链接事件 */
 export interface DeepLinkEvent {
@@ -77,17 +78,18 @@ export class DeepLinkClient {
   /**
    * 注册深链接协议。
    */
-  async register(): Promise<void> {
+  async register(): Promise<ProviderResult<void> | undefined> {
     if (!this._config.enabled) {
-      return;
+      return undefined;
     }
 
-    await this._backend.invoke('host_deep_link_register', {
+    const result = await this._backend.invoke<ProviderResult<void>>('host_deep_link_register', {
       protocol: this._config.protocol,
     });
 
     // 开始监听
     this._unlisten = await this._listen();
+    return result;
   }
 
   /**

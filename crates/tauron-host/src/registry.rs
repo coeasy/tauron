@@ -16,25 +16,29 @@
 //! 完成，避免 parking_lot 非重入导致的死锁。域内锁序见 [`Registry`] 的文档
 //! （`pending → streams → runtime → active_order`）。
 
+use crate::call_delivery::CallOutcome;
 use crate::error::{ErrorCode, HostError, HostResult};
-use crate::lifecycle::{Event, PluginState, State, TransitionOutcome, transition};
-use crate::manifest::{PluginIdentity, PluginId, PluginManifest, PermissionIndex};
+use crate::lifecycle::{transition, Event, PluginState, State, TransitionOutcome};
+use crate::manifest::{PermissionIndex, PluginId, PluginIdentity, PluginManifest};
 use crate::runtime::{RuntimeHandle, RuntimeLease, RuntimeTable};
 use crate::stream::{StreamFrame, StreamKind, StreamRegistry, StreamSink};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+/// 单插件同时挂起的调用上限。宿主总上限仍由 `RegistryConfig::max_pending_calls` 控制。
+pub const MAX_PENDING_PER_PLUGIN: usize = 100;
 
 /// 缺省配置（计划 §4.1 的数值约束）。
 pub fn default_config() -> RegistryConfig {
     RegistryConfig {
         max_plugins: 8,
         max_active_identities: 8,
-        max_pending_calls: 1000,
+        max_pending_calls: 2000,
         pending_ttl: Duration::from_secs(30),
         plugin_filter: None,
     }
@@ -94,7 +98,8 @@ impl PluginFilter {
 
         // 5. 平台过滤（空 = 所有平台）
         if !self.platforms.is_empty() {
-            let manifest_platforms: Vec<&str> = manifest.platforms.iter().map(|s| s.as_str()).collect();
+            let manifest_platforms: Vec<&str> =
+                manifest.platforms.iter().map(|s| s.as_str()).collect();
             if !manifest_platforms.iter().any(|p| self.platforms.iter().any(|f| f == p)) {
                 return false;
             }
@@ -190,15 +195,53 @@ pub struct PluginSummary {
 #[serde(rename_all = "camelCase")]
 pub struct PendingCall {
     pub call_id: String,
+    /// **配额归属主体**（= 发起方）。0.4-A1 之前它同时也是执行方；跨主体调用
+    /// 出现后二者分离，配额仍记在发起方名下（M2/M6：防止一个插件用别人的
+    /// 名义耗尽别人的配额）。
     pub plugin_id: String,
     pub cmd: String,
     pub args: serde_json::Value,
+    /// 发起主体：`"main"`（主窗）或插件 id。
+    pub caller: String,
+    /// 执行主体：插件 id。`self` 档调用时等于 `plugin_id`。
+    pub target: String,
+    /// 调用状态：等待执行方回填 / 已结算。
+    pub state: CallState,
+    /// 执行方回填的结果载荷（仅 `Settled` 且成功时）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    /// 执行方回填的失败码（仅 `Settled` 且失败时）。
+    #[serde(rename = "errorCode", skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
     /// 宿主分配的单调序号（§2.1）。
     pub seq: u64,
     #[serde(serialize_with = "serialize_instant")]
     pub created_at: Instant,
     #[serde(serialize_with = "serialize_instant")]
     pub expires_at: Instant,
+}
+
+/// 跨主体调用的状态（0.4-A1）。
+///
+/// 只有两态，不是状态机：**没有「执行中」**——宿主不知道执行方是本地 JS、
+/// sidecar 还是别的插件，也不该知道（那是执行方的私事）。宿主只区分
+/// 「结果还没回来」与「结果已在此」，其余一律交给 pending 的 TTL。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CallState {
+    /// 已登记、等待执行方回填。
+    Pending,
+    /// 执行方已回填结果（成功或失败），等待发起方取走。
+    Settled,
+}
+
+impl CallState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Settled => "settled",
+        }
+    }
 }
 
 /// 将 `Instant` 序列化为 u64（毫秒时间戳，参考进程启动时间）。
@@ -275,7 +318,11 @@ impl Registry {
     ///
     /// 过滤器（配置化选择加载）在 schema 校验之前执行：被过滤的插件返回
     /// `E_PLUGIN_FILTERED`，不入库、不占用容量。
-    pub fn install(&self, index: &PermissionIndex, manifest: PluginManifest) -> HostResult<PluginId> {
+    pub fn install(
+        &self,
+        index: &PermissionIndex,
+        manifest: PluginManifest,
+    ) -> HostResult<PluginId> {
         let id = manifest.id.clone();
 
         // 配置化选择加载：过滤器检查
@@ -355,10 +402,7 @@ impl Registry {
     /// 未知 plugin_id → 结构化错误（计划 §4.1：不 panic）。
     pub fn require(&self, id: &PluginId) -> HostResult<PluginEntry> {
         self.find(id).ok_or_else(|| {
-            HostError::new(
-                ErrorCode::E_UNKNOWN_PLUGIN,
-                format!("plugin_id `{id}` 未在注册表中"),
-            )
+            HostError::new(ErrorCode::E_UNKNOWN_PLUGIN, format!("plugin_id `{id}` 未在注册表中"))
         })
     }
 
@@ -376,9 +420,11 @@ impl Registry {
         for e in entries.values() {
             let is_self = caller.is_some_and(|c| c == &e.id);
             let subscribes_public = !subscribed_topics.is_empty()
-                && e.manifest.events.publish.iter().any(|p| {
-                    p.public && subscribed_topics.iter().any(|t| t == &p.topic)
-                });
+                && e.manifest
+                    .events
+                    .publish
+                    .iter()
+                    .any(|p| p.public && subscribed_topics.iter().any(|t| t == &p.topic));
             if is_self || subscribes_public {
                 out.push(summary_of(e));
             }
@@ -426,9 +472,12 @@ impl Registry {
     pub fn report_event(&self, id: &PluginId, event: Event) -> HostResult<TransitionOutcome> {
         let out = {
             let mut entries = self.entries.write();
-            let e = entries
-                .get_mut(id)
-                .ok_or_else(|| HostError::new(ErrorCode::E_UNKNOWN_PLUGIN, format!("plugin_id `{id}` 未在注册表中")))?;
+            let e = entries.get_mut(id).ok_or_else(|| {
+                HostError::new(
+                    ErrorCode::E_UNKNOWN_PLUGIN,
+                    format!("plugin_id `{id}` 未在注册表中"),
+                )
+            })?;
             let out = transition(&mut e.state, event);
             e.last_accessed = Instant::now();
             out
@@ -480,10 +529,7 @@ impl Registry {
             crate::authz::RegistryAdminOp::Purge => Event::Purge,
         };
         let out = self.report_event(id, event)?;
-        if !out.illegal
-            && out.from != out.to
-            && matches!(event, Event::Uninstall | Event::Purge)
-        {
+        if !out.illegal && out.from != out.to && matches!(event, Event::Uninstall | Event::Purge) {
             self.entries.write().remove(id);
             self.call_end_all(id);
             // 运行期租约随插件条目一起回收（P0-2）：租约是**插件身份**的句柄，
@@ -500,7 +546,8 @@ impl Registry {
     // pending call 表
     // ────────────────────────────────────────────────────────────
 
-    /// 登记一次调用的 pending 条目并分配单调序号。
+    /// 登记一次 `self` 档调用（插件调自己的 C/D 后端）：caller 与 target 同为
+    /// 该插件。跨主体调用走 {@link Registry::call_begin_cross}。
     ///
     /// 调用方必须是已启用/运行中的插件（ADR-05：`enabled` 标志即时拒绝）。
     pub fn call_begin(
@@ -509,18 +556,49 @@ impl Registry {
         cmd: &str,
         args: serde_json::Value,
     ) -> HostResult<PendingCall> {
-        let entry = self.require(id)?;
+        self.call_begin_cross(id.as_str(), id.as_str(), id.as_str(), cmd, args)
+    }
+
+    /// 登记一次**跨主体**调用（0.4-A1）。
+    ///
+    /// - `caller`：发起主体（`"main"` 或插件 id），**配额记在它名下**。
+    /// - `target`：执行主体，必须已在注册表且处于可用状态。
+    ///
+    /// 两者的分离是 A1 的核心：在此之前 `host_plugin_call` 只有 `resolve_self_identity`
+    /// 一条路，调用方永远等于执行方，于是「宿主调插件」和「插件调插件」都无法表达。
+    ///
+    /// 调用方必须是已启用/运行中的插件（ADR-05：`enabled` 标志即时拒绝）。
+    pub fn call_begin_cross(
+        &self,
+        caller: &str,
+        target: &str,
+        quota_owner: &str,
+        cmd: &str,
+        args: serde_json::Value,
+    ) -> HostResult<PendingCall> {
+        let entry = self.require(&PluginId::new(target).map_err(|_| {
+            HostError::new(
+                ErrorCode::E_UNKNOWN_PLUGIN,
+                format!("调用目标 `{target}` 不是合法插件 id"),
+            )
+        })?)?;
         if !entry.is_active() {
             return Err(HostError::new(
                 ErrorCode::E_PLUGIN_DISABLED,
-                format!("插件 `{id}` 当前状态 {}，不允许发起调用", entry.state.state),
+                format!("插件 `{target}` 当前状态 {}，不允许被调用", entry.state.state),
             ));
         }
         if cmd.trim().is_empty() {
             return Err(HostError::new(ErrorCode::E_AUTH_DENIED, "调用命令为空"));
         }
         let mut pending = self.pending.lock();
-        if pending.len() >= self.config.max_pending_calls {
+        let plugin_pending = pending
+            .values()
+            .filter(|call| call.plugin_id == quota_owner)
+            .count();
+        if pending.len() >= self.config.max_pending_calls
+            || plugin_pending >= MAX_PENDING_PER_PLUGIN
+        {
             // 表满时先做 TTL GC：僵尸条目（前端已超时却从未 callEnd 的调用）
             // 不得永久占用容量位——否则一次永久挂起累积起来就会把表占满，
             // 使后续所有调用永久 `E_CALL_PENDING_FULL`（ADR-04 的挂起会累积）。
@@ -532,11 +610,18 @@ impl Registry {
             self.gc_expired();
             pending = self.pending.lock();
         }
-        if pending.len() >= self.config.max_pending_calls {
+        let plugin_pending = pending
+            .values()
+            .filter(|call| call.plugin_id == quota_owner)
+            .count();
+        if pending.len() >= self.config.max_pending_calls
+            || plugin_pending >= MAX_PENDING_PER_PLUGIN
+        {
             return Err(HostError::new(
                 ErrorCode::E_CALL_PENDING_FULL,
                 format!(
-                    "pending call 表已达上限 {}（计划 §4.1）",
+                    "pending call 容量已达上限（插件 {plugin_pending}/{MAX_PENDING_PER_PLUGIN}，宿主 {}/{})",
+                    pending.len(),
                     self.config.max_pending_calls
                 ),
             ));
@@ -546,9 +631,14 @@ impl Registry {
         let now = Instant::now();
         let call = PendingCall {
             call_id: call_id.clone(),
-            plugin_id: id.as_str().to_string(),
+            plugin_id: quota_owner.to_string(),
             cmd: cmd.to_string(),
             args,
+            caller: caller.to_string(),
+            target: target.to_string(),
+            state: CallState::Pending,
+            result: None,
+            error_code: None,
             seq,
             created_at: now,
             expires_at: now + self.config.pending_ttl,
@@ -646,6 +736,78 @@ impl Registry {
         expired.len()
     }
 
+    /// 结算一次调用：执行方回填结果（成功或失败），标记 `Settled` 并**保留**条目。
+    ///
+    /// 保留（不回收）是因为发起方还要 `take_call` 来取走结果——回收交给 `take_call`
+    /// （取走即删）。重复结算被 [`ErrorCode::E_CALL_ALREADY_SETTLED`] 拒绝（不覆盖，
+    /// 避免竞态改写第一次结果；调用方据此判定执行方行为异常，而不是拿到错的结果）。
+    pub fn settle_call(&self, call_id: &str, outcome: CallOutcome) -> HostResult<PendingCall> {
+        let mut pending = self.pending.lock();
+        let call = pending.get_mut(call_id).ok_or_else(|| {
+            HostError::new(
+                ErrorCode::E_CALL_NOT_FOUND,
+                format!("pending call `{call_id}` 不存在或已被取走"),
+            )
+        })?;
+        if call.state == CallState::Settled {
+            return Err(HostError::new(
+                ErrorCode::E_CALL_ALREADY_SETTLED,
+                format!("pending call `{call_id}` 已被结算，重复回填被拒"),
+            ));
+        }
+        call.state = CallState::Settled;
+        call.result = outcome.result;
+        call.error_code = outcome.error_code;
+        Ok(call.clone())
+    }
+
+    /// 取走一次结算结果（0.4-A1 的回执取件步骤）。
+    ///
+    /// - `Settled`：返回条目并**删除**（发起方已拿到结果，回收）。
+    /// - `Pending`：返回条目副本、**保留**（发起方据此知道「还没好」，继续等/轮询）。
+    /// - 不存在：`E_CALL_NOT_FOUND`。
+    pub fn take_call(&self, call_id: &str) -> HostResult<PendingCall> {
+        let mut pending = self.pending.lock();
+        let call = pending.get(call_id).ok_or_else(|| {
+            HostError::new(
+                ErrorCode::E_CALL_NOT_FOUND,
+                format!("pending call `{call_id}` 不存在或已被取走"),
+            )
+        })?;
+        if call.state == CallState::Settled {
+            let taken = pending.remove(call_id).ok_or_else(|| {
+                HostError::new(
+                    ErrorCode::E_CALL_NOT_FOUND,
+                    format!("pending call `{call_id}` 取走时消失（并发回收）"),
+                )
+            })?;
+            Ok(taken)
+        } else {
+            Ok(call.clone())
+        }
+    }
+
+    /// 目标插件当前**存活**的进程 pid（进程插件投递用，A3）；无存活租约返回 `None`。
+    pub fn live_pid_of(&self, plugin_id: &str) -> Option<u32> {
+        self.runtime.lock().live_handle_of_plugin(plugin_id).map(|h| h.pid)
+    }
+
+    /// 只读取回一次 pending call 的快照（结算/取件前的授权判定用，不改状态）。
+    pub fn peek_call(&self, call_id: &str) -> HostResult<PendingCall> {
+        let pending = self.pending.lock();
+        pending.get(call_id).cloned().ok_or_else(|| {
+            HostError::new(
+                ErrorCode::E_CALL_NOT_FOUND,
+                format!("pending call `{call_id}` 不存在或已被取走"),
+            )
+        })
+    }
+
+    /// 只读取回一次 pending call 的执行方（target），用于结算授权判定。
+    pub fn call_target(&self, call_id: &str) -> HostResult<String> {
+        Ok(self.peek_call(call_id)?.target)
+    }
+
     // ────────────────────────────────────────────────────────────
     // 流式帧（R5 / P0-1）
     // ────────────────────────────────────────────────────────────
@@ -703,9 +865,7 @@ impl Registry {
         args_json: Option<serde_json::Value>,
         args_raw: Option<Vec<u8>>,
     ) -> HostResult<StreamFrame> {
-        self.streams
-            .lock()
-            .write(stream_id, subscriber, args_json, args_raw)
+        self.streams.lock().write(stream_id, subscriber, args_json, args_raw)
     }
 
     /// 发终帧并失效句柄（`host_stream_close`）。
@@ -726,6 +886,16 @@ impl Registry {
     /// 活跃/残留句柄数（诊断/测试）。
     pub fn stream_len(&self) -> usize {
         self.streams.lock().len()
+    }
+
+    /// 当前插件活跃流数（资源配额观测）。
+    pub fn stream_active_for(&self, plugin_id: &str) -> usize {
+        self.streams.lock().active_for(plugin_id)
+    }
+
+    /// 宿主当前活跃流总数（资源配额观测）。
+    pub fn stream_active_total(&self) -> usize {
+        self.streams.lock().active_total()
     }
 
     /// 调用是否已挂帧载体（测试用）。
@@ -757,6 +927,11 @@ impl Registry {
     /// pending 表大小。
     pub fn pending_len(&self) -> usize {
         self.pending.lock().len()
+    }
+
+    /// 当前插件挂起调用数（配额观测口径）。
+    pub fn pending_for(&self, plugin_id: &str) -> usize {
+        self.pending.lock().values().filter(|call| call.plugin_id == plugin_id).count()
     }
 
     // ────────────────────────────────────────────────────────────
@@ -809,7 +984,7 @@ impl Registry {
     ///   「lease 与 PID 一一绑定」；
     /// - 另一种选择（显式拒绝第二个）会让调用方必须处理一个它无法避免的竞态，
     ///   且把"幂等"这一有用性质换成"要么成功要么报错"二义行为。
-    /// 因此这里只有一种行为：**永远不启动第二个进程**。
+    ///   因此这里只有一种行为：**永远不启动第二个进程**。
     ///
     /// **"已有"的定义是"有活租约"**：已标崩溃的租约不算——那时进程已经没了，
     /// 调用方是来**重试**的（P0-2 的崩溃重试预算就靠这条路径才有意义）。
@@ -913,11 +1088,7 @@ impl Registry {
     /// **必须在 `entries` 锁外调用**——淘汰动作本身要再取 `entries` 锁，
     /// 嵌套持有会死锁（`parking_lot` 不重入）。
     fn maintain_active(&self, id: &PluginId) {
-        let active = self
-            .entries
-            .read()
-            .get(id)
-            .is_some_and(|e| e.is_active());
+        let active = self.entries.read().get(id).is_some_and(|e| e.is_active());
         {
             let mut order = self.active_order.lock();
             order.retain(|x| x != id);
@@ -1024,8 +1195,7 @@ fn minimal_manifest(id: PluginId) -> PluginManifest {
         permissions: Vec::new(),
         scopes: serde_json::Map::new(),
         platforms: Vec::new(),
-        framework: crate::manifest::parse_version_range(">=2.0 <3.0")
-            .expect("静态 range 必可解析"),
+        framework: crate::manifest::parse_version_range(">=2.0 <3.0").expect("静态 range 必可解析"),
         abi: None,
         contributes: crate::manifest::Contributes::default(),
         settings_schema: None,
@@ -1059,8 +1229,10 @@ fn summary_of(e: &PluginEntry) -> PluginSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{Contributes, EntrySpec, EventsDecl, Permission, PermissionEntry, PluginType, Risk};
-    use std::sync::{Arc, atomic::AtomicUsize};
+    use crate::manifest::{
+        Contributes, EntrySpec, EventsDecl, Permission, PermissionEntry, PluginType, Risk,
+    };
+    use std::sync::{atomic::AtomicUsize, Arc};
 
     fn index() -> PermissionIndex {
         PermissionIndex {
@@ -1086,20 +1258,14 @@ mod tests {
     fn manifest(id: &str, topic: Option<&str>) -> PluginManifest {
         let mut ev = EventsDecl::default();
         if let Some(t) = topic {
-            ev.publish.push(crate::manifest::EventDecl {
-                topic: t.into(),
-                public: true,
-            });
+            ev.publish.push(crate::manifest::EventDecl { topic: t.into(), public: true });
         }
         PluginManifest {
             id: PluginId::new(id).unwrap(),
             name: format!("plugin {id}"),
             version: semver::Version::new(1, 0, 0),
             plugin_type: PluginType::Js,
-            entry: EntrySpec {
-                js: Some("dist/index.js".into()),
-                ..Default::default()
-            },
+            entry: EntrySpec { js: Some("dist/index.js".into()), ..Default::default() },
             permissions: vec![Permission::new("store:allow-get")],
             scopes: serde_json::Map::new(),
             platforms: Vec::new(),
@@ -1172,10 +1338,7 @@ mod tests {
     #[test]
     fn concurrent_install_cannot_exceed_capacity() {
         use std::sync::Arc;
-        let cfg = RegistryConfig {
-            max_plugins: 3,
-            ..default_config()
-        };
+        let cfg = RegistryConfig { max_plugins: 3, ..default_config() };
         let r = Arc::new(Registry::new(cfg));
 
         let handles: Vec<_> = (0..12)
@@ -1203,10 +1366,7 @@ mod tests {
 
     #[test]
     fn registry_full_is_hard_failure() {
-        let cfg = RegistryConfig {
-            max_plugins: 2,
-            ..default_config()
-        };
+        let cfg = RegistryConfig { max_plugins: 2, ..default_config() };
         let r = Registry::new(cfg);
         r.install(&index(), manifest("com.example.a", None)).unwrap();
         r.install(&index(), manifest("com.example.b", None)).unwrap();
@@ -1241,7 +1401,10 @@ mod tests {
         assert!(o.is_ok());
         let o = o.unwrap();
         assert!(o.illegal);
-        assert_eq!(r.find(&PluginId::new("com.example.bad").unwrap()).unwrap().state.state, State::InstallFailed);
+        assert_eq!(
+            r.find(&PluginId::new("com.example.bad").unwrap()).unwrap().state.state,
+            State::InstallFailed
+        );
     }
 
     #[test]
@@ -1250,10 +1413,7 @@ mod tests {
         let id = PluginId::new("com.example.parsedfail").unwrap();
         r.record_install_failure(id.clone(), "hash mismatch".into()).unwrap();
         assert_eq!(r.find(&id).unwrap().state.state, State::InstallFailed);
-        assert_eq!(
-            r.find(&id).unwrap().state.last_reason.as_deref(),
-            Some("hash mismatch")
-        );
+        assert_eq!(r.find(&id).unwrap().state.last_reason.as_deref(), Some("hash mismatch"));
     }
 
     #[test]
@@ -1290,9 +1450,7 @@ mod tests {
     #[test]
     fn unknown_plugin_lifecycle_report_errors() {
         let r = Registry::default();
-        let e = r
-            .lifecycle_report("plugin-com.example.ghost", None, Event::Enable)
-            .unwrap_err();
+        let e = r.lifecycle_report("plugin-com.example.ghost", None, Event::Enable).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_UNKNOWN_PLUGIN);
     }
 
@@ -1324,10 +1482,7 @@ mod tests {
         r.admin_op(&id, crate::authz::RegistryAdminOp::Enable).unwrap();
         let s = r.find(&id).unwrap();
         assert_eq!(s.state.state, State::Enabled);
-        assert!(
-            !s.state.disabled_by_safemode,
-            "显式启用后不得仍报告 safemode 禁用"
-        );
+        assert!(!s.state.disabled_by_safemode, "显式启用后不得仍报告 safemode 禁用");
     }
 
     #[test]
@@ -1372,10 +1527,7 @@ mod tests {
 
     #[test]
     fn pending_full_is_hard_failure() {
-        let cfg = RegistryConfig {
-            max_pending_calls: 2,
-            ..default_config()
-        };
+        let cfg = RegistryConfig { max_pending_calls: 2, ..default_config() };
         let r = Registry::new(cfg);
         let id = r.install(&index(), manifest("com.example.a", None)).unwrap();
         enable(&r, &id);
@@ -1383,6 +1535,27 @@ mod tests {
         r.call_begin(&id, "b", serde_json::json!({})).unwrap();
         let e = r.call_begin(&id, "c", serde_json::json!({})).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_CALL_PENDING_FULL);
+    }
+
+    #[test]
+    fn pending_quota_is_per_plugin_and_isolated() {
+        let r = Registry::default();
+        let first = r.install(&index(), manifest("com.example.a", None)).unwrap();
+        let second = r.install(&index(), manifest("com.example.b", None)).unwrap();
+        enable(&r, &first);
+        enable(&r, &second);
+
+        for _ in 0..MAX_PENDING_PER_PLUGIN {
+            r.call_begin(&first, "cmd", serde_json::json!({})).unwrap();
+        }
+        let full = r.call_begin(&first, "cmd", serde_json::json!({})).unwrap_err();
+        assert_eq!(full.code, ErrorCode::E_CALL_PENDING_FULL);
+        assert!(full.message.contains("插件 100/100"));
+        assert_eq!(r.pending_for(first.as_str()), MAX_PENDING_PER_PLUGIN);
+
+        r.call_begin(&second, "cmd", serde_json::json!({})).expect("一个插件耗尽配额不能阻断邻居");
+        assert_eq!(r.pending_for(second.as_str()), 1);
+        assert_eq!(r.pending_len(), MAX_PENDING_PER_PLUGIN + 1);
     }
 
     #[test]
@@ -1409,10 +1582,7 @@ mod tests {
     #[test]
     fn pending_gc_does_not_evict_in_flight_calls() {
         // 反向约束：GC 只能清过期条目，不能赶走合法在途调用。
-        let cfg = RegistryConfig {
-            max_pending_calls: 1,
-            ..default_config()
-        };
+        let cfg = RegistryConfig { max_pending_calls: 1, ..default_config() };
         let r = Registry::new(cfg);
         let id = r.install(&index(), manifest("com.example.a", None)).unwrap();
         enable(&r, &id);
@@ -1426,10 +1596,7 @@ mod tests {
 
     #[test]
     fn pending_gc_reclaims_expired_and_reports_timeout() {
-        let cfg = RegistryConfig {
-            pending_ttl: Duration::from_millis(1),
-            ..default_config()
-        };
+        let cfg = RegistryConfig { pending_ttl: Duration::from_millis(1), ..default_config() };
         let r = Registry::new(cfg);
         let id = r.install(&index(), manifest("com.example.a", None)).unwrap();
         enable(&r, &id);
@@ -1473,10 +1640,7 @@ mod tests {
     #[test]
     fn call_end_on_expired_call_is_timeout_not_success() {
         // TTL 设成 0：`call_begin` 之后立刻就算过期（`now >= expires_at`）。
-        let cfg = RegistryConfig {
-            pending_ttl: Duration::from_millis(0),
-            ..default_config()
-        };
+        let cfg = RegistryConfig { pending_ttl: Duration::from_millis(0), ..default_config() };
         let r = Registry::new(cfg);
         let id = r.install(&index(), manifest("com.example.ttl", None)).unwrap();
         enable(&r, &id);
@@ -1524,8 +1688,7 @@ mod tests {
         let sink = rec();
         let call = r.call_begin(&id, "a", serde_json::json!({})).unwrap();
 
-        r.stream_bind(&call.call_id, "com.example.a", sink.clone())
-            .unwrap();
+        r.stream_bind(&call.call_id, "com.example.a", sink.clone()).unwrap();
         assert!(r.stream_call_bound(&call.call_id));
         let stream = r.stream_open(&call.call_id, "com.example.a").unwrap();
         assert_eq!(
@@ -1556,9 +1719,7 @@ mod tests {
         let call = r.call_begin(&a, "a", serde_json::json!({})).unwrap();
 
         // 换载体 = 偷走后续所有帧：知道 callId 的别的插件不得挂载。
-        let err = r
-            .stream_bind(&call.call_id, "com.example.b", rec())
-            .unwrap_err();
+        let err = r.stream_bind(&call.call_id, "com.example.b", rec()).unwrap_err();
         assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
         assert!(!r.stream_call_bound(&call.call_id), "被拒的挂载不得留下载体");
 
@@ -1576,8 +1737,7 @@ mod tests {
         enable(&r, &id);
         let sink = rec();
         let call = r.call_begin(&id, "a", serde_json::json!({})).unwrap();
-        r.stream_bind(&call.call_id, "com.example.a", sink.clone())
-            .unwrap();
+        r.stream_bind(&call.call_id, "com.example.a", sink.clone()).unwrap();
         let stream = r.stream_open(&call.call_id, "com.example.a").unwrap();
 
         r.call_cancel(&call.call_id).unwrap();
@@ -1596,8 +1756,7 @@ mod tests {
         enable(&r, &id);
         let sink = rec();
         let call = r.call_begin(&id, "a", serde_json::json!({})).unwrap();
-        r.stream_bind(&call.call_id, "com.example.a", sink.clone())
-            .unwrap();
+        r.stream_bind(&call.call_id, "com.example.a", sink.clone()).unwrap();
         let stream = r.stream_open(&call.call_id, "com.example.a").unwrap();
 
         assert_eq!(r.gc_expired(), 0);
@@ -1617,8 +1776,7 @@ mod tests {
         enable(&r, &id);
         let sink = rec();
         let call = r.call_begin(&id, "a", serde_json::json!({})).unwrap();
-        r.stream_bind(&call.call_id, "com.example.a", sink.clone())
-            .unwrap();
+        r.stream_bind(&call.call_id, "com.example.a", sink.clone()).unwrap();
         let stream = r.stream_open(&call.call_id, "com.example.a").unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1724,11 +1882,7 @@ mod tests {
 
     #[test]
     fn active_identity_lru_evicts_oldest() {
-        let cfg = RegistryConfig {
-            max_active_identities: 2,
-            max_plugins: 8,
-            ..default_config()
-        };
+        let cfg = RegistryConfig { max_active_identities: 2, max_plugins: 8, ..default_config() };
         let r = Registry::new(cfg);
         let a = r.install(&index(), manifest("com.example.a", None)).unwrap();
         let b = r.install(&index(), manifest("com.example.b", None)).unwrap();
@@ -1737,11 +1891,7 @@ mod tests {
         enable(&r, &b);
         assert_eq!(r.active_ids().len(), 2, "INSTALLED 不占活跃槽");
         enable(&r, &c);
-        assert!(
-            r.active_ids().len() <= 2,
-            "活跃身份不得超过上限：{:#?}",
-            r.active_ids()
-        );
+        assert!(r.active_ids().len() <= 2, "活跃身份不得超过上限：{:#?}", r.active_ids());
         // a 最旧 → 被淘汰为 DISABLED。
         assert_eq!(r.find(&a).unwrap().state.state, State::Disabled);
         assert_eq!(r.find(&b).unwrap().state.state, State::Enabled);
@@ -1750,11 +1900,7 @@ mod tests {
 
     #[test]
     fn lru_refreshes_on_new_event() {
-        let cfg = RegistryConfig {
-            max_active_identities: 2,
-            max_plugins: 8,
-            ..default_config()
-        };
+        let cfg = RegistryConfig { max_active_identities: 2, max_plugins: 8, ..default_config() };
         let r = Registry::new(cfg);
         let a = r.install(&index(), manifest("com.example.a", None)).unwrap();
         let b = r.install(&index(), manifest("com.example.b", None)).unwrap();
@@ -1835,10 +1981,7 @@ mod tests {
 
     #[test]
     fn concurrent_begin_and_gc_do_not_deadlock() {
-        let cfg = RegistryConfig {
-            pending_ttl: Duration::from_millis(50),
-            ..default_config()
-        };
+        let cfg = RegistryConfig { pending_ttl: Duration::from_millis(50), ..default_config() };
         let r = Arc::new(Registry::new(cfg));
         let id = r.install(&index(), manifest("com.example.a", None)).unwrap();
         enable(&r, &id);
@@ -1882,16 +2025,13 @@ mod tests {
         let c = default_config();
         assert_eq!(c.max_plugins, 8);
         assert_eq!(c.max_active_identities, 8);
-        assert_eq!(c.max_pending_calls, 1000);
+        assert_eq!(c.max_pending_calls, 2000);
         assert_eq!(c.pending_ttl, Duration::from_secs(30));
     }
 
     #[test]
     fn install_failure_does_not_leak_active_slot() {
-        let cfg = RegistryConfig {
-            max_active_identities: 2,
-            ..default_config()
-        };
+        let cfg = RegistryConfig { max_active_identities: 2, ..default_config() };
         let r = Registry::new(cfg);
         let mut m = manifest("com.example.bad", None);
         m.permissions = vec![Permission::new("nope:allow")];
@@ -1972,10 +2112,7 @@ mod tests {
     #[test]
     fn type_filter_rejects_wrong_type() {
         let cfg = RegistryConfig {
-            plugin_filter: Some(PluginFilter {
-                types: vec!["js".into()],
-                ..Default::default()
-            }),
+            plugin_filter: Some(PluginFilter { types: vec!["js".into()], ..Default::default() }),
             ..default_config()
         };
         let r = Registry::new(cfg);
@@ -2017,10 +2154,7 @@ mod tests {
     #[test]
     fn builtins_excluded_when_include_builtins_false() {
         let cfg = RegistryConfig {
-            plugin_filter: Some(PluginFilter {
-                include_builtins: false,
-                ..Default::default()
-            }),
+            plugin_filter: Some(PluginFilter { include_builtins: false, ..Default::default() }),
             ..default_config()
         };
         let r = Registry::new(cfg);
@@ -2091,10 +2225,8 @@ mod tests {
 
     #[test]
     fn filter_matches_manifest_with_platforms_against_specific_platform() {
-        let filter = PluginFilter {
-            platforms: vec!["win".into(), "mac".into()],
-            ..Default::default()
-        };
+        let filter =
+            PluginFilter { platforms: vec!["win".into(), "mac".into()], ..Default::default() };
         let mut m = manifest("com.example.a", None);
         m.platforms = vec!["win".into()];
         assert!(filter.matches(&m));
@@ -2102,10 +2234,8 @@ mod tests {
 
     #[test]
     fn filter_matches_manifest_platform_intersection() {
-        let filter = PluginFilter {
-            platforms: vec!["win".into(), "mac".into()],
-            ..Default::default()
-        };
+        let filter =
+            PluginFilter { platforms: vec!["win".into(), "mac".into()], ..Default::default() };
         let mut m = manifest("com.example.a", None);
         m.platforms = vec!["linux".into()];
         assert!(!filter.matches(&m));
@@ -2157,10 +2287,7 @@ mod tests {
             .unwrap();
         assert_eq!(second, first, "重复 spawn 必须返回既有 lease");
         assert_eq!(starts.get(), 1, "重复 spawn 不得再启动进程");
-        assert!(
-            !started_second,
-            "幂等返回必须报 `started = false`：调用方据此不投重复的 ATTACH"
-        );
+        assert!(!started_second, "幂等返回必须报 `started = false`：调用方据此不投重复的 ATTACH");
         assert_eq!(r.runtime_len(), 1, "同一插件至多一条租约");
     }
 
@@ -2187,7 +2314,10 @@ mod tests {
             ErrorCode::E_LEASE_EXPIRED,
             "租约边界必须报 E_LEASE_EXPIRED（不是 E_CALL_NOT_FOUND）"
         );
-        assert_eq!(r.runtime_mark_crashed("no-such-lease").unwrap_err().code, ErrorCode::E_LEASE_EXPIRED);
+        assert_eq!(
+            r.runtime_mark_crashed("no-such-lease").unwrap_err().code,
+            ErrorCode::E_LEASE_EXPIRED
+        );
     }
 
     #[test]
@@ -2208,10 +2338,7 @@ mod tests {
         let (h, _started) = r.runtime_ensure_lease(&id, || Ok(5)).unwrap();
         r.admin_op(&id, crate::authz::RegistryAdminOp::Purge).unwrap();
         assert_eq!(r.runtime_len(), 0, "卸载必须回收租约（否则是孤儿 PID）");
-        assert_eq!(
-            r.runtime_lease(&h.lease).unwrap_err().code,
-            ErrorCode::E_LEASE_EXPIRED
-        );
+        assert_eq!(r.runtime_lease(&h.lease).unwrap_err().code, ErrorCode::E_LEASE_EXPIRED);
     }
 
     /// 崩溃后的租约**不算"已有"**：重试必须真的能起新进程（否则重试预算形同虚设），
@@ -2271,10 +2398,7 @@ mod tests {
         r.admin_op(&id, crate::authz::RegistryAdminOp::Uninstall).unwrap();
         assert_eq!(r.runtime_len(), 0, "租约必须消失");
         assert!(r.runtime_handle_of(&id).is_none());
-        assert_eq!(
-            r.runtime_lease(&h.lease).unwrap_err().code,
-            ErrorCode::E_LEASE_EXPIRED
-        );
+        assert_eq!(r.runtime_lease(&h.lease).unwrap_err().code, ErrorCode::E_LEASE_EXPIRED);
         let s = r.runtime_reap_stats();
         assert_eq!((s.attempts, s.failures), (1, 1), "终止失败必须留痕");
         assert!(s.last_error.as_deref().unwrap_or("").contains("权限不足"));
@@ -2317,10 +2441,7 @@ mod tests {
             "状态离开可用态 → 必须终止仍在跑的 sidecar"
         );
         assert_eq!(r.runtime_len(), 0, "租约必须一起回收");
-        assert!(
-            r.runtime_handle_of(&id).is_none(),
-            "回收后不得留下指向已死进程的租约"
-        );
+        assert!(r.runtime_handle_of(&id).is_none(), "回收后不得留下指向已死进程的租约");
     }
 
     /// 对照：**崩溃**这条离场路径不得回收租约——进程已经死了，租约要留给
@@ -2352,10 +2473,7 @@ mod tests {
 
         assert_eq!(r.runtime_len(), 1, "崩溃租约必须留着给 health 报账");
         assert_eq!(r.runtime_lease(&h.lease).unwrap().pid, 77);
-        assert!(
-            r.runtime_needs_restart(&id),
-            "崩溃租约 = 需要（重新）启动"
-        );
+        assert!(r.runtime_needs_restart(&id), "崩溃租约 = 需要（重新）启动");
         assert!(
             recorder.killed.lock().is_empty(),
             "进程已死，不得在崩溃路径上再调一次终止（那是无谓的杀空 pid）"

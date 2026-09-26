@@ -32,6 +32,20 @@
 | 注册表 | `crates/tauron-host/src/registry.rs` 的 `Registry` | `crates/tauron-shell/src/registry.rs` 的 `PluginRegistry`：**legacy 冻结** |
 | 宿主态 | `crates/tauron-host` 的 `SubstrateState`（底座）+ `PluginRuntimeState`（插件运行时） | `crates/tauron-shell/src/dispatch.rs` 的 `HostState`：**legacy 冻结** |
 
+## 0.3 crate 归置决策（轮 13，状态如实反映当前依赖）
+
+| crate | 状态 | 决策与条件 |
+| --- | --- | --- |
+| `tauron-acl` | 迁移中 | M1 前置；接入 manifest 权限审批、签名授予及 Tauri capability 物化后改为已接线。 |
+| `tauron-brand` | 迁移中 | `host_brand_info` 返回带原因的 `UnsupportedBody`；接读端并映射品牌配置后改为已接线。 |
+| `tauron-market` | 迁移中 | M1/M7 共用取包与验签；HTTP / `.tpkg` 安装闭环前不宣称已接线。 |
+| `tauron-wasm` | 可选组件 | 不引入默认运行时；Wasm 插件明确返回 `E_PLUGIN_TYPE_NO_RUNTIME`。 |
+| `tauron-theme` | 可选组件 | 客户端主题由 UI design tokens 承担；crate 保留为可选集成。 |
+| `tauron-distribute` | 可选组件 | CI 运维组件，不进入客户端运行时依赖图。 |
+| `tauron-shell` | 迁移中 | legacy 冻结；按本文阶段 2/3 迁移到 `tauron-host` canonical 引擎。 |
+
+迁移中状态表示决策已定但接线尚未完成，不能作为「功能可用」的证据；对应轮次完成后必须同步更新 Cargo 依赖和本表。
+
 ## 依据（全部为实测，可复核）
 
 | 维度 | `tauron-host` | `tauron-shell` |

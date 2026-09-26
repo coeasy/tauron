@@ -2,7 +2,7 @@
 // dialog-client.ts 测试（P2-13：对话框客户端）
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { DialogClient, createDialogClient } from './dialog-client.js';
+import { DialogClient, createDialogClient, isUnsupportedBody } from './dialog-client.js';
 import { MockBackend } from './backend.js';
 
 describe('DialogClient', () => {
@@ -24,8 +24,8 @@ describe('DialogClient', () => {
         { cmd: 'host_dialog_save', result: '/path/to/save.txt' },
         { cmd: 'host_dialog_message', result: undefined },
         { cmd: 'host_dialog_confirm', result: true },
-        { cmd: 'host_clipboard_read', result: 'clipboard text' },
-        { cmd: 'host_clipboard_write', result: undefined },
+        { cmd: 'host_clipboard_read', result: { supported: false, reason: 'system clipboard missing', fallback: 'in-process-buffer', value: 'clipboard text' } },
+        { cmd: 'host_clipboard_write', result: { supported: false, reason: 'system clipboard missing', fallback: 'in-process-buffer' } },
       ],
     });
     client = new DialogClient({ backend });
@@ -43,6 +43,16 @@ describe('DialogClient', () => {
   });
 
   describe('openFile()', () => {
+    it('缺少原生 provider 时暴露 UnsupportedBody，不伪装成取消', async () => {
+      const backend2 = new MockBackend({
+        capabilities: ['host_dialog_open'],
+        cases: [{ cmd: 'host_dialog_open', result: { supported: false, reason: 'dialog provider missing', fallback: null } }],
+      });
+      const result = await new DialogClient({ backend: backend2 }).openFile();
+      expect(isUnsupportedBody(result)).toBe(true);
+      if (isUnsupportedBody(result)) expect(result.reason).toBe('dialog provider missing');
+    });
+
     it('打开文件对话框', async () => {
       const path = await client.openFile();
       expect(path).toBe('/path/to/file.png');
@@ -136,11 +146,20 @@ describe('DialogClient', () => {
       expect(text).toBe('clipboard text');
       expect(backend.invocations.some(i => i.cmd === 'host_clipboard_read')).toBe(true);
     });
+
+    it('详细读取结果明确标记进程内回退', async () => {
+      const result = await client.clipboardReadDetailed();
+      expect(result.supported).toBe(false);
+      expect(result.fallback).toBe('in-process-buffer');
+      expect(result.value).toBe('clipboard text');
+    });
   });
 
   describe('clipboardWrite()', () => {
     it('写入剪贴板', async () => {
-      await client.clipboardWrite('new text');
+      const result = await client.clipboardWrite('new text');
+      expect(result.supported).toBe(false);
+      expect(result.fallback).toBe('in-process-buffer');
       const inv = backend.invocations.find(i => i.cmd === 'host_clipboard_write');
       expect(inv?.args?.text).toBe('new text');
     });

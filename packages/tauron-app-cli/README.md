@@ -27,12 +27,12 @@ tauron-app plugin   new | create | dev | pack | sign | check | audit
 ### plugin pack / sign
 
 ```bash
-# 打包插件目录，产出 <id>-<version>.tauronpack-manifest.json（文件清单 + SHA-256 哈希）
-tauron-app plugin pack --dir ./my-plugin --output ./dist
+# 打包插件目录，产出标准 ZIP 格式 .tpkg 安装包
+tauron-app plugin pack --dir ./my-plugin --output ./dist/my-plugin.tpkg
 
-# 对打包清单签名，产出 <manifest>.sig
+# 对安装包中的文件清单签名，产出 <package>.sig
 # 私钥文件支持：PEM 文本（PKCS#8）或 hex 编码的 PKCS#8 DER
-tauron-app plugin sign --file ./dist/my-plugin-0.1.0.tauronpack-manifest.json \
+tauron-app plugin sign --file ./dist/my-plugin.tpkg \
   --key ./private-key.pem --algorithm ed25519 --kid tauron-001
 ```
 

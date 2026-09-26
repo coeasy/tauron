@@ -12,6 +12,7 @@ homepage.workspace = true
 default = []
 # 启用 Tauri v2 命令桥接（#[tauri::command] 包装 + invoke_handler）
 tauri = ["dep:tauri"]
+plugin-install = ["dep:tauron-acl", "dep:tauron-market", "dep:zip", "dep:ed25519-dalek", "dep:sha2", "dep:hex", "tauron-market/signing"]
 
 [dependencies]
 tauron-host = { workspace = true }
@@ -22,6 +23,12 @@ tauron-recovery = { workspace = true }
 # `SettingsStore` 里，适配层不再自己持一个裸 `HashMap`。用 path 而非 workspace
 # 依赖：workspace 根的 `[workspace.dependencies]` 属**只读文件**，本轮不改。
 tauron-settings = { path = "../tauron-settings" }
+tauron-acl = { path = "../tauron-acl", optional = true }
+tauron-market = { path = "../tauron-market", default-features = false, optional = true }
+zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
+ed25519-dalek = { version = "3", optional = true }
+sha2 = { version = "0.10", optional = true }
+hex = { workspace = true, optional = true }
 # 进程插件 host（P0-2 激活孤儿 crate）：只被**插件运行时域**用到——
 # `tauron_host` 不依赖它（租约表认识的是 plugin_id/pid，不认识进程 API），
 # 启动/探测存活留在适配层这一侧，平台细节与进程细节都不进核心。

@@ -74,6 +74,17 @@ pub enum ErrorCode {
     /// ⚠️ 追加码必须加在枚举**末尾**：TS 侧 `HOST_ERROR_CODES` 按声明顺序比对
     /// （`@tauron/contract-tests` 的 wire-gate 钉死）。
     E_STREAM_FULL,
+    /// 一次跨主体调用已被结算，重复回填被拒（0.4-A1）。
+    ///
+    /// **为什么不接受覆盖**：`host_call_result` 是「执行方报告这次调用的结果」。
+    /// 允许重复回填等于让"第一次的结果"可以被第二次悄悄改写——调用方拿到
+    /// 哪个结果取决于时序，而不是取决于事实。宁可显式失败（调用方据此判定
+    /// 执行方行为异常），也不让它变成竞态。
+    ///
+    /// **不是** `E_CALL_NOT_FOUND`：条目**还在**（调用方还没取走），只是不再接受
+    /// 新的结果；调用方的下一步动作也不同（去 `host_call_take` 取已结算的结果，
+    /// 而不是放弃这次调用）。
+    E_CALL_ALREADY_SETTLED,
 }
 
 impl ErrorCode {
@@ -108,6 +119,7 @@ impl fmt::Display for ErrorCode {
             Self::E_PLUGIN_TYPE_NO_RUNTIME => write!(f, "E_PLUGIN_TYPE_NO_RUNTIME"),
             Self::E_LEASE_EXPIRED => write!(f, "E_LEASE_EXPIRED"),
             Self::E_STREAM_FULL => write!(f, "E_STREAM_FULL"),
+            Self::E_CALL_ALREADY_SETTLED => write!(f, "E_CALL_ALREADY_SETTLED"),
         }
     }
 }
@@ -203,11 +215,9 @@ mod tests {
 
     #[test]
     fn error_code_roundtrips_through_json() {
-        for code in [
-            ErrorCode::E_HOST_PANIC,
-            ErrorCode::E_AUTH_DENIED,
-            ErrorCode::E_FORBIDDEN_PERMISSION,
-        ] {
+        for code in
+            [ErrorCode::E_HOST_PANIC, ErrorCode::E_AUTH_DENIED, ErrorCode::E_FORBIDDEN_PERMISSION]
+        {
             let s = serde_json::to_string(&code).unwrap();
             assert_eq!(s, format!("\"{code}\""));
             let back: ErrorCode = serde_json::from_str(&s).unwrap();

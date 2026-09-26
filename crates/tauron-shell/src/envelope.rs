@@ -61,12 +61,7 @@ pub struct PluginErrorBody {
 impl PluginInvokeResponse {
     /// 构建成功响应
     pub fn ok(call_id: String, result: serde_json::Value) -> Self {
-        Self {
-            call_id,
-            ok: true,
-            result: Some(result),
-            error: None,
-        }
+        Self { call_id, ok: true, result: Some(result), error: None }
     }
 
     /// 构建错误响应
@@ -154,7 +149,8 @@ mod tests {
 
     #[test]
     fn test_response_ok() {
-        let resp = PluginInvokeResponse::ok("call-1".to_string(), serde_json::json!({"result": 42}));
+        let resp =
+            PluginInvokeResponse::ok("call-1".to_string(), serde_json::json!({"result": 42}));
         assert!(resp.ok);
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
@@ -215,4 +211,3 @@ mod tests {
         assert_eq!(deserialized.total, 10);
     }
 }
-

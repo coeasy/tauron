@@ -31,7 +31,7 @@
 //! ```
 
 use crate::error::{ErrorCode, HostError, HostResult};
-use crate::registry::{PluginFilter, RegistryConfig, default_config};
+use crate::registry::{default_config, PluginFilter, RegistryConfig};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
@@ -120,10 +120,7 @@ impl ClientConfig {
     /// 包含具体的字段路径和错误原因。
     pub fn from_json(json: &str) -> HostResult<Self> {
         let config: Self = serde_json::from_str(json).map_err(|e| {
-            HostError::new(
-                ErrorCode::E_INVALID_MANIFEST,
-                format!("客户端配置 JSON 解析失败：{e}"),
-            )
+            HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("客户端配置 JSON 解析失败：{e}"))
         })?;
         config.validate()?;
         Ok(config)
@@ -145,10 +142,7 @@ impl ClientConfig {
     /// 序列化为 JSON 字符串（用于生成配置模板）。
     pub fn to_json(&self) -> HostResult<String> {
         serde_json::to_string_pretty(self).map_err(|e| {
-            HostError::new(
-                ErrorCode::E_INVALID_MANIFEST,
-                format!("客户端配置序列化失败：{e}"),
-            )
+            HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("客户端配置序列化失败：{e}"))
         })
     }
 
@@ -165,9 +159,7 @@ impl ClientConfig {
             if !valid.contains(&level.as_str()) {
                 return Err(HostError::new(
                     ErrorCode::E_INVALID_MANIFEST,
-                    format!(
-                        "log_level `{level}` 非法，必须是 {valid:?} 之一"
-                    ),
+                    format!("log_level `{level}` 非法，必须是 {valid:?} 之一"),
                 ));
             }
         }
@@ -197,9 +189,7 @@ impl ClientConfig {
                 .max_active_identities
                 .unwrap_or(base.max_active_identities),
             max_pending_calls: override_.max_pending_calls.unwrap_or(base.max_pending_calls),
-            pending_ttl: Duration::from_secs(
-                override_.pending_ttl_secs.unwrap_or(30),
-            ),
+            pending_ttl: Duration::from_secs(override_.pending_ttl_secs.unwrap_or(30)),
             plugin_filter: override_.plugin_filter.clone(),
         }
     }
@@ -417,7 +407,7 @@ mod tests {
         assert_eq!(rc.max_active_identities, 4);
         assert_eq!(rc.pending_ttl, Duration::from_secs(60));
         // 未覆盖的字段使用默认值
-        assert_eq!(rc.max_pending_calls, 1000);
+        assert_eq!(rc.max_pending_calls, 2000);
     }
 
     #[test]
@@ -465,7 +455,7 @@ mod tests {
         let rc = config.registry_config();
         assert_eq!(rc.max_plugins, 8);
         assert_eq!(rc.max_active_identities, 8);
-        assert_eq!(rc.max_pending_calls, 1000);
+        assert_eq!(rc.max_pending_calls, 2000);
         assert_eq!(rc.pending_ttl, Duration::from_secs(30));
         assert!(rc.plugin_filter.is_none());
     }
@@ -517,10 +507,7 @@ mod tests {
         let config = ClientConfig {
             log_level: Some("debug".into()),
             auto_update: Some(false),
-            registry: Some(RegistryConfigOverride {
-                max_plugins: Some(4),
-                ..Default::default()
-            }),
+            registry: Some(RegistryConfigOverride { max_plugins: Some(4), ..Default::default() }),
             ..Default::default()
         };
         let json = config.to_json().unwrap();
@@ -541,10 +528,7 @@ mod tests {
     fn env_overrides_are_serializable() {
         let mut env = std::collections::HashMap::new();
         env.insert("OC_DEBUG".to_string(), "1".to_string());
-        let config = ClientConfig {
-            env_overrides: Some(env),
-            ..Default::default()
-        };
+        let config = ClientConfig { env_overrides: Some(env), ..Default::default() };
         let json = config.to_json().unwrap();
         assert!(json.contains("OC_DEBUG"));
         let back = ClientConfig::from_json(&json).unwrap();

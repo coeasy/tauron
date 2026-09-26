@@ -93,9 +93,7 @@ impl std::str::FromStr for Locale {
             return Err(I18nError::InvalidLocale("空语言代码".into()));
         }
         if s.len() > 35 {
-            return Err(I18nError::InvalidLocale(
-                "语言代码过长（上限 35 字符）".into(),
-            ));
+            return Err(I18nError::InvalidLocale("语言代码过长（上限 35 字符）".into()));
         }
         Ok(Self(s.to_string()))
     }
@@ -110,10 +108,7 @@ pub struct ResourceBundle {
 
 impl ResourceBundle {
     pub fn new(locale: &str) -> Self {
-        Self {
-            locale: locale.to_string(),
-            texts: BTreeMap::new(),
-        }
+        Self { locale: locale.to_string(), texts: BTreeMap::new() }
     }
 
     pub fn insert(&mut self, key: &str, text: &str) {
@@ -229,36 +224,24 @@ impl I18nEngine {
         let mut removed = 0;
         // 从所有资源包中删除该前缀的 key。
         for bundle in self.bundles.values_mut() {
-            let keys_to_remove: Vec<String> = bundle
-                .texts
-                .keys()
-                .filter(|k| k.starts_with(&prefix))
-                .cloned()
-                .collect();
+            let keys_to_remove: Vec<String> =
+                bundle.texts.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
             for key in keys_to_remove {
                 bundle.remove(&key);
                 removed += 1;
             }
         }
         // 从默认包中删除。
-        let default_keys: Vec<String> = self
-            .default_bundle
-            .texts
-            .keys()
-            .filter(|k| k.starts_with(&prefix))
-            .cloned()
-            .collect();
+        let default_keys: Vec<String> =
+            self.default_bundle.texts.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
         for key in default_keys {
             self.default_bundle.remove(&key);
             removed += 1;
         }
         // 从缺失计数中删除。
         for counts in self.missing_counts.values_mut() {
-            let keys_to_remove: Vec<String> = counts
-                .keys()
-                .filter(|k| k.starts_with(&prefix))
-                .cloned()
-                .collect();
+            let keys_to_remove: Vec<String> =
+                counts.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
             for key in keys_to_remove {
                 counts.remove(&key);
             }
@@ -345,11 +328,7 @@ impl I18nEngine {
 
     /// 缺失键总数。
     pub fn missing_total(&self) -> usize {
-        self.missing_counts
-            .values()
-            .flat_map(|m| m.values())
-            .map(|&n| n as usize)
-            .sum()
+        self.missing_counts.values().flat_map(|m| m.values()).map(|&n| n as usize).sum()
     }
 
     /// 最近缺失记录。
@@ -379,9 +358,12 @@ impl I18nEngine {
     /// 反序列化。
     pub fn from_json(v: &serde_json::Value) -> I18nResult<Self> {
         let locale = Locale::new(v["locale"].as_str().unwrap_or(DEFAULT_LOCALE));
-        let bundles = serde_json::from_value(v["bundles"].clone()).map_err(|e| I18nError::BundleFormat(e.to_string()))?;
-        let default_bundle = serde_json::from_value(v["default_bundle"].clone()).map_err(|e| I18nError::BundleFormat(e.to_string()))?;
-        let missing_counts = serde_json::from_value(v["missing_counts"].clone()).map_err(|e| I18nError::BundleFormat(e.to_string()))?;
+        let bundles = serde_json::from_value(v["bundles"].clone())
+            .map_err(|e| I18nError::BundleFormat(e.to_string()))?;
+        let default_bundle = serde_json::from_value(v["default_bundle"].clone())
+            .map_err(|e| I18nError::BundleFormat(e.to_string()))?;
+        let missing_counts = serde_json::from_value(v["missing_counts"].clone())
+            .map_err(|e| I18nError::BundleFormat(e.to_string()))?;
         Ok(Self {
             locale,
             bundles,
@@ -411,8 +393,7 @@ mod tests {
         e.default_bundle.insert("oc.menu.help", "Help");
         e.default_bundle.insert("oc.settings.title", "Settings");
         e.default_bundle.insert("oc.plugin.uninstall", "Uninstall");
-        e.default_bundle
-            .insert("oc.greeting", "Hello, {{name}}!");
+        e.default_bundle.insert("oc.greeting", "Hello, {{name}}!");
         e
     }
 
@@ -562,10 +543,7 @@ mod tests {
             b
         };
         e.add_resource_bundle(bundle);
-        let result = e.t_params(
-            "oc.greeting",
-            &[("name", "Bob"), ("age", "30")],
-        );
+        let result = e.t_params("oc.greeting", &[("name", "Bob"), ("age", "30")]);
         assert_eq!(result, "Hello Bob, you are 30!");
     }
 
@@ -796,11 +774,15 @@ mod tests {
         // 卸载 p.audio。
         let removed = e.cleanup_plugin("p.audio");
         assert_eq!(removed, 2, "两个语言的 p.audio 文案都应被删除");
-        assert!(e.get_bundle("zh-CN").unwrap().get(
-            &I18nEngine::plugin_key("p.audio", "settings")
-        ).is_none());
-        assert!(e.get_bundle("zh-CN").unwrap().get(
-            &I18nEngine::plugin_key("p.video", "settings")
-        ).is_some());
+        assert!(e
+            .get_bundle("zh-CN")
+            .unwrap()
+            .get(&I18nEngine::plugin_key("p.audio", "settings"))
+            .is_none());
+        assert!(e
+            .get_bundle("zh-CN")
+            .unwrap()
+            .get(&I18nEngine::plugin_key("p.video", "settings"))
+            .is_some());
     }
 }

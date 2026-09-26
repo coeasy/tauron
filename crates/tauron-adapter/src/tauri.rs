@@ -4,7 +4,7 @@
 //!
 //! 设计参考 Tauri 官方插件（`tauri-plugin-*`）的标准模式：
 //! - 每个 `#[tauri::command]` 函数是对 `cmd_*` 平台无关函数的薄包装；
-//! - `self` 档命令的 webview label 从 `WebviewWindow` 自动解析（不信任前端入参）；
+//! - `CallerSource` 从宿主传输上下文提取调用者；Tauri 实现从 `WebviewWindow` 标签解析；
 //! - 错误返回 `HostError`（已实现 `Serialize`，Tauri 会序列化为 JS 侧可消费的 `{ code, message }`）；
 //! - `State<CommandState>` 由 Tauri DI 注入，无需全局状态。
 //!
@@ -29,24 +29,64 @@
 #![cfg(feature = "tauri")]
 
 use tauron_host::authz::RegistryAdminOp;
-use tauron_host::lifecycle::Event;
-use tauron_host::registry::{PluginSummary, PendingCall};
 use tauron_host::eventbus::{Frame, PublishResult};
+use tauron_host::lifecycle::Event;
 use tauron_host::lifecycle::TransitionOutcome;
+use tauron_host::registry::{PendingCall, PluginSummary};
 use tauron_host::runtime::RuntimeHandle;
 // `pub use`（而不是 `use`）：R8 §2 的装配器宏 `tauri_plugin_as_host_command!` 由
 // **第三方 crate** 展开，展开结果里必须能命名这两个类型
 // （`$crate::tauri::TauriError` / `$crate::tauri::HostResult`）。私有导入在跨 crate
 // 展开时会解析失败。
-pub use tauri::ipc::InvokeError as TauriError;
-pub use tauron_host::{ErrorCode, HostError, HostResult};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use crate::{ContributeEntry, RuntimeHealth, RuntimeSpawnProfile};
+use serde::{Deserialize, Serialize};
+use std::ops::Deref;
+use std::sync::Arc;
+pub use tauri::ipc::InvokeError as TauriError;
+use tauri::ipc::{CommandArg, CommandItem, InvokeError};
 use tauri::{Emitter, Manager, State, WebviewWindow};
+pub use tauron_host::{ErrorCode, HostError, HostResult};
 
 use crate::{AdapterConfig, CommandState, PluginRuntimeState, StreamOpened, SubstrateState};
+use crate::ProviderResult;
 use tauron_host::stream::{StreamFrame, StreamKind, StreamSink};
+
+/// Transport-provided caller context. Core handlers receive only the validated [`crate::Caller`].
+pub trait CallerSource {
+    fn caller(&self) -> HostResult<crate::Caller>;
+    fn label(&self) -> &str;
+}
+
+/// Tauri's per-invocation caller context. The framework injects this adapter through
+/// `CommandArg`; command signatures therefore depend on `CallerSource`, not `WebviewWindow`.
+pub struct TauriCallerSource {
+    window: WebviewWindow,
+}
+
+impl CallerSource for TauriCallerSource {
+    fn caller(&self) -> HostResult<crate::Caller> {
+        crate::Caller::from_label(self.window.label())
+    }
+
+    fn label(&self) -> &str {
+        self.window.label()
+    }
+}
+
+impl Deref for TauriCallerSource {
+    type Target = WebviewWindow;
+
+    fn deref(&self) -> &Self::Target {
+        &self.window
+    }
+}
+
+impl<'de> CommandArg<'de, tauri::Wry> for TauriCallerSource {
+    fn from_command(command: CommandItem<'de, tauri::Wry>) -> Result<Self, InvokeError> {
+        let window = <WebviewWindow as CommandArg<'de, tauri::Wry>>::from_command(command)?;
+        Ok(Self { window })
+    }
+}
 
 // ── 错误转换：HostError → TauriError ──────────────────────────────
 
@@ -102,6 +142,39 @@ pub struct HostCallEndReq {
     pub error_code: Option<String>,
     #[serde(default)]
     pub seq: Option<u64>,
+}
+
+/// `host_call_plugin` 的 `req` 载荷（跨主体调用，0.4-A1）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostCallPluginReq {
+    /// 执行主体（插件 id）。发起主体从 webview label 解析，不信任客户端传入。
+    pub target: String,
+    /// 目标方法名（→ 核心 `cmd`）。
+    pub method: String,
+    /// JSON 载荷（→ 核心 `args`）。
+    #[serde(default)]
+    pub args_json: Option<serde_json::Value>,
+}
+
+/// `host_call_result` 的 `req` 载荷（执行方回填结果，0.4-A1）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostCallResultReq {
+    pub call_id: String,
+    #[serde(default)]
+    pub ok: Option<bool>,
+    #[serde(default)]
+    pub result: Option<serde_json::Value>,
+    #[serde(default)]
+    pub error_code: Option<String>,
+}
+
+/// `host_call_take` 的 `req` 载荷（发起方取件，0.4-A1）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostCallTakeReq {
+    pub call_id: String,
 }
 
 /// `host_lifecycle_report` 的 `evt` 载荷。
@@ -245,10 +318,7 @@ pub fn wire_plugin_call(
         // 订阅者取**调用条目上的插件 id**（`call_begin` 已用 label 校验过的身份），
         // 不用前端传值、也不另做一次解析——两处派生若不一致，开流与写帧会互相
         // 判成跨插件（或被绕过），这类不一致必须从结构上排除。
-        if let Err(e) = state
-            .registry
-            .stream_bind(&call.call_id, &call.plugin_id, sink)
-        {
+        if let Err(e) = state.registry.stream_bind(&call.call_id, &call.plugin_id, sink) {
             // 带 channel 的调用必须挂上载体：挂不上就把条目撤掉，
             // 不留一条「有调用、没接收方」的悬挂。
             let _ = state.registry.call_cancel(&call.call_id);
@@ -285,19 +355,14 @@ impl StreamSink for ChannelSink {
 /// `unary` 调用没有帧可收。因此这里收线值（`Channel.toJSON()` 产出的
 /// `__CHANNEL__:<id>` 串）自己构造，顺带给非法串一个明确错误，而不是静默当成
 /// 「没有载体」。
-fn channel_sink(
-    raw: &str,
-    webview: tauri::Webview,
-) -> HostResult<Arc<dyn StreamSink>> {
+fn channel_sink(raw: &str, webview: tauri::Webview) -> HostResult<Arc<dyn StreamSink>> {
     let id: tauri::ipc::JavaScriptChannelId = raw.parse().map_err(|e| {
         HostError::new(
             tauron_host::ErrorCode::E_INVALID_MANIFEST,
             format!("非法 channel 标识（期望 `__CHANNEL__:<id>`）：{e}"),
         )
     })?;
-    Ok(Arc::new(ChannelSink {
-        channel: id.channel_on::<tauri::Wry, StreamFrame>(webview),
-    }))
+    Ok(Arc::new(ChannelSink { channel: id.channel_on::<tauri::Wry, StreamFrame>(webview) }))
 }
 
 /// `host_stream_open` 线格式：`{ req: { callId } }` + 顶层 `channel?`。
@@ -368,11 +433,6 @@ pub fn wire_stream_close(
 /// [`crate::cmd_stream_close`]）。
 pub const STREAM_KINDS: [&str; 3] = ["data", "end", "error"];
 
-/// 帧种类解析（闭集，大小写敏感）。宿主自己不猜：未知值一律拒绝。
-pub fn parse_stream_kind(kind: &str) -> Option<StreamKind> {
-    StreamKind::parse(kind)
-}
-
 /// `host_call_end` 线格式 → 核心。
 pub fn wire_call_end(state: &CommandState, req: &HostCallEndReq) -> HostResult<PendingCall> {
     crate::cmd_call_end(state, &req.call_id)
@@ -416,10 +476,7 @@ pub fn wire_events_subscribe(
     }
     if sub.len() == 1 {
         let outcome = crate::cmd_events_subscribe(state, subscriber, window, &sub[0].topic)?;
-        return Ok(HostSubscription {
-            token: outcome.token,
-            selectors: sub.to_vec(),
-        });
+        return Ok(HostSubscription { token: outcome.token, selectors: sub.to_vec() });
     }
 
     let mut tokens = Vec::with_capacity(sub.len());
@@ -438,20 +495,11 @@ pub fn wire_events_subscribe(
         }
     }
     let group_token = format!("grp:{}", tokens[0]);
-    state
-        .subscription_groups
-        .lock()
-        .insert(
-            group_token.clone(),
-            crate::GroupSubscription {
-                subscriber: subscriber.to_string(),
-                tokens,
-            },
-        );
-    Ok(HostSubscription {
-        token: group_token,
-        selectors: sub.to_vec(),
-    })
+    state.subscription_groups.lock().insert(
+        group_token.clone(),
+        crate::GroupSubscription { subscriber: subscriber.to_string(), tokens },
+    );
+    Ok(HostSubscription { token: group_token, selectors: sub.to_vec() })
 }
 
 /// `host_events_unsubscribe` 线格式 → 核心（分组 token 整体退订）。
@@ -482,10 +530,7 @@ pub fn wire_registry_list(
     if !scope_is_valid(scope) {
         return Err(HostError::new(
             tauron_host::ErrorCode::E_AUTH_DENIED,
-            format!(
-                "未知 scope `{}`（合法值：visible / public）",
-                scope.unwrap_or("")
-            ),
+            format!("未知 scope `{}`（合法值：visible / public）", scope.unwrap_or("")),
         ));
     }
     let topics = match caller {
@@ -516,20 +561,19 @@ pub fn wire_registry_admin(
 #[tauri::command]
 pub fn host_lifecycle_report(
     state: State<'_, PluginRuntimeState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     claimed_id: Option<String>,
     evt: HostLifecycleEvt,
 ) -> Result<TransitionOutcome, TauriError> {
     let label = window.label();
-    wire_lifecycle_report(&state, label, claimed_id.as_deref(), &evt)
-        .map_err(to_tauri_err)
+    wire_lifecycle_report(&state, label, claimed_id.as_deref(), &evt).map_err(to_tauri_err)
 }
 
 /// `host_plugin_call`：插件调用 C/D 后端（线格式：`{ req, channel? }`）。
 #[tauri::command]
 pub fn host_plugin_call(
     state: State<'_, PluginRuntimeState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     claimed_id: Option<String>,
     req: HostPluginCallReq,
     channel: Option<String>,
@@ -558,8 +602,71 @@ pub fn host_cancel(
     state: State<'_, PluginRuntimeState>,
     call_id: String,
 ) -> Result<(), TauriError> {
-    crate::cmd_cancel(&state, &call_id)
-        .map_err(to_tauri_err)
+    crate::cmd_cancel(&state, &call_id).map_err(to_tauri_err)
+}
+
+/// `host_call_plugin`：跨主体调用（宿主 → 插件 / 插件 → 插件，0.4-A1）。
+///
+/// 发起主体从 webview label 解析（`main` / 插件 id），不信任客户端传入；
+/// 返回 `ProviderResult<PendingCall>`：`Value` = 已投递待应答，`Unsupported` = 无通路。
+#[tauri::command]
+pub fn host_call_plugin(
+    state: State<'_, PluginRuntimeState>,
+    window: TauriCallerSource,
+    req: HostCallPluginReq,
+) -> Result<ProviderResult<PendingCall>, TauriError> {
+    let label = window.label();
+    let caller = match tauron_host::authz::resolve_principal(label) {
+        tauron_host::authz::Principal::Plugin(id) => id.as_str().to_string(),
+        tauron_host::authz::Principal::MainWindow => "main".to_string(),
+        tauron_host::authz::Principal::Invalid(_) => {
+            return Err(to_tauri_err(HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                "非法身份主体，不得发起跨主体调用",
+            )));
+        }
+    };
+    crate::cmd_call_plugin(
+        &state,
+        &caller,
+        &req.target,
+        &req.method,
+        req.args_json.unwrap_or(serde_json::Value::Null),
+    )
+    .map_err(to_tauri_err)
+}
+
+/// `host_call_result`：执行方回填一次调用的结果（0.4-A1 的结算入口）。
+#[tauri::command]
+pub fn host_call_result(
+    state: State<'_, PluginRuntimeState>,
+    window: TauriCallerSource,
+    claimed_id: Option<String>,
+    req: HostCallResultReq,
+) -> Result<PendingCall, TauriError> {
+    let label = window.label();
+    crate::cmd_call_result(
+        &state,
+        label,
+        claimed_id.as_deref(),
+        &req.call_id,
+        req.ok.unwrap_or(true),
+        req.result,
+        req.error_code,
+    )
+    .map_err(to_tauri_err)
+}
+
+/// `host_call_take`：发起方取走一次已结算的结果（0.4-A1 的回执取件）。
+#[tauri::command]
+pub fn host_call_take(
+    state: State<'_, PluginRuntimeState>,
+    window: TauriCallerSource,
+    claimed_id: Option<String>,
+    req: HostCallTakeReq,
+) -> Result<PendingCall, TauriError> {
+    let label = window.label();
+    crate::cmd_call_take(&state, label, claimed_id.as_deref(), &req.call_id).map_err(to_tauri_err)
 }
 
 /// self 档订阅者：从 webview label 解析**经校验的**身份（不用原始 label）。
@@ -574,7 +681,7 @@ fn subscriber_of(label: &str) -> HostResult<String> {
 #[tauri::command]
 pub fn host_stream_open(
     state: State<'_, PluginRuntimeState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     req: HostStreamOpenReq,
     channel: Option<String>,
 ) -> Result<StreamOpened, TauriError> {
@@ -582,10 +689,7 @@ pub fn host_stream_open(
     // 带 channel = 换载体：后订阅者接管后续帧（旧 Channel 不再收到帧）。
     if let Some(raw) = channel.as_deref() {
         let sink = channel_sink(raw, window.as_ref().clone()).map_err(to_tauri_err)?;
-        state
-            .registry
-            .stream_bind(&req.call_id, &subscriber, sink)
-            .map_err(to_tauri_err)?;
+        state.registry.stream_bind(&req.call_id, &subscriber, sink).map_err(to_tauri_err)?;
     }
     wire_stream_open(&state, &subscriber, &req).map_err(to_tauri_err)
 }
@@ -594,7 +698,7 @@ pub fn host_stream_open(
 #[tauri::command]
 pub fn host_stream_write(
     state: State<'_, PluginRuntimeState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     req: HostStreamWriteReq,
 ) -> Result<StreamFrame, TauriError> {
     let subscriber = subscriber_of(window.label()).map_err(to_tauri_err)?;
@@ -605,7 +709,7 @@ pub fn host_stream_write(
 #[tauri::command]
 pub fn host_stream_close(
     state: State<'_, PluginRuntimeState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     req: HostStreamCloseReq,
 ) -> Result<StreamFrame, TauriError> {
     let subscriber = subscriber_of(window.label()).map_err(to_tauri_err)?;
@@ -630,11 +734,11 @@ pub fn host_stream_close(
 #[tauri::command]
 pub fn host_runtime_spawn(
     state: State<'_, PluginRuntimeState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     plugin_id: String,
     profile: RuntimeSpawnProfile,
 ) -> Result<RuntimeHandle, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_runtime_spawn_as(&caller, &state, &plugin_id, &profile).map_err(to_tauri_err)
 }
 
@@ -647,18 +751,28 @@ pub fn host_runtime_spawn(
 #[tauri::command]
 pub fn host_runtime_health(
     state: State<'_, PluginRuntimeState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     lease: String,
 ) -> Result<RuntimeHealth, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_runtime_health_as(&caller, &state, &lease).map_err(to_tauri_err)
+}
+
+/// `host_resource_stats`：仅主窗可读取全局与逐插件配额占用快照。
+#[tauri::command]
+pub fn host_resource_stats(
+    state: State<'_, PluginRuntimeState>,
+    window: TauriCallerSource,
+) -> Result<serde_json::Value, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_resource_stats_as(&caller, &state).map_err(to_tauri_err)
 }
 
 /// `host_events_publish`：发布事件（唯一通道；线格式 `{ evt: { topic, payload } }`）。
 #[tauri::command]
 pub fn host_events_publish(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     evt: HostEventPublish,
 ) -> Result<PublishResult, TauriError> {
     // publisher 从 webview label 解析（self 档身份绑定）
@@ -670,7 +784,7 @@ pub fn host_events_publish(
 #[tauri::command]
 pub fn host_events_subscribe(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     sub: Vec<HostEventSelector>,
 ) -> Result<HostSubscription, TauriError> {
     let label = window.label();
@@ -697,7 +811,7 @@ pub fn host_events_unsubscribe(
 #[tauri::command]
 pub fn host_events_drain(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     kind: String,
 ) -> Result<Vec<Frame>, TauriError> {
     let label = window.label();
@@ -711,8 +825,7 @@ pub fn host_events_drain(
             )));
         }
     };
-    crate::cmd_events_drain(&state, &subscriber, &kind)
-        .map_err(to_tauri_err)
+    crate::cmd_events_drain(&state, &subscriber, &kind).map_err(to_tauri_err)
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -729,7 +842,7 @@ pub fn host_events_drain(
 #[tauri::command]
 pub fn host_registry_list(
     state: State<'_, PluginRuntimeState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     scope: Option<String>,
 ) -> Result<Vec<PluginSummary>, TauriError> {
     let label = window.label();
@@ -757,9 +870,9 @@ pub fn host_registry_list(
 #[tauri::command]
 pub fn host_registry_list_all(
     state: State<'_, PluginRuntimeState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
 ) -> Result<Vec<PluginSummary>, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_registry_list_all_as(&caller, &state).map_err(to_tauri_err)
 }
 
@@ -769,11 +882,60 @@ pub fn host_registry_list_all(
 #[tauri::command]
 pub fn host_registry_admin(
     state: State<'_, PluginRuntimeState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     op: HostAdminOp,
 ) -> Result<TransitionOutcome, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     wire_registry_admin(&caller, &state, &op).map_err(to_tauri_err)
+}
+
+/// Install a signed local plugin package after explicit permission approval (plugin-install feature).
+#[cfg(feature = "plugin-install")]
+#[tauri::command]
+pub fn host_registry_install(
+    state: State<'_, PluginRuntimeState>,
+    window: TauriCallerSource,
+    package_path: String,
+    approved_permissions: Vec<String>,
+) -> Result<crate::PluginInstallResult, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_registry_install_as(&caller, &state, &package_path, &approved_permissions)
+        .map_err(to_tauri_err)
+}
+
+#[cfg(feature = "plugin-install")]
+#[tauri::command]
+pub fn host_registry_install_preview(
+    state: State<'_, PluginRuntimeState>,
+    window: TauriCallerSource,
+    package_path: String,
+) -> Result<crate::PluginInstallPreview, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_registry_install_preview_as(&caller, &state, &package_path).map_err(to_tauri_err)
+}
+
+#[cfg(all(test, feature = "plugin-install"))]
+mod plugin_asset_protocol_tests {
+    use super::read_installed_plugin_asset;
+    use std::fs;
+
+    #[test]
+    fn serves_plugin_files_and_rejects_traversal_and_missing_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let plugin = temp.path().join("com.example.asset");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(plugin.join("index.html"), b"<main>plugin</main>").unwrap();
+        fs::write(temp.path().join("secret.txt"), b"secret").unwrap();
+
+        let (body, mime) =
+            read_installed_plugin_asset(temp.path(), "/com.example.asset/index.html").unwrap();
+        assert_eq!(body, b"<main>plugin</main>");
+        assert_eq!(mime, "text/html; charset=utf-8");
+        assert!(read_installed_plugin_asset(temp.path(), "/com.example.asset/../../secret.txt")
+            .is_err());
+        assert!(read_installed_plugin_asset(temp.path(), "/com.example.asset/missing.js").is_err());
+        assert!(read_installed_plugin_asset(temp.path(), "/../secret.txt").is_err());
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -792,10 +954,10 @@ pub fn host_registry_admin(
 #[tauri::command]
 pub fn host_settings_get(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     key: String,
 ) -> Result<serde_json::Value, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_settings_get_as(&caller, &state, &key).map_err(to_tauri_err)
 }
 
@@ -810,11 +972,11 @@ pub fn host_settings_get(
 #[tauri::command]
 pub fn host_settings_set(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     key: String,
     value: serde_json::Value,
 ) -> Result<(), TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_settings_set_as(&caller, &state, &key, value).map_err(to_tauri_err)
 }
 
@@ -844,10 +1006,10 @@ pub fn host_settings_set(
 #[tauri::command]
 pub fn host_settings_adopt_legacy(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     doc: serde_json::Value,
 ) -> Result<(), TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_settings_adopt_legacy_as(&caller, &state, doc).map_err(to_tauri_err)
 }
 
@@ -868,9 +1030,9 @@ pub fn host_settings_adopt_legacy(
 #[tauri::command]
 pub fn host_settings_migrate(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
 ) -> Result<usize, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_settings_migrate_as(&caller, &state).map_err(to_tauri_err)
 }
 
@@ -996,12 +1158,12 @@ impl tauron_notify::DispatchSink for TauriDispatchSink {
 #[tauri::command]
 pub fn host_notify(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     plugin_id: String,
     title: String,
     body: String,
 ) -> Result<(), TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_notify_as(&caller, &state, &plugin_id, &title, &body).map_err(to_tauri_err)
 }
 
@@ -1013,10 +1175,10 @@ pub fn host_notify(
 #[tauri::command]
 pub fn host_notifications_list(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     limit: Option<usize>,
 ) -> Result<serde_json::Value, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_notifications_list_as(&caller, &state, limit).map_err(to_tauri_err)
 }
 
@@ -1028,10 +1190,10 @@ pub fn host_notifications_list(
 #[tauri::command]
 pub fn host_notifications_read(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     id: Option<String>,
 ) -> Result<serde_json::Value, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_notifications_read_as(&caller, &state, id.as_deref()).map_err(to_tauri_err)
 }
 
@@ -1040,8 +1202,7 @@ pub fn host_notifications_read(
 pub fn host_recover_boot(
     state: State<'_, SubstrateState>,
 ) -> Result<serde_json::Value, TauriError> {
-    crate::cmd_recover_boot(&state)
-        .map_err(to_tauri_err)
+    crate::cmd_recover_boot(&state).map_err(to_tauri_err)
 }
 
 /// `host_recover_report`：应用上报启动结果（恢复引擎的**驱动信号**）。
@@ -1058,11 +1219,11 @@ pub fn host_recover_boot(
 #[tauri::command]
 pub fn host_recover_report(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     outcome: String,
     plugin_id: Option<String>,
 ) -> Result<serde_json::Value, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_recover_report_as(&caller, &state, &outcome, plugin_id.as_deref())
         .map_err(to_tauri_err)
 }
@@ -1075,10 +1236,10 @@ pub fn host_recover_report(
 #[tauri::command]
 pub fn host_recover_trial_enable(
     state: State<'_, PluginRuntimeState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     plugin_id: String,
 ) -> Result<serde_json::Value, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_recover_trial_enable_as(&caller, &state, &plugin_id).map_err(to_tauri_err)
 }
 
@@ -1093,13 +1254,13 @@ pub fn host_recover_trial_enable(
 #[tauri::command]
 pub fn host_market_check(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     // 与 host_market_download 保持同一线格式：更新源配置由前端持有并逐次下发。
     // 当前 check 为本地桩实现，源参数暂不使用（接入 tauri-plugin-updater 后生效）。
     #[allow(unused_variables)] endpoints: Option<Vec<String>>,
     #[allow(unused_variables)] pubkey: Option<String>,
 ) -> Result<crate::MarketCheckResult, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_market_check_as(&caller, &state).map_err(to_tauri_err)
 }
 
@@ -1107,9 +1268,16 @@ pub fn host_market_check(
 #[tauri::command]
 pub fn host_brand_info(
     state: State<'_, SubstrateState>,
-) -> Result<serde_json::Value, TauriError> {
-    crate::cmd_brand_info(&state)
-        .map_err(to_tauri_err)
+) -> Result<crate::UnsupportedBody, TauriError> {
+    crate::cmd_brand_info(&state).map_err(to_tauri_err)
+}
+
+/// 获取当前宿主实际注册的命令面与缺失能力。
+#[tauri::command]
+pub fn host_capabilities(
+    state: State<'_, SubstrateState>,
+) -> Result<crate::CapabilitiesBody, TauriError> {
+    crate::cmd_host_capabilities(&state).map_err(to_tauri_err)
 }
 
 /// `host_i18n_t`：翻译。
@@ -1117,12 +1285,8 @@ pub fn host_brand_info(
 /// 全部缺失时返回 key 本身（并计入缺失计数），不是空串——空串会让缺失文案
 /// 彻底隐形。缺失可观测性见 `host_i18n_stats`。
 #[tauri::command]
-pub fn host_i18n_t(
-    state: State<'_, SubstrateState>,
-    key: String,
-) -> Result<String, TauriError> {
-    crate::cmd_i18n_t(&state, &key)
-        .map_err(to_tauri_err)
+pub fn host_i18n_t(state: State<'_, SubstrateState>, key: String) -> Result<String, TauriError> {
+    crate::cmd_i18n_t(&state, &key).map_err(to_tauri_err)
 }
 
 /// `host_i18n_t_params`：带 `{{param}}` 占位替换的翻译。
@@ -1132,8 +1296,7 @@ pub fn host_i18n_t_params(
     key: String,
     params: serde_json::Map<String, serde_json::Value>,
 ) -> Result<String, TauriError> {
-    crate::cmd_i18n_t_params(&state, &key, params)
-        .map_err(to_tauri_err)
+    crate::cmd_i18n_t_params(&state, &key, params).map_err(to_tauri_err)
 }
 
 /// `host_i18n_set_locale`：切换语言（§4.20：语言状态的单一来源）。
@@ -1144,10 +1307,10 @@ pub fn host_i18n_t_params(
 #[tauri::command]
 pub fn host_i18n_set_locale(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     locale: String,
 ) -> Result<serde_json::Value, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_i18n_set_locale_as(&caller, &state, &locale).map_err(to_tauri_err)
 }
 
@@ -1161,21 +1324,19 @@ pub fn host_i18n_set_locale(
 #[tauri::command]
 pub fn host_i18n_load(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     locale: String,
     entries: serde_json::Map<String, serde_json::Value>,
     plugin_id: Option<String>,
 ) -> Result<serde_json::Value, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_i18n_load_as(&caller, &state, &locale, entries, plugin_id.as_deref())
         .map_err(to_tauri_err)
 }
 
 /// `host_i18n_stats`：i18n 状态与缺失键可观测性。
 #[tauri::command]
-pub fn host_i18n_stats(
-    state: State<'_, SubstrateState>,
-) -> Result<serde_json::Value, TauriError> {
+pub fn host_i18n_stats(state: State<'_, SubstrateState>) -> Result<serde_json::Value, TauriError> {
     crate::cmd_i18n_stats(&state).map_err(to_tauri_err)
 }
 
@@ -1187,10 +1348,10 @@ pub fn host_i18n_stats(
 #[tauri::command]
 pub fn host_i18n_cleanup_plugin(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     plugin_id: String,
 ) -> Result<serde_json::Value, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_i18n_cleanup_plugin_as(&caller, &state, &plugin_id).map_err(to_tauri_err)
 }
 
@@ -1236,7 +1397,7 @@ pub fn wire_contributes_register(
 #[tauri::command]
 pub fn host_contributes_register(
     state: State<'_, PluginRuntimeState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     entry: ContributeEntryInput,
 ) -> Result<(), TauriError> {
     wire_contributes_register(&state, window.label(), &entry).map_err(to_tauri_err)
@@ -1248,8 +1409,7 @@ pub fn host_contributes_list(
     state: State<'_, PluginRuntimeState>,
     kind: Option<String>,
 ) -> Result<Vec<ContributeEntry>, TauriError> {
-    crate::cmd_contributes_list(&state, kind.as_deref())
-        .map_err(to_tauri_err)
+    crate::cmd_contributes_list(&state, kind.as_deref()).map_err(to_tauri_err)
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1322,6 +1482,138 @@ impl TauriWindowSink {
                 format!("窗口操作 `{op}` 在 `{label}` 上失败：{e}"),
             )
         })
+    }
+}
+
+/// Register a read-only protocol for installed plugin UI assets.
+///
+/// Requests use `/plugin-id/relative/path`; the handler canonicalizes both the install root
+/// and target and refuses traversal, symlinks outside the plugin directory, and unknown IDs.
+#[cfg(feature = "plugin-install")]
+pub fn with_plugin_asset_protocol<R: tauri::Runtime>(
+    builder: tauri::Builder<R>,
+    root: std::path::PathBuf,
+) -> tauri::Builder<R> {
+    builder.register_uri_scheme_protocol("tauron-plugin", move |_ctx, request| {
+        let fail = |status| {
+            tauri::http::Response::builder()
+                .status(status)
+                .header(tauri::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(b"plugin asset unavailable".to_vec())
+                .expect("valid static response")
+        };
+        if request.method() != tauri::http::Method::GET
+            && request.method() != tauri::http::Method::HEAD
+        {
+            return fail(tauri::http::StatusCode::METHOD_NOT_ALLOWED);
+        }
+        let (bytes, content_type) = match read_installed_plugin_asset(&root, request.uri().path()) {
+            Ok(asset) => asset,
+            Err(status) => return fail(status),
+        };
+        tauri::http::Response::builder()
+            .status(tauri::http::StatusCode::OK)
+            .header(tauri::http::header::CONTENT_TYPE, content_type)
+            .header(tauri::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .body(if request.method() == tauri::http::Method::HEAD { Vec::new() } else { bytes })
+            .expect("valid plugin asset response")
+    })
+}
+
+#[cfg(feature = "plugin-install")]
+fn read_installed_plugin_asset(
+    root: &std::path::Path,
+    request_path: &str,
+) -> Result<(Vec<u8>, &'static str), tauri::http::StatusCode> {
+    let path = if request_path.starts_with("/plugin-") {
+        &request_path["/plugin-".len()..]
+    } else {
+        request_path.trim_start_matches('/')
+    };
+    let mut parts = path.split('/');
+    let id = parts.next().filter(|id| !id.is_empty()).ok_or(tauri::http::StatusCode::NOT_FOUND)?;
+    let rest = parts.collect::<Vec<_>>().join("/");
+    let plugin_id =
+        tauron_host::manifest::PluginId::new(id).map_err(|_| tauri::http::StatusCode::NOT_FOUND)?;
+    let relative = std::path::PathBuf::from(&rest);
+    if rest.is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(tauri::http::StatusCode::NOT_FOUND);
+    }
+    let install_root = root.canonicalize().map_err(|_| tauri::http::StatusCode::NOT_FOUND)?;
+    let plugin_root = install_root
+        .join(plugin_id.as_str())
+        .canonicalize()
+        .map_err(|_| tauri::http::StatusCode::NOT_FOUND)?;
+    if !plugin_root.starts_with(&install_root) {
+        return Err(tauri::http::StatusCode::NOT_FOUND);
+    }
+    let target = plugin_root
+        .join(relative)
+        .canonicalize()
+        .map_err(|_| tauri::http::StatusCode::NOT_FOUND)?;
+    if !target.starts_with(&plugin_root) || !target.is_file() {
+        return Err(tauri::http::StatusCode::NOT_FOUND);
+    }
+    let bytes = std::fs::read(&target).map_err(|_| tauri::http::StatusCode::NOT_FOUND)?;
+    let content_type = match target
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    };
+    Ok((bytes, content_type))
+}
+
+#[cfg(feature = "plugin-install")]
+fn make_plugin_asset_url(plugin_id: &str, entry: &str) -> HostResult<tauri::Url> {
+    let encoded = entry
+        .split('/')
+        .map(|part| {
+            let mut out = String::new();
+            for byte in part.bytes() {
+                if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+                    out.push(byte as char);
+                } else {
+                    out.push_str(&format!("%{byte:02X}"));
+                }
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("tauron-plugin://localhost/{plugin_id}/{encoded}").parse().map_err(|e| {
+        HostError::new(ErrorCode::E_STATE_INVALID_TRANSITION, format!("插件 UI URL 非法：{e}"))
+    })
+}
+
+#[cfg(feature = "plugin-install")]
+#[cfg(test)]
+mod plugin_asset_url_tests {
+    use super::make_plugin_asset_url;
+
+    #[test]
+    fn builds_stable_custom_protocol_url_with_encoded_segments() {
+        let url = make_plugin_asset_url("com.example.plugin", "ui/panel file.html").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "tauron-plugin://localhost/com.example.plugin/ui/panel%20file.html"
+        );
     }
 }
 
@@ -1409,7 +1701,39 @@ impl crate::WindowSink for TauriWindowSink {
                 ),
             ));
         }
-        let url = tauri::WebviewUrl::App(std::path::PathBuf::from(&spec.url));
+        let url = if spec.label.starts_with("plugin-") {
+            #[cfg(feature = "plugin-install")]
+            {
+                let plugin_id = &spec.label["plugin-".len()..];
+                let state = self.app.state::<crate::PluginRuntimeState>();
+                let installed = crate::installed_plugin_ui(&state, plugin_id)?;
+                let install_root = state.install_config_root().ok_or_else(|| {
+                    HostError::new(ErrorCode::E_INSTALL_FAILED, "插件安装目录未配置")
+                })?;
+                let relative =
+                    installed.entry.strip_prefix(install_root.as_path()).map_err(|e| {
+                        HostError::new(
+                            ErrorCode::E_INSTALL_FAILED,
+                            format!("插件 UI 越出安装目录：{e}"),
+                        )
+                    })?;
+                let entry = relative
+                    .strip_prefix(plugin_id)
+                    .unwrap_or(relative)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                tauri::WebviewUrl::CustomProtocol(make_plugin_asset_url(plugin_id, &entry)?)
+            }
+            #[cfg(not(feature = "plugin-install"))]
+            {
+                return Err(HostError::new(
+                    ErrorCode::E_PLUGIN_TYPE_NO_RUNTIME,
+                    "此构建未启用 plugin-install，不能加载磁盘插件页面",
+                ));
+            }
+        } else {
+            tauri::WebviewUrl::App(std::path::PathBuf::from(&spec.url))
+        };
         tauri::WebviewWindowBuilder::new(&self.app, &spec.label, url)
             .title(&spec.title)
             .inner_size(spec.width as f64, spec.height as f64)
@@ -1480,7 +1804,11 @@ impl crate::DialogSink for TauriDialogSink {
     fn open_file(&self, _multiple: bool, directory: bool) -> HostResult<Option<String>> {
         self.signal(
             "open",
-            if directory { "web 目录选择（webkitdirectory）" } else { "web 文件选择器（<input type=file>）" },
+            if directory {
+                "web 目录选择（webkitdirectory）"
+            } else {
+                "web 文件选择器（<input type=file>）"
+            },
         );
         Ok(None)
     }
@@ -1581,7 +1909,7 @@ impl crate::DeepLinkSink for TauriDeepLinkSink {
 #[tauri::command]
 pub fn host_window_minimize(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
 ) -> Result<(), TauriError> {
     crate::cmd_window_minimize(&state, window.label()).map_err(to_tauri_err)
 }
@@ -1590,7 +1918,7 @@ pub fn host_window_minimize(
 #[tauri::command]
 pub fn host_window_maximize(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
 ) -> Result<(), TauriError> {
     crate::cmd_window_maximize(&state, window.label()).map_err(to_tauri_err)
 }
@@ -1599,7 +1927,7 @@ pub fn host_window_maximize(
 #[tauri::command]
 pub fn host_window_restore(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
 ) -> Result<(), TauriError> {
     crate::cmd_window_restore(&state, window.label()).map_err(to_tauri_err)
 }
@@ -1608,7 +1936,7 @@ pub fn host_window_restore(
 #[tauri::command]
 pub fn host_window_close(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
 ) -> Result<(), TauriError> {
     crate::cmd_window_close(&state, window.label()).map_err(to_tauri_err)
 }
@@ -1632,9 +1960,9 @@ pub fn host_window_quit(state: State<'_, SubstrateState>) -> Result<(), TauriErr
 #[tauri::command]
 pub fn host_window_relaunch(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
 ) -> Result<crate::WindowRelaunchOutcome, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_window_relaunch_as(&caller, &state).map_err(to_tauri_err)
 }
 
@@ -1650,19 +1978,14 @@ pub fn host_window_relaunch(
 #[tauri::command]
 pub fn host_window_create(
     state: State<'_, PluginRuntimeState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     plugin_id: String,
     title: Option<String>,
     width: Option<u32>,
     height: Option<u32>,
 ) -> Result<crate::WindowCreateOutcome, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
-    let req = crate::WindowCreateRequest {
-        plugin_id,
-        title,
-        width,
-        height,
-    };
+    let caller = window.caller().map_err(to_tauri_err)?;
+    let req = crate::WindowCreateRequest { plugin_id, title, width, height };
     crate::cmd_window_create_as(&caller, &state, &req).map_err(to_tauri_err)
 }
 
@@ -1674,7 +1997,7 @@ pub fn host_window_create(
 #[tauri::command]
 pub fn host_window_set_position(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     x: i32,
     y: i32,
 ) -> Result<(), TauriError> {
@@ -1685,7 +2008,7 @@ pub fn host_window_set_position(
 #[tauri::command]
 pub fn host_window_set_size(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     width: u32,
     height: u32,
 ) -> Result<(), TauriError> {
@@ -1697,7 +2020,7 @@ pub fn host_window_set_size(
 pub fn host_clipboard_write(
     state: State<'_, SubstrateState>,
     text: String,
-) -> Result<(), TauriError> {
+) -> Result<crate::UnsupportedBody, TauriError> {
     crate::cmd_clipboard_write(&state, text).map_err(to_tauri_err)
 }
 
@@ -1705,7 +2028,7 @@ pub fn host_clipboard_write(
 #[tauri::command]
 pub fn host_clipboard_read(
     state: State<'_, SubstrateState>,
-) -> Result<String, TauriError> {
+) -> Result<crate::DegradedValue<String>, TauriError> {
     crate::cmd_clipboard_read(&state).map_err(to_tauri_err)
 }
 
@@ -1718,10 +2041,10 @@ pub fn host_clipboard_read(
 #[tauri::command]
 pub fn host_deep_link_register(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     protocol: String,
-) -> Result<(), TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+) -> Result<crate::ProviderResult<()>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_deep_link_register_as(&caller, &state, protocol).map_err(to_tauri_err)
 }
 
@@ -1738,12 +2061,12 @@ pub fn host_deep_link_register(
 #[tauri::command]
 pub fn host_market_download(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     version: Option<String>,
     #[allow(unused_variables)] endpoints: Option<Vec<String>>,
     #[allow(unused_variables)] pubkey: Option<String>,
 ) -> Result<crate::MarketUpdateResult, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_market_download_as(&caller, &state, version.as_deref()).map_err(to_tauri_err)
 }
 
@@ -1755,14 +2078,14 @@ pub fn host_market_download(
 #[tauri::command]
 pub fn host_market_install(
     state: State<'_, SubstrateState>,
-    window: WebviewWindow,
+    window: TauriCallerSource,
     version: Option<String>,
 ) -> Result<crate::MarketUpdateResult, TauriError> {
-    let caller = crate::Caller::from_label(window.label()).map_err(to_tauri_err)?;
+    let caller = window.caller().map_err(to_tauri_err)?;
     crate::cmd_market_install_as(&caller, &state, version.as_deref()).map_err(to_tauri_err)
 }
 
-/// `host_dialog_open`：文件选择对话框（当前返回 None = 取消）。
+/// `host_dialog_open`：文件选择对话框；缺少 provider 时返回 `UnsupportedBody`。
 #[tauri::command]
 pub fn host_dialog_open(
     state: State<'_, SubstrateState>,
@@ -1772,19 +2095,19 @@ pub fn host_dialog_open(
     // 当前对话框为桩实现，原生 UI 接入后生效。
     #[allow(unused_variables)] filters: Option<Vec<HostFileFilter>>,
     #[allow(unused_variables)] default_path: Option<String>,
-) -> Result<Option<String>, TauriError> {
+) -> Result<crate::ProviderResult<Option<String>>, TauriError> {
     crate::cmd_dialog_open(&state, multiple.unwrap_or(false), directory.unwrap_or(false))
         .map_err(to_tauri_err)
 }
 
-/// `host_dialog_save`：保存对话框（当前返回 None = 取消）。
+/// `host_dialog_save`：保存对话框；缺少 provider 时返回 `UnsupportedBody`。
 #[tauri::command]
 pub fn host_dialog_save(
     state: State<'_, SubstrateState>,
     default_name: Option<String>,
     #[allow(unused_variables)] filters: Option<Vec<HostFileFilter>>,
     #[allow(unused_variables)] default_path: Option<String>,
-) -> Result<Option<String>, TauriError> {
+) -> Result<crate::ProviderResult<Option<String>>, TauriError> {
     crate::cmd_dialog_save(&state, default_name.as_deref()).map_err(to_tauri_err)
 }
 
@@ -1795,11 +2118,11 @@ pub fn host_dialog_message(
     title: String,
     message: String,
     kind: Option<String>,
-) -> Result<(), TauriError> {
+) -> Result<crate::ProviderResult<()>, TauriError> {
     crate::cmd_dialog_message(&state, &title, &message, kind.as_deref()).map_err(to_tauri_err)
 }
 
-/// `host_dialog_confirm`：确认对话框（当前返回 false = 取消）。
+/// `host_dialog_confirm`：确认对话框；缺少 provider 时返回 `UnsupportedBody`。
 #[tauri::command]
 pub fn host_dialog_confirm(
     state: State<'_, SubstrateState>,
@@ -1809,7 +2132,7 @@ pub fn host_dialog_confirm(
     // 当前确认为桩实现，原生 UI 接入后生效。
     #[allow(unused_variables)] confirm_label: Option<String>,
     #[allow(unused_variables)] cancel_label: Option<String>,
-) -> Result<bool, TauriError> {
+) -> Result<crate::ProviderResult<bool>, TauriError> {
     crate::cmd_dialog_confirm(&state, &title, &message).map_err(to_tauri_err)
 }
 
@@ -1849,12 +2172,13 @@ where
 /// # 用法（真实消费者：`examples/minimal-app/src-tauri/src/main.rs`）
 ///
 /// ```rust,ignore
-/// use tauri::{State, WebviewWindow};
-/// use tauron_adapter::{Caller, HostResult, SubstrateState};
+/// use tauri::State;
+/// use tauron_adapter::tauri::{CallerSource, TauriCallerSource};
+/// use tauron_adapter::{HostResult, SubstrateState};
 ///
 /// tauron_adapter::tauri_plugin_as_host_command! {
 ///     plugin = "my-plugin",
-///     cmd = pub my_stats(state: State<'_, SubstrateState>, window: WebviewWindow, note: Option<String>)
+///     cmd = pub my_stats(state: State<'_, SubstrateState>, window: TauriCallerSource, note: Option<String>)
 ///         -> serde_json::Value,
 ///     handler = my_stats_body,
 /// }
@@ -1862,10 +2186,10 @@ where
 /// /// 业务体：只写这一半，返回 `HostResult<T>`。
 /// fn my_stats_body(
 ///     state: State<'_, SubstrateState>,
-///     window: WebviewWindow,
+///     window: TauriCallerSource,
 ///     note: Option<String>,
 /// ) -> HostResult<serde_json::Value> {
-///     let caller = Caller::from_label(window.label())?;      // 身份从 label 解析
+///     let caller = window.caller()?;                         // Tauri 实现从 label 解析
 ///     let stats = tauron_adapter::cmd_i18n_stats(&state)?;   // 宿主能力照用
 ///     Ok(serde_json::json!({ "note": note, "i18n": stats }))
 /// }
@@ -1971,7 +2295,7 @@ fn origin_gate<R: tauri::Runtime>(invoke: &tauri::ipc::Invoke<R>) -> Result<(), 
 
 /// 把 [`origin_gate`] 套在 `tauri::generate_handler!` 产出的处理器外面。
 ///
-/// **为什么是咽喉点而不是逐命令补丁**：54 条命令逐条加校验必然漏，而漏掉的那条
+/// **为什么是咽喉点而不是逐命令补丁**：55 条命令逐条加校验必然漏，而漏掉的那条
 /// 不会带来任何编译期或门禁期提示——只会静默裸奔。这里在唯一的分发入口判定，
 /// 新命令只要进 [`tauron_generate_handler!`] 就自动受管（`host_*` 命令族清单本身
 /// 也被 wire-gate 锁死，见 `@tauron/contract-tests`）。
@@ -2001,8 +2325,8 @@ where
 // macro，输入按**字面 path 列表**解析——实测传入 `family!()` 会得到
 // `error: expected ','`，族的展开结果无法拼进同一个 handler。因此族以**两组编译期
 // 可选集合**表达：宿主在**编译期**二选一，而不是运行时过滤。
-//   · [`tauron_substrate_handler!`] 底座-only（38 条）
-//   · [`tauron_plugin_handler!`] 全量（54 条 = 底座 38 + 插件运行时 16）
+//   · [`tauron_substrate_handler!`] 底座-only（39 条）
+//   · [`tauron_plugin_handler!`] 全量（56 条 = 底座 39 + 插件运行时 17）
 //
 // 两组集合的一致性**不靠人眼**：wire-gate 断言
 //   ① 全量集合 == tauri.rs 中全部 `#[tauri::command] pub fn host_*` 定义；
@@ -2070,16 +2394,17 @@ macro_rules! tauron_substrate_handler {
             // 插件的当前状态并补发 `TrialEnable`（R1b 实测发现），属插件运行时域。
             // 品牌 / 诊断域
             $crate::tauri::host_brand_info,
+            $crate::tauri::host_capabilities,
         ])
     };
 }
 
-/// **全量**命令集：底座 38 条 + 插件运行时 16 条（多插件宿主）。
+/// **全量**命令集：底座 39 条 + 插件运行时 17 条（多插件宿主）。
 #[macro_export]
 macro_rules! tauron_plugin_handler {
     () => {
         $crate::tauri::origin_gated_handler(tauri::generate_handler![
-            // ── 底座（与 [`tauron_substrate_handler!`] 的 38 条逐条一致）──
+            // ── 底座（与 [`tauron_substrate_handler!`] 的 39 条逐条一致）──
             $crate::tauri::host_window_minimize,
             $crate::tauri::host_window_maximize,
             $crate::tauri::host_window_restore,
@@ -2119,7 +2444,8 @@ macro_rules! tauron_plugin_handler {
             $crate::tauri::host_recover_boot,
             $crate::tauri::host_recover_report,
             $crate::tauri::host_brand_info,
-            // ── 插件运行时（16 条；底座-only 宿主不得注册）──
+            $crate::tauri::host_capabilities,
+            // ── 插件运行时（17 条；底座-only 宿主不得注册）──
             // 其中**插件面可触达**的那些（`host_lifecycle_report` / `host_plugin_call` /
             // `host_call_end` / `host_cancel` / `host_registry_list` /
             // `host_contributes_register` / 流式三命令 / `host_recover_trial_enable`…）
@@ -2147,11 +2473,20 @@ macro_rules! tauron_plugin_handler {
             // spawn 则永远拿不到 lease。二者同属插件运行时域。
             $crate::tauri::host_runtime_spawn,
             $crate::tauri::host_runtime_health,
+            $crate::tauri::host_resource_stats,
             // R8 §3：`host_window_create` 属**插件运行时域**——它要在注册表里确认
             // 目标插件存在、并从 manifest 取 `entry.ui` 作为窗口 URL；底座态
             // （`SubstrateState`）在编译期就拿不到注册表。只注册底座集合的宿主
             // 因此拿不到「为插件开窗」这条命令（语义正确：它没有插件可开窗）。
             $crate::tauri::host_window_create,
+            // 0.4-A1 调用投递闭环：跨主体调用 / 结果回填 / 结果取件。
+            $crate::tauri::host_call_plugin,
+            $crate::tauri::host_call_result,
+            $crate::tauri::host_call_take,
+            #[cfg(feature = "plugin-install")]
+            $crate::tauri::host_registry_install,
+            #[cfg(feature = "plugin-install")]
+            $crate::tauri::host_registry_install_preview,
         ])
     };
 }
@@ -2168,7 +2503,7 @@ macro_rules! tauron_plugin_handler {
 ///    `plugin:tauron|<name>`——**必须**为 `tauron` 插件配置 capability/permission
 ///    授予所需命令（Tauri v2 对 `plugin:` 命令强制 ACL），生产客户端应采用。
 ///
-/// 不跑插件运行时的宿主改用 [`tauron_substrate_handler!`]（少 16 条插件命令）。
+/// 不跑插件运行时的宿主改用 [`tauron_substrate_handler!`]（少 17 条插件命令）。
 #[macro_export]
 macro_rules! tauron_generate_handler {
     () => {
@@ -2216,7 +2551,7 @@ mod handler_families {
 
     /// R7-2 迁移入口「已接线」的**编译期证据**。
     ///
-    /// 两个包装器带 `State<'_, SubstrateState>` 与注入的 `WebviewWindow`，单测里
+    /// 两个包装器带 `State<'_, SubstrateState>` 与 `TauriCallerSource`，单测里
     /// 构造不出来（要 Tauri 运行时），所以只能做类型证据：函数项一旦改名 / 改签名
     /// （例如去掉 `window`、把 `doc` 改成 `String`、把返回改成 `()`），这里立刻
     /// 编译失败。行为路径由 `lib.rs` 的
@@ -2226,12 +2561,12 @@ mod handler_families {
     fn settings_migration_commands_are_wired() {
         let _: fn(
             tauri::State<'_, super::SubstrateState>,
-            tauri::WebviewWindow,
+            super::TauriCallerSource,
             serde_json::Value,
         ) -> Result<(), super::TauriError> = super::host_settings_adopt_legacy;
         let _: fn(
             tauri::State<'_, super::SubstrateState>,
-            tauri::WebviewWindow,
+            super::TauriCallerSource,
         ) -> Result<usize, super::TauriError> = super::host_settings_migrate;
     }
 }
@@ -2267,9 +2602,7 @@ fn command_state_with_dir_and_config(
     let mut substrate = SubstrateState::with_adapter_config(&cfg);
     // R7-3：注入 Tauri 系统通知通道。注入点只有这里（`OnceLock` 只设一次）——
     // 与 `plugin_flags` 同一模式，底座保持平台无关。
-    let _ = substrate
-        .notify_sink
-        .set(std::sync::Arc::new(TauriDispatchSink::new(app.clone())));
+    let _ = substrate.notify_sink.set(std::sync::Arc::new(TauriDispatchSink::new(app.clone())));
     // R8 §1：注入三类平台能力。**不注入 = 全部走 `lib.rs` 的进程内降级实现**
     // （窗口操作不生效、对话框恒取消、深链接不注册）——那对真实宿主是"哑掉"，所以
     // 生产装配点必须在这里补齐。真伪差异见各类型文档：只有窗口是真的。
@@ -2334,7 +2667,9 @@ pub fn state_init() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 }
 
 /// [`state_init`] 的可配置变体（见 [`init_with_config`]）。
-pub fn state_init_with_adapter_config(cfg: AdapterConfig) -> tauri::plugin::TauriPlugin<tauri::Wry> {
+pub fn state_init_with_adapter_config(
+    cfg: AdapterConfig,
+) -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("tauron-state")
         .setup(move |app, _api| {
             manage_states(
@@ -2383,8 +2718,7 @@ pub fn deliver_deep_link<R: tauri::Runtime>(
         "url": url,
         "protocol": state.shell_ext.lock().deep_link_protocol.clone(),
     });
-    app.emit(crate::DEEP_LINK_TOPIC, payload)
-        .map_err(|e| e.to_string())?;
+    app.emit(crate::DEEP_LINK_TOPIC, payload).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -2397,11 +2731,10 @@ pub fn deliver_deep_link<R: tauri::Runtime>(
 /// **绕过了 [`command_state_with_dir_and_config`] 这个唯一装配点**，于是恢复持久化
 /// 在该入口静默失活（`recovery_data_dir = None` → 崩溃检测只在进程内有效，安全
 /// 模式永不触发），origin 允许清单也无从配置。改为委托后两个问题一并消失。
-pub fn init_with_config(config: tauron_host::RegistryConfig) -> tauri::plugin::TauriPlugin<tauri::Wry> {
-    init_with_adapter_config(AdapterConfig {
-        registry: Some(config),
-        ..AdapterConfig::default()
-    })
+pub fn init_with_config(
+    config: tauron_host::RegistryConfig,
+) -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    init_with_adapter_config(AdapterConfig { registry: Some(config), ..AdapterConfig::default() })
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -2432,9 +2765,10 @@ mod wire_tests {
         assert_eq!(req.args_json, Some(serde_json::json!({ "text": "hi" })));
 
         // argsJson 缺省必须合法（对应 TS 的 argsRaw/unary 无参分支）
-        let bare: HostPluginCallReq =
-            serde_json::from_value(serde_json::json!({ "callId": "c-2", "method": "m", "kind": "stream" }))
-                .unwrap();
+        let bare: HostPluginCallReq = serde_json::from_value(
+            serde_json::json!({ "callId": "c-2", "method": "m", "kind": "stream" }),
+        )
+        .unwrap();
         assert!(bare.args_json.is_none());
     }
 
@@ -2572,10 +2906,10 @@ mod wire_tests {
             assert_eq!(op.id, "com.example.x");
         }
         // D15：枚举定稿，非法操作名必须拒绝
-        assert!(
-            serde_json::from_value::<HostAdminOp>(serde_json::json!({ "op": "delete", "id": "x" }))
-                .is_err()
-        );
+        assert!(serde_json::from_value::<HostAdminOp>(
+            serde_json::json!({ "op": "delete", "id": "x" })
+        )
+        .is_err());
     }
 
     #[test]
@@ -2598,10 +2932,7 @@ mod wire_tests {
     #[test]
     fn registry_admin_maps_id_and_op_onto_core() {
         let state = CommandState::new();
-        let op = HostAdminOp {
-            op: RegistryAdminOp::Disable,
-            id: "com.example.x".to_string(),
-        };
+        let op = HostAdminOp { op: RegistryAdminOp::Disable, id: "com.example.x".to_string() };
         // 未注册插件 → 核心以"未知插件"拒绝，证明 id/op 已正确映射到核心参数
         // （R7 收口后须带主体：这里用主窗，绕开身份判定、只验映射）。
         let main = crate::Caller::MainWindow;
@@ -2618,32 +2949,18 @@ mod wire_tests {
     }
 
     fn declare_self_topics(state: &CommandState, publisher: &str, topics: &[&str]) {
-        let decls: Vec<EventDecl> = topics
-            .iter()
-            .map(|t| EventDecl {
-                topic: (*t).to_string(),
-                public: false,
-            })
-            .collect();
-        state
-            .bus
-            .lock()
-            .declare_topics(publisher, &decls)
-            .expect("topic 声明应成功");
+        let decls: Vec<EventDecl> =
+            topics.iter().map(|t| EventDecl { topic: (*t).to_string(), public: false }).collect();
+        state.bus.lock().declare_topics(publisher, &decls).expect("topic 声明应成功");
     }
 
     #[test]
     fn single_selector_subscribe_passes_core_token_through() {
         let state = CommandState::new();
         declare_self_topics(&state, "com.a", &["plugin:com.a:x"]);
-        let sub = vec![HostEventSelector {
-            topic: "plugin:com.a:x".to_string(),
-        }];
+        let sub = vec![HostEventSelector { topic: "plugin:com.a:x".to_string() }];
         let out = wire_events_subscribe(&state, "com.a", "plugin-com.a", &sub).unwrap();
-        assert!(
-            !out.token.starts_with("grp:"),
-            "单选择器必须透传核心 token（与核心行为逐一一致）"
-        );
+        assert!(!out.token.starts_with("grp:"), "单选择器必须透传核心 token（与核心行为逐一一致）");
         assert_eq!(out.selectors.len(), 1);
         assert!(state.bus.lock().has_hanging_subscriptions("com.a"));
         wire_events_unsubscribe(&state, &out.token).unwrap();
@@ -2655,30 +2972,20 @@ mod wire_tests {
         let state = CommandState::new();
         declare_self_topics(&state, "com.a", &["plugin:com.a:x", "plugin:com.a:y"]);
         let sub = vec![
-            HostEventSelector {
-                topic: "plugin:com.a:x".to_string(),
-            },
-            HostEventSelector {
-                topic: "plugin:com.a:y".to_string(),
-            },
+            HostEventSelector { topic: "plugin:com.a:x".to_string() },
+            HostEventSelector { topic: "plugin:com.a:y".to_string() },
         ];
         let out = wire_events_subscribe(&state, "com.a", "plugin-com.a", &sub).unwrap();
         assert!(out.token.starts_with("grp:"), "多选择器必须返回分组 token");
         assert_eq!(out.selectors.len(), 2);
-        assert!(
-            state.bus.lock().has_hanging_subscriptions("com.a"),
-            "两个 topic 都应完成订阅"
-        );
+        assert!(state.bus.lock().has_hanging_subscriptions("com.a"), "两个 topic 都应完成订阅");
 
         wire_events_unsubscribe(&state, &out.token).unwrap();
         assert!(
             !state.bus.lock().has_hanging_subscriptions("com.a"),
             "分组退订必须退净全部成员（§8-3 零悬挂订阅）"
         );
-        assert!(
-            state.subscription_groups.lock().is_empty(),
-            "分组登记必须清理，不留孤儿条目"
-        );
+        assert!(state.subscription_groups.lock().is_empty(), "分组登记必须清理，不留孤儿条目");
     }
 
     #[test]
@@ -2689,13 +2996,9 @@ mod wire_tests {
         let state = CommandState::new();
         declare_self_topics(&state, "com.a", &["plugin:com.a:x"]);
         let sub = vec![
-            HostEventSelector {
-                topic: "plugin:com.a:x".to_string(),
-            },
+            HostEventSelector { topic: "plugin:com.a:x".to_string() },
             // 未声明的 topic → 授权拒绝，触发第 2 个选择器失败。
-            HostEventSelector {
-                topic: "plugin:com.b:missing".to_string(),
-            },
+            HostEventSelector { topic: "plugin:com.b:missing".to_string() },
         ];
         wire_events_subscribe(&state, "com.a", "plugin-com.a", &sub)
             .expect_err("第 2 个选择器失败必须整体失败");
@@ -2703,10 +3006,7 @@ mod wire_tests {
             !state.bus.lock().has_hanging_subscriptions("com.a"),
             "部分失败必须回滚已建成的订阅"
         );
-        assert!(
-            state.subscription_groups.lock().is_empty(),
-            "失败不得留下分组登记"
-        );
+        assert!(state.subscription_groups.lock().is_empty(), "失败不得留下分组登记");
     }
 
     #[test]
@@ -2716,12 +3016,8 @@ mod wire_tests {
         let state = CommandState::new();
         declare_self_topics(&state, "com.a", &["plugin:com.a:x", "plugin:com.a:y"]);
         let sub = vec![
-            HostEventSelector {
-                topic: "plugin:com.a:x".to_string(),
-            },
-            HostEventSelector {
-                topic: "plugin:com.a:y".to_string(),
-            },
+            HostEventSelector { topic: "plugin:com.a:x".to_string() },
+            HostEventSelector { topic: "plugin:com.a:y".to_string() },
         ];
         let out = wire_events_subscribe(&state, "com.a", "plugin-com.a", &sub).unwrap();
         assert!(out.token.starts_with("grp:"));
@@ -2736,19 +3032,10 @@ mod wire_tests {
 
         cleanup_closed_window(&state, "plugin-com.a");
 
-        assert!(
-            !state.bus.lock().has_hanging_subscriptions("com.a"),
-            "关窗必须清核心订阅"
-        );
+        assert!(!state.bus.lock().has_hanging_subscriptions("com.a"), "关窗必须清核心订阅");
         let groups = state.subscription_groups.lock();
-        assert!(
-            !groups.contains_key(&out.token),
-            "关窗必须回收本订阅者的分组登记"
-        );
-        assert!(
-            groups.contains_key("grp:other"),
-            "不得连坐回收其它订阅者的分组"
-        );
+        assert!(!groups.contains_key(&out.token), "关窗必须回收本订阅者的分组登记");
+        assert!(groups.contains_key("grp:other"), "不得连坐回收其它订阅者的分组");
     }
 
     #[test]
@@ -2790,14 +3077,8 @@ mod wire_tests {
             vec!["plugin:com.a:x".to_string()],
             "必须按窗口过滤并去重"
         );
-        assert_eq!(
-            bus.subscribed_topics_of("com.a", "w2"),
-            vec!["plugin:com.a:y".to_string()]
-        );
-        assert!(
-            bus.subscribed_topics_of("com.b", "w1").is_empty(),
-            "他人订阅不得被计入"
-        );
+        assert_eq!(bus.subscribed_topics_of("com.a", "w2"), vec!["plugin:com.a:y".to_string()]);
+        assert!(bus.subscribed_topics_of("com.b", "w1").is_empty(), "他人订阅不得被计入");
     }
 
     // ── 窗口 label ↔ 插件身份（一插件一 webview 约定）──────────────
@@ -2926,10 +3207,7 @@ mod wire_tests {
         );
         let text = payload.to_string();
         assert!(!text.contains("secret"), "正文泄露进广播载荷：{text}");
-        assert!(
-            !text.contains("evil.example"),
-            "附带数据（跳转载荷）泄露进广播载荷：{text}"
-        );
+        assert!(!text.contains("evil.example"), "附带数据（跳转载荷）泄露进广播载荷：{text}");
     }
 
     /// `host_market_check` 线形：字段名与数量**逐字**钉住（R8 §4）。
@@ -2938,11 +3216,7 @@ mod wire_tests {
         let state = CommandState::new();
         let json = serde_json::to_value(crate::cmd_market_check(&state).unwrap()).unwrap();
 
-        assert_eq!(
-            wire_keys(&json),
-            vec!["available", "reason", "simulated", "version"],
-            "{json}"
-        );
+        assert_eq!(wire_keys(&json), vec!["available", "reason", "simulated", "version"], "{json}");
         assert_eq!(json["available"], serde_json::json!(false));
         assert_eq!(
             json["simulated"],
@@ -2961,8 +3235,10 @@ mod wire_tests {
     fn market_update_wire_shape_is_exact() {
         let state = CommandState::new();
         for json in [
-            serde_json::to_value(crate::cmd_market_download(&state, Some("2.0.0")).unwrap()).unwrap(),
-            serde_json::to_value(crate::cmd_market_install(&state, Some("2.0.0")).unwrap()).unwrap(),
+            serde_json::to_value(crate::cmd_market_download(&state, Some("2.0.0")).unwrap())
+                .unwrap(),
+            serde_json::to_value(crate::cmd_market_install(&state, Some("2.0.0")).unwrap())
+                .unwrap(),
         ] {
             assert_eq!(wire_keys(&json), vec!["ok", "reason", "simulated", "version"], "{json}");
             assert_eq!(json["ok"], serde_json::json!(true));
@@ -3043,4 +3319,3 @@ mod wire_tests {
         assert_eq!(wire_keys(&degraded), wire_keys(&relaunch));
     }
 }
-
