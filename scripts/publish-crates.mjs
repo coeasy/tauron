@@ -288,7 +288,13 @@ for (const c of order) {
     console.log('\x1b[32m成功\x1b[0m');
   } catch (e) {
     console.log('\x1b[31m失败\x1b[0m');
-    console.error((e.stdout?.toString() ?? '') + (e.stderr?.toString() ?? ''));
+    const output = (e.stdout?.toString() ?? '') + (e.stderr?.toString() ?? '');
+    if (/verified email address is required/i.test(output)) {
+      fail(
+        'crates.io 发布账号尚未验证邮箱。请在 https://crates.io/settings/profile 完成验证后重新运行；已发布的 npm 版本会自动跳过。',
+      );
+    }
+    console.error(output);
     process.exit(1);
   }
 }

@@ -420,7 +420,7 @@ tauron-host → tauron-acl → tauron-brand → tauron-distribute → tauron-i18
 > `tauron-schema`，`tauron-adapter` 依赖其余 12 个——所以 adapter 必须排在最后一批。
 > 脚本每次运行都从 `cargo metadata` 重算，**新增/删除内部依赖不会让顺序漂移**。
 
-**当前状态**：20 个 npm 包已发布。Rust crates 发布校验发现 `tauron-host` 的权限词表未包含在 crate tarball 中，现已内嵌并加入与仓库主词表一致性的测试；发布预检升级为从 tarball 实际构建，避免遗漏此类问题。修复后的 Rust 发布和全新消费端验收待重跑。正式 Release 以 GitHub Releases 页面及通过验收的 Actions 运行为准。
+**当前状态**：20 个 npm 包已发布。Rust crate tarball 已修正并且全部通过实际构建验收；crates.io 当前要求发布账号先验证邮箱，账号完成验证后可安全续发。Rust 公共安装和全新消费端验收完成后，才发布正式 Release。
 
 ---
 
