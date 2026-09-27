@@ -271,10 +271,13 @@ export async function initProject(config: InitConfig = {}): Promise<InitResult> 
       };
     }
     const relRoot = toPosixRelative(path.resolve(dir), tauronRoot);
+    const relCargoRoot = toPosixRelative(tauriProject.srcTauri, tauronRoot);
     steps.push(`tauron 检出根：${tauronRoot}（相对本项目 ${relRoot}）`);
 
     // 3. Cargo.toml 添加 path 依赖（不写 version：那个坐标今天解析不了）
-    const depValue = `{ path = "${relRoot}/crates/tauron-adapter", default-features = false, features = ["tauri"] }`;
+    // Cargo resolves dependency paths from src-tauri/Cargo.toml; frontend file: specs
+    // below are resolved from the project-root package.json and therefore use relRoot.
+    const depValue = `{ path = "${relCargoRoot}/crates/tauron-adapter", default-features = false, features = ["tauri"] }`;
     if (dryRun) {
       steps.push(`Cargo.toml：将添加 tauron-adapter = ${depValue}`);
     } else if (addCargoDependency(tauriProject.cargoToml, 'tauron-adapter', depValue)) {

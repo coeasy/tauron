@@ -194,6 +194,7 @@ describe('tauron-app init（接入现有项目）', () => {
   it('--dir 真的作用在目标工程上（而不是当前目录）', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tauron-cli-init-'));
     const project = makeTauriProject(root);
+    fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({ name: 'existing-app' }));
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     process.exitCode = 0;
     try {
@@ -206,6 +207,15 @@ describe('tauron-app init（接入现有项目）', () => {
       expect(match).not.toBeNull();
       const resolved = path.resolve(project, 'src-tauri', match![1]!);
       expect(fs.existsSync(path.join(resolved, 'Cargo.toml'))).toBe(true);
+
+      // 前端依赖从项目根 package.json 解析，必须使用独立的根目录相对坐标。
+      const frontend = JSON.parse(fs.readFileSync(path.join(project, 'package.json'), 'utf8')) as {
+        dependencies: Record<string, string>;
+      };
+      const host = frontend.dependencies['@tauron/host'];
+      expect(host).toMatch(/^file:/);
+      const hostPackage = path.resolve(project, host!.slice('file:'.length));
+      expect(fs.existsSync(path.join(hostPackage, 'package.json'))).toBe(true);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
