@@ -2,7 +2,7 @@
 // tauron crate 发布编排（Node 22，零新依赖）
 //
 // 用法：
-//   node scripts/publish-crates.mjs            # 默认 = --check：只打包校验，不发布
+//   node scripts/publish-crates.mjs            # 默认 = --check：从 crate tarball 构建校验，不发布
 //   node scripts/publish-crates.mjs --check    # 同上（显式）
 //   node scripts/publish-crates.mjs --publish  # 真发布（需要 CARGO_REGISTRY_TOKEN，缺失即拒绝）
 //
@@ -13,7 +13,7 @@
 //
 // 本机限制（如实标注）：
 //   沙箱无网络、无 crates.io 凭据，**无法真的发布**，也无法与真实 registry 交互。
-//   因此 `--check` 的验收口径是「打包内容正确」：产物可离线产出、产物内的
+//   因此 `--check` 的验收口径包含真实 tarball 编译：产物可离线产出并构建，产物内的
 //   Cargo.toml 已把 path 剥成 version。为了让 cargo 在**无网络**下也能完成打包，
 //   本脚本在 --check 时用 `--config patch.crates-io.<dep>.path=...` 把内部依赖
 //   指回本地路径，仅为满足依赖解析；**这不改变产出的 manifest**（脚本会解包实测
@@ -137,7 +137,9 @@ const patchArgs = crates.flatMap((c) => [
 ]);
 
 // ── 2. 逐 crate 打包 + 校验产物 manifest ─────────────────────────
-log('\n── 2/3 逐 crate 打包并校验（cargo package --no-verify --allow-dirty --offline）──');
+log(
+  '\n── 2/3 逐 crate 打包、从 tarball 构建并校验产物 manifest（cargo package --allow-dirty --offline）──',
+);
 warn(
   '打包阶段将内部 crate 解析到本地 workspace；cargo package 产物会移除 path 依赖，' +
     '并逐 crate 检查发布 manifest 只保留版本约束。',
@@ -170,7 +172,7 @@ function internalDepVersionsInManifest(manifestText) {
 
 let failures = 0;
 for (const c of order) {
-  const pkgArgs = ['package', '-p', c.name, '--no-verify', '--allow-dirty', '--offline'];
+  const pkgArgs = ['package', '-p', c.name, '--allow-dirty', '--offline'];
   // Pre-package the complete release set before publishing any crate. This must
   // work in both check and publish modes because later crates may not yet exist
   // on crates.io; the patch is only used for resolution and is not shipped.
@@ -238,7 +240,7 @@ if (isCheck) {
     process.exit(1);
   }
   ok(
-    '--check 通过：15 个 crate 均可离线产出 .crate，且产物 manifest 已把内部 path 依赖剥成 version。',
+    '--check 通过：15 个 crate 均可离线产出并构建 .crate，且产物 manifest 已把内部 path 依赖剥成 version。',
   );
   warn('注意：本次**没有真的发布**。真实发布需先按上面的顺序逐个 `cargo publish`，');
   warn('      且必须由**已配置 CARGO_REGISTRY_TOKEN 且有网络**的环境执行，本机沙箱不具备该条件。');

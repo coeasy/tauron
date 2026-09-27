@@ -244,8 +244,8 @@ npm 侧 20 个公开包已发布为 `1.0.0`；Rust crates 将在本次发布工�
   / `files` 白名单）；第 20 个 `@tauron/contract-tests` **刻意保留 `private`**
   （它是仓库内的契约测试 harness，`dist/` 里只有 `*.test.js`、没有 `index.js`，
   用例还依赖 monorepo 目录布局，发布出去对第三方无意义）。
-- **crates**：15 个 crate 的内部互引用都已同时给出 `version`，`cargo package`
-  不再报错；产物 manifest 里 `path` 会被 cargo 剥离，只剩 `version`。
+- **crates**：15 个 crate 的内部互引用都已同时给出 `version`；发布检查会从每个 `.crate`
+  tarball 实际构建，并断言产物 manifest 里 `path` 已被 cargo 剥离，只剩 `version`。
 - **npm**：`@tauron/*@1.0.0` 与 `create-tauron-app@1.0.0` 已发布，可从公共 npm registry 安装。
 - **Rust crates**：以 crates.io 上 `tauron-adapter@1.0.0` 发布完成为正式可安装条件；发布前可使用下文源码集成方式。
 
@@ -353,9 +353,8 @@ pnpm add @tauron/types @tauron/core @tauron/host   # npm / yarn 同理
 15 个 crate 均已通过 `cargo package` 检查：产物 manifest 里内部依赖已只剩 `version`
 （`path` 由 cargo 剥离）。本次发布工作流按依赖顺序上传，完成后再由 Windows 干净消费者工程实际安装构建。
 
-- ✅ **本机已验证**：`cargo package -p <crate> --no-verify --allow-dirty --offline`
-  能对全部 15 个 crate 产出 `.crate`，且产物内 `[dependencies.tauron-*]` 只剩
-  `version = "1.0.0"`、没有 `path`。
+- ✅ **本机已验证**：`cargo package -p <crate> --allow-dirty --offline` 对全部 15 个 crate
+  产出并构建 `.crate`，且产物内 `[dependencies.tauron-*]` 只剩 `version = "1.0.0"`、没有 `path`。
 - ⏳ **CI 发布与验收**：由配置了发布凭据的 GitHub Actions 执行；失败可从断点安全续发。
 
 **发布必须按依赖拓扑顺序逐个来**（被依赖者先发）——`cargo publish` 剥离 `path` 后
@@ -421,7 +420,7 @@ tauron-host → tauron-acl → tauron-brand → tauron-distribute → tauron-i18
 > `tauron-schema`，`tauron-adapter` 依赖其余 12 个——所以 adapter 必须排在最后一批。
 > 脚本每次运行都从 `cargo metadata` 重算，**新增/删除内部依赖不会让顺序漂移**。
 
-**当前状态**：20 个 npm 包已发布。此前 Rust 发布失败于预打包时没有为 workspace 内部依赖启用本地解析；现已修复，并增加 npm 版本已存在时的安全跳过逻辑。本轮待重跑 crates 发布和全新消费端验收。正式 Release 以 GitHub Releases 页面及通过验收的 Actions 运行为准。
+**当前状态**：20 个 npm 包已发布。Rust crates 发布校验发现 `tauron-host` 的权限词表未包含在 crate tarball 中，现已内嵌并加入与仓库主词表一致性的测试；发布预检升级为从 tarball 实际构建，避免遗漏此类问题。修复后的 Rust 发布和全新消费端验收待重跑。正式 Release 以 GitHub Releases 页面及通过验收的 Actions 运行为准。
 
 ---
 

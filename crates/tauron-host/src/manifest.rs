@@ -880,7 +880,7 @@ impl std::fmt::Display for PluginIdentity {
 /// 于是 `Registry::install` 也从未被生产代码调用过，整条插件链在生产上是断的。
 /// 内嵌之后宿主二进制不再依赖"运行目录下正好有 `schema/`"。
 pub const EMBEDDED_PERMISSION_INDEX_JSON: &str =
-    include_str!("../../../schema/permissions.index.json");
+    include_str!("../schema/permissions.index.json");
 
 /// 解析内嵌词表。
 ///
@@ -1226,6 +1226,11 @@ mod tests {
     fn real_permissions_index_loads_and_is_well_formed() {
         // 门禁：随框架发版的手工维护词表必须可解析、字段完备、无重复。
         // （本测试只校验，不生成——仓库内没有词表生成器，见模块头「诚实边界」。）
+        assert_eq!(
+            EMBEDDED_PERMISSION_INDEX_JSON,
+            include_str!("../../../schema/permissions.index.json"),
+            "crate 内嵌词表必须与仓库唯一维护的权限词表同步"
+        );
         let idx = PermissionIndex::load(SCHEMA_PATH)
             .expect("schema/permissions.index.json 必须存在且可解析");
         assert_eq!(idx.version, 1);
