@@ -31,8 +31,6 @@ unmaintained = "workspace"
 
 [sources]
 unknown-registry = "deny"
-allow-registry = true
-allow-git = false
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
 unknown-git = "deny"
-git = []
-registry = []
