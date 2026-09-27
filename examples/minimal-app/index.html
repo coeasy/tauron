@@ -51,7 +51,16 @@
         <button id="btn-cross-call">② 跨主体调用 format</button>
         <pre id="cross-out"></pre>
       </section>
+
+      <section>
+        <h2>6. 命令面板（贡献命令 → 跨主体投递，1.0-W3）</h2>
+        <p>命令列表来自 <code>host_contributes_list('command')</code>（插件声明的
+        贡献命令）。选中一条后由 <code>ShellController</code> 解析归属插件并投递
+        ——此前该事件无消费者（点了没反应且无处可查）。</p>
+        <button id="btn-command-palette">打开命令面板</button>
+      </section>
     </main>
+    <oc-command-palette></oc-command-palette>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

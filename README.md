@@ -1,9 +1,9 @@
 # tauron
 
-> Tauri 2 插件化框架 —— 安全沙箱、双世界隔离、多形态插件加载的开源客户端基础设施。
+> Tauri 2 之上的插件化桌面客户端基础设施 —— 插件隔离、受控能力面、跨语言契约与多形态插件执行。
 
 [![CI](https://github.com/coeasy/tauron/actions/workflows/ci.yml/badge.svg)](https://github.com/coeasy/tauron/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-1626%20TS%20%C2%B7%201284%20Rust-informational)](#测试)
+[![Tests](https://img.shields.io/badge/tests-1701%20TS%20%C2%B7%201299%20Rust-informational)](#测试)
 [![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![Node](https://img.shields.io/badge/Node-22.x-brightgreen)](#)
 [![Rust](https://img.shields.io/badge/Rust-1.98-orange)](#)
@@ -20,8 +20,8 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
 
 | 层 | 面向 | 拿到什么 |
 |---|---|---|
-| **框架层** | 通用集成 | 信封协议 `plugin_invoke`、双世界沙箱、4+1 插件形态、双层 ACL、事件总线、插件市场、CLI |
-| **应用层** | 完整客户端交付 | `host_*` 命令族（54 条 = 底座 38 + 插件运行时 16）、生命周期状态机、三档授权、设置中心、白标、崩溃恢复、UI 组件 |
+| **框架层** | 通用集成 | 信封协议 `plugin_invoke`、`PluginType` 四形态（Js / Process 有生产执行器；Rust / Wasm 诚实返回 `E_PLUGIN_TYPE_NO_RUNTIME`，代码里**不存在**「B+ 混合模式」）、双层 ACL、事件总线、插件市场（Ed25519 验签）、CLI。**诚实边界**：`@tauron/dual-world` 的进程内沙箱是 fail-closed 模拟（`SANDBOX_UNAVAILABLE`），进程内 WASM 运行时仍为路线图项 |
+| **应用层** | 完整客户端交付 | `host_*` 命令族（60 条 = 底座 39 + 插件运行时 21；`plugin-install` 另加 2 条，该 feature **已进默认特性** → 默认装配共 62 条）、生命周期状态机、三档授权、设置中心、白标、崩溃恢复、UI 组件 |
 
 ### 它不是什么
 
@@ -68,13 +68,13 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
 | 特性 | 说明 |
 |---|---|
 | **插件信封协议** | 单一 `plugin_invoke` 命令，统一调用/取消/进度 |
-| **双世界沙箱** | 双世界隔离架构（QuickJS-WASM 引擎接入为路线图项） |
-| **4+1 插件形态** | Rust / JS（真实实现）/ WASM / Process（配置+模拟原型）+ B+ 混合模式 |
+| **进程内沙箱（dual-world）** | 架构与接口已定义，运行时为 **fail-closed 模拟**（`SANDBOX_UNAVAILABLE`）；QuickJS-WASM 引擎接入为路线图项 |
+| **四种插件形态（`PluginType`）** | Js / Process **有生产执行器**；Rust / Wasm 诚实返回 `E_PLUGIN_TYPE_NO_RUNTIME`。代码里**不存在**「B+ 混合模式」——该宣称已删除 |
 | **双层 ACL** | 外层 Tauri 静态 ACL + 内层框架动态 ACL |
 | **事件总线** | 每插件队列隔离，背压可配置，命名空间隔离 |
 | **配置 4 层合并** | session > plugin > user > default |
 | **Shell 矩阵** | local / local-server / remote-url / sub-webview（接口已定义，运行时为模拟原型） |
-| **插件市场** | HMAC-SHA256 签名，注册表搜索/发布（宿主侧 `host_market_*` 目前是桩，见上文成熟度） |
+| **插件市场** | **Ed25519** 签名（非对称：私钥签发、公钥验证），注册表搜索/发布（宿主侧 `host_market_*` 目前是桩，见上文成熟度） |
 | **CLI 工具链** | `create` / `plugin new` 真落盘；`doctor` 真探测环境；`plugin sign` 写真实 SHA-256 摘要（如实标 `simulated:true`，非签名）；`plugin dev/test/pack/publish` **未实现**且如实返回 `success:false`——不谎报成功 |
 | **UI 适配层** | React / Vue / Svelte hooks 和 composables |
 | **契约测试** | TS↔Rust 跨语言协议验证 |
@@ -472,8 +472,10 @@ tauron/
 > **两层架构说明**
 >
 > - **框架层**（`@tauron/types` / `core` / `plugin-sdk` / `adapter-*` + `tauron-shell`）
->   面向通用集成：信封协议 `plugin_invoke`、双世界沙箱、插件市场。
+>   面向通用集成：信封协议 `plugin_invoke`、`PluginType` 四形态、插件市场（Ed25519 验签）。
 >   第三方客户端从这一层接入。
+>   ⚠️ **注意**：这一层目前**没有生产装配**——`PluginDispatcher` 仍是零生产实现，
+>   `plugin_invoke` 三命令无接线（详见架构概览的接线状态表）。
 > - **应用层**（`@tauron/host` / `app-*` / `framework` / `ui` + `tauron-host` / `tauron-adapter`）
 >   面向完整客户端交付：`host_*` 命令族、生命周期、设置中心、白标。
 >   它复用框架层的类型与协议，但不改变框架层契约。
@@ -486,9 +488,9 @@ tauron/
 
 | 侧 | 用例数 | 口径 |
 |---|---|---|
-| TypeScript | **1626**（98 个测试文件 / 20 包） | `pnpm -r test` 实跑通过 |
-| Rust | **1284** | 源码内 `#[test]` 声明数（静态计数） |
-| 跨语言契约 | **110** | `@tauron/contract-tests` 的 wire-gate（`vitest run src/wire-gate.test.ts` 实跑） |
+| TypeScript | **1701**（101 个测试文件 / 20 包） | `pnpm -r test` 实跑通过 |
+| Rust | **1299** | 源码内 `#[test]` 声明数（静态计数）；同修订 `cargo test --workspace --lib --tests` 实跑 **1264**（15 个测试二进制） |
+| 跨语言契约 | **126** | `@tauron/contract-tests` 的 wire-gate（`vitest run src/wire-gate.test.ts` 实跑）；本包合计 147 条 / 2 个文件 |
 
 > **关于 Rust 一栏的口径**：Rust 侧除默认特性外还有 **feature 门控**用例
 > （`tauron-adapter` / `tauron-shell` 的 `tauri` feature），两者不是同一个数。

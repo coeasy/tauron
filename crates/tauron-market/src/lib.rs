@@ -5,7 +5,10 @@
 // - 解包只用 `ZipFile::enclosed_name()` 自写循环；拒 `..`/绝对路径/符号链接；
 // - 条目 ≤2000、解压 ≤200 MB、压缩比 ≤100×、单文件 ≤100 MB；
 // - 校验顺序固定：验签 → hash → 解包常量 → 权限审批 → 注册；
-// - 降级安装默认拒绝（version 单调 + min_allowed_version）；
+// - 版本序关系（`cmp_version` / `is_downgrade` / `is_monotonic`）**已实现且有测试，
+//   但尚未接线**：宿主安装路径（`tauron-adapter::registry_install_inner`）目前对
+//   已存在的插件 id 一律 `E_PLUGIN_EXISTS` 拒绝，因此"升级 / 降级安装"这条路径
+//   在整仓**不存在**，"降级默认拒绝"这条策略**尚未生效**（详见 `is_downgrade`）。
 // - 审计日志追加式 + 链式 hash，记录 grants 快照。
 //
 // 本 crate 不依赖 `tauri`：签名验证、HTTP 拉取、zip 解包由适配层提供。
@@ -84,6 +87,13 @@ impl FrameworkRange {
 
 /// 比较两个语义化版本号。
 /// 返回负数表示 a < b，0 表示 a == b，正数表示 a > b。
+///
+/// 只比较**数值**分段（`1.2.10` > `1.2.9`）；非数值段按 0 计。预发布标签
+/// （`-beta.1`）不参与比较——宿主安装路径不接受预发布版本。
+///
+/// 返回值刻意只取 `-1 / 0 / 1`：曾经写的是 `x as i32 - y as i32`，当任一分段
+/// ≥ 2³¹ 时 `as i32` 会截断，两个**不同**的版本可能被判成相等（或符号反转），
+/// 于是降级保护被静默绕过。判定「谁大」只需要序关系，不需要差值。
 pub fn cmp_version(a: &str, b: &str) -> i32 {
     let parse =
         |s: &str| -> Vec<u64> { s.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect() };
@@ -94,18 +104,29 @@ pub fn cmp_version(a: &str, b: &str) -> i32 {
         let x = av.get(i).copied().unwrap_or(0);
         let y = bv.get(i).copied().unwrap_or(0);
         if x != y {
-            return x as i32 - y as i32;
+            return if x > y { 1 } else { -1 };
         }
     }
     0
 }
 
 /// 检查是否有降级（目标版本 < 当前版本）。
+///
+/// **未接线（诚实标注）**：本谓词只有测试调用，生产路径没有调用方——不是忘了接，
+/// 而是**没有可接的地方**：`tauron-adapter::registry_install_inner` 对已存在的插件
+/// id 直接返回 `E_PLUGIN_EXISTS`，宿主里不存在"覆盖安装 / 升级 / 降级"这条流程。
+/// 因此 `PackageManifest` 的 `min_allowed_version` 字段（见 `tauron-host::manifest`）
+/// 也**只被解析、从未被读取**。要让它生效，先得有"更新安装"这条路径（当前
+/// `host_market_install` 是 `simulated: true` 的桩）。
+///
+/// 保留实现而不删：序关系判定（含 2³¹ 截断边界）已有测试覆盖，接线时直接可用。
 pub fn is_downgrade(current: &str, target: &str) -> bool {
     cmp_version(current, target) > 0
 }
 
 /// 版本号是否单调递增（target > current）。
+///
+/// **未接线**：同 [`is_downgrade`]——宿主没有更新安装路径，本谓词只有测试调用。
 pub fn is_monotonic(current: &str, target: &str) -> bool {
     cmp_version(target, current) >= 0
 }
@@ -420,6 +441,26 @@ mod tests {
     fn cmp_version_diff_lengths() {
         assert_eq!(cmp_version("1.0", "1.0.0"), 0);
         assert!(cmp_version("1.0.1", "1.0") > 0);
+    }
+
+    #[test]
+    fn cmp_version_is_immune_to_i32_truncation() {
+        // 回归锁：旧实现返回 `x as i32 - y as i32`，分段 ≥ 2³¹ 时 `as i32` 截断，
+        // 两个**不同**的版本会被判成相等 → 降级保护被静默绕过。
+        // `u64::MAX` 与 `u64::MAX - 1` 在 i32 下都是 -1。
+        let big = u64::MAX.to_string();
+        let bigger = u64::MAX.to_string();
+        let smaller = (u64::MAX - 1).to_string();
+        assert_eq!(cmp_version(&big, &bigger), 0);
+        assert!(cmp_version(&big, &smaller) > 0, "大分段必须比小分段大");
+        assert!(cmp_version(&smaller, &big) < 0);
+        assert!(
+            is_downgrade(&big, &smaller),
+            "`u64::MAX` 降到 `u64::MAX-1` 是降级，不得因 i32 截断而被判成「相同」"
+        );
+        // 2³¹ 边界本身。
+        assert!(cmp_version("2147483648.0.0", "2147483647.0.0") > 0);
+        assert!(cmp_version("2147483647.0.0", "2147483648.0.0") < 0);
     }
 
     #[test]

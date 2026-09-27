@@ -12,9 +12,10 @@
 //   （部署配置缺口，见 docs/architecture/app-layer-wire.md §1 告警）。
 //
 // 两种形态（编译期可选，`--features substrate-only`）：
-// - **默认（全量）**：底座 + 插件运行时（54 条命令 + 装配器宏消费者）。
+// - **默认（全量）**：底座 + 插件运行时（60 条命令 + 2 条 plugin-install = 62 条；
+//   外加装配器宏消费者）。
 // - **substrate-only（验收标准 1 的证据）**：只 `manage(SubstrateState)` +
-//   `tauron_substrate_handler![]`（38 条底座命令），**不**建 `PluginRuntimeState`、
+//   `tauron_substrate_handler![]`（39 条底座命令），**不**建 `PluginRuntimeState`、
 //   **不**注册装配器消费者。`cargo check --features substrate-only` 即证明
 //   "harness 类宿主只要底座也能编译并功能完整（shell + i18n + notify + recovery +
 //   settings）"——这是方案 §9-1 那条验收标准的可复核证据。
@@ -136,7 +137,7 @@ fn main() {
         // `ClientConfig`（`TAURON_CLIENT_CONFIG` 指向的 JSON）真正接进注册表配置，
         // 「配置化选择加载」（`plugin_filter`）才会生效。
         .plugin(tauron_adapter::tauri::state_init_with_adapter_config(load_adapter_config()))
-        // 54 条 host_* 命令：root 注册（裸名调用，不依赖插件 ACL capability）
+        // 62 条 host_* 命令（默认 60 + plugin-install 2）：root 注册（裸名调用，不依赖插件 ACL capability）
         .invoke_handler(tauron_adapter::tauron_generate_handler![])
         // ── 装配期插件安装（插件的「发现 → 注册表」这一段）─────────────
         //

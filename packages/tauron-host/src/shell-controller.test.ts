@@ -6,6 +6,8 @@ import { ShellController } from './shell-controller.js';
 import { MockBackend } from './backend.js';
 import { AdminClient } from './host.js';
 import { ShellClient } from './shell-client.js';
+import type { ContributeEntry } from './shell-client.js';
+import type { PendingCallInfo } from './events.js';
 
 /** 控制器用到的命令面（与 `ShellClient` 的调用点一一对应）。 */
 const CONTROLLER_CAPS = [
@@ -18,6 +20,8 @@ const CONTROLLER_CAPS = [
   'host_market_download',
   'host_market_install',
   'host_registry_admin',
+  'host_registry_install',
+  'host_registry_install_preview',
   'host_window_create',
 ];
 
@@ -264,5 +268,207 @@ describe('ShellController', () => {
     await new Promise(r => setTimeout(r, 10));
     expect(install).not.toHaveBeenCalled();
     expect(backend.invocations.some(invocation => invocation.cmd === 'host_registry_install')).toBe(false);
+  });
+
+  it('宿主未启用 plugin-install 特性时明确拒绝安装（不发注定 command not found 的 invoke）', async () => {
+    // 默认构建下 `host_registry_install*` 是 feature-gated 的——能力表说没有，
+    // 就必须在客户端拒绝，而不是把"命令不存在"甩给用户。
+    const noInstall = new MockBackend({
+      capabilities: CONTROLLER_CAPS.filter((c) => !c.startsWith('host_registry_install')),
+      pluginId: 'p.shell',
+    });
+    const preview = vi.spyOn(AdminClient.prototype, 'registryInstallPreview');
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const seen: Array<{ err: unknown; context: string }> = [];
+    const c = new ShellController({
+      backend: noInstall,
+      onError: (err, context) => seen.push({ err, context }),
+    });
+    c.start([container]);
+    container.dispatchEvent(new CustomEvent('oc-plugin-install', { detail: { packagePath: '/tmp/install.tpkg' } }));
+    await new Promise(r => setTimeout(r, 10));
+
+    expect(preview, '能力缺失时不得进入预览流程').not.toHaveBeenCalled();
+    expect(alert, '不得弹出"已安装"的假成功提示').not.toHaveBeenCalled();
+    expect(
+      noInstall.invocations.some((i) => i.cmd.startsWith('host_registry_install')),
+      '不得发出注定失败的 invoke',
+    ).toBe(false);
+    const hit = seen.find((s) => s.context === 'plugin.install');
+    expect(hit, '拒绝必须经 onError 上报').toBeDefined();
+    expect(String((hit!.err as Error).message)).toContain('plugin-install');
+  });
+
+  // ── onRegistryChange：改完注册表必须让接入方重取列表 ────────────────
+  //
+  // `<oc-plugin-manager>` 的列表由接入方喂（`plugins` 属性）。控制器改完注册表
+  // 若不通知，开关拨了、列表还是旧的——用户看到「点了没反应」。
+
+  it('oc-plugin-toggle 成功后触发 onRegistryChange（列表才会刷新）', async () => {
+    vi.spyOn(AdminClient.prototype, 'registryAdmin').mockResolvedValue();
+    let calls = 0;
+    const c = new ShellController({ backend, onRegistryChange: () => { calls += 1; } });
+    const local = document.createElement('div');
+    document.body.appendChild(local);
+    c.start([local]);
+    local.dispatchEvent(new CustomEvent('oc-plugin-toggle', { detail: { id: 'com.a', enabled: true } }));
+    await new Promise(r => setTimeout(r, 10));
+    expect(calls).toBe(1);
+    c.stop();
+    local.remove();
+  });
+
+  it('oc-plugin-uninstall 成功后触发 onRegistryChange', async () => {
+    vi.spyOn(AdminClient.prototype, 'registryAdmin').mockResolvedValue();
+    let calls = 0;
+    const c = new ShellController({ backend, onRegistryChange: () => { calls += 1; } });
+    const local = document.createElement('div');
+    document.body.appendChild(local);
+    c.start([local]);
+    local.dispatchEvent(new CustomEvent('oc-plugin-uninstall', { detail: { id: 'com.a' } }));
+    await new Promise(r => setTimeout(r, 10));
+    expect(calls).toBe(1);
+    c.stop();
+    local.remove();
+  });
+
+  it('onRegistryChange 回调抛错经 onError 上报（不静默吞掉）', async () => {
+    vi.spyOn(AdminClient.prototype, 'registryAdmin').mockResolvedValue();
+    const seen: Array<{ err: unknown; context: string }> = [];
+    const c = new ShellController({
+      backend,
+      onError: (err, context) => seen.push({ err, context }),
+      onRegistryChange: () => { throw new Error('list reload failed'); },
+    });
+    const local = document.createElement('div');
+    document.body.appendChild(local);
+    c.start([local]);
+    local.dispatchEvent(new CustomEvent('oc-plugin-toggle', { detail: { id: 'com.a', enabled: false } }));
+    await new Promise(r => setTimeout(r, 10));
+    const hit = seen.find((s) => s.context === 'registry.refresh');
+    expect(hit).toBeDefined();
+    expect(String((hit!.err as Error).message)).toContain('list reload failed');
+    c.stop();
+    local.remove();
+  });
+
+  // ── 命令面板：跨主体调用取件必须**轮询** ──────────────────────────
+  //
+  // `callTakeResult` 是一次性取件语义：`settled` 取走即删，`pending` 返回副本、
+  // 条目保留（「还没好，可稍后再取」）。只取一次就把 `pending` 判成失败，会把
+  // **正常的异步投递**误报为错误——跨 webview 的执行总要几毫秒才回填。
+
+  /** 造一条 `PendingCallInfo`（本组只关心 state / errorCode）。 */
+  function callInfo(state: 'pending' | 'settled', errorCode?: string): PendingCallInfo {
+    return {
+      callId: 'c-1',
+      pluginId: 'com.fmt',
+      cmd: 'fmt.run',
+      args: null,
+      seq: 1,
+      createdAt: 0,
+      expiresAt: 0,
+      state,
+      ...(errorCode !== undefined ? { errorCode } : {}),
+    };
+  }
+
+  const FMT_ENTRY: ContributeEntry = {
+    pluginId: 'com.fmt',
+    kind: 'command',
+    id: 'fmt.run',
+    label: '格式化',
+  };
+
+  it('oc-command-select：投递后轮询取件直到结算（pending 不是失败）', async () => {
+    const list = vi
+      .spyOn(ShellClient.prototype, 'contributesList')
+      .mockResolvedValue([FMT_ENTRY]);
+    const call = vi
+      .spyOn(ShellClient.prototype, 'callPlugin')
+      .mockResolvedValue(callInfo('pending'));
+    let n = 0;
+    const take = vi
+      .spyOn(ShellClient.prototype, 'callTakeResult')
+      .mockImplementation(async () => {
+        n += 1;
+        return n < 3 ? callInfo('pending') : callInfo('settled');
+      });
+    const seen: Array<{ err: unknown; context: string }> = [];
+    const c = new ShellController({
+      backend,
+      onError: (err, context) => seen.push({ err, context }),
+      commandResultBudget: { attempts: 5, intervalMs: 1 },
+    });
+    c.start([container]);
+    container.dispatchEvent(new CustomEvent('oc-command-select', { detail: { id: 'fmt.run' } }));
+    await new Promise(r => setTimeout(r, 40));
+
+    expect(list).toHaveBeenCalledWith('command');
+    expect(call).toHaveBeenCalledWith('com.fmt', 'fmt.run');
+    expect(take.mock.calls.length, '必须轮询取件，不能只取一次').toBeGreaterThanOrEqual(3);
+    expect(seen, 'pending 不是失败，不得上报错误').toEqual([]);
+  });
+
+  it('oc-command-select：预算耗尽仍 pending → 如实报取件超时（不静默）', async () => {
+    vi.spyOn(ShellClient.prototype, 'contributesList').mockResolvedValue([FMT_ENTRY]);
+    vi.spyOn(ShellClient.prototype, 'callPlugin').mockResolvedValue(callInfo('pending'));
+    const take = vi
+      .spyOn(ShellClient.prototype, 'callTakeResult')
+      .mockImplementation(async () => callInfo('pending'));
+    const seen: Array<{ err: unknown; context: string }> = [];
+    const c = new ShellController({
+      backend,
+      onError: (err, context) => seen.push({ err, context }),
+      commandResultBudget: { attempts: 3, intervalMs: 1 },
+    });
+    c.start([container]);
+    container.dispatchEvent(new CustomEvent('oc-command-select', { detail: { id: 'fmt.run' } }));
+    await new Promise(r => setTimeout(r, 40));
+
+    expect(take.mock.calls.length, '必须把预算用满').toBe(3);
+    const hit = seen.find(s => s.context === 'command.select');
+    expect(hit, '超时必须经 onError 上报').toBeDefined();
+    expect(String((hit!.err as Error).message)).toContain('取件超时');
+  });
+
+  it('oc-command-select：结算但带 errorCode → 如实报执行失败', async () => {
+    vi.spyOn(ShellClient.prototype, 'contributesList').mockResolvedValue([FMT_ENTRY]);
+    vi.spyOn(ShellClient.prototype, 'callPlugin').mockResolvedValue(callInfo('pending'));
+    vi.spyOn(ShellClient.prototype, 'callTakeResult').mockResolvedValue(
+      callInfo('settled', 'E_PLUGIN_TYPE_NO_RUNTIME'),
+    );
+    const seen: Array<{ err: unknown; context: string }> = [];
+    const c = new ShellController({
+      backend,
+      onError: (err, context) => seen.push({ err, context }),
+      commandResultBudget: { attempts: 3, intervalMs: 1 },
+    });
+    c.start([container]);
+    container.dispatchEvent(new CustomEvent('oc-command-select', { detail: { id: 'fmt.run' } }));
+    await new Promise(r => setTimeout(r, 40));
+
+    const hit = seen.find(s => s.context === 'command.select');
+    expect(hit).toBeDefined();
+    expect(String((hit!.err as Error).message)).toContain('E_PLUGIN_TYPE_NO_RUNTIME');
+  });
+
+  it('oc-command-select：找不到归属 → 如实报错且不投递（不静默丢弃）', async () => {
+    vi.spyOn(ShellClient.prototype, 'contributesList').mockResolvedValue([]);
+    const call = vi.spyOn(ShellClient.prototype, 'callPlugin');
+    const seen: Array<{ err: unknown; context: string }> = [];
+    const c = new ShellController({
+      backend,
+      onError: (err, context) => seen.push({ err, context }),
+      commandResultBudget: { attempts: 3, intervalMs: 1 },
+    });
+    c.start([container]);
+    container.dispatchEvent(new CustomEvent('oc-command-select', { detail: { id: 'builtin.quit' } }));
+    await new Promise(r => setTimeout(r, 40));
+
+    expect(call, '找不到归属时不得投递').not.toHaveBeenCalled();
+    const hit = seen.find(s => s.context === 'command.select');
+    expect(hit).toBeDefined();
+    expect(String((hit!.err as Error).message)).toContain('不是任何插件的贡献命令');
   });
 });

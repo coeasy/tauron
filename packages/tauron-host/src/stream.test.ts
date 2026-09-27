@@ -6,7 +6,7 @@
 // 「onFrame 永不触发、也不报错」。因此这里断言的不是"函数被调用了"，而是
 // **帧真的到了接收方的回调里**，且经过的是真实 `channel` 对象。
 // ──────────────────────────────────────────────────────────────────────────
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { MockBackend } from './backend.js';
 import { HostClient } from './host.js';
@@ -76,6 +76,11 @@ async function writeFrame(
 async function flush(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
+}
+
+/** 让已排队的 Promise 链彻底落定（关流 → `sink.dispose()` 的 then 链有好几跳）。 */
+async function settle(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 describe('流式帧往返（R5 / P0-1）', () => {
@@ -233,6 +238,86 @@ describe('HostRpc（R5）', () => {
     ).toBe(before);
   });
 
+  it('单个订阅者回调抛错，不得吞掉同批其余帧（逐订阅者隔离）', async () => {
+    // 帧在 `eventsDrain` 时就已从宿主队列取走（拉取模型，取走即删）：若一个订阅者
+    // 抛错把整拍打断，同批其余帧与其余订阅者就**永久**收不到，且没有任何出口可查。
+    const { host } = setup([
+      { topic: 'plugin:com.example.streamer:p1', seq: 1, payload: { n: 1 } },
+      { topic: 'plugin:com.example.streamer:p2', seq: 2, payload: { n: 2 } },
+    ]);
+    const ticks: Array<() => void> = [];
+    const rpc = toHostRpc(host, {
+      scheduler: {
+        every: (_ms, tick) => {
+          ticks.push(tick);
+          return () => {};
+        },
+      },
+    });
+    const boom = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const seenP1: unknown[] = [];
+    const seenP2: unknown[] = [];
+    // 同一 topic 两个订阅者：先入者为抛错者，后者仍须收到。
+    const offThrowing = await rpc.subscribe('plugin:com.example.streamer:p1', () => {
+      throw new Error('订阅者抛错');
+    });
+    const offOk = await rpc.subscribe('plugin:com.example.streamer:p1', (p) => seenP1.push(p));
+    // 另一个 topic：抛错后**同一拍内**仍须收到自己的帧。
+    const offOther = await rpc.subscribe('plugin:com.example.streamer:p2', (p) => seenP2.push(p));
+
+    expect(ticks).toHaveLength(1);
+    ticks[0]!();
+    await flush();
+
+    expect(seenP1).toEqual([{ n: 1 }]);
+    expect(seenP2).toEqual([{ n: 2 }]);
+    expect(boom).toHaveBeenCalled();
+    boom.mockRestore();
+
+    offThrowing();
+    offOk();
+    offOther();
+  });
+
+  it('宿主订阅失败后重试仍收得到帧（失败不得留下空登记）', async () => {
+    // 旧实现先 `handlers.set(topic, new Set())` 再 await 宿主订阅：订阅失败会留下
+    // 一个空 `Set`，重试时 `handlers.get(topic)` 命中它、**跳过宿主订阅**，
+    // 订阅者从此静默收不到帧（"点了没反应且无处可查"），且该空 Set 再无回收路径。
+    let attempts = 0;
+    const client = {
+      eventsSubscribe: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('E_ACL_DENIED: 订阅被拒');
+        return { token: 'tok-retry' };
+      },
+      eventsDrain: async () => [{ topic: 'plugin:p:ping', seq: 1, payload: { n: 1 } }],
+      eventsUnsubscribe: async () => {},
+      eventsPublish: async () => ({}),
+    } as unknown as HostClient;
+    const ticks: Array<() => void> = [];
+    const rpc = toHostRpc(client, {
+      scheduler: {
+        every: (_ms, tick) => {
+          ticks.push(tick);
+          return () => {};
+        },
+      },
+    });
+
+    await expect(rpc.subscribe('plugin:p:ping', () => {})).rejects.toThrow(/订阅被拒/);
+
+    const seen: unknown[] = [];
+    const off = await rpc.subscribe('plugin:p:ping', (p) => seen.push(p));
+    // 关键判据：重试**真的重发了**宿主订阅（旧实现只发一次 → attempts 会是 1）。
+    expect(attempts).toBe(2);
+    expect(ticks).toHaveLength(1);
+    ticks[0]!();
+    await flush();
+    expect(seen).toEqual([{ n: 1 }]);
+    off();
+  });
+
   it('stream 经 HostRpc 与经 HostClient 行为一致（同一调用序列）', async () => {
     const direct = setup();
     const viaRpc = setup();
@@ -288,6 +373,70 @@ describe('HostRpc（R5）', () => {
     const closeCalls = backend.invocations.filter((c) => c.cmd === 'host_stream_close');
     expect(closeCalls).toHaveLength(1);
     expect(closeCalls[0]!.args).toMatchObject({ req: { streamId, kind: 'end' } });
+  });
+
+  it('openStreamHandle：开流落定**之前** close() 也必须补发关流（否则宿主侧流泄漏）', async () => {
+    // 回归锁：旧实现用一个 `closed` 标志同时表示「已请求关闭」与「关闭已送出」。
+    // 于是 close() 因 `streamId` 还是 null 而不发命令，随后开流落定时又因
+    // `closed` 已为 true 而提前返回——`host_stream_close` **永远不会发出**，
+    // 宿主侧那条流没有任何人去关。
+    const { backend, host } = setup();
+    const pending = await host.pluginCall(
+      { callId: 'caller-c', method: 'fmt', kind: 'stream' },
+      () => {},
+    );
+
+    const handle = host.openStreamHandle(pending.callId, () => {});
+    handle.close(); // 还没 ready 就关（例如开流后立刻取消）
+    const streamId = await handle.ready;
+    await flush();
+
+    const closeCalls = backend.invocations.filter((c) => c.cmd === 'host_stream_close');
+    expect(closeCalls).toHaveLength(1);
+    expect(closeCalls[0]!.args).toMatchObject({ req: { streamId, kind: 'end' } });
+
+    // 幂等：再关不重复发。
+    handle.close();
+    await flush();
+    expect(backend.invocations.filter((c) => c.cmd === 'host_stream_close')).toHaveLength(1);
+  });
+
+  it('openStreamHandle：关流成功后释放帧载体（进程内传输的通道不得只增不减）', async () => {
+    // `FrameSink` 每次开流都向传输层要一个通道，而进程内传输（MemoryTransport /
+    // MockBackend）把通道存在自己的 Map 里、`onmessage` 闭包又强引用整条流的状态。
+    // 不释放就是每次开流漏一个不可回收的对象图。流的终态由**关流成功**定义，
+    // 因此那是唯一可证明安全的释放点。
+    const { backend, host } = setup();
+    const pending = await host.pluginCall(
+      { callId: 'caller-c', method: 'fmt', kind: 'stream' },
+      () => {},
+    );
+    // `pluginCall` 自己那个通道已知不释放（见 host.ts 的诚实标注），故以它为基线。
+    const baseline = backend.openChannelCount;
+
+    const handle = host.openStreamHandle(pending.callId, () => {});
+    await handle.ready;
+    expect(backend.openChannelCount, '开流必须真的向传输层要了一个通道').toBe(baseline + 1);
+
+    handle.close();
+    await settle();
+    expect(backend.openChannelCount, '关流成功后通道必须被释放').toBe(baseline);
+  });
+
+  it('openStreamHandle：开流失败时也释放帧载体（失败路径不得漏通道）', async () => {
+    // 让开流命令本身不可用（真机上等价于宿主没注册 / 构建没开这个 feature）。
+    const backend = new MockBackend({
+      capabilities: CAPS.filter((c) => c !== 'host_stream_open'),
+      pluginId: 'com.example.streamer',
+    });
+    const host = new HostClient({ backend });
+    const baseline = backend.openChannelCount;
+
+    const handle = host.openStreamHandle('c-unknown', () => {});
+    await expect(handle.ready).rejects.toThrow(/command not found/);
+    await settle();
+
+    expect(backend.openChannelCount, '开流失败 → 流从未存在 → 通道必须释放').toBe(baseline);
   });
 
   it('writeStream：二进制帧经 argsRaw 直达，不经 base64', async () => {

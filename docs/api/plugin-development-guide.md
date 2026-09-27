@@ -24,15 +24,20 @@
 
 ## 概述
 
-tauron 插件系统在**清单层**定义了四种插件类型。下表第三列是**今天真实成立**的隔离手段，
-不是设计意图——本仓库的规矩是"没接线就写没接线"：
+tauron 插件系统在**清单层**定义了四种插件类型（`PluginType` 枚举：`Rust` / `Js` /
+`Process` / `Wasm`，见 `crates/tauron-host/src/manifest.rs:301`）。下表第三列是
+**今天真实成立**的隔离手段，不是设计意图——本仓库的规矩是"没接线就写没接线"：
 
 | 类型 | 语言 | 今天的真实隔离手段 | 今天能跑吗 | 适用场景 |
 |---|---|---|---|---|
-| **JS** | JavaScript/TypeScript | **身份 Webview**：插件跑在自己的 webview 里，label 恒为 `plugin-<插件 id>`；宿主命令按身份判定（`Caller`），越权调用的主体在**副作用之前**被拒 | ✅ 能（这是 B 类的默认形态） | UI 扩展、轻量逻辑 |
-| **WASM** | WebAssembly | **无**（未接线） | ❌ **不能**：以 WASM 类型启动运行时返回 `E_PLUGIN_TYPE_NO_RUNTIME`（**诚实失败**，不会静默降级成"跑起来了"） | 计算密集、跨平台（**待接线**） |
-| **Process** | Rust/C/C++/Node.js | **独立进程**：sidecar spawn 有健康检查与崩溃事件 | ⚠️ 能（有边界，见下） | 系统操作、原生集成 |
-| **B+** | JS + Host | **无**（`@tauron/dual-world` 的进程内 JS 沙箱未接运行时，调用一律 fail closed） | ❌ 不能：`SANDBOX_UNAVAILABLE`，**不会**伪报 `executed: true` | 需要宿主能力的插件（**待接线**） |
+| **Rust**（A 类） | Rust | **无执行器**：crate 直接编译进宿主是设计意图，但 `PluginType::Rust` 目前**只出现在清单校验与测试**中，运行期落到 `UnwiredDelivery` | ❌ **不能**：返回 `E_PLUGIN_TYPE_NO_RUNTIME`（**诚实失败**） | 与宿主同进程的深度集成（**待接线**） |
+| **JS**（B 类） | JavaScript/TypeScript | **身份 Webview**：插件跑在自己的 webview 里，label 恒为 `plugin-<插件 id>`；宿主命令按身份判定（`Caller`），越权调用的主体在**副作用之前**被拒 | ✅ 能（这是默认形态） | UI 扩展、轻量逻辑 |
+| **Process**（C 类） | Rust/C/C++/Node.js | **独立进程**：sidecar spawn 有健康检查与崩溃事件 | ⚠️ 能（有边界，见下） | 系统操作、原生集成 |
+| **WASM**（D 类） | WebAssembly | **无**（未接线，进程内无 WASM 运行时） | ❌ **不能**：以 WASM 类型启动运行时返回 `E_PLUGIN_TYPE_NO_RUNTIME`（**诚实失败**，不会静默降级成"跑起来了"） | 计算密集、跨平台（**待接线**） |
+
+> **`B+`（JS + Host）不是 `PluginType` 变体**：它是 `@tauron/dual-world` 的进程内 JS
+> 沙箱**模式**，未接运行时，调用一律 fail closed（`SANDBOX_UNAVAILABLE`，**不会**伪报
+> `executed: true`）。清单里写不出 `type: "b+"`——此前的表述容易让人误以为它是第五种类型。
 
 **必须说清的两点**（此前本文件在这里写成"QuickJS-WASM 沙箱 / WASM 沙箱 / 双世界隔离"，
 是**未兑现的宣称**，轮 12 改判）：
@@ -141,6 +146,10 @@ tauron plugin new com.example.sys  --type process  # 骨架含 main.js
 > `settings_schema` / `events` / `host_functions` / `min_allowed_version` /
 > `signature` / `publisher` 等字段（见 `manifest.rs`）。上面的表是**脚手架生成的
 > 必填子集**——手写清单时按需补齐，未知字段会被 `deny_unknown_fields` 拒绝。
+>
+> ⚠️ 其中 `min_allowed_version` **只被解析、尚未生效**：宿主安装路径对已存在的
+> 插件 id 一律返回 `E_PLUGIN_EXISTS`，不存在"覆盖安装 / 升级 / 降级"流程，因此
+> 这条版本下限没有判定点。写上它不会报错，但也不会产生任何效果。
 
 ### package.json
 
@@ -340,7 +349,7 @@ if (done.state === 'settled') {
 |---|---|---|
 | js | 事件总线 request 通道（topic `plugin:<id>:__call`，插件经 `host_events_drain` 取件） | — |
 | process | sidecar stdin 帧回路（`tauron-adapter::process_delivery`） | — |
-| wasm / B+ | 无 | 结构化 `Unsupported` 失败（**诚实失败**，不假装投递成功） |
+| `Rust` / `Wasm`（`PluginType` 变体；无 B+ 变体） | 无 | 结构化 `Unsupported` 失败（诚实失败，不假装投递成功） |
 
 js / process 两条通路都在 `tauron-adapter::default_deliveries` 里生产装配；未装配
 任何通路时落到 `UnwiredDelivery`，返回有类型的 `Unsupported` 而非静默成功。
@@ -354,9 +363,9 @@ js / process 两条通路都在 `tauron-adapter::default_deliveries` 里生产�
 登记表（`authz::COMMANDS` / `ADMIN_COMMANDS`）的强制兑底是**门禁测试**
 （`validate_command_registry` + TS 镜像 `capabilities.ts`）。
 
-### 插件面命令（17 条，登记在 `authz::COMMANDS`）
+### 插件面命令（18 条，登记在 `authz::COMMANDS`）
 
-**Self_（15 条）**——身份取自 webview label（`plugin-<id>`），入参里的身份字段一律忽略（防冒充）：
+**Self_（16 条）**——身份取自 webview label（`plugin-<id>`），入参里的身份字段一律忽略（防冒充）：
 
 | 命令 | 说明 |
 |---|---|
@@ -365,6 +374,7 @@ js / process 两条通路都在 `tauron-adapter::default_deliveries` 里生产�
 | `host_cancel` | 取消调用，取消传播到 sidecar / supervisor |
 | `host_lifecycle_report` | 上报生命周期事件（state / reason） |
 | `host_contributes_register` | 注册 contributes（commands / menus / panels / …） |
+| `host_contributes_reconcile` | 对账本插件已注册的贡献（检出漂移并如实上报，0.4-W3） |
 | `host_events_publish` | 事件发布唯一入口（越界丢弃 + 计数） |
 | `host_events_subscribe` | 事件订阅（跨插件订阅需对方 `public: true`） |
 | `host_events_unsubscribe` | 事件退订（窗口销毁时由宿主回收） |
@@ -393,6 +403,22 @@ js / process 两条通路都在 `tauron-adapter::default_deliveries` 里生产�
 | `host_runtime_spawn` | 启动进程插件 sidecar（幂等：已有租约则返回既有 pid / lease） |
 | `host_runtime_health` | 按租约查询 sidecar 健康（pid / 崩溃窗口计数；暴露 PID 故同属特权） |
 | `host_resource_stats` | 查看全局及逐插件的 pending、流、订阅与通知配额占用 |
+
+### 插件安装命令（2 条，feature-gated 且**已进默认特性**）
+
+`host_registry_install_preview` / `host_registry_install` 挂在 `plugin-install` feature 下，
+而该 feature **已进 `tauron-adapter` 的默认特性**（`crates/tauron-adapter/Cargo.toml:21`，
+1.0-W6）。只想取底座的接入方用 `default-features = false` 关掉。
+
+| 命令 | 说明 |
+|---|---|
+| `host_registry_install_preview(packagePath)` | 预览安装：解析包、校验签名与 hash、列出需用户逐条确认的权限；**不改动注册表** |
+| `host_registry_install(packagePath, approvedPermissions)` | 执行安装：在**显式权限批准**后落盘并注册；`packagePath` 必须落在 `AdapterConfig.plugin_install_dir` 之下 |
+
+> **两条都不在 `authz::COMMANDS` / `ADMIN_COMMANDS` 表内**：它们由 `plugin-install`
+> feature 门控 + `plugin_install_dir` 配置门控 + 主窗身份判定三重把关。
+> **`plugin_install_dir` 未配置时安装明确不可用**（返回带原因的失败，不静默成功）。
+> 它们既不是插件可触达的命令面，也不参与 TS `CAPABILITIES` 的 1:1 镜像。
 
 ### 底座命令（主窗专属）
 
@@ -430,7 +456,7 @@ capability 的 `windows` 字段限制（只授予 `main`），不走 `authz` 表
 | `SC-3003` | `PLUGIN_EXITED` | 插件退出 |
 | `SC-9001` | `INTERNAL` | 内部错误（**可重试**） |
 
-### 应用层 `E_*`（20 个，`tauron-host`）
+### 应用层 `E_*`（21 个，`tauron-host`）
 
 变体名即**跨 IPC 线协议名**（改名即破坏兼容）。TS 侧 `HOST_ERROR_CODES`
 按**声明顺序**比对（wire-gate 门禁）。
@@ -457,6 +483,7 @@ capability 的 `windows` 字段限制（只授予 `main`），不走 `authz` 表
 | `E_LEASE_EXPIRED` | 运行时租约不存在或已失效 |
 | `E_STREAM_FULL` | 流句柄数达到上限（`MAX_STREAMS = 1024`）——先 `host_stream_close` 再开 |
 | `E_CALL_ALREADY_SETTLED` | 执行方对同一次跨主体调用重复回填（0.4-A1；重复回填显式拒绝，不覆盖） |
+| `E_CONTRIBUTES_DRIFT` | 贡献对账分叉：manifest 声明的扩展点与 activate 期实际注册的不一致（0.4-W3；报错并点名缺哪条） |
 
 **可重试集合只有 3 个**：`E_HOST_PANIC` / `E_CALL_TIMEOUT` / `E_PLUGIN_FILTERED`。
 其余一律不可自动重试——把一个确定性失败标成可重试会让前端无限重试。

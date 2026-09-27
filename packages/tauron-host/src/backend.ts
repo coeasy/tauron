@@ -65,6 +65,20 @@ export interface Backend {
   channel<T = unknown>(): ChannelPort<T>;
 
   /**
+   * **可选**：释放一个通道（{@link Backend.channel} 的配对操作）。
+   *
+   * 为什么是可选：真实 Tauri `Channel` 的生命周期由 Tauri 自己管（webview 销毁即
+   * 回收），{@link TauriBackend} 无需实现。但**进程内**传输
+   * （`MemoryTransport` / {@link MockBackend}）把通道存在自己的 Map 里，没有这条
+   * 出口就只增不减——`FrameSink` 每发起一次调用 / 开一条流都会建一个，长会话下
+   * 持续累积（每个条目还经 `onmessage` 强引用整条流的状态）。
+   *
+   * 未实现时调用方应把它当作「该传输层不需要显式释放」，**不是失败**；与
+   * {@link adoptRuntimeCapabilities} 的口径一致。
+   */
+  closeChannel?(id: string | number): void;
+
+  /**
    * 当前调用方的身份主体（R4）。
    *
    * 计划 §2.1：`self` 档命令的身份**只**从 webview label 解析（`plugin-<id>`），
@@ -298,6 +312,31 @@ export class MockBackend implements Backend {
     const port: ChannelPort<T> = { id, onmessage: null };
     this.channels.set(id, port as ChannelPort<StreamFrame>);
     return port;
+  }
+
+  /**
+   * 释放通道：连**反向索引**（`callId → channelId`）一起清掉。
+   *
+   * 只删 `channels` 不够：`callChannels` 里还留着指向它的条目，那是一份以
+   * callId 为键的死引用——与 `MemoryTransport` 的泄漏是同一类问题。
+   */
+  closeChannel(id: string | number): void {
+    const key = String(id);
+    this.channels.delete(key);
+    for (const [callId, channelId] of this.callChannels) {
+      if (channelId === key) this.callChannels.delete(callId);
+    }
+  }
+
+  /**
+   * 当前仍登记的通道数（**测试专用**）。
+   *
+   * 存在的理由：`FrameSink.dispose()` 的效果在真机上就是"通道不再收帧"，而在 mock
+   * 里唯一可判定的观察点就是这个计数——没有它，`closeChannel` 是否真的被调到
+   * 只能靠"代码里写了"来断言，那正是本仓反复吃亏的假绿形态。
+   */
+  get openChannelCount(): number {
+    return this.channels.size;
   }
 
   principal(): Principal {

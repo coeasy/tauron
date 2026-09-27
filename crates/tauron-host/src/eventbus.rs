@@ -402,6 +402,14 @@ impl EventBus {
             )
         })?;
 
+        // 授权判定：`is_approved` 内部取 `approvals` 锁，**不嵌套**其他锁；
+        // 紧随其后的 `stats` 也在前者的守卫释放之后才取。
+        //
+        // 关于声明锁序（`stats → topics → subs → topic_subscribers → approvals →
+        // queues`）：该顺序约束的是**嵌套持有**——反序嵌套会构成死锁环。
+        // 本处是**先后**而非嵌套（`allowed` 求值完毕、approvals 守卫已释放，
+        // 才取 `stats` 计数），因此不构成任何环。**刻意不改成嵌套**：把 `stats`
+        // 提到 `is_approved` 之前会让二者真正嵌套，反而新增死锁面。
         let allowed =
             meta.publisher == subscriber || meta.is_public || self.is_approved(subscriber, topic);
         if !allowed {

@@ -25,6 +25,7 @@ describe('@tauron/shell-events 契约自检', () => {
     expect(SHELL_EVENTS.maximize).toBe('oc-maximize');
     expect(SHELL_EVENTS.close).toBe('oc-close');
     expect(SHELL_EVENTS.updaterCheck).toBe('oc-updater-check');
+    expect(SHELL_EVENTS.updaterDismiss).toBe('oc-updater-dismiss');
     expect(SHELL_EVENTS.updateStart).toBe('oc-update-start');
     expect(SHELL_EVENTS.restart).toBe('oc-restart');
     expect(SHELL_EVENTS.pluginToggle).toBe('oc-plugin-toggle');

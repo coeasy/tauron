@@ -231,14 +231,23 @@ export class LazyPluginLoader {
       return descriptor.entry();
     }
 
-    return Promise.race([
-      descriptor.entry(),
-      new Promise<never>((_, reject) => {
-        setTimeout(() => {
-          reject(new Error(`Plugin load timed out after ${timeoutMs}ms: ${descriptor.id}`));
-        }, timeoutMs);
-      }),
-    ]);
+    // 定时器必须在加载落定后清掉：`Promise.race` 只丢弃**落败者**的结果，
+    // **不会取消**仍在排队的 `setTimeout`。不清的话每次成功加载都会把一个
+    // 定时器（默认 30s）留在队列里，Node 下还会拖住进程退出。
+    // 与 `plugin-sdk` 的 `host-invoke.ts` / `core` 的 `tauri-backend.ts` 同做法。
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        descriptor.entry(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error(`Plugin load timed out after ${timeoutMs}ms: ${descriptor.id}`));
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   /**

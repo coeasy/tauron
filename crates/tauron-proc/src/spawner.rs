@@ -11,7 +11,7 @@
 // `SpawnedProc` 是唯一输出）。
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Arc;
 
@@ -111,6 +111,138 @@ pub trait ProcessFrameSink: Send + Sync {
     fn on_eof(&self, _pid: u32) {}
 }
 
+/// 一次 `close` 的结果：既交还 sink，也报告「本读线程是否还代表当前代次」。
+struct CloseOutcome {
+    /// 本读线程对应的 sink（若仍挂在表上），交还给调用方触发 `on_eof`。
+    sink: Option<Arc<dyn ProcessFrameSink>>,
+    /// `false` = 该 pid **已被复用**（新进程占用同一 pid 并开启了新代次）。
+    /// 此时本读线程是"上一代"的遗骸，**不得**再清理该 pid 的 stdin / child 表项
+    /// ——那些条目已经属于新进程，误删就是把新进程的管道与句柄摘掉（静默断链）。
+    is_current: bool,
+}
+
+/// 表上的一条帧接收器登记：**带代次**。
+struct LiveSink {
+    /// 登记时该 pid 的代次。
+    gen: u64,
+    sink: Arc<dyn ProcessFrameSink>,
+}
+
+/// sidecar stdout 的**进程级登记**：帧接收器、「已关闭」标记与**代次**。
+///
+/// 为什么必须放在**同一把锁**下（1.0-W7 修复 P0-7①）：此前 `sinks` 与 `closed`
+/// 是两把独立的锁，`register_frame_sink` 先查 `closed` 再插 `sinks`，而读线程
+/// EOF 时先删 `sinks` 再插 `closed`——两次加锁之间可交错：
+///
+/// ```text
+/// 读线程: sinks.remove(pid) ──────────────► closed.insert(pid)
+/// 注册方:              closed 检查(未命中) ──► sinks.insert(pid)   ← 永久残留
+/// ```
+///
+/// 交错后 sink 在 `closed` 置位之后才插入，而读线程已经退出、永远不会再清理它
+/// ——反复「崩溃 → 重启」即**无界累积**。合并成一把锁后「检查 + 插入」原子，
+/// 交错在结构上不可能发生。
+///
+/// **为什么还要代次（generation）**：pid 会被操作系统复用（Windows 上尤其常见，
+/// 进程对象一关闭就可能回收号段）。没有代次时会出现两处**静默断链**：
+///
+/// 1. 上一代读线程的 EOF 迟到，把 `closed` 置到**复用后的新 pid** 上 →
+///    新进程 `register_frame_sink` 被拒 → 它的回帧**永远无人接收**，
+///    「宿主 → sidecar → 回帧 → 结算」在新进程上断掉，且不报任何错；
+/// 2. 同一个迟到的读线程还会 `children.remove(pid)` / `stdin_writers.remove(pid)`
+///    ——摘走的是**新进程**的句柄与 stdin，帧投递立刻 `NotFound`。
+///
+/// 代次把「pid」变成「pid + 本启动器的第几次使用」：每次 `spawn` 都 `begin` 出
+/// 新代次，读线程闭包捕获自己那一代；`close` 时若代次不符即判为遗骸，
+/// 既不写 `closed` 也不碰表项。
+///
+/// **为什么会无界增长**：`closed` / `generation` 按 pid 累积，而 pid 是会被回收
+/// 复用的有限空间。两者都由 [`SinkTable::retain_tracked`] 在每次 `spawn` 时
+/// 按「仍在 `children` 跟踪表里」裁剪，配合 `register_frame_sink` 的
+/// 「不在跟踪表 = 拒绝登记」前提（没有跟踪表条目就没有读线程，登记必然是悬空的），
+/// 使裁剪不会重新打开 P0-7① 的泄漏口。
+#[derive(Default)]
+struct SinkTable {
+    /// pid → 当前代次已登记的帧接收器。
+    live: HashMap<u32, LiveSink>,
+    /// pid → 已 EOF 的代次（仅当代次仍为当前代次时写入）。
+    closed: HashMap<u32, u64>,
+    /// pid → 当前代次（每次 `begin` 递增）。
+    generation: HashMap<u32, u64>,
+    /// 下一个代次号（进程内单调递增）。
+    next_generation: u64,
+}
+
+impl SinkTable {
+    /// 开启该 pid 的**新代次**：递增代次、清掉旧的 `closed` 标记。
+    ///
+    /// 返回 `(新代次, 上一代次遗留的 sink)`——后者若存在说明 pid 已被复用而上一代
+    /// 读线程还没来得及 EOF，调用方应在**锁外**替它触发 `on_eof`（否则那个 sink
+    /// 再也没人通知）。
+    fn begin(&mut self, pid: u32) -> (u64, Option<Arc<dyn ProcessFrameSink>>) {
+        let gen = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1);
+        self.generation.insert(pid, gen);
+        // 上一代的关闭标记属于旧进程，必须清掉，否则新进程永远登记不上。
+        self.closed.remove(&pid);
+        let stale = self.live.remove(&pid).map(|l| l.sink);
+        (gen, stale)
+    }
+
+    /// 当前代次（未登记过的 pid 视为代次 0，供 `register` 兜底）。
+    fn current_generation(&self, pid: u32) -> u64 {
+        self.generation.get(&pid).copied().unwrap_or(0)
+    }
+
+    /// 原子地「查 closed → 插入」。返回 `false` = 已关闭，拒绝迟到登记。
+    fn register(&mut self, pid: u32, sink: Arc<dyn ProcessFrameSink>) -> bool {
+        if self.closed.contains_key(&pid) {
+            return false;
+        }
+        self.live.insert(
+            pid,
+            LiveSink {
+                gen: self.current_generation(pid),
+                sink,
+            },
+        );
+        true
+    }
+
+    /// 取本读线程那一代的 sink（每帧调用；clone 出 `Arc` 后即可释放锁）。
+    /// 代次不符 = pid 已复用，旧读线程的帧不得再投给新进程。
+    fn get(&self, pid: u32, gen: u64) -> Option<Arc<dyn ProcessFrameSink>> {
+        self.live
+            .get(&pid)
+            .filter(|l| l.gen == gen)
+            .map(|l| l.sink.clone())
+    }
+
+    /// 标记关闭并摘除 sink（同一把锁内完成）。代次不符时视为遗骸：
+    /// 不写 `closed`（否则会把新进程的登记口焊死）。
+    fn close(&mut self, pid: u32, gen: u64) -> CloseOutcome {
+        let is_current = self.generation.get(&pid).map_or(true, |g| *g == gen);
+        if is_current {
+            self.closed.insert(pid, gen);
+        }
+        let sink = match self.live.get(&pid) {
+            Some(l) if l.gen == gen => self.live.remove(&pid).map(|l| l.sink),
+            _ => None,
+        };
+        CloseOutcome { sink, is_current }
+    }
+
+    /// 裁掉「已不在跟踪表里」的 pid 的 `closed` / `generation` 条目。
+    ///
+    /// 只在 `spawn` 持有 `children` 锁时调用（见 `retain_tracked` 的调用点），
+    /// 保证「裁掉的 pid 必然拿不到跟踪表条目」，而 `register_frame_sink`
+    /// 对无跟踪表条目的 pid 一律拒绝——因此裁剪不会重新放行悬空登记。
+    fn retain_tracked(&mut self, tracked: &std::collections::HashSet<u32>) {
+        self.closed.retain(|pid, _| tracked.contains(pid));
+        self.generation.retain(|pid, _| tracked.contains(pid));
+    }
+}
+
 /// 生产实现：`std::process::Command`。
 ///
 /// 做四件事——**真启动**（`Command::spawn`）、**真探测**（`Child::try_wait`）、
@@ -124,6 +256,17 @@ pub trait ProcessFrameSink: Send + Sync {
 ///   「未验证」里剩下的真实 sidecar 端到端缺口）。
 /// - 读线程每读到一行协议帧就交给该 pid 注册的 [`ProcessFrameSink`]；无 sink 时
 ///   静默丢弃（调用方尚未注册；sidecar 不应在收到请求前自发帧）。
+///
+/// **1.0-W7 加固（本轮）**
+/// - `SinkTable` 单锁：登记与关闭原子化，消除迟到登记的泄漏竞态（P0-7①）。
+/// - 写帧**不再持全局锁**：`stdin_writers` 是两级锁（外层只用于取 `Arc`，
+///   内层才是 per-pid 的阻塞写）——一个不读 stdin 的 sidecar 只阻塞**它自己**
+///   的帧投递，不再拖住所有进程（P0-7②）。
+/// - 单帧**长度上限** `MAX_FRAME_BYTES`：用 `Read::take` 限制，超长行（无换行）
+///   不会无限增长把宿主 OOM（P0-7③）。
+/// - EOF 时**主动 `try_wait` 回收**已退出的子进程（不 wait 会留僵尸），
+///   仅在「进程仍存活但关了 stdout」这种病态情形下保留句柄（P2-4）。
+/// - EOF 时调用 sink 的 `on_eof`（此前该钩子在生产路径上零调用，P2-3）。
 ///
 /// **未验证部分（诚实标注）**
 /// - **真实 sidecar 端到端**：本仓**没有**可执行的 sidecar 二进制，测试也明确
@@ -144,17 +287,35 @@ pub trait ProcessFrameSink: Send + Sync {
 pub struct CommandSpawner {
     /// pid → `Child`。持有句柄是 `try_wait` 的前提（否则只能靠平台 API 探测，
     /// 那会引入平台分支与 unsafe）。stdin/stdout 已在 `spawn` 时 `take` 出去，
-    /// 因此这里不再持有（不影响 `try_wait`/`kill`）。
-    children: Mutex<HashMap<u32, Child>>,
-    /// pid → sidecar stdin 写句柄（宿主写 JSON-RPC 行帧用）。封 `Arc` 以便 `spawn`
-    /// 时把同一张表克隆给读线程共享。
-    stdin_writers: Arc<Mutex<HashMap<u32, ChildStdin>>>,
-    /// pid → stdout 帧接收器（读线程把 sidecar 回帧路由给它）。封 `Arc` 共享。
-    sinks: Arc<Mutex<HashMap<u32, Arc<dyn ProcessFrameSink>>>>,
-    /// 已退出（读线程 EOF）的 pid 集合。`register_frame_sink` 用它挡住"进程已
-    /// 退出后才来注册"的迟到登记——那种登记永远不会被读线程清理（线程已退），
-    /// 不挡就是无界泄漏（0.4 审计修复）。
-    closed: Arc<Mutex<std::collections::HashSet<u32>>>,
+    /// 因此这里不再持有（不影响 `try_wait`/`kill`）。封 `Arc` 以便读线程在
+    /// stdout EOF 时**主动回收**已退出的子进程（1.0-W7）。
+    children: Arc<Mutex<HashMap<u32, Child>>>,
+    /// pid → sidecar stdin 写句柄（宿主写 JSON-RPC 行帧用）。
+    ///
+    /// **两级锁**（1.0-W7）：外层锁只在「取该 pid 的 `Arc`」时短暂持有，
+    /// 阻塞的 `write_all`/`flush` 只持**内层** per-pid 锁——因此一个不读 stdin
+    /// 的 sidecar 不会拖住其他进程的帧投递。
+    stdin_writers: Arc<Mutex<HashMap<u32, Arc<Mutex<ChildStdin>>>>>,
+    /// 帧接收器 + 关闭标记（同一把锁，见 [`SinkTable`]）。
+    sinks: Arc<Mutex<SinkTable>>,
+}
+
+/// 单帧字节上限（1.0-W7）。超过即判定为协议违规并断开读线程——
+/// 防 sidecar 用一条没有换行的超长行把宿主内存吃光。
+pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+/// 去掉行帧首尾的 ASCII 空白（含 `\n` / `\r`），返回子切片。
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map(|i| i + 1)
+        .unwrap_or(start);
+    &bytes[start..end]
 }
 
 impl CommandSpawner {
@@ -166,6 +327,16 @@ impl CommandSpawner {
     /// 当前被本启动器跟踪的进程数（诊断/测试）。
     pub fn tracked(&self) -> usize {
         self.children.lock().len()
+    }
+
+    /// 已 EOF（stdout 关闭）的 pid 数（诊断/测试）。
+    pub fn closed_count(&self) -> usize {
+        self.sinks.lock().closed.len()
+    }
+
+    /// 当前登记的帧接收器数（诊断/测试）。
+    pub fn sink_count(&self) -> usize {
+        self.sinks.lock().live.len()
     }
 }
 
@@ -205,36 +376,104 @@ impl ProcSpawner for CommandSpawner {
             }
         };
         self.children.lock().insert(pid, child);
-        self.stdin_writers.lock().insert(pid, stdin);
+
+        // 开启该 pid 的**新代次**并顺手裁剪陈旧登记。两把锁必须按
+        // `children → sinks` 的固定顺序嵌套（全仓唯一的嵌套点；读线程只依次
+        // 短暂持有各自的一把，不嵌套），否则「裁剪」与「新 pid 插入」之间
+        // 会留下交错窗口。
+        let (gen, stale_sink) = {
+            let children = self.children.lock();
+            let mut table = self.sinks.lock();
+            let tracked: std::collections::HashSet<u32> = children.keys().copied().collect();
+            table.retain_tracked(&tracked);
+            table.begin(pid)
+        };
+        // pid 复用时上一代遗留的 sink：替它触发一次 `on_eof`（锁外），否则
+        // 那个 sink 的所有者永远等不到关闭通知。
+        if let Some(stale) = stale_sink {
+            stale.on_eof(pid);
+        }
+
+        self.stdin_writers
+            .lock()
+            .insert(pid, Arc::new(Mutex::new(stdin)));
 
         // 读线程：持续排空 sidecar 的 stdout，逐行交给该 pid 注册的 sink。
-        // 读到 EOF（进程退出）即退出线程并清理该 pid 的 stdin/sink 登记，
-        // 并把 pid 记入 `closed`——挡住此后迟到的 `register_frame_sink`。
+        // 读到 EOF（进程退出 / 关闭 stdout）即退出线程、清理登记、并**主动回收**
+        // 已退出的子进程；同时把 pid 记入 `SinkTable.closed`——挡住此后迟到的
+        // `register_frame_sink`（1.0-W7：检查与插入在同一把锁下，无交错窗口）。
+        // 闭包捕获**本代次**的 `gen`：pid 被操作系统复用后，上一代读线程的
+        // 迟到 EOF 不得再动新进程的表项（见 `SinkTable` 文档）。
         let sinks = self.sinks.clone();
         let writers = self.stdin_writers.clone();
-        let closed = self.closed.clone();
+        let children = self.children.clone();
         std::thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                match line {
-                    Ok(l) => {
-                        let trimmed = l.trim();
+            let mut reader = BufReader::new(stdout);
+            let mut buf: Vec<u8> = Vec::with_capacity(256);
+            loop {
+                buf.clear();
+                // `take` 给单帧设上限：sidecar 若写一条没有换行的超长行，
+                // `read_until` 会在上限处返回而不是无限增长（1.0-W7③）。
+                let read = {
+                    let mut limited = (&mut reader).take((MAX_FRAME_BYTES + 1) as u64);
+                    limited.read_until(b'\n', &mut buf)
+                };
+                match read {
+                    // EOF：进程退出（或主动关了 stdout）。
+                    Ok(0) => break,
+                    // 超长帧（无换行）：协议违规，断开该进程的读线程。
+                    Ok(_) if buf.len() > MAX_FRAME_BYTES => break,
+                    Ok(_) => {
+                        let trimmed = trim_ascii(&buf);
                         if trimmed.is_empty() {
                             continue; // 空行跳过（sidecar 的分帧留白）
                         }
-                        let sink = sinks.lock().get(&pid).cloned();
+                        // **先取后用**：`on_frame` 会一路走到 `Registry::settle_call`，
+                        // 绝不能在持着 `sinks` 锁时回调（否则所有读线程串行化，
+                        // 且被调方一旦反向触碰登记表就是同锁再入）。
+                        let sink = sinks.lock().get(pid, gen);
                         if let Some(s) = sink {
-                            s.on_frame(pid, trimmed.as_bytes());
+                            s.on_frame(pid, trimmed);
                         }
                         // 无 sink：静默丢弃（调用方尚未注册；sidecar 不应自发帧）。
                     }
-                    Err(_) => break, // 读错误 / EOF → 退出读线程
+                    Err(_) => break, // 读错误 → 退出读线程
                 }
             }
-            // EOF：清理该 pid 的 stdin 与 sink 登记，并标记已关闭。
-            sinks.lock().remove(&pid);
-            writers.lock().remove(&pid);
-            closed.lock().insert(pid);
+            // EOF：标记关闭并摘除 sink（同一把锁内原子完成）。
+            // **临时 guard 在本语句结束即释放**——edition 2021 下
+            // `if let … = sinks.lock().close(…)` 会把 guard 一直持到 if-let 块尾，
+            // 块内若再触碰同一把锁就是自死锁（`parking_lot::Mutex` 不可重入）。
+            let outcome = sinks.lock().close(pid, gen);
+            if let Some(sink) = outcome.sink {
+                sink.on_eof(pid);
+            }
+            // `is_current == false` = pid 已被复用，下面三张表里的条目已属于
+            // **新进程**，这具"上一代遗骸"一个字都不能动（否则摘走新进程的
+            // stdin / 句柄 → 静默断链）。
+            if outcome.is_current {
+                writers.lock().remove(&pid);
+                // 主动回收：stdout 关闭**最常见**的原因是进程退出——此时 `try_wait`
+                // 能立刻拿到状态并回收（不 wait 会在 Unix 留僵尸）。若进程只是关了
+                // stdout 仍在跑（病态 sidecar），`try_wait` 返回 `None`，则放回表里
+                // 由 `is_alive` / `kill` 继续管理——不误杀、不丢句柄（1.0-W7）。
+                //
+                // **同锁再入防护（1.0-R1 P0）**：下面必须先把 guard 绑到变量、
+                // 在语句结束时释放，才能在 `if let` 体内再次 `children.lock()`。
+                // 早先的写法是直接把 `children.lock().remove(&pid)` 放进 `if let`
+                // 的判别式，edition 2021 的临时作用域会把那把 guard 持有到整个
+                // if-let 结束，体内再锁同一把 `parking_lot::Mutex` 就是**永久
+                // 自死锁**——病态 sidecar（关了 stdout 还在跑）一出现，整个
+                // 进程管理面冻结。`eof_reap_must_not_hold_children_lock_inside_if_let`
+                // 就是钉死这个形状的源码门禁。
+                let reclaimed = children.lock().remove(&pid);
+                if let Some(mut child) = reclaimed {
+                    let still_running = matches!(child.try_wait(), Ok(None));
+                    if still_running {
+                        children.lock().insert(pid, child);
+                    }
+                }
+            }
         });
 
         Ok(SpawnedProc { pid })
@@ -296,32 +535,46 @@ impl ProcSpawner for CommandSpawner {
     ///
     /// 该 pid 必须此前由本启动器 `spawn` 过且尚未退出（stdin 句柄仍在登记表）；
     /// 否则返回 `NotFound`（调用方据此知道"投递落空"，而不是静默丢失）。
+    ///
+    /// **两级锁（1.0-W7）**：外层锁只用于取该 pid 的 `Arc`，取到即释放；
+    /// 阻塞的 `write_all` / `flush` 只持**内层** per-pid 锁。因此一个不读 stdin
+    /// 的 sidecar 只会阻塞它自己的帧投递，不会拖住其他进程。
     fn write_frame(&self, pid: u32, frame: &[u8]) -> std::io::Result<()> {
-        let mut writers = self.stdin_writers.lock();
-        match writers.get_mut(&pid) {
-            Some(stdin) => {
-                stdin.write_all(frame)?;
-                stdin.write_all(b"\n")?;
-                stdin.flush()
-            }
-            None => Err(std::io::Error::new(
+        // 注意：临时 guard 在本语句结束即释放（未绑定到变量），阻塞写不持外层锁。
+        let stdin = self.stdin_writers.lock().get(&pid).cloned();
+        let Some(stdin) = stdin else {
+            return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("pid {pid} 没有可用的 stdin 管道（进程可能尚未启动或已退出）"),
-            )),
-        }
+            ));
+        };
+        let mut guard = stdin.lock();
+        guard.write_all(frame)?;
+        guard.write_all(b"\n")?;
+        guard.flush()
     }
 
     /// 注册一个 stdout 帧接收器（sidecar 回帧经此路由回宿主）。返回 `true` 表示已登记。
     ///
-    /// **迟到登记拒绝**：读线程 EOF 时会把 pid 记入 `closed` 并清掉登记；此后再来的
-    /// `register_frame_sink` 返回 `false`（拒绝）——否则条目永远不会被清理
-    /// （读线程已退，没人回收它），反复"崩溃→重启"就无界累积。
+    /// **迟到登记拒绝**：读线程 EOF 时会在**同一把锁**下标记 `closed` 并摘除 sink；
+    /// 此后再来的 `register_frame_sink` 返回 `false`（拒绝）——否则条目永远不会被
+    /// 清理（读线程已退，没人回收它），反复"崩溃→重启"就无界累积。
+    ///
+    /// **无跟踪表条目也拒绝**：`children` 里没有这个 pid，说明进程已退出并被
+    /// `is_alive` / `kill` 回收，或压根不是本启动器起的——两种情况都没有读线程
+    /// 在排空 stdout，登记上去就是一条**永远收不到帧的死条目**。这条前置也让
+    /// `SinkTable::retain_tracked` 的裁剪是安全的：被裁掉的 pid 必然过不了这道门。
+    ///
+    /// 1.0-W7：`closed` 检查与 `live` 插入由 [`SinkTable::register`] 原子完成，
+    /// 消除了此前「两把锁之间可交错」的 TOCTOU 泄漏窗口。
     fn register_frame_sink(&self, pid: u32, sink: Arc<dyn ProcessFrameSink>) -> bool {
-        if self.closed.lock().contains(&pid) {
+        // 先取值再判断：保证 `children` 的临时 guard 在本语句即释放，
+        // 不与下面的 `sinks` 锁叠加成嵌套（锁序只允许 `children → sinks` 一处嵌套）。
+        let tracked = self.children.lock().contains_key(&pid);
+        if !tracked {
             return false;
         }
-        self.sinks.lock().insert(pid, sink);
-        true
+        self.sinks.lock().register(pid, sink)
     }
 }
 
@@ -410,5 +663,189 @@ mod tests {
         assert_eq!(spawner.kill(0).unwrap(), KillOutcome::AlreadyGone);
         assert_eq!(spawner.kill(u32::MAX).unwrap(), KillOutcome::AlreadyGone);
         assert_eq!(spawner.tracked(), 0, "终止不得凭空造出被跟踪的进程");
+    }
+
+    // ── 1.0-W7：登记/关闭的原子性与写帧语义 ────────────────────────────
+
+    /// 记录 `on_frame` / `on_eof` 调用的测试 sink。
+    #[derive(Default)]
+    struct RecordingSink {
+        frames: Mutex<Vec<Vec<u8>>>,
+        eof: Mutex<Vec<u32>>,
+    }
+
+    impl ProcessFrameSink for RecordingSink {
+        fn on_frame(&self, _pid: u32, frame: &[u8]) {
+            self.frames.lock().push(frame.to_vec());
+        }
+        fn on_eof(&self, pid: u32) {
+            self.eof.lock().push(pid);
+        }
+    }
+
+    /// 门禁（P0-7①）：`closed` 标记与 `live` 登记必须在**同一把锁**下变更，
+    /// 因此「关闭后再登记」必须被拒绝——不允许出现"登记成功但永不被回收"的条目。
+    #[test]
+    fn sink_table_registration_after_close_is_rejected_atomically() {
+        let mut table = SinkTable::default();
+        let (gen, _) = table.begin(7);
+        assert!(table.register(7, Arc::new(RecordingSink::default())));
+        assert_eq!(table.live.len(), 1, "首次登记应入表");
+
+        // 读线程 EOF：标记关闭 + 摘除 sink（同一把锁内完成）。
+        let removed = table.close(7, gen);
+        assert!(
+            removed.sink.is_some(),
+            "close 必须把 sink 交还给调用方以便触发 on_eof"
+        );
+        assert!(removed.is_current, "同一代次的 EOF 必须判为当前代次");
+        assert!(table.live.is_empty(), "关闭后 live 必须为空");
+        assert!(table.closed.contains_key(&7));
+
+        // 迟到登记：必须被拒，否则该条目永远不会被回收（无界累积）。
+        assert!(!table.register(7, Arc::new(RecordingSink::default())));
+        assert!(
+            table.live.is_empty(),
+            "迟到登记被拒后不得留下任何条目（这正是 P0-7① 的泄漏形态）"
+        );
+    }
+
+    /// 关闭时交还的 sink 必须能被调用 `on_eof`——该钩子此前在生产路径上零调用
+    /// （P2-3），现在由读线程在 EOF 时触发。
+    #[test]
+    fn close_hands_back_sink_so_on_eof_can_fire() {
+        let mut table = SinkTable::default();
+        let (gen, _) = table.begin(11);
+        let sink = Arc::new(RecordingSink::default());
+        assert!(table.register(11, sink.clone()));
+        let handed_back = table
+            .close(11, gen)
+            .sink
+            .expect("close 应返回被摘除的 sink");
+        handed_back.on_eof(11);
+        assert_eq!(sink.eof.lock().as_slice(), &[11]);
+    }
+
+    /// **1.0-R1 P0 回归**：pid 被操作系统复用后，上一代读线程的迟到 EOF
+    /// 既不能把新进程的登记口焊死（否则新进程回帧**永远无人接收**——
+    /// 「宿主 → sidecar → 回帧 → 结算」静默断链），也不能被判成"当前代次"
+    /// 而去摘新进程的 stdin / child 表项。
+    #[test]
+    fn stale_eof_from_previous_generation_cannot_poison_reused_pid() {
+        let mut table = SinkTable::default();
+        let (gen_a, _) = table.begin(77); // 第一代
+        assert!(table.register(77, Arc::new(RecordingSink::default())));
+
+        // pid 复用：第二代开始（复用本身就要清掉第一代的关闭标记）。
+        let (gen_b, stale) = table.begin(77);
+        assert!(stale.is_some(), "上一代遗留的 sink 必须交还，否则它的所有者永远等不到 on_eof");
+        assert_ne!(gen_a, gen_b, "同 pid 的两代必须不同，否则代次判别形同虚设");
+        assert!(
+            table.register(77, Arc::new(RecordingSink::default())),
+            "复用后的新进程必须能登记——被旧代次的 closed 标记焊死就是静默断链"
+        );
+
+        // 第一代读线程的 EOF 迟到：必须判为遗骸。
+        let outcome = table.close(77, gen_a);
+        assert!(!outcome.is_current, "旧代次 EOF 不得判为当前代次");
+        assert!(outcome.sink.is_none(), "旧代次不得摘走新代次的 sink");
+        assert!(
+            !table.closed.contains_key(&77),
+            "旧代次不得写 closed，否则新进程的回帧口被焊死"
+        );
+        assert!(
+            table.register(77, Arc::new(RecordingSink::default())),
+            "旧代次 EOF 之后新进程仍应能登记"
+        );
+
+        // 第二代自己的 EOF：正常关闭。
+        let outcome = table.close(77, gen_b);
+        assert!(outcome.is_current);
+        assert!(outcome.sink.is_some());
+        assert!(table.closed.contains_key(&77));
+    }
+
+    /// 无跟踪表条目（进程已回收 / 非本启动器起的）= 没有读线程在排水，
+    /// 登记上去就是一条永远收不到帧的死条目 → 必须拒绝。
+    #[test]
+    fn register_frame_sink_rejects_pid_without_tracked_child() {
+        let spawner = CommandSpawner::new();
+        assert!(
+            !spawner.register_frame_sink(4242, Arc::new(RecordingSink::default())),
+            "未跟踪的 pid 必须拒绝登记（否则是永久残留的死条目）"
+        );
+        assert_eq!(spawner.sink_count(), 0, "拒绝后不得留下任何条目");
+    }
+
+    /// **锁形门禁（1.0-R1 P0）**：`children.lock()` 的临时 guard 在 edition 2021
+    /// 下会一直活到 `if let` 块尾，块内再锁同一把 `parking_lot::Mutex` 就是
+    /// **永久自死锁**（不可重入、无死锁检测）。真实触发条件是"病态 sidecar 关了
+    /// stdout 还在跑"，本仓测试不起真进程，抓不到运行期——只能在源码形上钉死。
+    #[test]
+    fn eof_reap_must_not_hold_children_lock_inside_if_let() {
+        let src = include_str!("spawner.rs");
+        // needle 用片段拼出来，避免「门禁自身的字面量」被自己匹配到。
+        let needle = [
+            "if let Some(mut child) = ",
+            "children",
+            ".lock().remove(&pid)",
+        ]
+        .concat();
+        assert!(
+            !src.contains(&needle),
+            "禁止在 if let 里直接持有 children.lock() 的临时 guard（edition 2021 \
+             会把它持到块尾，体内同锁再入即永久自死锁）——必须先 let 绑定释放"
+        );
+        let fixed = ["let reclaimed = ", "children", ".lock().remove(&pid);"].concat();
+        assert!(
+            src.contains(&fixed),
+            "回收路径必须以「先 let 绑定、语句结束即释放」的形状存在"
+        );
+    }
+
+    /// `closed` / `generation` 不得无界增长：每次 `spawn` 按跟踪表裁剪。
+    #[test]
+    fn sink_table_prunes_closed_and_generation_for_untracked_pids() {
+        let mut table = SinkTable::default();
+        for pid in 1..=8u32 {
+            let (gen, _) = table.begin(pid);
+            let _ = table.register(pid, Arc::new(RecordingSink::default()));
+            let _ = table.close(pid, gen);
+        }
+        assert_eq!(table.closed.len(), 8, "裁剪前应按 pid 累积");
+        table.retain_tracked(&std::collections::HashSet::from([2, 5]));
+        assert_eq!(table.closed.len(), 2, "只保留仍在跟踪表里的 pid");
+        assert_eq!(table.generation.len(), 2, "代次表同步裁剪");
+        assert!(table.closed.contains_key(&2) && table.closed.contains_key(&5));
+    }
+
+    /// 写帧到未登记的 pid：必须如实报 `NotFound`（"投递落空"），不得静默成功。
+    /// 同时验证两级锁下写路径不需要真进程即可覆盖失败分支。
+    #[test]
+    fn write_frame_to_unknown_pid_reports_not_found() {
+        let spawner = CommandSpawner::new();
+        let err = spawner
+            .write_frame(4242, b"{\"id\":1}")
+            .expect_err("未登记的 pid 必须报错");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// 帧首尾的 ASCII 空白（含 `\r\n`）必须被裁掉：sidecar 用 CRLF 分帧时
+    /// 不能把 `\r` 带进 JSON 解析。
+    #[test]
+    fn frame_trimming_strips_crlf_and_spaces() {
+        assert_eq!(trim_ascii(b"  {\"a\":1}\r\n"), b"{\"a\":1}");
+        assert_eq!(trim_ascii(b"\n"), b"");
+        assert_eq!(trim_ascii(b"{}"), b"{}");
+    }
+
+    /// 单帧上限必须是**有界**的常量（防 sidecar 用无换行超长行把宿主 OOM）。
+    #[test]
+    fn max_frame_bytes_is_bounded() {
+        assert!(MAX_FRAME_BYTES > 0);
+        assert!(
+            MAX_FRAME_BYTES <= 16 * 1024 * 1024,
+            "单帧上限过大等于没有上限"
+        );
     }
 }

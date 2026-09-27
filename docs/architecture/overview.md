@@ -25,7 +25,7 @@
 ├──────────────────────────────────────────────────────────────────────────┤
 │                  Tauri 命令适配层（薄包装，feature = "tauri"）              │
 │   tauron-shell: plugin_invoke / plugin_cancel / plugin_emit (3 条信封命令) │
-│   tauron-adapter: host_* 命令族（应用层，59 条 = 底座 39 + 插件运行时 20；install 2 条 feature-gated 另计）  │
+│   tauron-adapter: host_* 命令族（应用层，60 条 = 底座 39 + 插件运行时 21；install 2 条 feature-gated 另计）  │
 ├──────────────────────────────────────────────────────────────────────────┤
 │          Rust 壳层                        TS 插件 SDK 层                   │
 │  ┌──────────────────────────┐      ┌──────────────────────────────────┐  │
@@ -60,6 +60,13 @@
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
+> ⚠️ **上图为架构愿景，不是实测接线状态**（2026-09-27 复核）：图中的
+> 「Rust Native Plugin」「B+ 混合模式」在代码里**无对应实现**——`PluginType`
+> 只有 `Rust` / `Js` / `Process` / `Wasm` 四变体，且 Rust / Wasm 返回
+> `E_PLUGIN_TYPE_NO_RUNTIME`；`tauron-wasm` 是**未接线且无 wasm 引擎依赖**的 crate
+> （1629 行、50 测试），「Extism / QuickJS-WASM」是设想。真实接线状态见
+> [full-architecture-refactor-plan.md](./full-architecture-refactor-plan.md) §1.2。
+
 ## 两层架构
 
 tauron 由**框架层**与**应用层**组成。两层共享同一套类型与协议，但职责不同：
@@ -69,7 +76,7 @@ tauron 由**框架层**与**应用层**组成。两层共享同一套类型与�
 | **面向** | 第三方客户端集成 | 完整客户端交付 |
 | **npm** | `@tauron/types` `core` `plugin-sdk` `dual-world` `adapter-*` `market` `shell-matrix` `cli` `contract-tests` | `@tauron/host` `framework` `ui` `app-cli` `app-plugin-sdk` `app-contract-kit` |
 | **Rust** | `tauron-shell` | `tauron-host` `tauron-adapter` |
-| **命令族** | `plugin_invoke` / `plugin_cancel` / `plugin_emit` | `host_*`（59 条，默认构建） |
+| **命令族** | `plugin_invoke` / `plugin_cancel` / `plugin_emit` | `host_*`（60 条，默认构建） |
 | **入口** | `tauron_shell::commands::init()` 或零配置 `state_init()` + `tauron_generate_handler![]` | `tauron_adapter::tauri::init()` 或 `state_init()` + `tauron_generate_handler![]` |
 
 > 应用层**复用**框架层的类型与协议，不修改框架层契约。两层之间的命令名与
@@ -109,11 +116,11 @@ tauron-*       ← 全部 Rust crate
 | **@tauron/types** | 共享类型 | `PluginInvokeRequest/Response`, `PluginErrorCode`, `PluginState`, `PluginManifest`, `PluginEvent`, `TauronConfig`, `PluginPermissionGrant` |
 | **@tauron/core** | 平台无关核心 | `invokePlugin()`, `createTauriBackend()`, `TAURON_COMMANDS`, `EventBus`, `PluginRegistry`, `ConfigManager`, ACL |
 | **@tauron/plugin-sdk** | 插件 SDK | `PluginBridge`（宿主侧）、`createPluginContext()`（插件侧） |
-| **@tauron/dual-world** | 双世界沙箱 | `createBridge()`, `createSandbox()`, QuickJS-WASM 隔离 |
+| **@tauron/dual-world** | 进程内沙箱（**当前为 fail-closed 模拟**） | `createBridge()`, `createSandbox()`（不可用时返回 `code:'SANDBOX_UNAVAILABLE'`，不伪报执行成功）；QuickJS-WASM 引擎接入为路线图项 |
 | **@tauron/adapter-react** | React 适配 | `TauronProvider`, `useInvoke`, `useEvent`, `useCapabilities` |
 | **@tauron/adapter-vue** | Vue 适配 | `useInvoke`, `useEvent`, `useCapabilities`（composables） |
 | **@tauron/adapter-svelte** | Svelte 适配 | `createInvokeStore`, `createEventStore`, stores |
-| **@tauron/market** | 插件市场 | HMAC-SHA256 签名/验签、注册表 search/register/remove（独立基础设施库，供市场服务集成方使用；应用内商城入口未接线） |
+| **@tauron/market** | 插件市场 | **Ed25519** 签名/验签（`verify(data, signature, publicKey)`，非对称）、注册表 search/register/remove（独立基础设施库，供市场服务集成方使用；应用内商城入口未接线） |
 | **@tauron/shell-matrix** | Shell 矩阵 | `createShellManager()`，4 形态：local / local-server / remote-url / sub-webview |
 | **@tauron/cli** | CLI 工具（bin: `tauron`） | `doctor` / `create` / `plugin new\|dev\|test\|pack\|sign\|publish` |
 | **@tauron/contract-tests** | 跨语言契约 | TS↔Rust 命令名、camelCase 线格式、错误码门禁 |
@@ -160,7 +167,8 @@ tauron-*       ← 全部 Rust crate
 > | ✅ **已接线** | `tauron-host` / `tauron-i18n` / `tauron-notify` / `tauron-recovery` | 适配层直接依赖并调用其引擎 |
 > | ✅ **已接线** | `tauron-settings` | 设置走 `SettingsStore`（R7-2 激活孤儿 crate），不是适配层内建裸 KV；`host_settings_*` 的 schema 校验与版本迁移都在它里面 |
 > | ✅ **已接线** | `tauron-proc` | 进程插件用 `CommandSpawner` / `CrashTracker` / `validate_spawn_config`（P0-2 激活孤儿 crate）；崩溃窗口计数**唯一**来源是 `tauron_proc::CrashTracker` |
-> | ⚠️ **未接线** | `tauron-market` / `tauron-brand` | market 仍为 `simulated: true`；`host_brand_info` 返回 `UnsupportedBody`，不伪装成空品牌数据 |
+> | 🟡 **部分接线** | `tauron-market` / `tauron-acl` | 两者**已在** `tauron-adapter/Cargo.toml` 依赖表内，但仅 `plugin-install` feature 下被调（market 用于安装包验签、acl 用于授权判定）；`host_market_*` 命令仍是 `simulated: true` 桩 |
+> | ⚠️ **未接线** | `tauron-brand` | `host_brand_info` 返回 `UnsupportedBody`，不伪装成空品牌数据 |
 > | ⚠️ **未接线** | `tauron-theme` / `tauron-wasm` / `tauron-distribute` | **独立组件库**——自带全绿测试，集成点已定义但尚未接入适配层运行时 |
 >
 > 对话框与 OS 深链接缺 provider 时返回 `UnsupportedBody`；剪贴板保留进程内回退并在结果中标明。未接线的部分不应被描述为可用能力。
@@ -191,7 +199,10 @@ tauron-*       ← 全部 Rust crate
 - `@tauron/ui-primitives` **不得**依赖 `@tauron/host`——哑组件只吃属性、只发
   `oc-*` 事件（事件名取自 `@tauron/shell-events`）。任意桌面宿主可只取原语。
 - `@tauron/host` **不得静态**引入任何 UI 包（保持入口 DOM / `lit` 无关，
-  node 测试环境可用）；`bootstrap` 只以动态 import 可选获取 UI 能力。
+  node 测试环境可用）；该规则由 wire-gate 的「不得静态引入 UI 包」全目录断言钉住。
+  **没有**动态 import 的例外口子——曾经承担这个角色的 `bootstrap.ts` 已随 W1 删除
+  （它 import `@tauron/core` 的**运行时类**，而本包 `sideEffects: false` → 真实构建
+  里那些类根本不存在，一用即崩）。启动编排属于**应用装配层**，不属于 host。
 - `@tauron/ui` 是便利包：转出原语 + 提供需要宿主命令面的 `PluginManagerStore`，
   因此它可以依赖两者（方向 ui → host 单向）。
 

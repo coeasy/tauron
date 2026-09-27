@@ -200,11 +200,48 @@ describe('门禁 §8-17：命令面消费方登记（D13–D16）', () => {
   const authz = read('crates/tauron-host/src/authz.rs');
   const tauriBackend = read('packages/tauron-host/src/tauri-backend.ts');
 
+  /**
+   * 解析 `authz.rs` 的 `CommandAuth { … }` 条目（容忍 rustfmt 折行）。
+   *
+   * 旧写法是 `/command:\s*"([^"]+)"[\s\S]*?tier:\s*"self"/`——**永远匹配不到**：
+   * `tier` 是 `AuthTier::Self_` 而不是字符串 `"self"`。于是集合恒为空、循环空转，
+   * 这条门禁长期是**假绿**（本仓反复出现的「解析到 0 条却不失败」）。
+   */
+  function commandAuths(): Array<{ command: string; tier: string; consumer: string }> {
+    const out: Array<{ command: string; tier: string; consumer: string }> = [];
+    for (const m of authz.matchAll(/CommandAuth\s*\{([\s\S]*?)\n\s*\},/g)) {
+      const body = m[1]!;
+      const command = /command:\s*"([^"]+)"/.exec(body)?.[1];
+      const tier = /tier:\s*AuthTier::(\w+)/.exec(body)?.[1];
+      const consumer = /consumer:\s*"([^"]*)"/.exec(body)?.[1];
+      if (command !== undefined && tier !== undefined && consumer !== undefined) {
+        out.push({ command, tier, consumer });
+      }
+    }
+    return out;
+  }
+
+  it('authz 命令登记解析非空，且三档齐全（防解析失配的假绿）', () => {
+    const all = commandAuths();
+    expect(all.length, 'authz.rs 的 CommandAuth 解析到 0 条（门禁定位失败）').toBeGreaterThan(20);
+    for (const tier of ['Self_', 'ScopedRead', 'Privileged']) {
+      expect(
+        all.filter((c) => c.tier === tier).length,
+        `authz 里 ${tier} 档解析到 0 条（分档断言会空转）`,
+      ).toBeGreaterThan(0);
+    }
+  });
+
+  it('每条登记命令都写明了消费方（consumer 非空）', () => {
+    const empty = commandAuths().filter((c) => c.consumer.trim().length === 0);
+    expect(empty.map((c) => c.command), '以下命令未登记消费方（孤儿命令面）').toEqual([]);
+  });
+
   it('所有 self 档命令在 tauri-backend 中有 invoke 入口', () => {
-    const selfCommands = [...authz.matchAll(/command:\s*"([^"]+)"[\s\S]*?tier:\s*"self"/g)]
-      .map((m) => m[1]!);
-    for (const cmd of selfCommands) {
-      expect(tauriBackend).toContain(cmd);
+    const selfCommands = commandAuths().filter((c) => c.tier === 'Self_');
+    expect(selfCommands.length, 'authz 里 self 档命令解析到 0 条').toBeGreaterThan(0);
+    for (const { command } of selfCommands) {
+      expect(tauriBackend, `self 档命令 ${command} 在 tauri-backend.ts 无入口`).toContain(command);
     }
   });
 
@@ -217,11 +254,16 @@ describe('门禁 §8-17：命令面消费方登记（D13–D16）', () => {
     expect(shell).not.toMatch(/async contributesRegister\(/);
   });
 
-  it('所有 privileged 档命令在 authz 中均已登记', () => {
-    const privCommands = [...authz.matchAll(/command:\s*"([^"]+)"[\s\S]*?tier:\s*"privileged"/g)]
-      .map((m) => m[1]!);
-    for (const cmd of privCommands) {
-      expect(authz).toContain(cmd);
+  it('所有 privileged 档命令都能在 TS 侧被调到（tauri-backend + 客户端方法）', () => {
+    // 旧断言是**同义反复**：从 authz 里取出命令名，再断言 authz 里含这个命令名——
+    // 恒真，等于没检查。现在断言它们真的存在 TS 调用点（否则就是「有登记、无入口」）。
+    const priv = commandAuths().filter((c) => c.tier === 'Privileged');
+    expect(priv.length, 'authz 里 privileged 档命令解析到 0 条').toBeGreaterThan(0);
+    const clients =
+      read('packages/tauron-host/src/shell-client.ts') + read('packages/tauron-host/src/host.ts');
+    for (const { command } of priv) {
+      expect(tauriBackend, `privileged 命令 ${command} 在 tauri-backend.ts 无入口`).toContain(command);
+      expect(clients, `privileged 命令 ${command} 在任何主窗客户端都没有调用点`).toContain(command);
     }
   });
 

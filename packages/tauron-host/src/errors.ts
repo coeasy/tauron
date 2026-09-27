@@ -56,6 +56,18 @@ export const HOST_ERROR_CODES = [
    * 接受新结果；下一步动作是去 `takeCallResult` 取已结算的结果。
    */
   'E_CALL_ALREADY_SETTLED',
+  /**
+   * manifest 声明的贡献与 activate 期实际注册的贡献不一致（0.4-W3）。
+   *
+   * `contributes` 是插件对外承诺的扩展点清单（命令面板 / 菜单 / 面板 / 设置 Tab
+   * 都从它派生 UI）：声明了没注册 = 入口点了没反应；注册了没声明 = 来源不明的入口。
+   * 这是「宣称」与「事实」的落差，必须显式失败。
+   *
+   * **不是** `E_INVALID_MANIFEST`：manifest 本身合法（`Contributes::validate` 已过），
+   * 不一致发生在运行期注册与声明之间——是"没做到"，不是"写错了"。
+   * 确定性故障，不可重试。
+   */
+  'E_CONTRIBUTES_DRIFT',
 ] as const;
 
 export type HostErrorCode = (typeof HOST_ERROR_CODES)[number];

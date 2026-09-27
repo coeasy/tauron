@@ -15,6 +15,21 @@ import type { ToastActionEventDetail } from '@tauron/shell-events';
 
 import { ToastStore, type ToastItem, type ToastSnapshot } from './toast.js';
 
+// ── 注册其余全部自定义元素（1.0-W2 修复 P0-1）─────────────────────────────
+//
+// 本文件头部一直宣称「`import '@tauron/ui/wc'` 一次性注册所有自定义元素」，
+// 但此前**只注册了 `oc-toast`**。后果是真实的：示例 app 只 import 了
+// `@tauron/ui/wc`，于是 `oc-plugin-manager` 等 6 个壳组件**永不 upgrade**，
+// 插件管理 UI 运行时完全惰性（构建产物里 `customElements.define` 只有
+// `"oc-toast"` 一条）。
+//
+// `wc` 入口的语义是「注册全部自定义元素」——以下副作用导入把它兑现。
+// 新增组件时必须同步本清单与 `wc.test.ts` 的 `EXPECTED_TAGS`（门禁会红）。
+import './wc-shell.js';
+import './wc-motion.js';
+import './skeleton.js';
+import './theme-picker.js';
+
 // ──────────────────────────────────────────────────────────────────────────
 // <oc-toast> — 统一通知出口
 // ──────────────────────────────────────────────────────────────────────────

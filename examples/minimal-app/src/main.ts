@@ -1,17 +1,22 @@
 // tauron 应用层贯通示例 —— 宿主主窗入口。
 //
-// 演示五条核心链路（全部走 tauron-adapter 的 45 条 host_* 命令面）：
+// 演示七条核心链路（全部走 tauron-adapter 的 60 条默认 host_* 命令面；
+// 本示例默认特性开 `plugin-install`，故实际注册 62 条）：
 // 1. iframe 沙箱插件：PluginBridge 握手（token 经 URL hash 注入）+ callPluginMethod
 // 2. 窗口控制：ShellClient → Tauri 真实窗口操作
 // 3. 系统能力：DialogClient（剪贴板）+ AutoUpdateClient（检查更新）
 // 4. UI：@tauron/ui 的 <oc-toast> Web Component
-// 5. 启动恢复（§4.14）：上报启动结果（驱动信号）+ 读回阶段决策
+// 5. 壳层组件动作：ShellController 接管标题栏/更新/插件管理/命令面板
+// 6. 启动恢复（§4.14）：上报启动结果（驱动信号）+ 读回阶段决策
+// 7. 跨主体调用（0.4-A1/A2）：callPlugin → 插件 webview 执行泵 → callTakeResult 取件
+//
+// 编号与正文各节标题一一对应（七节 = 七条），改任一侧请同步另一侧。
 
 import { TauriBackend } from '@tauron/host/tauri';
-import { ShellClient, DialogClient, AutoUpdateClient } from '@tauron/host';
+import { ShellClient, DialogClient, AutoUpdateClient, ShellController } from '@tauron/host';
 import type { PendingCallInfo } from '@tauron/host';
 import { PluginBridge, callPluginMethod } from '@tauron/plugin-sdk';
-import '@tauron/ui/wc'; // 注册 <oc-toast> 等自定义元素
+import '@tauron/ui/wc'; // 注册全部自定义元素（oc-toast / oc-plugin-manager / …）
 
 // ── 宿主基础 ──────────────────────────────────────────────────────────────
 
@@ -31,7 +36,6 @@ void shell.refreshCapabilities().catch((err: Error) => {
   console.warn('[tauron] 能力快照拉取失败，能力表按静态全集降级：', err.message);
 });
 const dialog = new DialogClient({ backend });
-const admin = new (await import('@tauron/host')).AdminClient({ backend });
 const updater = new AutoUpdateClient({
   backend,
   config: {
@@ -135,8 +139,10 @@ el<HTMLButtonElement>('btn-update').addEventListener('click', () => {
         info.simulated
           ? `更新检查未实际执行：${info.reason ?? '宿主更新源尚未接入'}`
           : info.available
-            ? `发现新版本 ${info.version ?? '?'}（当前 ${info.currentVersion}）——下载和安装能力需宿主真实接入后使用`
-            : `已是最新版本（${info.currentVersion}）`,
+            // `currentVersion` 是可选字段：`host_market_check` 今天不返回它，
+            // 直接插值会打印 "undefined"。
+            ? `发现新版本 ${info.version ?? '?'}（当前 ${info.currentVersion ?? '未知'}）——下载和安装能力需宿主真实接入后使用`
+            : `已是最新版本（${info.currentVersion ?? '未知'}）`,
       ),
     )
     .catch((err: Error) => log('host-out', err.message));
@@ -148,50 +154,77 @@ el<HTMLButtonElement>('btn-toast').addEventListener('click', () => {
   toast.push?.({ title: 'tauron', message: '来自 @tauron/ui 的通知', level: 'success' });
 });
 
-// ── 本地已签名插件安装、启用、窗口和管理器入口 ─────────────────────────
+// ── 5. 壳层组件动作：本地已签名插件安装、启用、窗口和管理器入口（ShellController 接管）──
+//
+// 为什么在这里实例化控制器：`@tauron/host` 的 `ShellController` 是标题栏 /
+// 更新对话框 / 插件管理器 / 命令面板这几个壳组件的**唯一**宿主侧消费者。
+// 此前它只存在于自己的单测里（生产代码零实例化），后果是：本示例自己又写了
+// 一份更弱的 `document.addEventListener('oc-plugin-*')` 重复接线，而命令面板
+// 的 `oc-command-select` **完全没有出口**——「点了没反应且无处可查」。
+// 现在统一交给控制器：重复接线删除，指挥链只有一条（1.0-W3）。
 const pluginManager = document.querySelector('oc-plugin-manager');
-if (pluginManager) {
-  const refreshPlugins = async (): Promise<void> => {
-    const rows = await shell.registryListAll();
-    (pluginManager as HTMLElement & { plugins: unknown[] }).plugins = rows.map((row) => ({
-      id: row.id, name: row.name, version: row.version,
-      enabled: row.state === 'enabled' || row.state === 'running',
-      type: row.pluginType, description: row.disabledBySafemode ? '安全模式已禁用' : undefined,
-    }));
-  };
-  document.addEventListener('oc-plugin-install', (event) => {
-    const detail = (event as CustomEvent<{ packagePath: string }>).detail;
-    // 0.4-A2：安装命令是 feature-gated 的——能力表说没有就明确拒绝，
-    // 不发一条注定 command not found 的 invoke。
-    if (!shell.supports('host_registry_install')) {
-      setStatus('当前宿主未启用 plugin-install 特性，无法安装插件包', false);
-      return;
-    }
-    if (detail?.packagePath) void admin.registryInstallPreview(detail.packagePath).then(async (preview) => {
-      const approved = preview.permissions.filter((p) => p.defaultChecked || window.confirm(`是否授予 ${preview.pluginName} 的权限 ${p.permission}？`)).map((p) => p.permission);
-      await admin.registryInstall(detail.packagePath, approved);
-      await refreshPlugins();
-    }).catch((error: Error) => setStatus(`安装失败：${error.message}`, false));
-  });
-  document.addEventListener('oc-plugin-toggle', (event) => {
-    const detail = (event as CustomEvent<{ id: string; enabled: boolean }>).detail;
-    void admin.registryAdmin({ op: detail.enabled ? 'enable' : 'disable', id: detail.id }).then(refreshPlugins)
-      .catch((error: Error) => setStatus(`插件状态更新失败：${error.message}`, false));
-  });
-  document.addEventListener('oc-plugin-uninstall', (event) => {
-    const detail = (event as CustomEvent<{ id: string }>).detail;
-    void admin.registryAdmin({ op: 'uninstall', id: detail.id }).then(refreshPlugins)
-      .catch((error: Error) => setStatus(`卸载失败：${error.message}`, false));
-  });
-  void refreshPlugins().catch((error: Error) => setStatus(`插件列表加载失败：${error.message}`, false));
-}
+const commandPalette = document.querySelector('oc-command-palette') as
+  | (HTMLElement & { commands: unknown[]; open: boolean })
+  | null;
 
-// ── 5. 启动恢复（§4.14）─────────────────────────────────────────────────
+/** 重取插件列表喂给 `<oc-plugin-manager>`（哑组件靠属性供数）。 */
+const refreshPlugins = async (): Promise<void> => {
+  if (!pluginManager) return;
+  const rows = await shell.registryListAll();
+  (pluginManager as HTMLElement & { plugins: unknown[] }).plugins = rows.map((row) => ({
+    id: row.id, name: row.name, version: row.version,
+    enabled: row.state === 'enabled' || row.state === 'running',
+    type: row.pluginType, description: row.disabledBySafemode ? '安全模式已禁用' : undefined,
+  }));
+};
+
+/** 重取**插件的贡献命令**喂给 `<oc-command-palette>`（选中后由控制器投递）。 */
+const refreshCommands = async (): Promise<void> => {
+  if (!commandPalette) return;
+  const entries = await shell.contributesList('command');
+  commandPalette.commands = entries.map((entry) => ({
+    id: entry.id,
+    label: entry.label,
+    category: entry.pluginId,
+  }));
+};
+
+const controller = new ShellController({
+  backend,
+  // 标题栏/更新/插件开关都是**用户直接点的**：失败必须有用户可见的出口。
+  onError: (err, context) => setStatus(`${context} 失败：${(err as Error).message}`, false),
+  // 控制器改完注册表后需要重取列表与命令（否则开关拨了、列表还是旧的）。
+  onRegistryChange: () => {
+    void refreshPlugins().catch((error: Error) => setStatus(`插件列表加载失败：${error.message}`, false));
+    void refreshCommands().catch(() => {
+      /* 贡献命令拉取失败不阻断插件管理（多为宿主未实现 contributes_list） */
+    });
+  },
+});
+controller.start();
+
+void refreshPlugins().catch((error: Error) => setStatus(`插件列表加载失败：${error.message}`, false));
+void refreshCommands().catch(() => {
+  /* 同上：无贡献命令时命令面板显示「无匹配命令」 */
+});
+
+el<HTMLButtonElement>('btn-command-palette').addEventListener('click', () => {
+  if (!commandPalette) return;
+  void refreshCommands()
+    .catch(() => {
+      /* 打开动作不应被数据拉取失败挡住 */
+    })
+    .then(() => {
+      commandPalette.open = true;
+    });
+});
+
+// ── 6. 启动恢复（§4.14）─────────────────────────────────────────────────
 
 // 持久化已在 Rust 侧 `state_init()` 自动打开（app_config_dir）。崩溃检测的
 // 「干净退出」判据是**本轮上报过 success**：漏报 = 每次重启被计为一次崩溃，
-// 连续两次进安全模式（方向安全——一次 success 即自愈）。走 `bootstrap()` 的
-// 应用由它代劳；这里演示的是裸用 ShellClient 时应用侧必须做的事。
+// 连续两次进安全模式（方向安全——一次 success 即自愈）。这是**应用侧必须做**的
+// 事（0.4-W1 起 `bootstrap()` 编排器已删除，本示例就是唯一落点）。
 //
 // `recoverReport` 的返回即阶段决策：安全模式时 `disabledPlugins` 给出被禁用
 // 名单，应用可用 `shell.recoverTrialEnable(id)` 逐个试启（试验失败 1 次即回落
@@ -210,7 +243,7 @@ void shell
   })
   .catch((err: Error) => setStatus(`恢复上报失败：${err.message}`, false));
 
-// ── 6. 跨主体调用（0.4-A1 投递 + 0.4-A2 主推 SDK 端到端）────────────────
+// ── 7. 跨主体调用（0.4-A1 投递 + 0.4-A2 主推 SDK 端到端）────────────────
 //
 // 完整链路：本窗 `callPlugin` 受理 → `JsCallDelivery` 把调用帧投进插件队列 →
 // 插件 webview（label `plugin-com.example.formatter`，页面 plugin-window.html，

@@ -699,6 +699,12 @@ pub struct PluginManifest {
     pub events: EventsDecl,
     #[serde(default)]
     pub host_functions: Vec<String>,
+    /// 允许被安装为"更新目标"的最低版本（计划 §4.2 声明的字段）。
+    ///
+    /// **只被解析、从未被读取（诚实标注）**：宿主安装路径对已存在的插件 id 一律
+    /// `E_PLUGIN_EXISTS` 拒绝，不存在"覆盖安装 / 升级 / 降级"流程，所以这条下限
+    /// 没有判定点。它对应的判定谓词 `tauron_market::is_downgrade` 同样是未接线状态
+    /// （见那里的注释）。写进 manifest 不会报错，但**也不会产生任何效果**。
     #[serde(default)]
     pub min_allowed_version: Option<semver::Version>,
     #[serde(default)]

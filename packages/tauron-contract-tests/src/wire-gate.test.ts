@@ -23,6 +23,7 @@ import {
   HOST_ERROR_CODES,
   LIFECYCLE_EVENTS,
   LIFECYCLE_STATES,
+  PLUGIN_REPORTABLE_EVENTS,
   RETRYABLE_HOST_ERROR_CODES,
 } from '@tauron/host';
 import { PluginErrorCode, RETRYABLE_ERROR_CODES } from '@tauron/types';
@@ -31,6 +32,21 @@ const here = dirname(fileURLToPath(import.meta.url));
 // packages/tauron-contract-tests/src → packages/tauron-contract-tests → packages → root
 const workspaceRoot = resolve(here, '..', '..', '..');
 const read = (rel: string): string => readFileSync(resolve(workspaceRoot, rel), 'utf8');
+
+/**
+ * `@tauron/host` 的 `src/` 文件名清单（含测试）。
+ *
+ * 用于「整包不得再 import X」这类**全目录**断言：只查几个已知文件会让
+ * 新增文件绕过门禁。解析到 0 条即失败（防正则/路径失配的假绿）。
+ */
+function hostSrcFiles(): string[] {
+  const dir = join(workspaceRoot, 'packages', 'tauron-host', 'src');
+  const files = readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isFile() && e.name.endsWith('.ts'))
+    .map((e) => e.name);
+  expect(files.length, '@tauron/host/src 解析到 0 个 .ts 文件（门禁定位失败）').toBeGreaterThan(0);
+  return files;
+}
 
 const SHELL = 'crates/tauron-shell/src';
 
@@ -463,7 +479,10 @@ describe('门禁：应用层 host_* 命令族 TS ↔ Rust 一致', () => {
     walk('packages');
     expect(files.length, '未扫到任何 TS 源文件（路径失配）').toBeGreaterThan(50);
 
-    const blob = files.map((f) => read(f)).join('\n');
+    // **必须剥注释**再匹配：否则一句「TODO: 接 host_xxx」的注释就能让一条
+    // 从没被调用过的命令通过门禁（假绿）。`stripComments` 保留字符串字面量，
+    // 因此 `invoke('host_xxx')` 这类真实调用点仍然算数。
+    const blob = files.map((f) => stripComments(read(f))).join('\n');
     const orphaned = rust.filter((cmd) => !blob.includes(`'${cmd}'`));
     expect(
       orphaned,
@@ -891,8 +910,80 @@ describe('门禁：生命周期状态机镜像 TS ↔ Rust', () => {
 
   it('TS 侧不再把状态名当事件上报（断链回归）', () => {
     const hostTs = read('packages/tauron-host/src/host.ts');
-    expect(hostTs).toMatch(/lifecycleReport\(evt: \{ event: LifecycleEvent/);
+    // 事件类型必须是**收窄后的** `PluginReportableEvent`，不是完整枚举：
+    // `host_lifecycle_report` 是 self 档，越权事件 Rust 会以 E_AUTH_DENIED 硬拒。
+    expect(hostTs).toMatch(/lifecycleReport\(evt: \{ event: PluginReportableEvent/);
+    expect(hostTs).not.toMatch(/lifecycleReport\(evt: \{ event: LifecycleEvent/);
     expect(hostTs).not.toMatch(/lifecycleReport\(evt: \{ state:/);
+  });
+
+  // ── self 档事件白名单（P0：插件不得自报越权事件）──────────────────
+  // `host_lifecycle_report` 由插件自己调用。若白名单缺失或过宽，插件就能
+  // 自报 ENABLE（跳过用户放行）/ SAFEMODE_EXIT（自己解禁）/ UNINSTALL
+  // （进终态，槽位再也收不回）。Rust `Event::PLUGIN_REPORTABLE` 是单一真相源。
+
+  /** 解析 Rust `Event::PLUGIN_REPORTABLE` 数组的事件名（容忍 rustfmt 折行）。 */
+  const rustPluginReportable = (): string[] => {
+    const src = read(LIFECYCLE_RS);
+    const m = /pub const PLUGIN_REPORTABLE:\s*\[Event;\s*\d+\]\s*=\s*\[([\s\S]*?)\];/.exec(src);
+    expect(m, 'Rust 未定义 Event::PLUGIN_REPORTABLE').not.toBeNull();
+    const names = [...m![1]!.matchAll(/Event::(\w+)/g)].map((v) => SCREAMING(v[1]!));
+    // 解析到 0 条 = 正则失配的**假绿**，必须硬失败。
+    expect(names.length, 'PLUGIN_REPORTABLE 解析到 0 条（门禁定位失败）').toBeGreaterThan(0);
+    return names;
+  };
+
+  it('插件可自报事件白名单 TS ↔ Rust 逐名一致', () => {
+    const rust = rustPluginReportable();
+    expect([...PLUGIN_REPORTABLE_EVENTS].sort()).toEqual([...rust].sort());
+  });
+
+  it('白名单是完整事件枚举的严格子集，且排除全部越权事件', () => {
+    const rust = rustPluginReportable();
+    // 严格子集：等于全量就等于没设闸。
+    expect(rust.length, '白名单不得等于完整事件枚举').toBeLessThan(LIFECYCLE_EVENTS.length);
+    for (const e of rust) {
+      expect(LIFECYCLE_EVENTS as readonly string[]).toContain(e);
+    }
+
+    // 越权事件逐一钉死（含「Disabled→Enabled 出边」的全部三条：ENABLE /
+    // TRIAL_ENABLE / SAFEMODE_EXIT——它们一旦可自报，插件就能自行解禁）。
+    const forbidden = [
+      'ENABLE',
+      'DISABLE',
+      'TRIAL_ENABLE',
+      'SAFEMODE_ENTER',
+      'SAFEMODE_EXIT',
+      'INSTALL_START',
+      'INSTALL_OK',
+      'INSTALL_FAIL',
+      'UNINSTALL',
+      'PURGE',
+    ];
+    const leaked = forbidden.filter((e) => rust.includes(e));
+    expect(leaked, `以下越权事件混进了插件可自报白名单：${leaked.join(', ')}`).toEqual([]);
+
+    // 交叉校验：TRANSITIONS 里 `Disabled → Enabled` 的出边事件必须全部不可自报。
+    const reenable = new Set(
+      [...transitions().matchAll(
+        /rule!\(\s*State::Disabled,\s*Event::(\w+),\s*(?:Guard::\w+,\s*)?State::Enabled/g,
+      )].map((m) => SCREAMING(m[1]!)),
+    );
+    expect(reenable.size, '未解析到 Disabled→Enabled 出边（门禁定位失败）').toBeGreaterThan(0);
+    const selfUnlock = [...reenable].filter((e) => rust.includes(e));
+    expect(selfUnlock, `插件可自行解禁（Disabled→Enabled 出边事件在白名单里）：${selfUnlock.join(', ')}`)
+      .toEqual([]);
+  });
+
+  it('白名单强制点必须落在 self 档入口（registry.lifecycle_report）', () => {
+    const reg = read('crates/tauron-host/src/registry.rs');
+    expect(reg, 'lifecycle_report 未调用 plugin_reportable() 做闸').toMatch(
+      /fn lifecycle_report\([\s\S]{0,1200}?plugin_reportable\(\)/,
+    );
+    // 宿主内部路径 `report_event` 不得被这道闸拦住（否则恢复引擎/管理面会被自锁）。
+    const reportEvent = /pub fn report_event\([\s\S]*?\n    \}/.exec(reg);
+    expect(reportEvent, '未找到 report_event').not.toBeNull();
+    expect(reportEvent![0]).not.toMatch(/plugin_reportable/);
   });
 
   // ── 转移表健全性 / 活性（词表一致 ≠ 表可用）────────────────────
@@ -983,15 +1074,16 @@ function rustAuthTable(): Map<string, string> {
 }
 
 describe('门禁：能力表（命令 → 档位）TS ↔ Rust 同构', () => {
-  it('命令集合一致（插件面 17 条 + 主窗特权 6 条）', () => {
+  it('命令集合一致（插件面 18 条 + 主窗特权 6 条）', () => {
     const rust = rustAuthTable();
     const ts = new Map(CAPABILITIES.map((c) => [c.command, c.tier]));
     // 不写死总数（会随命令面增长而漂移）：只钉住两表**逐条相等**与结构比例。
     expect(ts.size, 'TS CAPABILITIES 条目数').toBe(rust.size);
     expect([...ts.keys()].sort(), '命令集合').toEqual([...rust.keys()].sort());
     const pluginFace = CAPABILITIES.filter((c) => c.tier !== 'privileged');
-    // 17 = 13（0.4-A1 之前）+ 跨主体调用 3 条 + 0.4 审计补登记 host_contributes_list。
-    expect(pluginFace.length, '插件面（self + scoped-read）命令数').toBe(17);
+    // 18 = 13（0.4-A1 之前）+ 跨主体调用 3 条 + 0.4 审计补登记 host_contributes_list
+    // + 0.4-W3 扩展点对账 host_contributes_reconcile。
+    expect(pluginFace.length, '插件面（self + scoped-read）命令数').toBe(18);
     expect(CAPABILITIES.filter((c) => c.consumer === 'plugin').map((c) => c.command).sort()).toEqual(
       pluginFace.map((c) => c.command).sort(),
     );
@@ -1295,10 +1387,12 @@ describe('门禁：应用层命令注册完整性（未注册 = 前端 command n
 
   // 0.4-A2：Rust 侧 feature-gated 的命令，TS 侧不得混进静态能力表。
   //
-  // 断链原型：`host_registry_install*` 挂 `#[cfg(feature = "plugin-install")]` 而
-  // `Cargo.toml` 的 `default = []`，默认构建不注册；此前它们被无条件列进
+  // 断链原型：`host_registry_install*` 挂 `#[cfg(feature = "plugin-install")]`，
+  // 编译期可关（`default-features = false`）；此前它们被无条件列进
   // `FRAMEWORK_COMMANDS`，于是 `capabilities()` 对它们误报已注册——调用方按能力表
   // 判断"能不能装插件"拿到 `true`，直到 invoke 才 `command not found`。
+  // （注：`plugin-install` 现已进默认特性，默认装配会注册；但"静态全集不得硬编码"
+  //  这条纪律与 feature 的默认值无关——关掉 feature 的装配仍会误报。）
   // 本门禁把「哪些命令是可选的」这份真相钉在两侧之间：集合必须对得上，
   // 且可选命令**不得**出现在静态全集里（只能由 host_capabilities 运行期开门）。
   it('TS 可选命令集与 Rust feature-gated 命令集一致（默认构建不得误报已注册）', () => {
@@ -1408,21 +1502,73 @@ describe('门禁：启动恢复阶段线值（Rust BootPhase::as_str ↔ TS Reco
     }
   });
 
-  it('bootstrap 必须上报启动结果（持久化打开后漏报 = 每次重启计一次崩溃）', () => {
-    // 断链回归：持久化一旦在宿主入口打开，崩溃检测的干净退出判据就变成
-    // 「本轮上报过 success」。前端没有任何一处上报 = 两次重启进安全模式。
-    const src = read('packages/tauron-host/src/bootstrap.ts');
-    expect(src).toMatch(/recoverReport\('success'\)/);
-    // best-effort 必须显式吞错：上报失败不得反过来弄垮启动。
-    expect(src).toMatch(/recoverReport\('success'\)\.catch\(/);
+  it('0.4-W1：host 不得依赖 @tauron/core，且死编排器 bootstrap() 保持删除', () => {
+    // 断链回归（P1-1「活线依赖死线」）：`@tauron/host` 的 `bootstrap.ts` 曾在
+    // **真实运行时** import `@tauron/core` 的 PluginRegistry / ConfigManager /
+    // EventBus 三个运行时类；而本包声明 `sideEffects: false`，真实构建里这三个类
+    // 根本不存在——一旦被用就会崩。处置按 W9-3 取**删除**（它全仓零生产消费者）。
+    const pkg = read('packages/tauron-host/package.json');
+    expect(pkg, '@tauron/host 不得依赖 @tauron/core（P1-1 回归）').not.toMatch(
+      /"@tauron\/core"/,
+    );
+    // 全包源码（含测试）都不得再 import core 运行时类。
+    const offenders: string[] = [];
+    for (const file of hostSrcFiles()) {
+      if (/from '@tauron\/core'/.test(read(`packages/tauron-host/src/${file}`))) {
+        offenders.push(file);
+      }
+    }
+    expect(offenders, '@tauron/host 源码仍 import @tauron/core（活线依赖死线）').toEqual([]);
+    // 死编排器不得悄悄回来：入口不导出 bootstrap，源文件也不存在。
+    expect(read('packages/tauron-host/src/index.ts')).not.toMatch(/\bbootstrap\b\s*,/);
+    expect(hostSrcFiles(), 'bootstrap.ts 是已删除的死导出，不得回归').not.toContain(
+      'bootstrap.ts',
+    );
+    // 启动上报的真实落点（示例）由下一条门禁钉住；这里只确认它仍在。
+    expect(read('examples/minimal-app/src/main.ts')).toMatch(/recoverReport\('success'\)/);
+
+    // P1-5：不得再出现**硬编码的**插件数上限字面量。历史上的第二事实源是
+    // `bootstrap.ts` 的 `new PluginRegistry({ maxPlugins: 32 })`——与 Rust
+    // `registry.rs` 的 `max_plugins: 8` 互相矛盾（32 ≥ 8 纯属巧合）。
+    // 上限的唯一定义在 Rust `RegistryConfig::default()`；TS 只通过
+    // `host_capabilities` 读回真实值。
+    const hardcoded: string[] = [];
+    for (const file of hostSrcFiles()) {
+      // 去注释后再查：说明文字里提到 `maxPlugins: 32` 是**记录历史缺陷**，
+      // 不是硬编码。代码里的字面量才是第二事实源。
+      if (/maxPlugins:\s*\d/.test(stripComments(read(`packages/tauron-host/src/${file}`)))) {
+        hardcoded.push(file);
+      }
+    }
+    expect(hardcoded, 'TS 出现硬编码 maxPlugins 字面量（第二事实源回归，P1-5）').toEqual([]);
   });
 
   it('参考集成示例必须上报启动结果（它是接入方的唯一样板）', () => {
-    // 示例不走 bootstrap()（裸用 ShellClient），漏报不会被上面的门禁抓到——
-    // 而抄这个示例的接入方会把「两次重启进安全模式」当成框架行为。
+    // 启动上报的唯一落点是示例（`bootstrap()` 已按 0.4-W1 删除）——漏报会让
+    // 抄这个示例的接入方把「两次重启进安全模式」当成框架行为。
     const src = read('examples/minimal-app/src/main.ts');
     expect(src, '示例必须上报 host_recover_report').toMatch(/recoverReport\('success'\)/);
     expect(src, '示例必须消费阶段决策而非只发后不管').toMatch(/r\.phase/);
+  });
+
+  it('参考集成示例必须实例化 ShellController（壳组件动作的唯一宿主侧消费者）', () => {
+    // 断链回归：`ShellController` 曾在生产代码里**零实例化**——只存在于自己的
+    // 单测中。后果是 1.0-W3 宣称的「命令面板选中 → 跨主体投递」在唯一可运行的
+    // app 里没有入口，而示例自己又写了一份更弱的 `document.addEventListener`
+    // 重复接线。本门禁把「控制器必须被示例真实使用」钉死。
+    const src = stripComments(read('examples/minimal-app/src/main.ts'));
+    expect(src, '示例必须 new ShellController').toMatch(/new ShellController\(/);
+    expect(src, '示例必须 start() 控制器（否则监听不生效）').toMatch(/controller\.start\(\)/);
+    // 重复接线不得回归：壳组件事件只能由控制器消费。
+    expect(
+      src,
+      '示例不得自行 addEventListener 壳层事件（会与 ShellController 形成第二指挥链）',
+    ).not.toMatch(/addEventListener\(\s*'oc-(plugin|command)-/);
+    // 命令面板的真实落点：示例必须渲染该组件并喂数。
+    expect(read('examples/minimal-app/index.html'), '示例必须渲染 <oc-command-palette>').toMatch(
+      /<oc-command-palette>/,
+    );
+    expect(src, '示例必须用 contributesList 喂命令面板').toMatch(/contributesList\('command'\)/);
   });
 });
 
@@ -1440,6 +1586,34 @@ describe('门禁：断链回归（贡献身份绑定 / 事件取件泵 / 声明�
     expect(host).toMatch(/async contributesRegister\(/);
     const shell = read('packages/tauron-host/src/shell-client.ts');
     expect(shell).not.toMatch(/async contributesRegister\(/);
+  });
+
+  it('0.4-W3：贡献对账闭环（声明 vs 注册必须可检出，且 SDK 真的消费它）', () => {
+    // 断链回归（P0-6）：`contributes` 是插件对外承诺的扩展点清单，但过去
+    // **没有任何东西比对声明与事实**——声明了却漏注册（入口点了没反应）与
+    // 注册了却没声明（来源不明的入口）都无人发现。这条门禁钉住四件事：
+    const tauri = read('crates/tauron-adapter/src/tauri.rs');
+    const lib = read('crates/tauron-adapter/src/lib.rs');
+
+    // ① 命令真的注册进 handler 宏（否则线上不可达）。
+    expect(tauri, 'host_contributes_reconcile 未进注册宏').toMatch(
+      /tauri::host_contributes_reconcile/,
+    );
+    // ② 身份只从 label 解析（对账的是"我自己"，不接受入参 pluginId）。
+    expect(tauri).toMatch(/fn host_contributes_reconcile[\s\S]{0,600}resolve_self_identity/);
+    // ③ 分叉必须报**专用**错误码，且该码两侧词表都有（追加在末尾）。
+    expect(lib, '未定义 E_CONTRIBUTES_DRIFT').toMatch(/ErrorCode::E_CONTRIBUTES_DRIFT/);
+    expect(lib, '对账必须比对声明与注册两侧').toMatch(
+      /fn cmd_contributes_reconcile[\s\S]{0,2000}difference/,
+    );
+    const rustErr = read('crates/tauron-host/src/error.rs');
+    const tsErr = read('packages/tauron-host/src/errors.ts');
+    expect(rustErr, 'Rust 错误码枚举缺 E_CONTRIBUTES_DRIFT').toContain('E_CONTRIBUTES_DRIFT');
+    expect(tsErr, 'TS 错误码词表缺 E_CONTRIBUTES_DRIFT').toContain('E_CONTRIBUTES_DRIFT');
+    // ④ 必须有**真实消费方**：SDK 激活期对账（否则又是一个"有命令没入口"）。
+    const create = read('packages/tauron-app-plugin-sdk/src/createPlugin.ts');
+    expect(create, 'SDK 必须在对账命令上留痕（消费它）').toMatch(/contributesReconcile\(/);
+    expect(create, '对账失败必须留痕而不是静默').toMatch(/对账发现分叉/);
   });
 
   it('PluginContext 必须内置取件泵（只订阅不取件 = 投递断链）', () => {
@@ -1639,22 +1813,43 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     );
   });
 
-  it('wc-shell 派发的每个契约事件必须在 ShellController 有归属（接线或声明接入方域）', () => {
+  it('wc-shell 派发的每个契约事件必须在 ShellController 有归属（真实监听或显式登记未接线）', () => {
     // 断链回归：更新对话框的「开始更新/立即重启」与插件管理器的启用开关曾零监听。
-    // 本门禁要求每个派发要么被控制器接线，要么在控制器头注的「接入方域」清单写明。
+    //
+    // 判据与 `packages/tauron-host/src/unwired-events.test.ts` **同源**，而不是
+    // 「名字在 shell-controller.ts 的文本里出现过」——后者连注释里的名字都算数，
+    // 于是 `oc-command-select` 曾靠一句「属接入方域」的注释蒙混过关（命令面板
+    // 点了没反应，且没有任何出口可查）。现在只认两种归属：
+    //   1) 真实接线：`_listen(elements, SHELL_EVENTS.<key>, …)`
+    //   2) 在 `unwired-events.ts` 的 `UNWIRED_EVENTS` 里显式登记（附原因）
     const contract = shellEventContract();
     expect(contract.size, 'ShellController 契约事件解析失败').toBeGreaterThan(8);
 
     const dispatched = dispatchedKeys('packages/tauron-ui-primitives/src/wc-shell.ts');
     expect(dispatched.length, 'wc-shell 契约派发提取失败').toBeGreaterThan(4);
 
-    const controller = read('packages/tauron-host/src/shell-controller.ts');
+    // 去掉注释再找接线：注释不算接线。
+    const controller = stripComments(read('packages/tauron-host/src/shell-controller.ts'));
+    const listenedKeysIn = new Set(
+      [...controller.matchAll(/_listen\(elements, SHELL_EVENTS\.([a-zA-Z]+)/g)].map((m) => m[1]!),
+    );
+    expect(listenedKeysIn.size, 'ShellController 接线解析失败').toBeGreaterThan(3);
+
+    const unwiredKeys = new Set(
+      [
+        ...read('packages/tauron-host/src/unwired-events.ts').matchAll(
+          /name:\s*SHELL_EVENTS\.([a-zA-Z]+)/g,
+        ),
+      ].map((m) => m[1]!),
+    );
+    expect(unwiredKeys.size, 'UNWIRED_EVENTS 解析失败').toBeGreaterThan(0);
+
     for (const key of dispatched) {
       const name = contract.get(key);
       expect(name, `契约里没有 ${key} 这个 key`).toBeDefined();
       expect(
-        controller.includes(`SHELL_EVENTS.${key}`) || controller.includes(name!),
-        `事件 ${name} 在 ShellController 无归属（既没接线也没声明接入方域）`,
+        listenedKeysIn.has(key) || unwiredKeys.has(key),
+        `事件 ${name} 在 ShellController 无归属（既没真实接线也没在 UNWIRED_EVENTS 登记）`,
       ).toBe(true);
     }
   });
@@ -1683,15 +1878,39 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     }
   });
 
+  it('更新对话框的「稍后」不得复用 oc-close（点一下会把主窗口关掉）', () => {
+    // 回归锁：`OcUpdaterDialog` 的「稍后」曾派发 `SHELL_EVENTS.close`，而
+    // ShellController 把 `oc-close` 无条件路由到 `windowClose()`——用户点
+    // 「稍后」把主窗口关掉了。「稍后」语义是**收起对话框**，走 oc-updater-dismiss。
+    const shell = stripComments(read('packages/tauron-ui-primitives/src/wc-shell.ts'));
+    // 组件里 `SHELL_EVENTS.close` 只允许出现在标题栏 ✕ 那一处。
+    const closeUses = [...shell.matchAll(/SHELL_EVENTS\.close/g)].length;
+    expect(closeUses, `wc-shell 里有 ${closeUses} 处 SHELL_EVENTS.close，应只有标题栏 ✕ 一处`).toBe(1);
+    expect(shell, '「稍后」按钮的点击处理必须是 _dismiss').toMatch(
+      /_dismiss\(\)\}\s*>\s*稍后\s*<\/button>/,
+    );
+    expect(shell, '必须存在 _dismiss 实现').toMatch(/private _dismiss\(\): void \{/);
+    expect(shell, '_dismiss 必须派发 oc-updater-dismiss').toMatch(
+      /_dismiss\(\): void \{[\s\S]{0,300}SHELL_EVENTS\.updaterDismiss/,
+    );
+    // 契约里必须真有这条事件，且控制器**不**监听它（收起是组件自身行为）。
+    const contract = shellEventContract();
+    expect(contract.get('updaterDismiss')).toBe('oc-updater-dismiss');
+    expect(
+      read('packages/tauron-host/src/shell-controller.ts'),
+      '控制器不得监听 oc-updater-dismiss（收起对话框不是宿主命令）',
+    ).not.toMatch(/_listen\(elements, SHELL_EVENTS\.updaterDismiss/);
+  });
+
   it('@tauron/host 不得静态引入 UI 包（保持宿主入口 DOM/lit 无关）', () => {
     // host 是轻量客户端层（`sideEffects: false`，node 测试环境可用）。
     // 静态 import/re-export UI 包会把 lit 与全部 DOM 组件拖进每个消费者。
-    const idx = read('packages/tauron-host/src/index.ts');
-    expect(idx).not.toMatch(/^export .*from '@tauron\/ui(-primitives)?'/m);
-    expect(idx).not.toMatch(/^import .*from '@tauron\/ui(-primitives)?'/m);
-    // bootstrap 只允许动态 import（非字面量变量，TS 不静态解析）。
-    const boot = read('packages/tauron-host/src/bootstrap.ts');
-    expect(boot).toMatch(/await import\(moduleName\)/);
+    // 全目录断言（不只查 index.ts）：新增文件里的静态 import 同样违规。
+    const offenders = hostSrcFiles().filter((file) => {
+      const src = read(`packages/tauron-host/src/${file}`);
+      return /^\s*(?:import|export)[^\n]*from '@tauron\/ui(-primitives)?'/m.test(src);
+    });
+    expect(offenders, '@tauron/host 静态引入 UI 包（会把 lit/DOM 拖进每个消费者）').toEqual([]);
   });
 
   it('@tauron/host 不得导出无生产调用点的 PluginJsRuntime', () => {
@@ -1859,9 +2078,10 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       ).toBe(false);
     }
     // 差值必须**恰好**等于插件域命令数：少减=白拿，多减=底座宿主漏功能。
-    // 22 = 19（0.4-A1 之前）+ host_call_plugin / host_call_result / host_call_take。
+    // 23 = 19（0.4-A1 之前）+ host_call_plugin / host_call_result / host_call_take
+    //      + host_contributes_reconcile（0.4-W3）。
     const pluginOnly = full.filter((c) => PLUGIN_DOMAIN.test(c));
-    expect(pluginOnly.length, '插件域命令数量异常').toBe(22);
+    expect(pluginOnly.length, '插件域命令数量异常').toBe(23);
     expect(full.length - substrate.length).toBe(pluginOnly.length);
 
     // ③ 两组集合都必须经 origin 门（收窄命令面不得绕过 R4-D2）。
@@ -2702,6 +2922,27 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(lib, '同源测试必须遍历 authz 的特权表').toMatch(/ADMIN_COMMANDS/);
   });
 
+  it('P1-10：授权档位表自检必须是生产调用（不得只在测试里调用）', () => {
+    // 断链回归：`validate_command_registry` 曾经**有实现、有单测、生产零调用**——
+    // 档位表写错（空字段 / 重复命令）要等到有人写测试才暴露。现在底座构造会跑它。
+    const lib = read('crates/tauron-adapter/src/lib.rs');
+    // ① 生产代码里必须真的调用（`tauron_host::authz::validate_command_registry()`）。
+    expect(
+      lib,
+      'tauron-adapter 未在装配期调用 validate_command_registry（P1-10 回归）',
+    ).toMatch(/tauron_host::authz::validate_command_registry\(\)/);
+    // ② 调用点必须在**非测试**区域（`#[cfg(test)]` 之前），否则等于没接生产。
+    const testModule = lib.indexOf('#[cfg(test)]\nmod substrate_only_tests');
+    expect(testModule, '找不到 substrate_only_tests 模块（门禁定位失败）').toBeGreaterThan(-1);
+    const production = lib.slice(0, testModule);
+    expect(
+      production,
+      'validate_command_registry 只在测试区域出现，生产装配没接（P1-10 未解）',
+    ).toMatch(/tauron_host::authz::validate_command_registry\(\)/);
+    // ③ 自检结果必须可读（OnceLock 缓存 + 可断言），不是「调了就丢」。
+    expect(production, '自检结果必须被缓存并可断言').toMatch(/fn authz_table_selfcheck\(\)/);
+  });
+
   it('无孤儿命令：每条 #[tauri::command] 都必须真的被某个 handler 宏注册', () => {
     // 轮 11 审计抓到的断链类：`cmd_settings_adopt_legacy` / `cmd_settings_migrate`
     // 曾经**有实现、有包装器、有单测，但没进任何宏**——真实宿主里这两条命令根本不存在，
@@ -2729,7 +2970,8 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // 结构比例：底座 ⊆ 全量，且差集 = 插件运行时域命令（绑 PluginRuntimeState 的那些）。
     // 16 → 17（M8）；可选 plugin-install feature 另外增加 install + preview 两条主窗命令。
     // 17 → 20（0.4-A1：跨主体调用三命令 host_call_plugin/result/take 入插件域）。
-    const PLUGIN_RUNTIME_DOMAIN_SIZE = 20;
+    // 20 → 21（0.4-W3：host_contributes_reconcile 入插件域）。
+    const PLUGIN_RUNTIME_DOMAIN_SIZE = 21;
     const notInSub = [...inPlug].filter((c) => !inSub.has(c));
     expect(
       [...inSub].filter((c) => !inPlug.has(c)),
@@ -2883,6 +3125,16 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
 
     const stripComments = (s: string): string =>
       s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    /**
+     * 取出某个 `export class` 类体里引用的全部 `host_*` 命令字面量。
+     *
+     * **刻意不用「调用形状」正则**（`(?:invoke|call)<…>\('host_x'`）：实测它会
+     * **静默漏解析**。`AdminClient.registryInstallPreview` 的写法是
+     * `this.call<{ permissions: Array<{ … }> }>('host_registry_install_preview', …)`，
+     * 泛型实参跨行且**内含 `>`**，`<[^>]*>` 匹配不到 `(`，整条命令被丢掉——反向
+     * 覆盖检查因此误报「没有任何客户端入口」。改成类体内 `'host_*'` 字面量抽取，
+     * 没有这个盲区，口径也与同文件的 `tsShellCommands()` 一致。
+     */
     const commandsOfClass = (src: string, cls: string): string[] => {
       const starts: Array<[string, number]> = [];
       const re = /^export class (\w+)/gm;
@@ -2893,12 +3145,14 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       const end = idx + 1 < starts.length ? starts[idx + 1]![1] : src.length;
       const body = stripComments(src.slice(starts[idx]![1], end));
       return [
-        ...new Set([...body.matchAll(/(?:invoke|call)(?:<[^>]*>)?\(\s*'([a-z_]+)'/g)].map((x) => x[1]!)),
+        ...new Set([...body.matchAll(/'([a-z0-9_]*host_[a-z0-9_]+)'/g)].map((x) => x[1]!)),
       ];
     };
 
     const hostTs = read('packages/tauron-host/src/host.ts');
     const shellTs = read('packages/tauron-host/src/shell-client.ts');
+    // 前两条是**身份绑定**客户端：`HostClient` 只服务插件自身，`AdminClient` 只服务
+    // 主窗管理面。对它们可以整体卡档位（整类命令只允许某一档）。
     const clients: Array<[string, string, string[]]> = [
       // 插件侧：只能 self / scoped-read（越权面就是从这里漏出去的）。
       ['host.ts', 'HostClient', ['self', 'scoped-read']],
@@ -2925,6 +3179,47 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
         ).toBe(true);
       }
     }
+
+    // ── 主窗壳客户端（ShellClient）────────────────────────────────────────
+    //
+    // 此前这一段是**假绿**：`shellTs` 被读进来却从未使用
+    // （`file === 'host.ts' ? hostTs : shellTs` 恒取 `hostTs`，因为 `clients` 里
+    // 只有 `host.ts` 两条目），于是"哪个客户端能摸到哪些命令"对**权限最大的**
+    // 那个客户端是一句空话——它的注释却正好写着这条门禁是为了防越权入口。
+    //
+    // 它不能像前两条那样整体卡档位：档位把「谁能**发起**」与「谁的**身份**被操作」
+    // 混在一个字段里（`host_call_plugin` 是 self 档，但主窗**可以**作为发起方调用
+    // 它）。所以改成**显式允许集**：ShellClient 能触达的插件档命令必须恰好是三条。
+    // 主窗的越权方向是"去走插件自身身份面"——主窗没有 `plugin-<id>` 身份，
+    // 调 `host_lifecycle_report` / `host_events_*` / `host_stream_*` /
+    // `host_plugin_call` 要么恒失败，要么等于伪造一个不存在的插件身份。
+    const shellCmds = commandsOfClass(shellTs, 'ShellClient');
+    expect(shellCmds.length, 'ShellClient 命令解析为空——授权面门禁对它已失效').toBeGreaterThanOrEqual(8);
+    for (const cmd of shellCmds) reached.add(cmd);
+
+    const SHELL_PLUGIN_FACE_ALLOW = [
+      'host_call_plugin', // 主窗作为发起方的跨主体调用
+      'host_call_take', // 取回上述调用的结算结果
+      'host_contributes_list', // 渲染菜单 / 面板需要读贡献表
+    ];
+    const shellPluginFace = shellCmds.filter((c) => {
+      const t = tierOf.get(c);
+      return t === 'self' || t === 'scoped-read';
+    });
+    expect(
+      [...shellPluginFace].sort(),
+      'ShellClient 触达了插件档命令：主窗不得操作插件自身身份面（要放开请在此显式登记并写明理由）',
+    ).toEqual([...SHELL_PLUGIN_FACE_ALLOW].sort());
+
+    // 反向覆盖：表里每条命令都必须**至少被一个客户端触达**。没有这一条时，
+    // 档位表可以养着一条谁都调不到的命令（表里有、代码里没有入口），
+    // 而正向检查照样全绿。`reached` 此前只被填充、从未被断言——一并修掉。
+    const unreachable = [...tierOf.keys()].filter((c) => !reached.has(c)).sort();
+    expect(
+      unreachable,
+      `能力表登记了没有任何客户端入口的命令: ${unreachable.join(', ')}`,
+    ).toEqual([]);
+
     // 反向：表里的命令必须真在 Rust 宏里注册过（避免表里养着已删除的命令）。
     const rustMacros = new Set(rustHostCommands());
     const ghost = [...tierOf.keys()].filter((c) => !rustMacros.has(c));

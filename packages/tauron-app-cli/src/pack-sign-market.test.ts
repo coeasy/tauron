@@ -10,7 +10,7 @@
 //   ③ 辨别力——改一位输入（一个 hex 字符），签名必须变。
 // ──────────────────────────────────────────────────────────────────────────
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { sign as marketSign, verify as marketVerify } from '@tauron/market';
 import {
   pluginSign,
@@ -39,31 +39,56 @@ const RFC8032_EMPTY_SIGNATURE =
   'e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155' +
   '5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b';
 
-// ── 向量 2：固定文件清单（payload = 哈希按序拼接）─────────────────────────
+// ── 向量 2：固定文件清单（payload = v2 规范化文本）────────────────────────
 //
-//   payload    = 'aa'×32 + 'bb'×32 （128 个 ASCII 字符）
+//   1.0-W6：载荷从「哈希拼接」改为**规范化文本 v2**（元数据 + path/size/hash），
+//   与 Rust `tauron_market::package_signature::signing_payload` 逐字节一致。
+//   因此 `issuedAt` 现在**进签名**，测试必须冻结时间（见下方 fake timers）。
+//
+//   payload    = 'tauron-tpkg-sig-v2\nalgorithm=ed25519\nkid=kid-rfc8032\n'
+//              + 'issuedAt=2026-09-26T00:00:00.000Z\n'
+//              + 'manifest.json\t128\t<aa×32>\ndist/index.js\t2048\t<bb×32>\n'
 //   私钥        = 同 RFC 8032 向量 1（seed 9d61b1…7f60）
-//   期望签名    = 3d74e24e341612ca59d1190f2caefed1471384e542ef0e843cbe537102e6e865
-//                 b295bdb98f3ff21d8ae8aff12bcc730f49c0920f4fc8979e64868545a01aff0b
+//   期望签名    = 9e977069d87a4c0e0c1b7acde76e2e47e2f71d756551f558c5633c75a387a873
+//                 0b577a6a3eedfa01758859dc8ab18762dc6a6316a2ce25d94544562c88b83706
 //
 // 复核方式（与实现无关的第二条路径，Node 内置 OpenSSL）：
 //   node -e "const c=require('crypto');
 //     const k=c.createPrivateKey({key:Buffer.from('302e...7f60','hex'),format:'der',type:'pkcs8'});
-//     console.log(c.sign(null,Buffer.from('aa'.repeat(32)+'bb'.repeat(32)),k).toString('hex'))"
+//     const m='tauron-tpkg-sig-v2\nalgorithm=ed25519\nkid=kid-rfc8032\n'+
+//       'issuedAt=2026-09-26T00:00:00.000Z\nmanifest.json\t128\t'+'aa'.repeat(32)+
+//       '\ndist/index.js\t2048\t'+'bb'.repeat(32)+'\n';
+//     console.log(c.sign(null,Buffer.from(m),k).toString('hex'))"
+//
+// 同一向量在 Rust 侧（`crates/tauron-market/src/package_signature.rs` 的
+// `SIGNATURE` 常量）逐字相同——两侧共用一份载荷定义。
+const FIXED_ISSUED_AT = '2026-09-26T00:00:00.000Z';
 const FIXED_FILES: PluginFileInfo[] = [
   { path: 'manifest.json', size: 128, hash: 'aa'.repeat(32) },
   { path: 'dist/index.js', size: 2048, hash: 'bb'.repeat(32) },
 ];
-const FIXED_PAYLOAD = 'aa'.repeat(32) + 'bb'.repeat(32);
+const FIXED_META = { algorithm: 'ed25519', kid: 'kid-rfc8032', issuedAt: FIXED_ISSUED_AT };
+const FIXED_PAYLOAD =
+  `tauron-tpkg-sig-v2\nalgorithm=ed25519\nkid=kid-rfc8032\nissuedAt=${FIXED_ISSUED_AT}\n` +
+  `manifest.json\t128\t${'aa'.repeat(32)}\ndist/index.js\t2048\t${'bb'.repeat(32)}\n`;
 const FIXED_SIGNATURE =
-  '3d74e24e341612ca59d1190f2caefed1471384e542ef0e843cbe537102e6e865' +
-  'b295bdb98f3ff21d8ae8aff12bcc730f49c0920f4fc8979e64868545a01aff0b';
+  '9e977069d87a4c0e0c1b7acde76e2e47e2f71d756551f558c5633c75a387a873' +
+  '0b577a6a3eedfa01758859dc8ab18762dc6a6316a2ce25d94544562c88b83706';
 
 /** 改一位输入：第一个文件哈希的末位 'a' → 'b'。 */
 const TAMPERED_FILES: PluginFileInfo[] = [
   { ...FIXED_FILES[0]!, hash: `${'aa'.repeat(31)}ab` },
   FIXED_FILES[1]!,
 ];
+
+// `issuedAt` 进签名后，签名值取决于时钟——冻结时间才能有固定向量。
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date(FIXED_ISSUED_AT));
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('已知向量：@tauron/market 是标准 Ed25519（RFC 8032 §7.1 TEST 1）', () => {
   it('空消息签名 == 标准向量', async () => {
@@ -90,17 +115,17 @@ describe('已知向量：CLI 签名 == @tauron/market 直接调用（逐字节�
 
     // ① 期望值（人工可复核的已知向量）
     expect(signature.signature).toBe(FIXED_SIGNATURE);
-    expect(signPayload(FIXED_FILES)).toEqual(new TextEncoder().encode(FIXED_PAYLOAD));
+    expect(signPayload(FIXED_FILES, FIXED_META)).toEqual(new TextEncoder().encode(FIXED_PAYLOAD));
 
     // ② 与 @tauron/market 直接调用逐字节相同
-    const direct = await marketSign(signPayload(FIXED_FILES), RFC8032_PKCS8_HEX);
+    const direct = await marketSign(signPayload(FIXED_FILES, FIXED_META), RFC8032_PKCS8_HEX);
     expect(signature.signature).toBe(direct.signature);
     expect(signature.signature.length).toBe(128); // 64 字节 hex
 
     // ③ 市场侧可独立验证（公钥验证）
     expect(
       await marketVerify(
-        signPayload(FIXED_FILES),
+        signPayload(FIXED_FILES, FIXED_META),
         signature.signature,
         RFC8032_SPKI_HEX,
       ),
@@ -177,7 +202,7 @@ describe('辨别力：改一位输入 → 签名必须变', () => {
     // 用期望签名去验证被篡改的载荷 → 必须失败（不是「都变了」就够）
     expect(
       await marketVerify(
-        signPayload(TAMPERED_FILES),
+        signPayload(TAMPERED_FILES, FIXED_META),
         FIXED_SIGNATURE,
         RFC8032_SPKI_HEX,
       ),

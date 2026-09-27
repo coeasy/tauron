@@ -1412,6 +1412,21 @@ pub fn host_contributes_list(
     crate::cmd_contributes_list(&state, kind.as_deref()).map_err(to_tauri_err)
 }
 
+/// `host_contributes_reconcile`（self 档）：对账声明与注册。
+///
+/// 身份**只从 label 解析**（与 `host_contributes_register` 同一口径）：对账的是
+/// "**我自己**声明了什么、注册了什么"。允许传 pluginId 就等于让任何插件去看别人
+/// 的贡献清单——那是信息面，不是它的事。
+#[tauri::command]
+pub fn host_contributes_reconcile(
+    state: State<'_, PluginRuntimeState>,
+    window: TauriCallerSource,
+) -> Result<crate::ContributesReconcileReport, TauriError> {
+    let id = tauron_host::authz::resolve_self_identity(window.label(), None)
+        .map_err(to_tauri_err)?;
+    crate::cmd_contributes_reconcile(&state, id.as_str()).map_err(to_tauri_err)
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // R8 §1：三类宿主能力 Sink 的 **Tauri 实现**
 //
@@ -2326,7 +2341,8 @@ where
 // `error: expected ','`，族的展开结果无法拼进同一个 handler。因此族以**两组编译期
 // 可选集合**表达：宿主在**编译期**二选一，而不是运行时过滤。
 //   · [`tauron_substrate_handler!`] 底座-only（39 条）
-//   · [`tauron_plugin_handler!`] 全量（56 条 = 底座 39 + 插件运行时 17）
+//   · [`tauron_plugin_handler!`] 全量（60 条 = 底座 39 + 插件运行时 21；
+//     另 2 条安装命令为 `plugin-install` feature-gated，启用后共 62 条）
 //
 // 两组集合的一致性**不靠人眼**：wire-gate 断言
 //   ① 全量集合 == tauri.rs 中全部 `#[tauri::command] pub fn host_*` 定义；
@@ -2399,7 +2415,8 @@ macro_rules! tauron_substrate_handler {
     };
 }
 
-/// **全量**命令集：底座 39 条 + 插件运行时 17 条（多插件宿主）。
+/// **全量**命令集：底座 39 条 + 插件运行时 21 条（多插件宿主；另 2 条安装命令
+/// 受 `plugin-install` feature 门控，启用后共 62 条）。
 #[macro_export]
 macro_rules! tauron_plugin_handler {
     () => {
@@ -2445,10 +2462,11 @@ macro_rules! tauron_plugin_handler {
             $crate::tauri::host_recover_report,
             $crate::tauri::host_brand_info,
             $crate::tauri::host_capabilities,
-            // ── 插件运行时（17 条；底座-only 宿主不得注册）──
+            // ── 插件运行时（21 条；底座-only 宿主不得注册）──
             // 其中**插件面可触达**的那些（`host_lifecycle_report` / `host_plugin_call` /
             // `host_call_end` / `host_cancel` / `host_registry_list` /
-            // `host_contributes_register` / 流式三命令 / `host_recover_trial_enable`…）
+            // `host_contributes_register` / `host_contributes_reconcile` /
+            // 流式三命令 / `host_recover_trial_enable`…）
             // 必须在 `tauron_host::authz` 的档位表里有登记——「注册了但没登记档位」
             // 正是 R7 收口时抓到的缺口（`host_events_drain` / `host_stream_*`）。
             // 主窗命令（`host_registry_list_all` / `host_registry_admin` /
@@ -2462,6 +2480,7 @@ macro_rules! tauron_plugin_handler {
             $crate::tauri::host_registry_admin,
             $crate::tauri::host_contributes_register,
             $crate::tauri::host_contributes_list,
+            $crate::tauri::host_contributes_reconcile,
             $crate::tauri::host_recover_trial_enable,
             // 流式三命令（R5/P0-1）**成组**注册：只注册其中一两条会让流无法终结
             // （缺 close）或无法开流（缺 open），因此由门禁锁死「三缺一即失败」。
@@ -2503,7 +2522,7 @@ macro_rules! tauron_plugin_handler {
 ///    `plugin:tauron|<name>`——**必须**为 `tauron` 插件配置 capability/permission
 ///    授予所需命令（Tauri v2 对 `plugin:` 命令强制 ACL），生产客户端应采用。
 ///
-/// 不跑插件运行时的宿主改用 [`tauron_substrate_handler!`]（少 17 条插件命令）。
+/// 不跑插件运行时的宿主改用 [`tauron_substrate_handler!`]（少 21 条插件命令）。
 #[macro_export]
 macro_rules! tauron_generate_handler {
     () => {

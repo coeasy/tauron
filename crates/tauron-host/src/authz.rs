@@ -75,7 +75,7 @@ pub struct CommandAuth {
 }
 
 /// 插件侧宿主命令面（§2.1 定稿 9 条 + R7 收口补登记 4 条 + 0.4 审计补登记 1 条
-/// + 0.4-A1 调用投递 3 条 = 17 条）。
+/// + 0.4-A1 调用投递 3 条 + 0.4-W3 扩展点对账 1 条 = 18 条）。
 pub static COMMANDS: &[CommandAuth] = &[
     CommandAuth {
         command: "host_plugin_call",
@@ -178,6 +178,18 @@ pub static COMMANDS: &[CommandAuth] = &[
         tier: AuthTier::ScopedRead,
         consumer: "ShellClient.contributesList / 应用设置中心",
         description: "列出贡献表（commands/menus/panels/settings，纯只读）",
+    },
+    // ── 0.4-W3 扩展点闭环 ────────────────────────────────────────
+    //
+    // 纯只读对账（比对 manifest 声明与 activate 期注册），身份只从 label 解析：
+    // 对账的是"我自己声明了什么、注册了什么"，所以是 self 档而不是 scoped-read
+    // （后者是"读别人的表"）。**刻意不放在表末**——表末三连是 0.4-A1 的调用投递
+    // 块，有测试钉住它必须连续在末尾；本块插在 0.4 审计块之后、A1 块之前。
+    CommandAuth {
+        command: "host_contributes_reconcile",
+        tier: AuthTier::Self_,
+        consumer: "plugin-sdk（激活后自检贡献声明）",
+        description: "对账 manifest 声明的贡献与 activate 期实际注册（分叉报 E_CONTRIBUTES_DRIFT）",
     },
     // ── 0.4-A1 调用投递闭环 ──────────────────────────────────────
     CommandAuth {
@@ -736,7 +748,7 @@ mod tests {
         for c in COMMANDS.iter().chain(ADMIN_COMMANDS.iter()) {
             assert!(!c.consumer.is_empty(), "{} 缺 consumer 登记", c.command);
         }
-        assert_eq!(COMMANDS.len(), 17, "§2.1 定稿 9 条 + R7 收口补登记 4 条 + 0.4-A1 跨主体调用 3 条 + 0.4 审计补登记 host_contributes_list 1 条");
+        assert_eq!(COMMANDS.len(), 18, "§2.1 定稿 9 条 + R7 收口补登记 4 条 + 0.4-A1 跨主体调用 3 条 + 0.4 审计补登记 host_contributes_list 1 条 + 0.4-W3 贡献对账 1 条");
         // 主窗面包含注册表管理、sidecar 管理与 M8 配额诊断四条特权命令。
         assert_eq!(
             ADMIN_COMMANDS.len(),

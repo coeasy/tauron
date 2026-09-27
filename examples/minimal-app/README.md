@@ -1,7 +1,8 @@
 # Minimal App Example — tauron 应用层贯通示例
 
 可运行的集成示例：宿主主窗 + **iframe 沙箱插件**（握手/调用全协议）+
-**59 条 `host_*` 命令族**（底座 39 + 插件运行时 20；`plugin-install` feature 另注册 2 条）+ `@tauron/ui` Web Components。
+**`host_*` 命令族 60 条**（底座 39 + 插件运行时 21；`plugin-install` 另 2 条
+**已进默认特性** → 本示例实际注册 **62** 条）+ `@tauron/ui` Web Components。
 
 ## 安装包获取与运行
 
@@ -44,7 +45,7 @@ minimal-app/
 │       ├── first.ts           # @tauron/app-plugin-sdk 插件（createPlugin + 执行泵）
 │       └── legacy-first.ts    # legacy iframe 插件（deprecated，仅对照）
 ├── src-tauri/
-│   ├── src/main.rs            # root 注册 54 条命令 + state_init
+│   ├── src/main.rs            # root 注册 62 条命令（底座 39 + 运行时 21 + plugin-install 2，install 默认开启）+ state_init
 │   ├── Cargo.toml
 │   ├── build.rs               # tauri-build
 │   ├── tauri.conf.json        # 含 bundle.icon 声明
@@ -62,7 +63,7 @@ pnpm dlx @tauri-apps/cli@2 icon app-icon.svg
 本示例是桌面应用，生成后可删掉这两个目录。`tauri.conf.json` 的 `bundle.icon`
 只列桌面端用到的那几个文件。
 
-## 五条演示链路
+## 七条演示链路
 
 | 链路 | 前端 | Rust |
 |---|---|---|
@@ -71,6 +72,8 @@ pnpm dlx @tauri-apps/cli@2 icon app-icon.svg
 | 窗口控制 | `ShellClient.windowMinimize()` | `host_window_minimize` → `window.minimize()` 真实操作 |
 | 系统能力 | `DialogClient.clipboardRead()` / `AutoUpdateClient.checkUpdate()` | `host_clipboard_read`（进程内）/ `host_market_check`（模拟响应，带 `simulated:true`） |
 | UI | `<oc-toast>.push(…)` | — |
+| 壳层动作（插件管理 / 命令面板） | `new ShellController({backend, onRegistryChange, onError}).start()` —— `<oc-plugin-manager>` 的开关/卸载/安装与 `<oc-command-palette>` 的选中**统一**经它路由；命令列表由 `ShellClient.contributesList('command')` 喂 | `host_registry_admin`（enable/disable/uninstall）→ `host_registry_install_preview` / `host_registry_install`（feature-gated）→ `host_window_create`；命令面板选中 → `host_contributes_list` 找归属 → `host_call_plugin` → `host_call_take` |
+| 启动恢复（§4.14） | `ShellClient.recoverReport('success')` 上报"本轮已干净启动"（**漏报 = 每次重启被计一次崩溃**，连续两次进安全模式），并读回阶段决策驱动 UI | `host_recover_report` → `tauron-recovery` 计数器 + 阶段判定（normal / safemode / repairmode）；安全模式下 `host_recover_trial_enable` 逐个试启 |
 
 ## 集成要点（读代码前先读这里）
 

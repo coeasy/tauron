@@ -340,6 +340,15 @@ export class OcSplash extends LitElement {
 
   private _unsubscribe: (() => void) | null = null;
   private _exitTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * `data-ready` 属性监听器。
+   *
+   * **必须持有引用**：`MutationObserver` 会强引用被观察节点，只在
+   * `connectedCallback` 里 `new` 出来、不 `disconnect()`，元素从 DOM 摘掉之后
+   * 这一对就永久悬在内存里；而且 `data-ready` 在**游离**节点上仍会触发
+   * `_handleReady()`，作用在一个已经被 `destroy()` 过的 store 上。
+   */
+  private _readyObserver: MutationObserver | null = null;
 
   constructor() {
     super();
@@ -348,6 +357,13 @@ export class OcSplash extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+
+    // `connectedCallback` 会在**重连**时再跑一次（元素被移动 / 再次插入 DOM）。
+    // 先把上一次的连接态收干净，否则订阅与观察者会逐次叠加。
+    this._unsubscribe?.();
+    this._unsubscribe = null;
+    this._readyObserver?.disconnect();
+    this._readyObserver = null;
 
     // 读取 data-* 属性覆盖配置
     const dataLogo = this.getAttribute('data-logo');
@@ -380,21 +396,27 @@ export class OcSplash extends LitElement {
       this.store.start();
     }
 
-    // 监听 data-ready 属性变化
-    const observer = new MutationObserver((mutations) => {
+    // 监听 data-ready 属性变化（观察者存进字段，见 `_readyObserver` 的说明）
+    this._readyObserver = new MutationObserver((mutations) => {
       for (const m of mutations) {
         if (m.attributeName === 'data-ready' && this.hasAttribute('data-ready')) {
           this._handleReady();
         }
       }
     });
-    observer.observe(this, { attributes: true, attributeFilter: ['data-ready'] });
+    this._readyObserver.observe(this, { attributes: true, attributeFilter: ['data-ready'] });
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this._unsubscribe?.();
-    if (this._exitTimer) clearTimeout(this._exitTimer);
+    this._unsubscribe = null;
+    if (this._exitTimer) {
+      clearTimeout(this._exitTimer);
+      this._exitTimer = null;
+    }
+    this._readyObserver?.disconnect();
+    this._readyObserver = null;
     this.store.destroy();
   }
 

@@ -1,6 +1,14 @@
 # tauron 0.4 能力收口方案：从「有接口无入口」到「链路真通」
 
-> **状态**：方案已定，分轮实施中（轮 19 起）。不得据此宣称可发布。
+> ⚠️ **状态更正横幅（2026-09-26 重评估）**：本方案**只落地了 A1–A3**（轮 20–22）。
+> **A4–A8 与轮 23–29 未开工**，已由
+> [full-architecture-refactor-plan.md](./full-architecture-refactor-plan.md)（1.0 全量方案）
+> 接管——**不得据本方案宣称 0.4 已完成**。本文件保留为历史记录与设计来源，
+> §1/§2 描述的是**施工前**状态（调用投递等缺口已于轮 20 修复，见该文件 §2.4）。
+> 另：§2.2 把 `tauron-acl` / `tauron-market` 列为「迁移中/孤儿」**已过期**，
+> 两者现已在 `tauron-adapter` 依赖表内。
+
+> **原状态**：方案已定，分轮实施中（轮 19 起）。不得据此宣称可发布。
 > **目标版本**：tauron 0.4
 > **前置**：底座重构 R1–R8（轮 7–12 已完成收口）；0.3 方案 S/M/X 部分落地
 > （轮 13–18，见 [multi-plugin-substrate-roadmap.md](./multi-plugin-substrate-roadmap.md)）。
@@ -64,15 +72,15 @@
 | 通知 | `host_notify` / `host_notifications_list/read` | ✅ 真通（系统推降级） | 缓冲 + dispatchLog，系统气泡不可达 |
 | 设置 | `host_settings_*`（含 adopt/migrate） | ✅ 真通 | `SettingsStore` 四层合并 + 版本迁移 |
 | 资源配额 | `host_resource_stats` | ✅ 真通 | 4 类 per-plugin 配额已接线 |
-| **插件调用** | `host_plugin_call` / `host_call_end` / `host_cancel` | ❌ **只登记，不投递** | `lib.rs:2386-2397`；见 §5-L8 |
-| **插件安装** | `host_registry_install(_preview)` | ❌ 默认不可达 | `#[cfg(feature="plugin-install")]`，`Cargo.toml:12 default=[]` |
+| **插件调用** | `host_plugin_call` / `host_call_end` / `host_cancel` | ~~❌ 只登记，不投递~~ → ✅ **已闭环**（0.4-A1） | `host_call_plugin` / `host_call_result` / `host_call_take` 三条投递命令已接线（`lib.rs:2597/2616/2649`）；消费方 `ShellController`（`shell-controller.ts:231/264`）与 `HostClient.callPlugin/takeCallResult`。原 §5-L8 的缺口已修 |
+| **插件安装** | `host_registry_install(_preview)` | ⚠️ 默认可达但需配置 | `#[cfg(feature="plugin-install")]`；该 feature **已进默认**（`crates/tauron-adapter/Cargo.toml:21`，1.0-W6），但 `plugin_install_dir` 未配置时仍明确不可用（`lib.rs:226-228`） |
 | **进程插件通信** | `host_runtime_spawn/health` | ❌ 能起不能聊 | `tauron-proc/spawner.rs:126-127` `Stdio::null()` |
-| **扩展点 UI** | `host_contributes_register/list` | ❌ 不驱动 UI | 无 reconcile、无 drift 码、`oc-command-select` 孤儿 |
+| **扩展点 UI** | `host_contributes_register/list/reconcile` | ~~❌ 不驱动 UI~~ → 🟡 **对账已闭合**（2026-09-27） | `host_contributes_reconcile` + `E_CONTRIBUTES_DRIFT` 已在（`authz.rs:189`/`error.rs:97`/`tauri.rs:1421`）；`oc-command-select` 已由 `ShellController` 接管（`shell-controller.ts:203`）。**剩余**：命令面板填充仍由接入方喂数 |
 | 对话框 | `host_dialog_*`（4 条） | ⚠️ 诚实降级 | `UnsupportedBody`，非「假装成功」 |
 | 剪贴板 | `host_clipboard_write/read` | ⚠️ 进程内回退 | `fallback: in-process-buffer` |
 | 品牌 / 商城 / 更新 | `host_brand_info` / `host_market_*` | ⚠️ 诚实桩 | `UnsupportedBody` / `simulated: true` |
 | menu / tray / fs / http / updater | — | ❌ **全仓 0 命中** | `grep host_menu_\|host_tray_\|host_fs_\|host_http_\|host_updater` 空 |
-| 跨插件调用 | — | ❌ 不存在 | `host_call_plugin` 不存在 |
+| 跨插件调用 | `host_call_plugin` / `host_call_result` / `host_call_take` | ✅ **已实现**（0.4-A1） | `lib.rs:2597/2616/2649`；caller/target 显式，仅 target 可回填、仅 caller 可取件 |
 
 ---
 
@@ -133,11 +141,11 @@ tauron-acl ──────→ tauron-host
 
 | 集合 | 条数 | 定义 |
 |---|---:|---|
-| 底座 `tauron_substrate_handler!` | **39** | `tauri.rs:2253-2305` |
-| 插件运行时 `tauron_plugin_handler!` | **56**（39 + 17） | `tauri.rs:2313-2393` |
-| 安装（feature-gated） | **+2** | `tauri.rs:2389-2392`，`#[cfg(feature="plugin-install")]` |
+| 底座 `tauron_substrate_handler!` | **39** | `tauri.rs` 的 `macro_rules! tauron_substrate_handler` |
+| 插件运行时 `tauron_plugin_handler!` | **60**（39 + 21） | `tauri.rs` 的 `macro_rules! tauron_plugin_handler`（行号随重构漂移，以符号名为准） |
+| 安装（feature-gated） | **+2** | 同上宏体内的 `#[cfg(feature="plugin-install")]` 两条，启用后共 **62** 条 |
 
-`crates/tauron-adapter/Cargo.toml:12` → `default = []`（连 `tauri` feature 都不默认）。
+`crates/tauron-adapter/Cargo.toml:21` → `default = ["plugin-install"]`（**`plugin-install` 已进默认**，1.0-W6；`tauri` feature 仍不默认）。
 唯一真实装配入口：`examples/minimal-app/src-tauri/src/main.rs:140`。
 
 ---
@@ -151,7 +159,7 @@ tauron-acl ──────→ tauron-host
 2. **两套错误码、零交集、只追加**：框架层 `SC-xxxx`，应用层 `E_*`；
    `ErrorCode` 新码只能追加到枚举末尾（TS `HOST_ERROR_CODES` 按声明顺序比对）。
 3. **身份从 webview label 解析，不信任入参**：self 档命令的 pluginId 只从
-   `plugin-<id>` 解析（`lib.rs:6202`），调用方传入一律忽略。
+   `plugin-<id>` 解析（`lib.rs` 的 `require_self_plugin_scope`，`:1811`；label 铸造在 `:4932`），调用方传入一律忽略。
 4. **底座类型上触达不到注册表**：`SubstrateState` 无 registry 字段，编译期隔离。
 5. **`cmd_*` 零直接 Tauri 调用**：平台调用一律经 `trait *Sink`。
 6. **事件总线锁序**：`stats → topics → subs → topic_subscribers → approvals → queues`。
@@ -206,23 +214,30 @@ tauron-acl ──────→ tauron-host
 
 **「主体链路」定义**：一个用户从打开客户端到用一个插件完成一次交互所必须经过的跳。
 
+> ⚠️ **2026-09-27 复核**：下图是 **0.4 施工前**口径。其中 **L3（安装）已修**——
+> `plugin-install` 已进 `tauron-adapter` 默认特性（`Cargo.toml:21`，1.0-W6）；
+> **L8（调用投递）已修**（0.4-A1，轮 20）；**L6 仍是缺口**（示例用 legacy iframe SDK，
+> 主推的 `app-plugin-sdk` 在仓内零生产调用点）。**L3/L8 两行保留原判作为历史记录。**
+
 ```
  L1  宿主装配    tauron_adapter::tauri::init()          ✅  main.rs:140
  L2  主窗启动    ShellClient + host_capabilities        ✅  但有 1 红灯（P0-4）
- L3  插件安装    host_registry_install                  ❌  feature-gated，默认不可达
+ L3  插件安装    host_registry_install                  ❌→✅  已进默认特性（1.0-W6）
  L4  插件启用    host_registry_admin(enable)            ✅
  L5  插件开窗    host_window_create                     ✅  label 恒 plugin-<id>
  L6  插件自举    app-plugin-sdk PluginContext           ❌  示例用 legacy iframe SDK
  L7  生命周期    host_lifecycle_report(ATTACH)          ✅
- L8  调用投递    host_plugin_call                       ❌  ★只登记，不投递
+ L8  调用投递    host_plugin_call                       ❌→✅  已投递（0.4-A1）
  L9  流式帧      host_stream_open/write/close           ✅
  L10 事件        publish/subscribe/drain                ✅  app-sdk 有泵；legacy 无泵
  L11 卸载回收    host_registry_admin(uninstall/purge)   ✅
  L12 崩溃恢复    host_recover_*                         ✅
 ```
 
-**结论：12 跳中 8 跳真通、4 跳断。** 断的 4 跳里，**L8 是最严重的**——
+**结论（0.4 施工前）：12 跳中 8 跳真通、4 跳断。** 断的 4 跳里，**L8 是最严重的**——
 它意味着「多插件框架」这个名字里的「调用」这件事，**从来没有实现过**。
+（2026-09-27 复核后：L3 与 L8 已闭环，剩余断点见
+[full-architecture-refactor-plan.md](./full-architecture-refactor-plan.md) §4.2。）
 
 ### 5.1 ★ L8 的证据链（这是本次最重要的发现）
 
@@ -256,7 +271,7 @@ pub fn cmd_plugin_call(
 
 | 跳 | 断在哪 | 证据 |
 |---|---|---|
-| L3 安装 | `#[cfg(feature="plugin-install")]` + `default=[]`；TS 侧 `tauri-backend.ts:76-77`、`capabilities.ts:135-143` **无条件**列出 → `available()` 返回 true，invoke 才失败 | `Cargo.toml:12`、`tauri.rs:2389` |
+| L3 安装 | ~~`default=[]`~~ **已进默认特性**（`crates/tauron-adapter/Cargo.toml:21`，1.0-W6）；剩余真实缺口是 `plugin_install_dir` 未配置时不可用。TS 侧曾无条件列出能力（`available()` 返回 true 而 invoke 失败），已由 0.4-A2 改为运行期 `host_capabilities` 开门 | `Cargo.toml:21`、`tauri.rs` 的 `host_registry_install` / `host_registry_install_preview` 符号（`:2506-2508`） |
 | L6 自举 | 示例 `examples/minimal-app/src/plugin/first.ts:9` 用的是 legacy `@tauron/plugin-sdk` 的 `registerPlugin`（iframe 握手）；主推的 `@tauron/app-plugin-sdk` 在仓内**零生产调用点**（只出现在 `app-cli/plugin.ts:317` 的脚手架模板字符串里） | 见 §6-P1-3 |
 | 进程插件通信 | `tauron-proc/src/spawner.rs:126-127` 把 stdin/stdout 都设成 `Stdio::null()`，文件头 `:82-83` 明文「JSON-RPC 帧回路未接线」；`spawn.rs:322` 是回显模拟 | Process 型「能起不能聊」 |
 
@@ -625,7 +640,7 @@ pub struct DeliveryReceipt {
 
 | 文档 | 需同步内容 |
 |---|---|
-| [overview.md](./overview.md) | 三层结构（补充「活线依赖死线」）；接线状态表按 A8-5 归置表更新；命令面 59 条 |
+| [overview.md](./overview.md) | 三层结构（补充「活线依赖死线」）；接线状态表按 A8-5 归置表更新；命令面 60 条 |
 | [app-layer-wire.md](./app-layer-wire.md) | 新增 install 的 feature 可达性说明、调用投递的 `DeliveryReceipt` 线形、contributes reconcile |
 | [canonical-owners.md](./canonical-owners.md) | crate 归置表按 A4/A5/A8-5 更新；wasm 从「可选组件」改为「可选组件（已接线）」 |
 | [multi-plugin-substrate-roadmap.md](./multi-plugin-substrate-roadmap.md) | §2 残差表按本次实测重写（M-1/M-2 已实现） |

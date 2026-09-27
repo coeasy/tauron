@@ -63,6 +63,8 @@ describe('契约 1：错误码全集', () => {
       'E_STREAM_FULL',
       // 0.4-A1：跨主体调用的重复回填显式拒绝（枚举末尾，只能追加）。
       'E_CALL_ALREADY_SETTLED',
+      // 0.4-W3：贡献声明与注册不一致（枚举末尾，只能追加）。
+      'E_CONTRIBUTES_DRIFT',
     ]);
   });
 

@@ -160,6 +160,58 @@ impl Event {
         Event::RuntimeCrash,
     ];
 
+    /// 插件（webview 侧）**可自行上报**的事件白名单——[`Event::ALL`] 的严格子集。
+    ///
+    /// 线格式枚举 [`Event::ALL`] 是完整的：宿主内部路径
+    /// （[`Registry::report_event`](crate::registry::Registry::report_event)）与管理面
+    /// 需要全部 18 条。但 `host_lifecycle_report` 是 **self 档**入口（身份从 webview
+    /// label 解析），插件能自报什么必须比枚举小一圈——否则这个「上报」通道就是一条
+    /// 越权写状态的捷径：
+    ///
+    /// - 自报 `Enable` / `TrialEnable` / `SafemodeExit` → 绕过用户放行与安全模式。
+    ///   尤其 `SafemodeExit` 在 `Disabled` 上有 `Guard::InSafemode` 出边，插件可以
+    ///   **自己给自己解禁**，恢复引擎的判定被它一句话推翻；
+    /// - 自报 `Uninstall` / `Purge` → 落到终态 `Uninstalled`，此后
+    ///   `admin(Uninstall)` 在终态是非法迁移 → 条目再也删不掉、槽位永远收不回
+    ///   （`MAX_PLUGINS` 槽位自 DoS）；
+    /// - 自报 `InstallStart` / `InstallOk` / `InstallFail` → 伪造安装结果。
+    ///   `InstallOk` 从 `Installing` 直达 `Installed`，跳过签名校验与权限审批；
+    /// - 自报 `Disable` / `SafemodeEnter` → 只坑自己，但同样属于「被管对象宣告自己的
+    ///   状态」，破坏 §4.3 单一写入者原则，一并排除。
+    ///
+    /// 允许留下的是宿主**无法从外部观测**的运行时事实：webview 何时挂载/卸载、
+    /// 插件内部错误、重试结果、健康心跳、sidecar 崩溃。这些只有插件自己知道，
+    /// 只能采信它自报——但也仅止于此。
+    pub const PLUGIN_REPORTABLE: [Event; 8] = [
+        Event::Attach,
+        Event::Detach,
+        Event::ErrorRetryable,
+        Event::ErrorFatal,
+        Event::RetryOk,
+        Event::RetryExhausted,
+        Event::HealthOk,
+        Event::RuntimeCrash,
+    ];
+
+    /// 本事件是否可由插件自报（[`Event::PLUGIN_REPORTABLE`] 的成员判定）。
+    ///
+    /// 强制点在 [`Registry::lifecycle_report`](crate::registry::Registry::lifecycle_report)
+    /// ——self 档入口一律先过这道闸；宿主内部走
+    /// [`Registry::report_event`](crate::registry::Registry::report_event)，不受限。
+    pub const fn plugin_reportable(self) -> bool {
+        matches!(
+            self,
+            Event::Attach
+                | Event::Detach
+                | Event::ErrorRetryable
+                | Event::ErrorFatal
+                | Event::RetryOk
+                | Event::RetryExhausted
+                | Event::HealthOk
+                | Event::RuntimeCrash
+        )
+    }
+
     /// 是否可由用户 / UI 触发（false = 系统自动触发）。
     ///
     /// 用于"无零耗环"判定：全由系统事件构成的环若不含预算消耗动作，
@@ -801,7 +853,9 @@ pub fn reachable_events(s: State) -> Vec<Event> {
 /// 5. **无零耗环**：每个大小 ≥2 的强连通分量内至少含一条"用户触发"规则
 ///    或含"消耗预算"动作的规则（自环豁免，见下）；
 /// 6. 链深 ≤ `MAX_CHAIN_DEPTH`；
-/// 7. D3 出边补齐：`RUNNING→ERRORED_USER_CONFIRM` 存在。
+/// 7. D3 出边补齐：`RUNNING→ERRORED_USER_CONFIRM` 存在；
+/// 8. 事件词表全覆盖：每个 [`Event`] 至少在一个状态下有规则（无「上报必非法」的
+///    孤儿事件——推导器是 [`reachable_events`]）。
 pub fn validate_table() -> HostResult<()> {
     // 1. 键唯一
     let mut seen: HashSet<RuleKey> = HashSet::new();
@@ -873,6 +927,19 @@ pub fn validate_table() -> HostResult<()> {
             ErrorCode::E_STATE_INVALID_TRANSITION,
             "缺少 D3 要求的出边 RUNNING → ERRORED_USER_CONFIRM".to_string(),
         ));
+    }
+
+    // 8. 事件词表全覆盖（1.0-R1：让 `reachable_events` 成为真门禁，而不是孤儿）：
+    //    每个事件必须至少在**一个**状态下可用。声明了却在任何状态下都非法的事件
+    //    是「上报必失败」的孤儿词表——前端把它写进上报通道只会拿到
+    //    `E_STATE_INVALID_TRANSITION`，而枚举本身却宣称它是合法线名。
+    for e in Event::ALL {
+        if !State::ALL.iter().any(|s| reachable_events(*s).contains(&e)) {
+            return Err(HostError::new(
+                ErrorCode::E_STATE_INVALID_TRANSITION,
+                format!("事件 {e} 在任何状态下都没有迁移规则（孤儿事件词表）"),
+            ));
+        }
     }
 
     Ok(())
@@ -1053,6 +1120,79 @@ mod tests {
     }
 
     // ── 状态×事件全组合（计划 §4.3 测试要求）────────────────────
+
+    #[test]
+    fn plugin_reportable_is_a_strict_subset_of_all() {
+        // 白名单必须是**严格**子集：若哪天有人把全部事件都塞进去，这道闸就形同虚设。
+        assert!(
+            Event::PLUGIN_REPORTABLE.len() < Event::ALL.len(),
+            "插件可自报集合不得等于完整事件枚举"
+        );
+        for e in Event::PLUGIN_REPORTABLE {
+            assert!(Event::ALL.contains(&e), "白名单成员 {e} 不在 Event::ALL 中");
+            assert!(e.plugin_reportable(), "{e} 在数组中但 plugin_reportable() 为 false");
+        }
+        // 反向：不在数组里的一律不可自报（数组与判定函数必须同源）。
+        for e in Event::ALL {
+            let in_array = Event::PLUGIN_REPORTABLE.contains(&e);
+            assert_eq!(in_array, e.plugin_reportable(), "{e} 的数组归属与判定函数不一致");
+        }
+    }
+
+    #[test]
+    fn plugin_reportable_excludes_privileged_events() {
+        // 这些事件一旦可由插件自报，就是越权：用户放行 / 安全模式 / 安装结果 /
+        // 终态迁移 / 槽位回收。逐一钉死，防止将来「顺手补一条」把它加回去。
+        for e in [
+            Event::Enable,
+            Event::Disable,
+            Event::TrialEnable,
+            Event::SafemodeEnter,
+            Event::SafemodeExit,
+            Event::InstallStart,
+            Event::InstallOk,
+            Event::InstallFail,
+            Event::Uninstall,
+            Event::Purge,
+        ] {
+            assert!(!e.plugin_reportable(), "{e} 绝不可由插件自报");
+        }
+    }
+
+    #[test]
+    fn plugin_reportable_covers_runtime_facts() {
+        // 另一半：宿主观测不到的运行时事实必须在白名单里，否则插件无法上报真实错误。
+        for e in [
+            Event::Attach,
+            Event::Detach,
+            Event::ErrorRetryable,
+            Event::ErrorFatal,
+            Event::RetryOk,
+            Event::RetryExhausted,
+            Event::HealthOk,
+            Event::RuntimeCrash,
+        ] {
+            assert!(e.plugin_reportable(), "{e} 是运行时事实，必须允许插件自报");
+        }
+    }
+
+    #[test]
+    fn plugin_reportable_events_have_no_privileged_out_edges_from_disabled() {
+        // 交叉校验：白名单里**没有**任何事件能在 `Disabled` 上直接回到 `Enabled`
+        //（那等于插件自己解禁）。这是白名单的语义目的，不只是名字对不对。
+        let reenabling: Vec<Event> = TRANSITIONS
+            .iter()
+            .filter(|r| r.from == State::Disabled && r.to == State::Enabled)
+            .map(|r| r.event)
+            .collect();
+        assert!(!reenabling.is_empty(), "Disabled 应有回到 Enabled 的出边（用户放行路径）");
+        for e in &reenabling {
+            assert!(
+                !e.plugin_reportable(),
+                "`Disabled → Enabled` 的出边事件 {e} 落进了插件可自报集合——插件可自行解禁"
+            );
+        }
+    }
 
     #[test]
     fn full_state_event_matrix_never_panics() {

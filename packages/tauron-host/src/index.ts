@@ -42,7 +42,12 @@ export {
 export type { AuthTier, Capability, CapabilityCommand, Consumer } from './capabilities.js';
 
 export { HostClient, AdminClient, FrameSink } from './host.js';
-export type { HostClientOptions, PluginCallRequest, ContributeEntryInput } from './host.js';
+export type {
+  HostClientOptions,
+  PluginCallRequest,
+  ContributeEntryInput,
+  ContributesReconcileReport,
+} from './host.js';
 
 export { ShellClient, SIDECAR_ABI_CONTRACT } from './shell-client.js';
 export type {
@@ -83,8 +88,9 @@ export type {
 
 export { ShellController } from './shell-controller.js';
 export type { ShellControllerOptions } from './shell-controller.js';
-
-export { bootstrap, type BootstrapOptions, type BootstrapResult, type BootstrapPluginDescriptor, type BootPhase, type SplashHandle } from './bootstrap.js';
+// 未接线事件的显式登记表（1.0-W3）：接入方自检「哪些事件需要自己接」。
+export { UNWIRED_EVENTS, UNWIRED_EVENT_NAMES } from './unwired-events.js';
+export type { UnwiredEvent } from './unwired-events.js';
 
 // 退出动画（ExitAnimation）与组件动画（animateEnter/staggerIn/...）已**迁出**本包，
 // 归属 `@tauron/ui-primitives`（R3：它们是纯 DOM 时序工具，不是宿主能力）。
@@ -92,7 +98,19 @@ export { bootstrap, type BootstrapOptions, type BootstrapResult, type BootstrapP
 // 这里**不做转出**：`@tauron/ui-primitives` 会静态引入 `lit` 与全部 DOM 组件，
 // 在宿主入口转出会把它们拖进每个 `@tauron/host` 消费者（含 node 测试环境），
 // 违背本包 `sideEffects: false` 的轻量契约。需要者直接从
-// `@tauron/ui-primitives` 导入。`bootstrap` 仍以**动态**导入方式可选获取该类能力。
+// `@tauron/ui-primitives` 导入。
+//
+// ── 已删除：`bootstrap()` 启动编排器（0.4-W1）────────────────────────────
+// 它曾在此转出，但**全仓零生产消费者**（除自己的测试），且是 P1-1 的载体：
+// 它 import `@tauron/core` 的 `PluginRegistry`/`ConfigManager`/`EventBus`
+// 三个**运行时类**，让「活线（host）依赖死线（core）」成立；而本包声明
+// `sideEffects: false`，真实构建里这三个类根本不存在——即它一旦被用就会崩。
+// 处置按 W9-3 的「接线 / 移入 testing / 删除，不留第三态」取**删除**：
+// 应用启动编排的真实落点是 `examples/minimal-app/src/main.ts`（裸用
+// `ShellClient`，含 `recoverReport('success')` 上报），插件注册的真实落点是
+// **宿主侧** Rust 注册表（`host_registry_admin` / `host_registry_install`），
+// 前端不需要第二份注册表。删除后本包不再依赖 `@tauron/core`（P1-5 的
+// 「TS `maxPlugins: 32` vs Rust `max_plugins: 8`」矛盾随之消失）。
 export { WindowState, createWindowState } from './window-state.js';
 export type { WindowStateConfig, WindowStateData } from './window-state.js';
 
@@ -187,8 +205,8 @@ export type {
   PumpScheduler,
 } from './rpc.js';
 
-export { LIFECYCLE_EVENTS, LIFECYCLE_STATES } from './lifecycle.js';
-export type { LifecycleEvent, LifecycleState } from './lifecycle.js';
+export { LIFECYCLE_EVENTS, LIFECYCLE_STATES, PLUGIN_REPORTABLE_EVENTS } from './lifecycle.js';
+export type { LifecycleEvent, LifecycleState, PluginReportableEvent } from './lifecycle.js';
 
 export type {
   ContributesEntry,

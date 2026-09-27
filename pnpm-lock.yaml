@@ -35,9 +35,6 @@ importers:
       '@tauron/app-plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/tauron-app-plugin-sdk
-      '@tauron/core':
-        specifier: workspace:*
-        version: link:../../packages/tauron-core
       '@tauron/host':
         specifier: workspace:*
         version: link:../../packages/tauron-host
@@ -258,9 +255,6 @@ importers:
 
   packages/tauron-host:
     dependencies:
-      '@tauron/core':
-        specifier: workspace:*
-        version: link:../tauron-core
       '@tauron/shell-events':
         specifier: workspace:*
         version: link:../tauron-shell-events

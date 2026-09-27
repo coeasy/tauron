@@ -144,7 +144,14 @@ export class OcUpdaterDialog extends LitElement {
   private _status: string = 'idle';
 
   get open(): boolean { return this._open; }
-  set open(v: boolean) { this._open = v; this.requestUpdate(); }
+  set open(v: boolean) {
+    const changed = this._open !== v;
+    this._open = v;
+    // 可见性开关是 `:host([open])`——只改私有字段不反映到属性，组件会永远
+    // 停在 `display: none`，`open` 就成了「有接口、无行为」。
+    this.toggleAttribute('open', v);
+    if (changed) this.requestUpdate();
+  }
 
   get version(): string { return this._version; }
   set version(v: string) { this._version = v; this.requestUpdate(); }
@@ -158,6 +165,19 @@ export class OcUpdaterDialog extends LitElement {
   get status(): string { return this._status; }
   set status(v: string) { this._status = v; this.requestUpdate(); }
 
+  /**
+   * 「稍后」：收起对话框本身，并广播 `oc-updater-dismiss`。
+   *
+   * **不得**复用 `SHELL_EVENTS.close`——那是关闭窗口，`ShellController` 把它
+   * 无条件路由到 `windowClose()`，于是点「稍后」会把主窗口关掉。
+   */
+  private _dismiss(): void {
+    this.open = false;
+    this.dispatchEvent(
+      new CustomEvent(SHELL_EVENTS.updaterDismiss, { bubbles: true, composed: true }),
+    );
+  }
+
   protected override render() {
     return html`
       <div class="dialog">
@@ -166,7 +186,7 @@ export class OcUpdaterDialog extends LitElement {
         ${this._message ? html`<div class="dialog-content">${this._message}</div>` : ''}
         ${this._status === 'downloading' || this._status === 'updating' ? html`<div class="progress-bar"><div class="progress-fill" style="width: ${this._progress}%"></div></div>` : ''}
         <div class="dialog-actions">
-          <button class="btn" @click=${() => this.dispatchEvent(new CustomEvent(SHELL_EVENTS.close, { bubbles: true, composed: true }))}>稍后</button>
+          <button class="btn" @click=${() => this._dismiss()}>稍后</button>
           ${this._status === 'done'
             ? html`<button class="btn btn-primary" @click=${() => this.dispatchEvent(new CustomEvent(SHELL_EVENTS.restart, { bubbles: true, composed: true }))}>立即重启</button>`
             : this._status === 'idle'
@@ -181,12 +201,13 @@ export class OcUpdaterDialog extends LitElement {
 // ──────────────────────────────────────────────────────────────────────────
 // <oc-command-palette> — 命令面板
 //
-// 契约（哑组件，数据与执行都在接入方）：
+// 契约（哑组件，数据由接入方喂；**执行**由 ShellController 接）：
 // - 供数：接入方设置 `commands` 属性——典型来源是
 //   `ShellClient.contributesList('command')`（插件的贡献命令）
-// - 消费：选中项派发 `oc-command-select`（detail `{ id }`）——执行是应用域
-//   （跨窗口命令调用走 `host_plugin_call` 的 C/D 后端路径），
-//   ShellController 不接本事件
+// - 消费：选中项派发 `oc-command-select`（detail `{ id }`）——由
+//   `ShellController` 解析归属插件并跨主体投递（`callPlugin` → 轮询
+//   `callTakeResult`）。此处曾写「ShellController 不接本事件」，结果该事件
+//   长期零消费者（命令面板点了没反应）；1.0-W3 起控制器真实接线。
 // ──────────────────────────────────────────────────────────────────────────
 
 export interface CommandItem {
@@ -216,7 +237,14 @@ export class OcCommandPalette extends LitElement {
   private _query: string = '';
 
   get open(): boolean { return this._open; }
-  set open(v: boolean) { this._open = v; this.requestUpdate(); }
+  set open(v: boolean) {
+    const changed = this._open !== v;
+    this._open = v;
+    // 同 `<oc-updater-dialog>`：`open` 必须反映到属性，否则 `:host([open])`
+    // 永不匹配，组件永远不可见。
+    this.toggleAttribute('open', v);
+    if (changed) this.requestUpdate();
+  }
 
   get commands(): CommandItem[] { return this._commands; }
   set commands(v: CommandItem[]) { this._commands = v; this.requestUpdate(); }
@@ -272,6 +300,8 @@ export class OcShortcutRecorder extends LitElement {
   private _unsubscribe: (() => void) | null = null;
   private _keydownHandler: ((e: KeyboardEvent) => void) | null = null;
   private _keyupHandler: ((e: KeyboardEvent) => void) | null = null;
+  /** 是否已经历过一次连接（区分首连与重连，见 `connectedCallback`）。 */
+  private _connectedOnce = false;
 
   constructor() {
     super();
@@ -285,8 +315,26 @@ export class OcShortcutRecorder extends LitElement {
   get recording(): boolean { return this._recording; }
   set recording(v: boolean) { this._recording = v; this.requestUpdate(); }
 
+  override connectedCallback(): void {
+    super.connectedCallback();
+    // 订阅此前只建在 `firstUpdated` 里，而 `firstUpdated` **每个元素实例只跑一次**，
+    // 偏偏 `disconnectedCallback` 会退订——于是「摘掉再插回」之后组件就与 store
+    // 永久脱钩：store 再变也不重渲染，且没有任何报错。
+    //
+    // 但首次连接仍交给 `firstUpdated`：`store.subscribe` 会**立即**回灌一次快照，
+    // 在首帧之前订阅会把调用方刚设的 `shortcut` 属性冲掉（既有语义是「先设属性、
+    // 挂载后按属性渲染」）。所以这里只补重连那一次。
+    if (this._connectedOnce) this._subscribeStore();
+    this._connectedOnce = true;
+  }
+
   override firstUpdated(): void {
-    // 订阅 Store 状态变化
+    this._subscribeStore();
+  }
+
+  /** 订阅 store 状态变化（幂等：已订阅则不再叠加）。 */
+  private _subscribeStore(): void {
+    if (this._unsubscribe) return;
     this._unsubscribe = this.store.subscribe((snapshot) => {
       const { state } = snapshot;
       this._shortcut = state.current ?? '';
@@ -301,6 +349,7 @@ export class OcShortcutRecorder extends LitElement {
     super.disconnectedCallback();
     this._stopListening();
     this._unsubscribe?.();
+    this._unsubscribe = null;
   }
 
   protected override render() {
@@ -585,8 +634,12 @@ declare global {
     'oc-minimize': CustomEvent<null>;
     /** @see 'oc-minimize' */
     'oc-maximize': CustomEvent<null>;
-    /** `<oc-title-bar>` / `<oc-updater-dialog>` 的关闭请求。 @see 'oc-minimize' */
+    /** `<oc-title-bar>` 的关闭请求。**仅**标题栏 ✕——更新对话框用下面的 `oc-updater-dismiss`。 */
     'oc-close': CustomEvent<null>;
+    /** `<oc-updater-dialog>` 请求检查更新。 @see 'oc-minimize' */
+    'oc-updater-check': CustomEvent<null>;
+    /** `<oc-updater-dialog>`「稍后」——收起对话框本身（不是关闭窗口）。 @see 'oc-minimize' */
+    'oc-updater-dismiss': CustomEvent<null>;
     /** `<oc-updater-dialog>` 请求开始更新。 @see 'oc-minimize' */
     'oc-update-start': CustomEvent<null>;
     /** `<oc-updater-dialog>` 请求重启应用。 @see 'oc-minimize' */

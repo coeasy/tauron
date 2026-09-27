@@ -68,6 +68,14 @@ export class MemoryTransport implements HostTransport {
     return true;
   }
 
+  /**
+   * 释放通道（`channel()` 的配对操作，同时满足 `Backend.closeChannel`）。
+   *
+   * 不加这条出口时 `channels` 只增不减：`FrameSink` 每发起一次调用 / 开一条流都会
+   * 建一个通道，而 `onmessage` 闭包强引用整条流的状态。`closeChannel` 返回布尔值
+   * （是否真的删掉了），比 `Backend.closeChannel` 的 `void` 更具体——返回类型协变，
+   * 接口实现不受影响。
+   */
   closeChannel(id: string | number): boolean {
     return this.channels.delete(String(id));
   }

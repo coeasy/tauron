@@ -117,6 +117,8 @@ const FRAMEWORK_COMMANDS = [
   'host_i18n_cleanup_plugin',
   // 贡献（读取）
   'host_contributes_list',
+  // 贡献（对账：声明 vs 注册，0.4-W3）
+  'host_contributes_reconcile',
   // 窗口
   'host_window_minimize',
   'host_window_maximize',
@@ -142,14 +144,13 @@ const FRAMEWORK_COMMANDS = [
 ] as const;
 
 /**
- * **可选**命令面：Rust 侧是 feature-gated 的，默认构建**不注册**。
+ * **可选**命令面：Rust 侧是 feature-gated 的（`plugin-install`）。
  *
- * 这是 0.4-A2 修的断链：`host_registry_install*` 在 `crates/tauron-adapter` 里
- * 挂在 `#[cfg(feature = "plugin-install")]` 下，而 `Cargo.toml` 的 `default = []`，
- * 于是默认装配的宿主根本注册不了这两条命令。此前它们被混在
- * {@link FRAMEWORK_COMMANDS} 里无条件列出，导致 `capabilities()` 对它们
- * **误报已注册**——调用方按能力表判断"能不能装插件"得到 `true`，直到真正
- * `invoke` 才以 `command not found` 失败。
+ * ⚠️ **该 feature 现已进 `tauron-adapter` 默认特性**（`crates/tauron-adapter/Cargo.toml:21`，
+ * 1.0-W6）——所以默认装配的宿主**会**注册这两条；只有接入方显式
+ * `default-features = false` 时才不注册。它们仍归「可选」是因为**能力表不得硬编码**：
+ * feature 可在编译期关掉，静态全集里写上它们就会在那种装配下变成
+ * 「能力表说有、invoke 说没有」的误报（0.4-A2 修的正是这个断链）。
  *
  * 处置：这两条**不进**静态全集，只能由运行期真相开门——宿主调
  * `host_capabilities` 拿到真实命令集后调 {@link TauriBackend.adoptCapabilities}

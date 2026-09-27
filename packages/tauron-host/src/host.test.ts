@@ -16,6 +16,7 @@ const ALL_CAPS = [
   'host_events_drain',
   'host_registry_list',
   'host_registry_admin',
+  'host_contributes_reconcile',
 ];
 
 function pluginClient(): { client: HostClient; backend: MockBackend } {
@@ -28,6 +29,7 @@ function pluginClient(): { client: HostClient; backend: MockBackend } {
       { cmd: 'host_events_publish', result: { delivered: 2, dropped: false } },
       { cmd: 'host_events_subscribe', result: { token: 'sub-1', selectors: [{ topic: 'com.example.x.ready' }] } },
       { cmd: 'host_events_drain', result: [] },
+      { cmd: 'host_contributes_reconcile', result: { pluginId: 'com.example.formatter', declared: 1, registered: 1, missing: [], extra: [] } },
     ],
   });
   return { client: new HostClient({ backend }), backend };
@@ -138,6 +140,20 @@ describe('HostClient — 命令镜像与参数形状', () => {
     expect(inv?.args).toEqual({ entry: { kind: 'menu', id: 'a.menu', label: 'A' } });
     expect(inv?.args).not.toHaveProperty('pluginId');
     expect(inv?.args?.entry).not.toHaveProperty('pluginId');
+  });
+
+  it('contributesReconcile 是 self 档：无入参，身份由宿主从 label 解析（0.4-W3）', async () => {
+    // 对账的是"我自己声明了什么、注册了什么"——线形不带 pluginId，
+    // 否则任何插件都能去看别人的贡献清单。
+    const { client, backend } = pluginClient();
+    const report = await client.contributesReconcile();
+    const inv = backend.invocations.find((i) => i.cmd === 'host_contributes_reconcile');
+    expect(inv).toBeDefined();
+    expect(inv?.args).not.toHaveProperty('pluginId');
+    expect(inv?.args).not.toHaveProperty('entry');
+    // 无分叉时返回报告（分叉时宿主抛 E_CONTRIBUTES_DRIFT，诊断在 message 里）。
+    expect(report.declared).toBe(1);
+    expect(report.missing).toEqual([]);
   });
 
   it('eventsDrain 走 drain 命令，默认 request 通道', async () => {

@@ -1,7 +1,7 @@
 // wc-motion.ts 测试（P1-6 Splash 启动画面）
 // @vitest-environment happy-dom
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   SplashStore,
   DEFAULT_SPLASH_CONFIG,
@@ -245,5 +245,56 @@ describe('<oc-splash>', () => {
     expect(container?.hasAttribute('dangerouslySetInnerHTML')).toBe(false);
 
     el.remove();
+  });
+
+  // ── 观察者生命周期（此前 disconnectedCallback 根本断不掉它）──────────────
+  //
+  // `MutationObserver` 会强引用被观察节点：只在 connectedCallback 里 new 一个
+  // 局部变量、从不 disconnect，元素被摘掉后 observer ↔ 元素 这一对就永久悬着；
+  // 而且 `data-ready` 在游离节点上仍会触发 `_handleReady()`，作用在一个已经
+  // `destroy()` 过的 store 上。
+  it('disconnectedCallback 断开 data-ready 观察者', async () => {
+    const observeSpy = vi.spyOn(MutationObserver.prototype, 'observe');
+    const disconnectSpy = vi.spyOn(MutationObserver.prototype, 'disconnect');
+    try {
+      const el = document.createElement('oc-splash') as OcSplash;
+      el.store = new SplashStore({ enabled: false });
+      document.body.appendChild(el);
+      await el.updateComplete;
+      expect(observeSpy, '挂载时必须真的观察 data-ready').toHaveBeenCalled();
+
+      observeSpy.mockClear();
+      disconnectSpy.mockClear();
+      el.remove();
+      expect(disconnectSpy, '卸载时观察者必须被断开').toHaveBeenCalledTimes(1);
+    } finally {
+      observeSpy.mockRestore();
+      disconnectSpy.mockRestore();
+    }
+  });
+
+  it('重连：先断旧的再建新的，不叠加观察者', async () => {
+    const observeSpy = vi.spyOn(MutationObserver.prototype, 'observe');
+    const disconnectSpy = vi.spyOn(MutationObserver.prototype, 'disconnect');
+    try {
+      const el = document.createElement('oc-splash') as OcSplash;
+      el.store = new SplashStore({ enabled: false });
+      document.body.appendChild(el);
+      await el.updateComplete;
+
+      observeSpy.mockClear();
+      disconnectSpy.mockClear();
+      el.remove();
+      document.body.appendChild(el);
+      await el.updateComplete;
+
+      expect(disconnectSpy, '重连时必须先断开上一次的观察者').toHaveBeenCalledTimes(1);
+      expect(observeSpy, '重连后必须重新观察，且只观察一次').toHaveBeenCalledTimes(1);
+
+      el.remove();
+    } finally {
+      observeSpy.mockRestore();
+      disconnectSpy.mockRestore();
+    }
   });
 });

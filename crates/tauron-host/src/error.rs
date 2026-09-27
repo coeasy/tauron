@@ -85,6 +85,16 @@ pub enum ErrorCode {
     /// 新的结果；调用方的下一步动作也不同（去 `host_call_take` 取已结算的结果，
     /// 而不是放弃这次调用）。
     E_CALL_ALREADY_SETTLED,
+    /// manifest 声明的贡献与 activate 期实际注册的贡献不一致（0.4-W3）。
+    ///
+    /// **为什么是错误而不是"报告里的一个布尔位"**：`contributes` 是插件对外承诺的
+    /// 扩展点清单（命令面板 / 菜单 / 面板 / 设置 Tab 都从它派生 UI）。声明了却没注册
+    /// = 用户能看到入口但点了没反应；注册了却没声明 = 存在一个来源不明的入口。
+    /// 两者都是「宣称」与「事实」的落差，必须显式失败，不能被调用方当成成功忽略。
+    ///
+    /// **不是** `E_INVALID_MANIFEST`：manifest 本身合法（`Contributes::validate` 已过），
+    /// 不一致发生在**运行期注册**与声明之间——是"没做到"，不是"写错了"。
+    E_CONTRIBUTES_DRIFT,
 }
 
 impl ErrorCode {
@@ -120,6 +130,7 @@ impl fmt::Display for ErrorCode {
             Self::E_LEASE_EXPIRED => write!(f, "E_LEASE_EXPIRED"),
             Self::E_STREAM_FULL => write!(f, "E_STREAM_FULL"),
             Self::E_CALL_ALREADY_SETTLED => write!(f, "E_CALL_ALREADY_SETTLED"),
+            Self::E_CONTRIBUTES_DRIFT => write!(f, "E_CONTRIBUTES_DRIFT"),
         }
     }
 }
@@ -211,6 +222,15 @@ mod tests {
         assert!(ErrorCode::E_HOST_PANIC.retryable());
         assert!(!ErrorCode::E_INVALID_MANIFEST.retryable());
         assert!(!ErrorCode::E_ABI_MISMATCH.retryable());
+        // 声明/事实不一致是**确定性**故障：重试不会让缺失的注册出现。
+        assert!(!ErrorCode::E_CONTRIBUTES_DRIFT.retryable());
+    }
+
+    #[test]
+    fn contributes_drift_uses_its_wire_name() {
+        assert_eq!(format!("{}", ErrorCode::E_CONTRIBUTES_DRIFT), "E_CONTRIBUTES_DRIFT");
+        let s = serde_json::to_string(&ErrorCode::E_CONTRIBUTES_DRIFT).unwrap();
+        assert_eq!(s, "\"E_CONTRIBUTES_DRIFT\"");
     }
 
     #[test]

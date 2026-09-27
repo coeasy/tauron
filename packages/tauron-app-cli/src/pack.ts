@@ -645,8 +645,30 @@ export function generatePackManifest(config: ResolvedPackConfig): string {
  *
  * 该定义是本包与市场之间的**唯一**载荷约定（改名/改序即协议破坏）。
  */
-export function signPayload(files: PluginFileInfo[]): Uint8Array {
-  return new TextEncoder().encode(files.map((f) => f.hash).join(''));
+/** 载荷版本头（与 Rust `tauron_market::package_signature::SIGNING_PAYLOAD_HEADER` 逐字一致）。 */
+export const SIGNING_PAYLOAD_HEADER = 'tauron-tpkg-sig-v2';
+
+/**
+ * 构造**规范化签名载荷 v2**（1.0-W6）。
+ *
+ * 与 Rust 侧 `signing_payload` 必须产生**逐字节相同**的输出：
+ * 版本头 + 三行元数据 + 每文件一行 `path\tsize\thash`，行分隔 `\n`，末尾带换行。
+ *
+ * **v1 的缺陷**：旧载荷只拼接文件哈希，`algorithm` / `kid` / `issuedAt` 不在签名内
+ * ——`issuedAt` 可被改写以绕过有效期，`kid`（指向哪把密钥）也不受保护。
+ */
+export function signPayload(
+  files: PluginFileInfo[],
+  meta: { algorithm: string; kid: string; issuedAt: string },
+): Uint8Array {
+  const lines = [
+    SIGNING_PAYLOAD_HEADER,
+    `algorithm=${meta.algorithm}`,
+    `kid=${meta.kid}`,
+    `issuedAt=${meta.issuedAt}`,
+    ...files.map((f) => `${f.path}\t${f.size}\t${f.hash}`),
+  ];
+  return new TextEncoder().encode(`${lines.join('\n')}\n`);
 }
 
 /**
@@ -697,14 +719,18 @@ export async function pluginSign(config: SignConfig, files: PluginFileInfo[]): P
         `签名算法 ${validated.algorithm} 未接线：@tauron/market 仅实现 ed25519`,
       );
     }
+    // **先定时间戳，再签名**（1.0-W6）：`issuedAt` 现在**进签名**，因此载荷里的
+    // 时间必须与写进 sidecar 的时间**完全一致**。此前依赖 `marketSign` 返回值里的
+    // `signedAt`，那是签名**之后**才产生的，无法参与载荷。
+    const issuedAt = new Date().toISOString();
     const signed = await marketSign(
-      signPayload(files),
+      signPayload(files, { algorithm: validated.algorithm, kid: validated.kid, issuedAt }),
       toPkcs8PrivateKeyHex(validated.privateKey),
     );
     const signature: PluginSignature = {
       algorithm: validated.algorithm,
       kid: validated.kid,
-      issuedAt: signed.signedAt,
+      issuedAt,
       signature: signed.signature,
       files,
     };
@@ -732,7 +758,11 @@ export async function verifySignatureCrypto(
     throw new Error(`@tauron/market 仅实现 ed25519，无法验证 ${signature.algorithm} 签名`);
   }
   return marketVerify(
-    signPayload(signature.files),
+    signPayload(signature.files, {
+      algorithm: signature.algorithm,
+      kid: signature.kid,
+      issuedAt: signature.issuedAt,
+    }),
     signature.signature,
     toSpkiPublicKeyHex(publicKey),
   );

@@ -35,7 +35,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use tauron_host::{
-    call_delivery::{CallDelivery, DeliveryKind, JsCallDelivery, select_delivery},
+    call_delivery::{CallDelivery, CallOutcome, DeliveryKind, JsCallDelivery, select_delivery},
     eventbus::{ChannelKind, EventBus, Frame, PublishResult, SubscribeOutcome},
     guard,
     lifecycle::{Event, State as LifecycleStateName, TransitionOutcome},
@@ -481,6 +481,7 @@ pub const PLUGIN_RUNTIME_COMMANDS: &[&str] = &[
     "host_registry_admin",
     "host_contributes_register",
     "host_contributes_list",
+    "host_contributes_reconcile",
     "host_recover_trial_enable",
     "host_stream_open",
     "host_stream_write",
@@ -916,6 +917,12 @@ pub struct SubstrateState {
     pub settings: Arc<Mutex<SettingsStore>>,
     /// 设置文档的落盘位置（`None` = 纯内存，重启即丢）。
     pub settings_path: Option<std::path::PathBuf>,
+    /// **只写不读**的兼容通知日志（R8 之前的 `host_notify` 产物）。
+    ///
+    /// ⚠️ **接入状态：没有任何命令返回它**——`host_notify` 返回 `void`，
+    /// 通知中心的读取端是 [`SubstrateState::notify_store`]（`host_notifications_list`）。
+    /// 因此它是有上限的兼容缓冲（见 [`cmd_notify`] 的环形裁剪），前端
+    /// `shell-client.ts` 的 `NotificationRecord` 注释也自认"它今天不在线上"。
     pub notifications: Arc<Mutex<Vec<NotificationRecord>>>,
     /// 通知存储（P0-5：对接 tauron-notify crate）。
     pub notify_store: Arc<Mutex<NotifyStore>>,
@@ -1259,6 +1266,23 @@ pub struct GroupSubscription {
     pub tokens: Vec<String>,
 }
 
+/// §8-17 授权档位表的**生产自检入口**（解 P1-10）。
+///
+/// `tauron_host::authz::{COMMANDS, ADMIN_COMMANDS}` 是编译期常量表：若有空字段或
+/// 重复命令，属**构建缺陷**——授权层对某条命令没有定义，是安全相关的坏状态。
+/// 此前 `validate_command_registry` 只在测试里被调用（生产零调用），表错了要等到
+/// 有人写测试才暴露。本函数让底座装配**每次进程只跑一次**校验：
+///
+/// - `OnceLock` 缓存结果：静态表不需要每次构造状态都重算；
+/// - 结果可读（测试可断言 `is_ok()`），因此这条链路是**可测的生产调用**，不是
+///   只在 `#[cfg(test)]` 里存在的摆设。
+fn authz_table_selfcheck() -> &'static Result<(), String> {
+    static CHECK: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    CHECK.get_or_init(|| {
+        tauron_host::authz::validate_command_registry().map_err(|e| e.message)
+    })
+}
+
 impl SubstrateState {
     /// 底座装配：恢复持久化 + i18n + origin 清单 + 通知存储。
     ///
@@ -1273,6 +1297,13 @@ impl SubstrateState {
     /// **不消费 `cfg.registry`**：注册表属插件运行时（[`PluginRuntimeState`]），
     /// 底座装配不该顺带建一份——那正是 R1 要拆掉的东西。
     pub fn with_adapter_config(cfg: &AdapterConfig) -> Self {
+        // §8-17 生产自检（P1-10）：档位表是构建期常量，错了就是构建缺陷。
+        // 失败**立即 panic**（与同一构造函数里 `NotifyStore::new(512).expect(..)` 的
+        // 失败姿态一致）——让缺陷在第一次启动就暴露，而不是带病运行到越权发生。
+        if let Err(msg) = authz_table_selfcheck() {
+            panic!("[tauron] 授权档位表自检失败（§8-17 构建缺陷）：{msg}");
+        }
+
         let notify_store = NotifyStore::new(512).expect("NotifyStore::new(512) should succeed");
 
         let mut store = match cfg.recovery_data_dir.clone() {
@@ -1461,12 +1492,7 @@ impl PluginRuntimeState {
             }
         };
         let entry = self.registry.require(&target)?;
-        let kind = match entry.manifest.plugin_type {
-            PluginType::Js => DeliveryKind::Js,
-            PluginType::Process => DeliveryKind::Process,
-            PluginType::Rust => DeliveryKind::Native,
-            PluginType::Wasm => DeliveryKind::Wasm,
-        };
+        let kind = delivery_kind_of(entry.manifest.plugin_type);
         let delivery = select_delivery(kind, &self.deliveries);
         let receipt = delivery.deliver(call)?;
         if receipt.delivered {
@@ -1479,6 +1505,31 @@ impl PluginRuntimeState {
         }
     }
 
+    /// 按目标插件形态选投递实现并**结算**（与 [`Self::deliver_call`] 对称）。
+    ///
+    /// 为什么结算也必须走投递表：`CallDelivery` 是「一次调用的通路」的唯一抽象面，
+    /// 投递与结算是同一条通路的两端。结算若绕开投递表直连
+    /// [`Registry::settle_call`](tauron_host::registry::Registry::settle_call)，
+    /// `CallDelivery::settle` 上的语义（`UnwiredDelivery` 的诚实拒绝、未来 Process
+    /// 形态按 sidecar 协议解析回执）就成了**永远不会被执行的孤儿分支**——写的人
+    /// 以为它生效，实际任何形态的结算都走另一条直连。
+    ///
+    /// 兜底：目标插件已不在注册表（卸载后仍残留的 pending call）时直接走注册表结算
+    /// ——投递实现只是"按形态分流"，形态信息消失不该让发起方拿不到结果。
+    pub fn settle_call_for(
+        &self,
+        target: &str,
+        call_id: &str,
+        outcome: CallOutcome,
+    ) -> HostResult<PendingCall> {
+        let entry = PluginId::new(target).ok().and_then(|id| self.registry.require(&id).ok());
+        let Some(entry) = entry else {
+            return self.registry.settle_call(call_id, outcome);
+        };
+        let kind = delivery_kind_of(entry.manifest.plugin_type);
+        select_delivery(kind, &self.deliveries).settle(call_id, outcome)
+    }
+
     /// 自建底座 + 注入进程启动面（测试用；恢复持久化关闭）。
     pub fn with_spawner(spawner: Arc<dyn ProcSpawner>) -> Self {
         Self::with_substrate_and_spawner(
@@ -1486,6 +1537,19 @@ impl PluginRuntimeState {
             AdapterConfig::default(),
             spawner,
         )
+    }
+}
+
+/// 插件形态 → 投递实现键。
+///
+/// **投递侧与结算侧共用**这一个映射：两处各写一遍 `match` 就会漂移，届时
+/// 「投递走 Js、结算走 Unwired」这种半通半断的链路没有任何测试能提前发现。
+fn delivery_kind_of(plugin_type: PluginType) -> DeliveryKind {
+    match plugin_type {
+        PluginType::Js => DeliveryKind::Js,
+        PluginType::Process => DeliveryKind::Process,
+        PluginType::Rust => DeliveryKind::Native,
+        PluginType::Wasm => DeliveryKind::Wasm,
     }
 }
 
@@ -1538,6 +1602,26 @@ mod substrate_only_tests {
 
         // 插件侧写回口未注入 → 对账无事可做（空结果，而不是 panic 或静默失败）。
         assert!(state.plugin_flags.get().is_none(), "底座-only 装配不得注入插件侧写回口");
+    }
+
+    /// P1-10 回归：授权档位表自检必须是**生产调用**（构造状态就会跑），
+    /// 且结果是可读的（不是只在 `#[cfg(test)]` 里存在的摆设）。
+    ///
+    /// 断链回归：`validate_command_registry` 此前只在测试里被调用——档位表写错了
+    /// （空字段 / 重复命令）要等到有人写测试才暴露。现在构造任何底座状态都会跑它。
+    #[test]
+    fn authz_table_selfcheck_is_wired_into_production_construction() {
+        // 构造一次底座即触发自检（panic 就不会走到这里）。
+        let _ = SubstrateState::with_adapter_config(&AdapterConfig::default());
+        let checked = authz_table_selfcheck();
+        assert!(
+            checked.is_ok(),
+            "内置授权档位表必须自洽（§8-17）：{:?}",
+            checked.as_ref().err()
+        );
+        // 自检对象确实是 canonical 的命令面（不是空表通过）。
+        assert!(tauron_host::authz::COMMANDS.len() >= 15);
+        assert!(!tauron_host::authz::ADMIN_COMMANDS.is_empty());
     }
 
     /// 插件运行时装配会注入写回口，且**共享同一份底座**（不是两份状态）。
@@ -1993,6 +2077,11 @@ fn registry_install_inner(
     let unpack_result = (|| -> HostResult<()> {
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&archive))
             .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("打开包失败：{e}")))?;
+        // 解包常量（条目数 / 单文件 / 解压总量 / 压缩比）与路径清洗**不在这里**
+        // 重复实现：它们在 `read_verified_package` → `verify_tpkg` →
+        // `package_signature::verify_package_against_zip` 里已经强制过一遍，
+        // 而且那边还额外做了「每个条目必须被签名」与逐文件哈希比对。这里再写一份
+        // 只会变成两处各自演化的策略副本（本仓已经因为这种副本吃过亏）。
         for i in 0..zip.len() {
             let mut entry = zip
                 .by_index(i)
@@ -2188,6 +2277,12 @@ pub fn cmd_registry_admin(
         //   未读计数永远膨胀、通知中心显示死条目）；
         state.notify_store.lock().cleanup_plugin(plugin_id);
         state.recovery.lock().remove_plugin(plugin_id);
+        // - 进程侧崩溃窗口（`ProcRuntime` 的 `CrashTracker`，同样**以插件 id 为键**）。
+        //   注册表条目在上一步已被删掉，重装同名插件是被允许的——残留会让"修好的
+        //   新版本"一上来就撞上旧版本的崩溃预算（5 分钟窗口内直接拒绝
+        //   `host_runtime_spawn`），表现为"刚装的插件永远起不来"。
+        //   `Enable`（人工确认路径）会清它，但卸载是**另一条出口**，两条都要清。
+        state.proc_runtime.reset_crashes(plugin_id);
     }
 
     // **人工确认的唯一出口**（P0-2 崩溃预算）：Enable 是宿主 UI 的显式动作，
@@ -2436,9 +2531,13 @@ fn stage_install_cleanup(
 ///
 /// 身份从 webview label 解析，忽略入参 pluginId（§2.1）。
 ///
-/// 上报后做一次恢复阶段对账：插件进入注册表（`InstallOk`）或自报启用后，若
-/// 当前处于安全模式且该插件非必需，`SafemodeEnter` 会立刻把它标记为禁用——
-/// 恢复判定优先于插件自己的上报。
+/// **事件必须落在 [`tauron_host::lifecycle::Event::PLUGIN_REPORTABLE`] 内**——
+/// 越权事件（`Enable`/`SafemodeExit`/`Uninstall`/`InstallOk` 等）在
+/// `Registry::lifecycle_report` 里以 `E_AUTH_DENIED` 拒绝。这道闸不在本函数里
+/// 补一遍，是为了让**所有** self 档调用点共用同一份白名单。
+///
+/// 上报后做一次恢复阶段对账：插件自报启用后若当前处于安全模式且该插件非必需，
+/// `SafemodeEnter` 会立刻把它标记为禁用——恢复判定优先于插件自己的上报。
 pub fn cmd_lifecycle_report(
     state: &PluginRuntimeState,
     webview_label: &str,
@@ -2535,9 +2634,10 @@ pub fn cmd_call_result(
                 ),
             ));
         }
-        state.registry.settle_call(
+        state.settle_call_for(
+            &target,
             call_id,
-            tauron_host::call_delivery::CallOutcome { ok, result, error_code },
+            CallOutcome { ok, result, error_code },
         )
     })?
 }
@@ -3912,6 +4012,117 @@ pub fn cmd_contributes_list(
     })?
 }
 
+/// 贡献对账结果（`host_contributes_reconcile` 成功时的返回体）。
+///
+/// 只在**无分叉**时返回（有分叉走 `E_CONTRIBUTES_DRIFT`），因此 `missing` / `extra`
+/// 按构造恒为空——保留字段是为了让线格式与错误消息里的诊断信息同形，
+/// 调用方不必按分支读两种形状。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContributesReconcileReport {
+    /// 被对账的插件 id。
+    pub plugin_id: String,
+    /// manifest 声明的贡献数（`kind:id` 去重后）。
+    pub declared: usize,
+    /// activate 期实际注册的贡献数（`kind:id` 去重后）。
+    pub registered: usize,
+    /// 声明了但没注册的 `kind:id`（成功时恒为空）。
+    pub missing: Vec<String>,
+    /// 注册了但没声明的 `kind:id`（成功时恒为空）。
+    pub extra: Vec<String>,
+}
+
+/// 把 manifest 的 `Contributes` 摊平成 `kind:id` 键集。
+///
+/// **kind 词汇与 `@tauron/app-plugin-sdk` 的 `createPlugin` 必须一致**
+/// （`command` / `menu` / `panel` / `settings` / `shortcut`），否则对账会把
+/// 每一对都报成分叉。两处漂移由 wire-gate 的 `contributes` 门禁钉住。
+///
+/// **shortcut 的 id 用 `command`**：快捷键没有天然 id（与 `createPlugin` 同口径），
+/// 因此「同一条命令绑两个加速键」在声明侧只算一条——这不是缺陷，是两侧共同的有损
+/// 映射；用 `BTreeSet` 去重后两侧口径一致。
+pub fn declared_contribute_keys(contributes: &tauron_host::manifest::Contributes) -> std::collections::BTreeSet<String> {
+    let mut keys = std::collections::BTreeSet::new();
+    for c in &contributes.commands {
+        keys.insert(format!("command:{}", c.id));
+    }
+    for m in &contributes.menus {
+        keys.insert(format!("menu:{}", m.id));
+    }
+    for p in &contributes.panels {
+        keys.insert(format!("panel:{}", p.id));
+    }
+    for t in &contributes.settings_tabs {
+        keys.insert(format!("settings:{}", t.id));
+    }
+    for s in &contributes.shortcuts {
+        keys.insert(format!("shortcut:{}", s.command));
+    }
+    keys
+}
+
+/// `host_contributes_reconcile`：对账「manifest 声明」与「activate 期注册」。
+///
+/// 这是 P0-6 的收口：`host_contributes_register` 过去只是往 `Vec` 里增删，
+/// **没有任何东西比对声明与事实**——声明了却漏注册（入口点了没反应）与注册了
+/// 却没声明（来源不明的入口）都无人发现。本函数把这份落差变成可检出的错误。
+///
+/// 纯只读（不改任何状态），因此可在安装完成 / 启用 / 列表三个触发点安全调用。
+pub fn cmd_contributes_reconcile(
+    state: &PluginRuntimeState,
+    plugin_id: &str,
+) -> HostResult<ContributesReconcileReport> {
+    guard("contributes_reconcile", || {
+        let id = tauron_host::manifest::PluginId::new(plugin_id).map_err(|_| {
+            HostError::new(
+                ErrorCode::E_UNKNOWN_PLUGIN,
+                format!("插件 id `{plugin_id}` 不合法，无法对账贡献"),
+            )
+        })?;
+        // 声明面来自注册表里的 manifest。不在注册表 = 无从对账（不是"零分叉"）：
+        // 静默返回空报告会让调用方以为"对过账了，没问题"。
+        let entry = state.registry.find(&id).ok_or_else(|| {
+            HostError::new(
+                ErrorCode::E_UNKNOWN_PLUGIN,
+                format!("插件 `{plugin_id}` 不在注册表中，无法对账贡献声明"),
+            )
+        })?;
+        let declared = declared_contribute_keys(&entry.manifest.contributes);
+        // 事实面来自贡献表（只看该插件自己的条目）。
+        let registered: std::collections::BTreeSet<String> = state
+            .contributes
+            .lock()
+            .list_all()
+            .iter()
+            .filter(|e| e.plugin_id == plugin_id)
+            .map(|e| format!("{}:{}", e.kind, e.id))
+            .collect();
+
+        let missing: Vec<String> = declared.difference(&registered).cloned().collect();
+        let extra: Vec<String> = registered.difference(&declared).cloned().collect();
+        if !missing.is_empty() || !extra.is_empty() {
+            return Err(HostError::new(
+                ErrorCode::E_CONTRIBUTES_DRIFT,
+                format!(
+                    "插件 `{plugin_id}` 的贡献声明与注册不一致：声明 {} 条 / 注册 {} 条；\
+                     声明了但没注册 {:?}；注册了但没声明 {:?}",
+                    declared.len(),
+                    registered.len(),
+                    missing,
+                    extra
+                ),
+            ));
+        }
+        Ok(ContributesReconcileReport {
+            plugin_id: plugin_id.to_string(),
+            declared: declared.len(),
+            registered: registered.len(),
+            missing,
+            extra,
+        })
+    })?
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // 启动恢复（§4.14：持久化 + 崩溃检测 + 驱动信号）
 // ──────────────────────────────────────────────────────────────────────────
@@ -4752,12 +4963,22 @@ pub fn cmd_window_create_as(
 #[derive(Debug, Clone, Default)]
 pub struct ShellExtState {
     /// 窗口几何 (x, y, width, height)：由 set_position/set_size 更新。
+    ///
+    /// ⚠️ **接入状态：今天没有任何生产读取方**（全仓只有本文件单测读它）。
+    /// 窗口几何的**持久化与恢复在前端**：`@tauron/host` 的 `window-state.ts`
+    /// 把它存在 `localStorage`，恢复时经 `host_window_set_position/_set_size`
+    /// 回写平台。因此它是"进程内几何账本"，不是恢复链路的读取来源——不要据它
+    /// 推断"窗口状态恢复读宿主"。
     pub window_rect: (i32, i32, u32, u32),
     /// 进程内剪贴板文本。
     pub clipboard: String,
     /// 已注册的深链接协议（None = 未注册）。
     pub deep_link_protocol: Option<String>,
     /// 更新状态机：None → downloaded → installed。
+    ///
+    /// ⚠️ **接入状态：今天没有任何生产读取方**（只有单测读它）。前端的更新状态
+    /// 机是 `auto-update-client.ts` 自持的 `UpdateStatus`，不消费本字段；
+    /// 路线图 M-8（`docs/architecture/multi-plugin-substrate-roadmap.md`）登记为待接线桩。
     pub update_state: Option<String>,
     /// **origin 允许清单（R4-D2）**：由 [`AdapterConfig::origin_allowlist`] 装配，
     /// 由 `tauri::origin_gate` 在命令分发入口读取。空 = 不启用。
@@ -4776,7 +4997,8 @@ pub struct ShellExtState {
 /// `host_window_set_position`：移动调用方窗口到 `(x, y)`（逻辑像素/DIP）。
 ///
 /// **两件事，都要做**（R8）：
-/// 1. 写 `shell_ext.window_rect` —— 进程内的几何账本（窗口状态恢复读它）；
+/// 1. 写 `shell_ext.window_rect` —— 进程内的几何账本（**无生产读取方**；
+///    持久化与恢复在前端 `window-state.ts`，见该字段的接入状态说明）；
 /// 2. 转调 [`SubstrateState::window_sink`] 执行真实移动。
 ///
 /// 只做 1 = 几何只在账本里变了（R8 之前的桩就是这样）；只做 2 = 账本失真。
@@ -5257,10 +5479,11 @@ mod tests {
         let full = cmd_host_capabilities(&plugin_runtime).unwrap();
         assert!(full.plugin_runtime);
         #[cfg(feature = "plugin-install")]
-        let expected = 59 + PLUGIN_INSTALL_COMMANDS.len();
+        let expected = 60 + PLUGIN_INSTALL_COMMANDS.len();
         #[cfg(not(feature = "plugin-install"))]
-        // 59 = 56（0.4-A1 之前）+ host_call_plugin / host_call_result / host_call_take。
-        let expected = 59;
+        // 60 = 56（0.4-A1 之前）+ host_call_plugin / host_call_result / host_call_take
+        //      + host_contributes_reconcile（0.4-W3）。
+        let expected = 60;
         assert_eq!(full.commands.len(), expected);
         assert_eq!(full.commands.iter().collect::<std::collections::HashSet<_>>().len(), expected);
         for domain in
@@ -5304,15 +5527,61 @@ mod tests {
         }
     }
 
+    /// 把一组文件打成**签名合法**的 `.tpkg`（+ 同名 `.sig`）。
+    ///
+    /// 签名载荷是 **v2 规范化文本**（元数据 + path/size/hash），由
+    /// `signing_payload` 单一生成——测试 fixture 必须用同一个函数，
+    /// 否则会退回"手搓载荷"的旧形态（那正是 v1 的缺陷来源）。
     #[cfg(feature = "plugin-install")]
-    fn signed_install_fixture(
+    fn signed_tpkg(
         dir: &std::path::Path,
         id: &str,
+        files: &[(String, Vec<u8>)],
     ) -> (std::path::PathBuf, ed25519_dalek::VerifyingKey) {
         use ed25519_dalek::{Signer, SigningKey};
         use sha2::{Digest, Sha256};
         use zip::write::SimpleFileOptions;
 
+        let signed_files: Vec<tauron_market::package_signature::SignedFile> = files
+            .iter()
+            .map(|(path, bytes)| tauron_market::package_signature::SignedFile {
+                path: path.clone(),
+                size: bytes.len() as u64,
+                hash: hex::encode(Sha256::digest(bytes)),
+            })
+            .collect();
+        let issued_at = "2026-09-26T00:00:00Z";
+        let payload = tauron_market::package_signature::signing_payload(
+            "ed25519",
+            "fixture-key",
+            issued_at,
+            &signed_files,
+        );
+        let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+        let signature = signing_key.sign(&payload);
+        let sidecar = serde_json::json!({
+            "algorithm": "ed25519", "kid": "fixture-key", "issuedAt": issued_at,
+            "signature": hex::encode(signature.to_bytes()), "files": signed_files,
+        });
+
+        let package = dir.join(format!("{id}.tpkg"));
+        let file = std::fs::File::create(&package).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        for (path, bytes) in files {
+            archive.start_file(path.as_str(), SimpleFileOptions::default()).unwrap();
+            std::io::Write::write_all(&mut archive, bytes).unwrap();
+        }
+        archive.finish().unwrap();
+        std::fs::write(format!("{}.sig", package.display()), sidecar.to_string()).unwrap();
+        (package, signing_key.verifying_key())
+    }
+
+    /// 标准三文件安装包（manifest + entry js + index.html）。
+    #[cfg(feature = "plugin-install")]
+    fn signed_install_fixture(
+        dir: &std::path::Path,
+        id: &str,
+    ) -> (std::path::PathBuf, ed25519_dalek::VerifyingKey) {
         let manifest = serde_json::json!({
             "id": id,
             "name": "Install Fixture",
@@ -5323,42 +5592,121 @@ mod tests {
             "framework": ">=0.1.0, <0.2.0"
         });
         let files = vec![
-            ("manifest.json", serde_json::to_vec(&manifest).unwrap()),
-            ("src/index.js", b"export const activate = () => true;".to_vec()),
-            ("index.html", b"<!doctype html><html><body>plugin</body></html>".to_vec()),
+            ("manifest.json".to_string(), serde_json::to_vec(&manifest).unwrap()),
+            ("src/index.js".to_string(), b"export const activate = () => true;".to_vec()),
+            (
+                "index.html".to_string(),
+                b"<!doctype html><html><body>plugin</body></html>".to_vec(),
+            ),
         ];
-        let signed_files: Vec<serde_json::Value> = files
-            .iter()
-            .map(|(path, bytes)| {
-                serde_json::json!({
-                    "path": path,
-                    "size": bytes.len(),
-                    "hash": hex::encode(Sha256::digest(bytes)),
-                })
-            })
-            .collect();
-        let payload: Vec<u8> = signed_files
-            .iter()
-            .map(|file| file["hash"].as_str().unwrap().as_bytes().to_vec())
-            .flatten()
-            .collect();
-        let signing_key = SigningKey::from_bytes(&[7u8; 32]);
-        let signature = signing_key.sign(&payload);
-        let sidecar = serde_json::json!({
-            "algorithm": "ed25519", "kid": "fixture-key", "issuedAt": "2026-09-26T00:00:00Z",
-            "signature": hex::encode(signature.to_bytes()), "files": signed_files,
-        });
+        signed_tpkg(dir, id, &files)
+    }
 
-        let package = dir.join(format!("{id}.tpkg"));
-        let file = std::fs::File::create(&package).unwrap();
-        let mut archive = zip::ZipWriter::new(file);
-        for (path, bytes) in files {
-            archive.start_file(path, SimpleFileOptions::default()).unwrap();
-            std::io::Write::write_all(&mut archive, &bytes).unwrap();
+    /// 给定签名密钥建一个可安装的宿主状态 + 安装根目录。
+    #[cfg(feature = "plugin-install")]
+    fn install_state(
+        install_root: std::path::PathBuf,
+        verifying_key: &ed25519_dalek::VerifyingKey,
+    ) -> PluginRuntimeState {
+        let mut signing_keys = std::collections::BTreeMap::new();
+        signing_keys.insert("fixture-key".to_string(), verifying_key.to_bytes().to_vec());
+        PluginRuntimeState::with_adapter_config(AdapterConfig {
+            plugin_install_dir: Some(install_root),
+            plugin_signing_keys: signing_keys,
+            acl_signing_key: Some(vec![0x5a; 32]),
+            ..AdapterConfig::default()
+        })
+    }
+
+    /// 解包防护（端到端回归锁）：条目数超上限的包必须被拒绝。
+    ///
+    /// **强制点不在适配层**——在 `read_verified_package` → `verify_tpkg` →
+    /// `package_signature::verify_package_against_zip`（`zip.len() > MAX_ENTRIES`、
+    /// 逐条目 `sanitize_entry_path`、单文件/解压总量上限、逐文件哈希比对）。
+    /// 本测试锁的是**安装这条链路整体**的行为：拒绝、且不留任何半截产物。
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn install_rejects_package_exceeding_entry_count_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("plugins");
+        let manifest = serde_json::json!({
+            "id": "com.install.bomb",
+            "name": "Bomb",
+            "version": "1.0.0",
+            "type": "js",
+            "entry": { "js": "src/index.js", "ui": "index.html" },
+            "permissions": [],
+            "framework": ">=0.1.0, <0.2.0"
+        });
+        let mut files = vec![
+            ("manifest.json".to_string(), serde_json::to_vec(&manifest).unwrap()),
+            ("src/index.js".to_string(), b"export const activate = () => true;".to_vec()),
+            ("index.html".to_string(), b"<!doctype html>".to_vec()),
+        ];
+        // MAX_ENTRIES 条填充 → 总数 MAX_ENTRIES + 3 > 上限。
+        for i in 0..tauron_market::MAX_ENTRIES {
+            files.push((format!("junk/{i}.txt"), b"x".to_vec()));
         }
-        archive.finish().unwrap();
-        std::fs::write(format!("{}.sig", package.display()), sidecar.to_string()).unwrap();
-        (package, signing_key.verifying_key())
+        let (package, verifying_key) = signed_tpkg(dir.path(), "com.install.bomb", &files);
+        let state = install_state(install_root.clone(), &verifying_key);
+
+        let err = cmd_registry_install_as(
+            &Caller::MainWindow,
+            &state,
+            package.to_str().unwrap(),
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_INSTALL_FAILED, "{}", err.message);
+        assert!(!install_root.join("com.install.bomb").exists(), "拒绝后不得留下安装目录");
+        assert!(state.registry.find(&PluginId::new("com.install.bomb").unwrap()).is_none());
+        // 临时目录也必须清干净（安装目录里除了刚建的 root 之外不该有残留）。
+        let leftovers: Vec<_> = std::fs::read_dir(&install_root)
+            .map(|it| it.filter_map(|e| e.ok().map(|e| e.file_name())).collect())
+            .unwrap_or_default();
+        assert!(leftovers.is_empty(), "解包失败后残留了临时目录：{leftovers:?}");
+    }
+
+    /// 解包防护（端到端回归锁）：含 `..` 的条目必须被拒绝，且**不得有任何文件
+    /// 落到安装根之外**。
+    ///
+    /// 强制点同上（`package_signature::verify_package_against_zip` 里的
+    /// `sanitize_entry_path`）。这里锁的是「逃逸不成立」这个可观测事实。
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn install_rejects_path_traversal_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("plugins");
+        let manifest = serde_json::json!({
+            "id": "com.install.traverse",
+            "name": "Traverse",
+            "version": "1.0.0",
+            "type": "js",
+            "entry": { "js": "src/index.js", "ui": "index.html" },
+            "permissions": [],
+            "framework": ">=0.1.0, <0.2.0"
+        });
+        let files = vec![
+            ("manifest.json".to_string(), serde_json::to_vec(&manifest).unwrap()),
+            ("src/index.js".to_string(), b"export const activate = () => true;".to_vec()),
+            ("index.html".to_string(), b"<!doctype html>".to_vec()),
+            ("../escape.txt".to_string(), b"pwned".to_vec()),
+        ];
+        let (package, verifying_key) = signed_tpkg(dir.path(), "com.install.traverse", &files);
+        let state = install_state(install_root.clone(), &verifying_key);
+
+        let err = cmd_registry_install_as(
+            &Caller::MainWindow,
+            &state,
+            package.to_str().unwrap(),
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_INSTALL_FAILED, "{}", err.message);
+        assert!(err.message.contains("恶意路径"), "错误消息应点名恶意路径：{}", err.message);
+        assert!(!install_root.join("com.install.traverse").exists());
+        assert!(!install_root.join("escape.txt").exists(), "逃逸文件不得落盘");
+        assert!(!dir.path().join("escape.txt").exists(), "逃逸文件不得落到安装根之外");
     }
 
     #[cfg(feature = "plugin-install")]
@@ -5554,7 +5902,7 @@ mod tests {
     #[test]
     fn cmd_lifecycle_report_unknown_label() {
         let state = CommandState::new();
-        let result = cmd_lifecycle_report(&state, "plugin-test.nonexistent", None, Event::Enable);
+        let result = cmd_lifecycle_report(&state, "plugin-test.nonexistent", None, Event::Attach);
         assert!(result.is_err());
         // label_to_plugin_id 应解析成功，但 registry 中没有该插件
         assert_eq!(result.unwrap_err().code, ErrorCode::E_UNKNOWN_PLUGIN);
@@ -5563,9 +5911,33 @@ mod tests {
     #[test]
     fn cmd_lifecycle_report_forged_identity() {
         let state = CommandState::new();
-        let result = cmd_lifecycle_report(&state, "plugin-p.real", Some("p.fake"), Event::Enable);
+        let result = cmd_lifecycle_report(&state, "plugin-p.real", Some("p.fake"), Event::Attach);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ErrorCode::E_AUTH_DENIED);
+    }
+
+    #[test]
+    fn cmd_lifecycle_report_rejects_privileged_events_before_lookup() {
+        // self 档白名单在适配器边界同样生效。断言错误码是 `E_AUTH_DENIED` 而不是
+        // `E_UNKNOWN_PLUGIN`：说明白名单判定发生在注册表查表**之前**——它是权限闸，
+        // 不是查表失败。插件不得自报用户放行（Enable）、自己解禁（SafemodeExit）、
+        // 伪造安装结果（InstallOk）、或把自己推进终态（Uninstall）。
+        let state = CommandState::new();
+        for ev in [
+            Event::Enable,
+            Event::Disable,
+            Event::TrialEnable,
+            Event::SafemodeEnter,
+            Event::SafemodeExit,
+            Event::InstallStart,
+            Event::InstallOk,
+            Event::InstallFail,
+            Event::Uninstall,
+            Event::Purge,
+        ] {
+            let err = cmd_lifecycle_report(&state, "plugin-p.any", None, ev).unwrap_err();
+            assert_eq!(err.code, ErrorCode::E_AUTH_DENIED, "{ev} 应被 self 档白名单拒绝");
+        }
     }
 
     #[test]
@@ -7898,6 +8270,174 @@ mod tests {
         assert_eq!(commands[0].id, "cmd1");
     }
 
+    // ── 0.4-W3：贡献对账（声明 vs 注册）───────────────────────────
+
+    /// 造一个「声明了 N 条贡献」的 manifest（`kind:id` 与 `createPlugin` 同口径）。
+    fn manifest_with_contributes(id: &str, contributes: tauron_host::manifest::Contributes) -> PluginManifest {
+        let mut m = test_manifest(id);
+        m.contributes = contributes;
+        m
+    }
+
+    fn declared_commands(ids: &[&str]) -> tauron_host::manifest::Contributes {
+        tauron_host::manifest::Contributes {
+            commands: ids
+                .iter()
+                .map(|id| tauron_host::manifest::CommandContribute {
+                    id: (*id).to_string(),
+                    title: format!("T {id}"),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn declared_contribute_keys_maps_all_five_kinds() {
+        // kind 词汇必须与 `@tauron/app-plugin-sdk` 的 createPlugin 一致，
+        // 否则对账会把每一对都报成分叉。
+        let c = tauron_host::manifest::Contributes {
+            commands: vec![tauron_host::manifest::CommandContribute {
+                id: "a.cmd".into(),
+                title: "A".into(),
+            }],
+            menus: vec![tauron_host::manifest::MenuContribute {
+                id: "a.menu".into(),
+                command: "a.cmd".into(),
+            }],
+            panels: vec![tauron_host::manifest::PanelContribute {
+                id: "a.panel".into(),
+                title: "P".into(),
+                icon: "assets/p.svg".into(),
+            }],
+            settings_tabs: vec![tauron_host::manifest::SettingsTabContribute {
+                id: "a.tab".into(),
+                title: "S".into(),
+            }],
+            shortcuts: vec![tauron_host::manifest::ShortcutContribute {
+                accelerator: "Ctrl+Shift+P".into(),
+                command: "a.cmd".into(),
+            }],
+        };
+        let keys = declared_contribute_keys(&c);
+        // shortcut 的 id 用 command（与 createPlugin 同口径）。
+        assert_eq!(
+            keys.into_iter().collect::<Vec<_>>(),
+            vec!["command:a.cmd", "menu:a.menu", "panel:a.panel", "settings:a.tab", "shortcut:a.cmd"]
+        );
+    }
+
+    #[test]
+    fn contributes_reconcile_ok_when_declared_matches_registered() {
+        let state = CommandState::new();
+        state
+            .registry
+            .install(&empty_index(), manifest_with_contributes("p.ok", declared_commands(&["a.cmd"])))
+            .unwrap();
+        cmd_contributes_register(
+            &state,
+            "p.ok",
+            ContributeEntry {
+                plugin_id: "p.ok".into(),
+                kind: "command".into(),
+                id: "a.cmd".into(),
+                label: "A".into(),
+            },
+        )
+        .unwrap();
+
+        let report = cmd_contributes_reconcile(&state, "p.ok").expect("无分叉应成功");
+        assert_eq!(report.plugin_id, "p.ok");
+        assert_eq!(report.declared, 1);
+        assert_eq!(report.registered, 1);
+        assert!(report.missing.is_empty());
+        assert!(report.extra.is_empty());
+    }
+
+    #[test]
+    fn contributes_reconcile_detects_missing_registration() {
+        // 声明了却没注册 = 用户能看到入口但点了没反应。这是 P0-6 的核心落差。
+        let state = CommandState::new();
+        state
+            .registry
+            .install(
+                &empty_index(),
+                manifest_with_contributes("p.drift", declared_commands(&["a.cmd"])),
+            )
+            .unwrap();
+
+        let err = cmd_contributes_reconcile(&state, "p.drift").expect_err("应报分叉");
+        assert_eq!(err.code, ErrorCode::E_CONTRIBUTES_DRIFT);
+        assert!(err.message.contains("command:a.cmd"), "诊断必须点名缺哪条：{}", err.message);
+        // 对账是只读的：失败不改变任何状态。
+        assert!(cmd_contributes_list(&state, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn contributes_reconcile_detects_extra_registration() {
+        // 注册了却没声明 = 来源不明的入口。
+        let state = CommandState::new();
+        state.registry.install(&empty_index(), test_manifest("p.extra")).unwrap();
+        cmd_contributes_register(
+            &state,
+            "p.extra",
+            ContributeEntry {
+                plugin_id: "p.extra".into(),
+                kind: "panel".into(),
+                id: "sneaky".into(),
+                label: "S".into(),
+            },
+        )
+        .unwrap();
+
+        let err = cmd_contributes_reconcile(&state, "p.extra").expect_err("应报分叉");
+        assert_eq!(err.code, ErrorCode::E_CONTRIBUTES_DRIFT);
+        assert!(err.message.contains("panel:sneaky"));
+    }
+
+    #[test]
+    fn contributes_reconcile_unknown_plugin_is_not_a_silent_pass() {
+        // 不在注册表 = 无从对账。返回空报告会让调用方以为"对过账了，没问题"。
+        let state = CommandState::new();
+        let err = cmd_contributes_reconcile(&state, "p.missing").expect_err("应拒绝");
+        assert_eq!(err.code, ErrorCode::E_UNKNOWN_PLUGIN);
+    }
+
+    #[test]
+    fn contributes_reconcile_ignores_other_plugins_entries() {
+        // 事实面必须只取**该插件自己**的条目：否则别人的贡献会把自己判成分叉。
+        let state = CommandState::new();
+        state
+            .registry
+            .install(&empty_index(), manifest_with_contributes("p.mine", declared_commands(&["x"])))
+            .unwrap();
+        state.registry.install(&empty_index(), test_manifest("p.other")).unwrap();
+        cmd_contributes_register(
+            &state,
+            "p.mine",
+            ContributeEntry {
+                plugin_id: "p.mine".into(),
+                kind: "command".into(),
+                id: "x".into(),
+                label: "X".into(),
+            },
+        )
+        .unwrap();
+        cmd_contributes_register(
+            &state,
+            "p.other",
+            ContributeEntry {
+                plugin_id: "p.other".into(),
+                kind: "command".into(),
+                id: "y".into(),
+                label: "Y".into(),
+            },
+        )
+        .unwrap();
+
+        assert!(cmd_contributes_reconcile(&state, "p.mine").is_ok());
+    }
+
     #[test]
     fn contributes_register_is_bounded_and_fails_loudly_at_the_cap() {
         // `host_contributes_register` 是 self 档：插件换个 `id` 就能再插一条，
@@ -7988,7 +8528,7 @@ mod tests {
         // 这里用 lifecycle_report 测试：对一个不存在的插件，
         // registry 应返回 E_UNKNOWN_PLUGIN 而非 panic。
         let state = CommandState::new();
-        let result = cmd_lifecycle_report(&state, "plugin-test.nonexistent", None, Event::Enable);
+        let result = cmd_lifecycle_report(&state, "plugin-test.nonexistent", None, Event::Attach);
         assert!(result.is_err());
         // 错误码不应是 E_HOST_PANIC（因为逻辑正确处理了未知插件）
         assert_ne!(result.unwrap_err().code, ErrorCode::E_HOST_PANIC);
@@ -8604,6 +9144,12 @@ mod tests {
         )
         .unwrap();
         state.recovery.lock().register_plugin("com.a");
+        // 进程侧崩溃窗口（同样以插件 id 为键）：种满 4 次（缺省上限 3 次/5min），
+        // 让 `is_crash_exceeded` 真的成立——否则本断言没有判别力。
+        for _ in 0..4 {
+            state.proc_runtime.record_crash("com.a");
+        }
+        assert!(state.proc_runtime.is_crash_exceeded("com.a"), "前置：崩溃预算必须已超限");
         // 多选择器分组登记（以订阅者为键）——卸载必须连它一起回收。
         state.subscription_groups.lock().insert(
             "grp:a".to_string(),
@@ -8641,6 +9187,14 @@ mod tests {
 
         // 恢复引擎：不再被登记（它的状态表是持久化的，残留会跨重启）。
         assert!(state.recovery.lock().plugin_state("com.a").is_none());
+
+        // 崩溃窗口：注册表条目已被删掉（重装同名插件是允许的），旧版本的崩溃预算
+        // 不得留给新版本——否则"刚装的插件永远起不来"。
+        assert_eq!(state.proc_runtime.crash_count("com.a"), 0, "卸载必须清掉崩溃窗口");
+        assert!(
+            !state.proc_runtime.is_crash_exceeded("com.a"),
+            "卸载后重装同名插件不得继承旧版本的崩溃预算"
+        );
     }
 
     /// 禁用**不得**回收总线残留：只有卸载/清除才回收。

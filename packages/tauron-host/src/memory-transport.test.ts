@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryTransport } from './memory-transport.js';
+import { FrameSink } from './host.js';
 import { ShellClient } from './shell-client.js';
 
 describe('MemoryTransport', () => {
@@ -39,6 +40,21 @@ describe('MemoryTransport', () => {
     expect(onmessage).toHaveBeenCalledWith({ seq: 1 });
     expect(transport.closeChannel(port.id!)).toBe(true);
     expect(transport.sendChannel(port.id!, { seq: 2 })).toBe(false);
+  });
+
+  it('FrameSink.dispose 注销通道（否则每次调用都漏一个不可回收的闭包图）', () => {
+    // `closeChannel` 此前不在 `Backend` 接口上，因此**没有任何生产调用方**：
+    // `MemoryTransport.channels` 只增不减。这条测试走的是真实释放路径
+    // （`FrameSink.dispose` → `Backend.closeChannel`），不是直接调 closeChannel。
+    const transport = new MemoryTransport();
+    const sink = new FrameSink(() => {}, transport);
+    const id = sink.port.id!;
+
+    expect(transport.sendChannel(id, { seq: 1 })).toBe(true);
+    sink.dispose();
+    expect(transport.sendChannel(id, { seq: 2 }), '释放后通道必须不再收帧').toBe(false);
+    // 幂等：重复释放不抛错（关流成功与开流失败两条路径都可能碰到）。
+    expect(() => sink.dispose()).not.toThrow();
   });
 
   it('derives principal and command capabilities, and rejects absent handlers', async () => {

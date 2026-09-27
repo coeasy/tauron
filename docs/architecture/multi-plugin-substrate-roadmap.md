@@ -25,17 +25,17 @@
 | Rust 测试 | **1221 / 0 failed**（15 crate） | 轮 12 收口 |
 | TS 测试 | **1571 / 0 failed**（97 文件，21 包） | 轮 12 收口 |
 | 跨语言门禁 wire-gate | **125 / 125**（当轮计数口径，见下方口径注） | `packages/tauron-contract-tests/src/wire-gate.test.ts` |
-| 命令面（本方案新增 `host_capabilities` 后） | **59 = 底座 39 + 插件运行时 20**（0.4 实测复核，含 0.4-A1 三命令；`plugin-install` feature 另注册 2 条） | `tauron_substrate_handler!` / `tauron_plugin_handler!` |
+| 命令面（本方案新增 `host_capabilities` 后） | **60 = 底座 39 + 插件运行时 21**（0.4 实测复核，含 0.4-A1 三命令与 0.4-W3 对账命令；`plugin-install` feature 另注册 2 条） | `tauron_substrate_handler!` / `tauron_plugin_handler!` |
 | 能力表 | 16（13 插件面 + 3 特权） | `authz::COMMANDS` / `capabilities.ts` |
 | 底座独立装配 | ✅ 有编译证据 + 功能证据 | `substrate-only` feature + `substrate_only_host_is_functionally_complete` |
 
 > **数字口径**：上表是**轮 12 收口时**的快照，作为本方案的比较基准，不随后续改动刷新。
-> 当前实测（2026-09-25，三轮全链路审计之后）：TS **1626**（`pnpm -r test` 实跑，98 文件）；
-> Rust 执行结果 **1251 passed / 0 failed**（`cargo test --workspace --locked --lib --tests`，
-> 15 suite），源码 `#[test]` 声明数 **1284**——**声明数不是执行结果**，feature 门控
+> 当前实测（2026-09-27，发布收口三轮审计之后）：TS **1701**（`pnpm -r test` 实跑，101 文件）；
+> Rust 执行结果 **1264 passed / 0 failed**（`cargo test --workspace --locked --lib --tests`，
+> 15 suite），源码 `#[test]` 声明数 **1299**——**声明数不是执行结果**，feature 门控
 > （`tauron-adapter` / `tauron-shell` 的 `tauri` feature）另计，真实执行结果以 CI 为准；
-> wire-gate **110**（`vitest run src/wire-gate.test.ts` 实跑；基线表的 125 是更早的计数
-> 口径，那个口径下同一文件曾按包含 `contract.test.ts` 的整包计）。
+> wire-gate **126**（`vitest run src/wire-gate.test.ts` 实跑；本包合计 147 条 / 2 文件；
+> 基线表的 125 是更早的计数口径，那个口径下同一文件曾按包含 `contract.test.ts` 的整包计）。
 > 本节只陈述口径，不再回头改基线表的数字。
 
 ### 当前执行快照（2026-09-26）
@@ -98,6 +98,13 @@
 | 多插件 UI | **45** | 80 | `PluginManagerStore` 启停/卸载真调命令 ✅；无安装入口；`oc-plugin-manager` 是哑组件 |
 | 市场 / 更新链 | **10** | 60 | 全桩，不下载/不验签/不换文件，只改进程内 `updateState` 字符串 |
 
+> **2026-09-27 复核修正（只改事实陈述，不回改分数）**：上表「扩展点 contributes」一行的
+> 「**无对账**（`cmd_contributes_reconcile` 与 `E_CONTRIBUTES_DRIFT` 只存在于方案文档）」
+> **已过时**——两者都已在代码里：`crates/tauron-host/src/error.rs` 的 `E_CONTRIBUTES_DRIFT`、
+> `crates/tauron-host/src/authz.rs:189` 的 `host_contributes_reconcile`（self 档）、
+> `crates/tauron-adapter/src/tauri.rs:1421` 的 handler。命令面板也已由 `ShellController`
+> 真投递（见 §2.2-M6 的改判）。分数行按基线口径保留不动。
+
 > **两条线的共同诊断**：R1–R8 解决的是「结构」问题（谁能依赖谁、状态怎么拆），本方案要解决的
 > 是**「通路上有类型、有接口、没有入口」**这一类问题——它比"没实现"更隐蔽，因为编译过、测试过、
 > 文档还写着，但线上永远走不到。轮 9–12 已经抓出 8 处这类断链，本方案预判还有同类存在，
@@ -112,14 +119,16 @@
 >
 > | 条目 | 本节原判 | 2026-09-26 实测 |
 > |---|---|---|
-> | M-1 无 install 入口 | 🔴 | **已实现**：`host_registry_install` / `_preview` 存在（`tauri.rs:2389-2392`），但挂在 `#[cfg(feature = "plugin-install")]` 下且 `default = []` → **默认构建不可达**；TS 侧能力表曾无条件列出（误报已注册），已由 0.4-A2 修 |
+> | M-1 无 install 入口 | 🔴 | **已实现**：`host_registry_install` / `_preview` 存在（`tauri.rs` 的 `#[cfg(feature = "plugin-install")]` 块，注册点 `:2506-2508`），且该 feature **已进 `tauron-adapter` 默认特性**（`Cargo.toml:21`，1.0-W6）→ 默认构建**可达**；`plugin_install_dir` 未配置时仍如实不可用（`lib.rs:226-228`）。TS 侧能力表曾无条件列出（误报为已注册），已由 0.4-A2 修 |
 > | M-2 无任何 per-plugin 配额 | 🔴 | **已接线 4 类**：pending 100/插件（`registry.rs:33`）、stream 32/插件（`stream.rs:113`）、订阅 256/插件（`eventbus.rs:52`）、通知 64/插件（`tauron-notify/src/lib.rs:161`） |
 > | S-6 无能力协商 | 🟠 | **已实现** `host_capabilities`（`lib.rs:382`），但 `families` / `unsupported` 域名仍硬编码（`lib.rs:396-415`） |
 > | S-3 桩命令谎报 | 🔴 | **已修**：dialog / clipboard / brand / market 全部返回有类型的 `UnsupportedBody` / `simulated`，无裸成功 |
 > | S-4 剪贴板 | 🟠 | 保持（进程内回退，已诚实标注 `fallback: in-process-buffer`） |
 > | S-1 传输层 | 🔴 | `MemoryTransport` 已有但**不完整**（无流式内核、无取件泵）→ S1 验收条件实际未达成 |
 > | S-2 命令面缺 5 域 | 🔴 | **未变**：menu / tray / fs / http / updater 仍全仓 0 命中 |
-> | S-7 / S-8 / M-3~M-10 | — | **未变** |
+> | S-5 `tauron-acl` 孤儿 | 🟠 | **部分变化（2026-09-27 复核）**：`tauron-acl` **已在** `crates/tauron-adapter/Cargo.toml` 依赖表内，仅 `plugin-install` feature 下被调；但 `EventBus::approve` 仍**无任何线上入口**（调用点全在单测），授予/审批链仍未闭环 |
+> | S-8 7 个孤儿 crate | 🟡 | **变化（2026-09-27 复核）**：`tauron-acl` / `tauron-market` **已非孤儿**（在 `tauron-adapter` 依赖表内）；真孤儿为 `brand` / `theme` / `wasm` / `distribute` / `shell`（`tauron-shell` 属有意保留的框架层门面） |
+> | S-7 / S-9 / M-3~M-10 | — | **未变**（S-9 的 `relaunch` 已由轮 11 修正，见 `auto-update-client.ts` 单测） |
 >
 > **新发现的断链不在本节**（调用投递不存在、框架层链路死、进程插件不能通信等），
 > 统一登记在 [capability-closure-plan.md](./capability-closure-plan.md) §6。
@@ -143,12 +152,12 @@
 
 | # | 残差 | 证据 | 档 |
 |---|---|---|---|
-| M-1 | ~~**无 install 入口**~~ → **已实现但默认不可达**（2026-09-26 改判）：`host_registry_install` / `_preview` 已存在并注册，但挂 `#[cfg(feature = "plugin-install")]` 且 `default = []`；TS 侧能力表原无条件列出（误报已注册），已由 0.4-A2 改为运行期 `host_capabilities` 开门 | `tauri.rs:2389-2392`、`Cargo.toml:12`；修正在 `capability-closure-plan.md` A2 | 🟠 |
+| M-1 | ~~**无 install 入口**~~ → **已实现且已进默认特性**（2026-09-27 复核）：`host_registry_install` / `_preview` 已存在并注册，挂 `#[cfg(feature = "plugin-install")]`，而该 feature **已进 `default`**（`Cargo.toml:21`，1.0-W6）；`plugin_install_dir` 未配置时仍如实不可用；TS 侧能力表原无条件列出（误报已注册），已由 0.4-A2 改为运行期 `host_capabilities` 开门 | `tauri.rs` 符号 `host_registry_install`（注册点 `:2506-2508`）、`crates/tauron-adapter/Cargo.toml:21`；修正在 `capability-closure-plan.md` A2 | 🟠 |
 | M-2 | ~~**无任何 per-plugin 配额**~~ → **已接线 4 类**（2026-09-26 改判）：pending 100/插件、stream 32/插件 + 256 全局、订阅 256/插件 + 4096 全局、通知 64/插件 + 512 全局。**剩余缺口**：通知环仍是全局单实例（逐插件只是裁剪）、无内存/CPU 配额 | `registry.rs:33`、`stream.rs:113/122`、`eventbus.rs:49/52`、`tauron-notify/src/lib.rs:129/161` | 🟡 |
 | M-3 | **Js 型插件无执行器**：`entry.js` 零消费点；真实路径是「宿主开窗 + 插件自举」，但文档没这么写 | `manifest.rs:344-350` | 🔴 |
 | M-4 | **Rust 型插件完全无落点**：`PluginType::Rust` 仅出现在 manifest 校验与 1 个测试；插件开发指南的形态表**缺 Rust 整行** | `manifest.rs:335/392/732`、`registry.rs:1874`；`docs/api/plugin-development-guide.md:24-29` | 🔴 |
 | M-5 | **四套插件开发体验并存**：legacy `PluginContext`(iframe) / `createContractContext`(沙箱，缺取件泵) / app-plugin-sdk(webview，有泵) / `PluginJsRuntime`(无生产调用点) | `plugin-context.ts:103`、`contract-context.ts:111`、`context.ts:47`、`plugin-js.ts` | 🟠 |
-| M-6 | **contributes 不对账、不驱动 UI**：无 reconcile；`oc-command-select` 被 `ShellController` 明确不接（"执行属接入方域"） | `wire-gate.test.ts:1240/1265`、`shell-events/index.ts:50-54` | 🟠 |
+| M-6 | ~~**contributes 不对账、不驱动 UI**~~ → **已闭环**（2026-09-27 改判）：对账命令 `host_contributes_reconcile`（self 档，`authz.rs:189`）+ `E_CONTRIBUTES_DRIFT`（`error.rs:97`）已在代码里；`ShellController` 已接 `oc-command-select` → `host_contributes_list('command')` 解析归属 → 跨主体投递（`shell-controller.ts:203`，wire-gate 有断链门禁）。**剩余**：命令面板的**填充**仍由接入方喂数（哑组件），框架不做自动灌入 | `wire-gate.test.ts:1552`、`shell-controller.ts:203`、`tauri.rs:1421` | 🟢 |
 | M-7 | **无 plugin-to-plugin 协作**：`cmd_plugin_call` 用 `resolve_self_identity` → 插件只能调自己；跨插件调用只会命中拒绝测试 | `lib.rs:1424`、`eventbus.rs:770` | 🟡 |
 | M-8 | **市场/更新链全桩**：只改进程内 `updateState` 字符串，不下载/不验签/不换文件 | `lib.rs:3729/3752/3776` | 🟠 |
 | M-9 | **两份注册表无桥接**：`@tauron/core` 的 `PluginRegistry`（`maxPlugins: 32`）与 Rust `tauron-host::Registry`（`max: 8`）互不感知 | `registry.ts:49`、`bootstrap.ts:148/207` | 🟡 |
@@ -357,7 +366,7 @@ TS 侧 `Backend.capabilities()` 已有字段，改为**启动时拉取一次并�
 
 **门禁**：「`host_capabilities` 的 `commands` 集合 == 两个 handler 宏的并集（按当前装配形态）」。
 
-**验证**：档 1 装配返回 39 条且 `pluginRuntime: false`；档 3 返回 55 条且 `true`；
+**验证**：档 1 装配返回 39 条且 `pluginRuntime: false`；档 3 返回 60 条且 `true`；
 注入/不注入 provider 时 `unsupported` 相应变化。
 
 **影响**：底座宿主第一次能"自述能力"，UI 可按底座形态自适应。**量级：小（0.5 轮）**。

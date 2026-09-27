@@ -36,8 +36,16 @@ export interface UpdateInfo {
   reason?: string | null;
   /** 最新版本号 */
   version: string | null;
-  /** 当前版本号 */
-  currentVersion: string;
+  /**
+   * 当前版本号。
+   *
+   * ⚠️ **宿主今天不返回这个字段**：`host_market_check` 的线形是
+   * `{ available, simulated, version, reason }`（见 `shell-client.ts` 的
+   * `MarketCheckResult`，那是与 Rust 逐字段对齐的口径），**没有** `currentVersion`。
+   * 因此它标为可选——标成必填等于让类型撒谎（TS 说 `string`，运行时是 `undefined`）。
+   * 待更新源接线（路线图 M-8）后由宿主补上，或由接入方用 `host_brand_info().version` 自补。
+   */
+  currentVersion?: string;
   /** 更新大小（字节） */
   size?: number;
   /** 更新日志 */

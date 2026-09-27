@@ -130,7 +130,25 @@ impl ProcessFrameSink for ProcessFrameSinkImpl {
                     .map(|s| s.to_string())
             });
 
-        // 幂等：已结算则忽略（见模块头）。
-        let _ = self.registry.settle_call(&call_id, CallOutcome { ok, result, error_code });
+        // 结算。**幂等**：重复回帧（sidecar 重发 / 宿主已按 TTL 回收该 pending）
+        // 返回 `E_CALL_NOT_FOUND` / `E_CALL_ALREADY_SETTLED`——那是预期路径，静默。
+        //
+        // 1.0-W7（P2-1）：其余失败**必须留痕**。此前这里是 `let _ =`，把
+        // `settle_call` 的**全部**错误一并吞掉——包括非幂等的内部失败，
+        // 结果通道出问题时既无计数也无日志，故障点被彻底淹没。
+        if let Err(err) = self
+            .registry
+            .settle_call(&call_id, CallOutcome { ok, result, error_code })
+        {
+            if !matches!(
+                err.code,
+                ErrorCode::E_CALL_NOT_FOUND | ErrorCode::E_CALL_ALREADY_SETTLED
+            ) {
+                eprintln!(
+                    "[tauron] sidecar 回帧结算失败（callId={call_id}）：{} — {}",
+                    err.code, err.message
+                );
+            }
+        }
     }
 }

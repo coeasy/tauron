@@ -1,9 +1,50 @@
 // @vitest-environment happy-dom
 
+import { readFileSync, readdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { html, render } from 'lit';
 
 import './wc.js';
+
+/**
+ * 门禁（1.0-W2，防 P0-1 回归）。
+ *
+ * `wc` 入口的语义是「注册**全部**自定义元素」。此前它只注册了 `oc-toast`，
+ * 而唯一的可运行 app 恰好只 import 这一个入口 → `oc-plugin-manager` 等 6 个
+ * 壳组件永不 upgrade，插件管理 UI 运行时完全惰性（构建产物里
+ * `customElements.define` 只有 `"oc-toast"` 一条）。
+ *
+ * 本门禁**从源码解析**标签集合（不维护手写清单，避免「新组件忘了同步」），
+ * 再断言 `import './wc.js'` 之后每一个都已注册：
+ * - 解析到 0 条即失败（防正则被改坏导致假绿）；
+ * - 新增组件文件但忘记接进 `wc.ts` → 本测试红。
+ */
+describe('wc 入口必须注册源码里定义的全部自定义元素', () => {
+  const srcDir = dirname(fileURLToPath(import.meta.url));
+  const definedTags = [
+    ...new Set(
+      readdirSync(srcDir)
+        .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
+        .flatMap((f) =>
+          [
+            ...readFileSync(join(srcDir, f), 'utf8').matchAll(
+              /customElements\.define\(\s*['"]([a-z0-9-]+)['"]/g,
+            ),
+          ].map((m) => m[1] as string),
+        ),
+    ),
+  ].sort();
+
+  it('源码解析到的标签数 > 0（防解析失败假绿）', () => {
+    expect(definedTags.length).toBeGreaterThan(0);
+  });
+
+  it.each(definedTags)('<%s> 已注册', (tag) => {
+    expect(customElements.get(tag), `wc 入口未注册 <${tag}>`).toBeDefined();
+  });
+});
 
 describe('<oc-toast>', () => {
   beforeEach(() => {

@@ -128,6 +128,12 @@ export const CAPABILITIES: readonly Capability[] = [
     description: '列出贡献表（commands/menus/panels/settings，纯只读；0.4 审计补登记）',
   },
   {
+    command: 'host_contributes_reconcile',
+    tier: 'self',
+    consumer: 'plugin',
+    description: '对账 manifest 声明的贡献与 activate 期实际注册（分叉报 E_CONTRIBUTES_DRIFT；0.4-W3）',
+  },
+  {
     command: 'host_events_drain',
     tier: 'self',
     consumer: 'plugin',

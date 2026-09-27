@@ -21,18 +21,73 @@
 **框架层**
 
 - 单命令信封协议：`plugin_invoke` / `plugin_cancel` / `plugin_emit`
-- 双世界隔离架构（`@tauron/dual-world`）；QuickJS-WASM 引擎接入仍为路线图项
-- 4+1 插件形态：Rust / JS（真实实现）/ WASM / Process（配置 + 模拟原型）+ B+ 混合
+- **Js 型隔离来自 webview 边界 + 逐命令身份判定**（非进程内沙箱）；
+  `@tauron/dual-world` 的进程内沙箱是 fail-closed 模拟（`SANDBOX_UNAVAILABLE`），
+  进程内 WASM 运行时仍为路线图项
+- 插件形态以 `PluginType` 枚举为准：Js / Process 有生产执行器，
+  Rust / Wasm 返回 `E_PLUGIN_TYPE_NO_RUNTIME`（**诚实失败**，不伪报可用）。
+  **代码里不存在「B+ 混合模式」**——该宣称已删除（原写作「4+1 形态」，为未兑现宣称）
 - 双层 ACL：外层 Tauri 静态 ACL + 内层框架动态 ACL
 - 每插件隔离的事件总线队列，`Event` 溢出丢最旧 / `Request` 硬失败 / `State` 只留最新；
   `MAX_QUEUE = 1000`，连续溢出 3 次熔断
 - 配置 4 层合并（session > plugin > user > default）
 - Shell 矩阵 4 形态（local / local-server / remote-url / sub-webview）
-- 插件市场：HMAC-SHA256 验签、注册表搜索 / 发布
+- 插件市场：**Ed25519** 验签（`verify(data, signature, publicKey)`，非对称——私钥签发、
+  公钥公开验证）、注册表搜索 / 发布
 - CLI 工具链：`create` / `plugin new|dev|test|pack|sign|publish` / `doctor`
 - React / Vue / Svelte 适配层
 
 **应用层**
+
+- **全量架构重评估（1.0，2026-09-26）**：按「入口可达性」判据（不是「函数存在」）
+  对 15 crate + 20 包重测，产出
+  [full-architecture-refactor-plan.md](./docs/architecture/full-architecture-refactor-plan.md)
+  （含 W1–W10 工作流与轮 30–41 编排）。要点：
+  - **0.4 方案状态更正**：只有 **A1–A3 落地**（轮 20–22），A4–A8 与轮 23–29 未开工。
+    此前提交 `08156f9` 的信息「A4–A8 按方案落地」**不准确**，以重评估文档为准
+    （按决策不改写已公开历史）。
+  - **主体链路**：12 跳中 10 跳真通（调用投递 L8 与插件自举 L6 已由轮 20/22 修复），
+    剩 L3 安装默认不可达、扩展点 UI 未驱动。
+  - **新发现 P0**：唯一的可运行 app 里插件管理 UI **完全惰性**——示例只
+    `import '@tauron/ui/wc'`，而该入口只注册 `oc-toast`（构建产物佐证），
+    `oc-plugin-manager` 等 6 个组件永不 upgrade。
+  - **新发现 P0**：`tauron-proc` spawner 三处缺陷（`closed`/`sinks` 两锁非原子的
+    sink 泄漏竞态、`write_frame` 持全局锁阻塞、`lines()` 无行长上限）。
+  - **新发现 P0**：安装签名 payload 只覆盖文件哈希，`algorithm`/`kid`/`issued_at`
+    未进签名（可篡改绕过有效期）。
+  - **孤儿重测**：`tauron-acl`/`tauron-market` 已非孤儿（在 adapter 依赖表内）；
+    真孤儿为 brand / theme / wasm / distribute / shell（合计 7536 行）。
+  - **文档更正**：`docs/architecture/README.md` 的「唯一的前瞻计划」、
+    「4+1 插件形态」、「双世界隔离（QuickJS-WASM）」三处漂移已修；
+    本 CHANGELOG 同段的两条框架层宣称一并更正。
+
+- **1.0 W 系列落地（第一批，2026-09-26）**：按上述方案实施，本轮完成
+  **W2 / W6 / W7 / W3 / P1-10**，并部分完成 **W1-b（TS 侧单线收敛）/ W10（文档派生）**。
+  每项都以「可复现命令输出」为判据（不是「代码里看起来有了」）：
+  - **W2 端到端可运行**：`@tauron/ui-primitives/wc` 补 4 条副作用导入 → 示例构建产物
+    注册的自定义元素 **1 → 10**（含 `oc-plugin-manager`）。新增两道门禁
+    （「源码定义的标签必须已注册」「`@tauron/ui/wc` 必须注册壳组件」）。
+  - **W7 运行时硬化**：spawner 的 `SinkTable` 单锁消除 TOCTOU 泄漏、写帧改两级锁
+    （不再全局阻塞）、单帧 `MAX_FRAME_BYTES` 上限、EOF 主动回收；proc **17 → 22** tests。
+  - **W6 安装默认可达 + 签名强化**：`tauron-adapter` 的 `default = ["plugin-install"]`；
+    签名载荷升级 **v2**（`algorithm`/`kid`/`issuedAt` + `path`/`size`/`hash` 全进签名）
+    + 有效期与时钟偏移校验 + 路径控制字符拒绝；market **63 → 73** tests。
+  - **W3 扩展点闭环**：`ShellController` 接 `oc-command-select` 真投递；新增
+    `UNWIRED_EVENTS` 显式登记表（替代「写句注释就放行」的门禁漏洞）；**新增
+    `host_contributes_reconcile`（self 档）+ `E_CONTRIBUTES_DRIFT`**——比对 manifest
+    声明与 activate 期注册，分叉报错并点名缺哪条，SDK 激活后真消费它。
+    命令面：插件面 **17 → 18**，adapter 全量 **59 → 60**（底座 39 不变）。
+  - **P1-10 档位表生产自检**：`validate_command_registry` 不再只在测试里调用——
+    `SubstrateState` 装配期跑一次（`OnceLock` 缓存、可断言），失败即 panic。
+  - **W1-b（部分）**：**删除死编排器 `bootstrap()`**——它是 P1-1「活线依赖死线」的
+    载体（import `@tauron/core` 三个**运行时类**，而本包 `sideEffects:false`，
+    真实构建里这些类不存在，一用即崩）。`@tauron/host` 移除 `@tauron/core` 依赖，
+    P1-5 的「TS `maxPlugins: 32` vs Rust `max_plugins: 8`」第二事实源随之消失。
+  - **W10（部分）**：命令面计数（59→60）在 7 份文档中同步；新增/改造 5 条门禁。
+  - **实测绿**：`cargo check --workspace --all-targets` 0 警告；
+    `cargo test --workspace --locked --lib --tests` 15 个测试二进制全绿
+    （adapter **221** / host **284** / market 73 / proc 22）；`pnpm -r typecheck` 全绿；
+    `eslint` 0 error；wire-gate **142** tests 全绿。
 
 - **发布收口三轮审计（0.4，2026-09-26）**：按「主体流程全联通、核心链路无断链、
   无孤儿逻辑、无死循环」对 Rust 15 crate + TS 20 包做了三轮全量审计，修复：
@@ -60,9 +115,52 @@
   - **契约钉补齐**：`@tauron/app-contract-kit` 的错误码全集测试补
     `E_CALL_ALREADY_SETTLED`（0.4-A1 漏网的第二阶钉子）。
   - **文档数字全量对账**：命令面 54/56/58 等历史口径统一为实测
-    **59 条（底座 39 + 插件运行时 20；`plugin-install` 另加 2 条）**，涉及
+    **60 条（底座 39 + 插件运行时 21；`plugin-install` 另加 2 条）**，涉及
     overview / app-layer-wire / installation / incremental-adoption /
     competitive-analysis / 示例 README；wire-gate 计数 110→140。
+- **发布收口三轮审计（1.0，2026-09-27）**：按同一套判据（主体流程全联通、
+  核心链路无断链、无孤儿逻辑、无死循环、前后端全贯通）再做**三轮**全量审计，
+  每轮修完全部问题后进下一轮。本轮发现的缺陷**类型集中在「已修的事实没同步到
+  声明处」与「门禁假绿」**，而非新的功能缺口——这正是 1.0 收口期的典型形态。
+  - **生产入口补线（R1-1）**：`ShellController`（`W3` 引入的壳层编排器，
+    接 `oc-command-select` → `callPlugin` → `callTakeResult` 真投递链）
+    **在生产里零实例化**——只有测试构造它。示例 app 的启动序列补上装配，
+    这条链才真正可达；只修测试不算修（「入口可达性」判据）。
+  - **运行时竞态修复（R2-1）**：`@tauron/host` 的 `rpc.ts` 事件泵 `tick()`
+    逐订阅者无隔离——任一订阅者回调抛错会打断同 tick 的其余订阅者并让订阅表
+    与宿主侧 topic 失同步；改为逐订阅者 try/catch 隔离，且 `subscribe()` 改为
+    **宿主订阅成功后才登记 topic**（原先先登记后订阅，宿主拒订阅时留下孤儿 topic）。
+  - **超时资源泄漏修复（R2-1c）**：`lazy-plugin-loader.ts` 的 `_loadWithTimeout`
+    在 `Promise.race` 分支下未清理定时器；补 `try/finally` + `clearTimeout`。
+  - **可选字段契约修复（R2-2）**：`auto-update-client.ts` 的 `UpdateInfo.currentVersion`
+    改为可选（宿主在「无已安装版本」时本就不回填它，必填会让消费方按错误前提编码）。
+  - **孤立状态如实披露（R2-3/R2-4）**：`tauron-adapter` 的 `notifications` /
+    `window_rect` / `update_state`，与 `tauron-recovery` 的 `RecoveryAction`，
+    均在源码处以 ⚠️ 标注真实接入状态——**存在状态容器不等于有链路**。
+  - **门禁假绿加固（R3-1）**：`unwired-events.test.ts` 的事件名解析若漏项会
+    「解析到空 = 一致」地假绿；新增断言「解析出的键数 == `SHELL_EVENTS` 声明键数」。
+  - **文档漂移全量对账（R3-2/R3-3 与文档批）**：`plugin-install` **已进默认特性**
+    （`crates/tauron-adapter/Cargo.toml:21`，1.0-W6）这一事实**未同步到大量声明处**——
+    多份文档与两处代码注释仍写「`default = []`、默认构建不注册」。
+    逐处更正：`tauron-host/src/tauri-backend.ts`（`OPTIONAL_FRAMEWORK_COMMANDS`
+    头注）、`contract-tests/src/wire-gate.test.ts`（0.4-A2 门禁注释）两处代码注释，
+    以及 installation / app-layer-wire / multi-plugin-substrate-roadmap /
+    competitive-analysis / capability-closure-plan / full-architecture-refactor-plan
+    六份架构与竞品文档；`@tauron/market` README 的签名算法从 `HMAC-SHA256`
+    更正为 **Ed25519**（`verify(data, signature, publicKey)`，第三参是**公钥**）；
+    `docs/api/plugin-development-guide.md` 补 Rust 形态整行、新增「插件安装命令
+    （2 条，feature-gated 且已进默认特性）」小节（用户重点要求的使用/接口文档）；
+    `tauron-host/README.md` 命令面表重写为 22 行 + `plugin-install` 默认特性注。
+  - **过度宣称剔除**：`capability-closure-plan.md` 与 `full-architecture-refactor-plan.md`
+    的记分卡基线快照补「2026-09-27 复核」横幅，把已闭环项（插件调用 ✅、安装
+    ⚠️→默认可达、扩展点对账 🟡）与仍未做项（W1-a / W4 / W5 / W8 / W9）分开标注，
+    **不做「全部完成」表述**。
+  - **实测绿**：`cargo test --workspace --locked --lib --tests` 全绿
+    （adapter 224 / host 290 / market 74 / proc 46 / settings 99 / schema 131 / types 67）；
+    `pnpm -r build` 成功；`pnpm -r typecheck` 20 包全 Done；
+    `pnpm -r test` 全绿（contract-tests **147** / wire-gate **126** / host 376 /
+    ui 54 / app-cli 288 / app-contract-kit 91 / app-plugin-sdk 37 / framework 40）；
+    `pnpm lint` **0 error / 81 warning**。
 - **跨主体调用示例切换主推 SDK（0.4-A2，轮 22）**：示例 app 插件页
   `examples/minimal-app/src/plugin/first.ts` 从 legacy iframe SDK 改用
   `@tauron/app-plugin-sdk`（`createPlugin` + `createPluginContext` 接宿主 RPC 面，
@@ -94,8 +192,10 @@
     追加在 `ErrorCode`/authz/能力表末尾）；新错误码 `E_CALL_ALREADY_SETTLED`
     （重复回填显式拒绝，不覆盖）。
   - Rust 闭环测试：`process_call_delivers_frame_to_stdin_and_settles_via_sink`。
-- `host_*` 命令族共 59 条（底座 39 + 插件运行时 20；`plugin-install` feature 另加
-  `host_registry_install` / `host_registry_install_preview` 2 条，默认构建不注册）
+- `host_*` 命令族共 60 条（底座 39 + 插件运行时 21；`plugin-install` feature 另加
+  `host_registry_install` / `host_registry_install_preview` 2 条——该 feature **已进默认特性**
+  （`crates/tauron-adapter/Cargo.toml:21`，1.0-W6），默认装配会注册，共 62 条；
+  仅在接入方显式 `default-features = false` 时不注册）
 - 生命周期状态机：10 态 / 18 事件 / 7 守卫，表驱动 `TRANSITIONS`（表内顺序即优先级），
   `MAX_CHAIN_DEPTH = 2`
 - 三档授权 `AuthTier{Self_, ScopedRead, Privileged}`；`self` 档的 pluginId 只从
@@ -108,10 +208,11 @@
 
 **跨语言契约**
 
-- `@tauron/contract-tests` 的 wire-gate：直接正则解析 Rust 源码文本做断言，**140 条**
-  （`vitest run src/wire-gate.test.ts` 实跑计数）
+- `@tauron/contract-tests` 的 wire-gate：直接正则解析 Rust 源码文本做断言
+  （**当前修订实跑 126 条**：`vitest run src/wire-gate.test.ts`；本包合计 **147** 条 /
+  2 个测试文件。该数字随门禁增删与用例合并而变，**以实跑为准**，勿引用历史条目里的旧值）
 - 全部跨 IPC 边界的 Rust 结构体强制 `#[serde(rename_all = "camelCase", deny_unknown_fields)]`
-- 双套错误码且零交集：框架层 `SC-xxxx`（14 个）/ 应用层 `E_*`（20 个）
+- 双套错误码且零交集：框架层 `SC-xxxx`（14 个）/ 应用层 `E_*`（21 个）
 
 **工程与发布基础设施**（本次补齐）
 
@@ -186,8 +287,8 @@
   权威源（架构概览的接线状态 / 竞品分析的兑现度标记 / CHANGELOG 的已知债务）、
   「现在适合拿它做什么」适不适合表，并挂上安装文档入口
 - **文档数字按实测重测并修正**：ESLint `0 error / 81 warning`（原写 82，已过期）；
-  示例工程 README 与 `@tauron/host` README 的 `host_*` 命令数 `45 条` → **54 条**
-  （底座 39 + 插件运行时 20，逐条数过 `tauron_substrate_handler!` /
+  示例工程 README 与 `@tauron/host` README 的 `host_*` 命令数 `45 条` → **60 条**
+  （底座 39 + 插件运行时 21，逐条数过 `tauron_substrate_handler!` /
   `tauron_plugin_handler!` 的宏定义）
 - `docs/architecture/README.md` 文档地图补 `installation.md` 一行（标注为「落地
   入口——第一次接触先读这份」）；示例工程 README 补「安装包获取与运行」一节
@@ -209,6 +310,9 @@
 - **能力表对 feature-gated 命令误报已注册（0.4-A2）**：`host_registry_install` /
   `host_registry_install_preview` 在 Rust 侧挂 `#[cfg(feature = "plugin-install")]`，
   而 `crates/tauron-adapter` 的 `default = []`——默认构建的宿主根本注册不了这两条。
+  （**注**：该 feature 已于 1.0-W6 进默认特性，见上文「1.0 W 系列落地」；
+  本条描述的是修复当口的事实，纪律「静态能力表不得硬编码可选命令」与
+  feature 的默认值无关，故仍成立。）
   此前它们被无条件列进 TS 的 `FRAMEWORK_COMMANDS`，于是 `capabilities()` /
   `supports()` 对它们返回 `true`，调用方直到真正 `invoke` 才 `command not found`。
   现在这两条移入新的 `OPTIONAL_FRAMEWORK_COMMANDS`，**不进**静态能力表；
@@ -430,9 +534,9 @@ cargo clippy --workspace --all-targets -- -D warnings   # 从未运行
 
 `pnpm format:check` 当前会失败。CI 里没有 format 门禁，避免永久红。
 
-**3. ESLint 有 80 条 warning（0 error）**
+**3. ESLint 有 81 条 warning（0 error）**
 
-`pnpm lint` 退出码为 0，因此已作为**硬门禁**接入 CI。80 条 warning 绝大多数是
+`pnpm lint` 退出码为 0，因此已作为**硬门禁**接入 CI。81 条 warning 绝大多数是
 测试文件里的未用导入。**不要**加 `--max-warnings 0`，那会让仓库直接变红。
 
 **4. Rust 测试未在有网络的环境执行过**
@@ -467,13 +571,18 @@ cargo clippy --workspace --all-targets -- -D warnings   # 从未运行
 
 **8. 命令面缺口**
 
-host 命令面缺 menu / tray / fs / http 四域。
+host 命令面缺 menu / tray / fs / http / updater 五域（`grep host_menu_|host_tray_|
+host_fs_|host_http_|host_updater crates/tauron-adapter/src/tauri.rs` → 空）。
 
 **9. 孤儿 crate**
 
-未被任何其他 crate 依赖：`tauron-acl` / `tauron-brand` / `tauron-theme` /
-`tauron-market` / `tauron-distribute` / `tauron-wasm` / `tauron-shell`（`tauron-shell`
-是框架层门面，属有意为之；其余为待激活）。
+未被任何其他 crate 依赖：`tauron-brand` / `tauron-theme` / `tauron-distribute` /
+`tauron-wasm` / `tauron-shell`（`tauron-shell` 是框架层门面，属有意为之；
+`tauron-distribute` 属 CI 侧运维组件，可接受但要登记；其余为待激活）。
+
+> **口径更正（1.0，2026-09-27）**：本条此前把 `tauron-acl` / `tauron-market`
+> 也列为孤儿——**已过期**。两者现已在 `crates/tauron-adapter/Cargo.toml` 依赖表内
+> （`acl` 用于授权判定、`market` 用于安装验签，均在 `plugin-install` feature 下被调）。
 
 **10. 测试期 peer 依赖告警**
 

@@ -53,20 +53,40 @@ import { MockBackend } from '@tauron/host/testing';
 
 ## 命令面（计划 §2.1 定稿）
 
-9 条插件命令（8 条 `self` + 1 条 `scoped-read`）+ 1 条主窗特权命令：
+**22 条已登记命令**：`crates/tauron-host/src/authz.rs` 的 `COMMANDS` **18 条**
+（16 `self` + 2 `scoped-read`）+ `ADMIN_COMMANDS` **4 条特权**（仅主窗）；
+另有 **2 条 feature-gated**（`host_registry_install_preview` / `host_registry_install`，
+挂 `plugin-install`——**该特性现已进 `tauron-adapter` 的默认特性**，
+见 `crates/tauron-adapter/Cargo.toml:21`；只想取底座用 `default-features = false`）。
+
+> 「22 条」是**需登记档位**的命令；Tauri 实际注册的命令面是另一个口径：**60 条**
+> （`tauron_plugin_handler!` = 底座 39 + 插件运行时 21），默认特性下 62 条。
+> 两侧一致性由 `src/gates.test.ts` 逐名比对，不靠本文维护。
 
 | 命令 | 档位 | 消费方 |
 |---|---|---|
-| `host_plugin_call` | self | plugin |
-| `host_call_end` | self | plugin |
-| `host_cancel` | self | plugin |
-| `host_lifecycle_report` | self | plugin |
-| `host_contributes_register` | self | plugin |
-| `host_events_publish` | self | plugin |
-| `host_events_subscribe` | self | plugin |
-| `host_events_unsubscribe` | self | plugin |
-| `host_registry_list` | scoped-read | plugin |
-| `host_registry_admin` | privileged | main-window |
+| `host_plugin_call` | self | plugin-sdk `createPlugin()` |
+| `host_call_end` | self | plugin-sdk（流式终帧确认） |
+| `host_cancel` | self | plugin-sdk |
+| `host_lifecycle_report` | self | plugin-sdk 生命周期钩子 |
+| `host_contributes_register` | self | plugin-sdk（attach 期） |
+| `host_events_publish` | self | plugin-sdk |
+| `host_events_subscribe` | self | plugin-sdk |
+| `host_events_unsubscribe` | self | plugin-sdk（dispose 期） |
+| `host_events_drain` | self | plugin-sdk（事件取件泵） |
+| `host_stream_open` | self | plugin-sdk（流式开流） |
+| `host_stream_write` | self | plugin-sdk（流式写帧） |
+| `host_stream_close` | self | plugin-sdk（流式收尾） |
+| `host_contributes_reconcile` | self | plugin-sdk（激活后自检贡献声明） |
+| `host_call_plugin` | self | 宿主主窗 / plugin-sdk（插件→插件） |
+| `host_call_result` | self | plugin-sdk（执行方回填） |
+| `host_call_take` | self | 宿主主窗 / plugin-sdk（发起方取件） |
+| `host_registry_list` | scoped-read | plugin-sdk / `<oc-plugin-manager>` |
+| `host_contributes_list` | scoped-read | `ShellClient.contributesList` / 应用设置中心 |
+| `host_registry_admin` | privileged | 宿主 UI 主窗（`<oc-plugin-manager>`） |
+| `host_runtime_spawn` | privileged | 宿主 UI 主窗（插件生命周期监管） |
+| `host_runtime_health` | privileged | 宿主 UI 主窗（插件生命周期监管） |
+| `host_resource_stats` | privileged | 宿主 UI 主窗（资源配额诊断） |
 
 > **订阅取件**：`host_events_subscribe` 只把帧排进每订阅者队列；
 > 前端必须调用 `HostClient.eventsDrain(kind)` 取走帧（`host_events_publish`
@@ -75,26 +95,28 @@ import { MockBackend } from '@tauron/host/testing';
 ## 主窗客户端（应用层）
 
 以下客户端面向**主窗**，通过 `host_window_*` / `host_dialog_*` / `host_clipboard_*` /
-`host_market_*` / `host_deep_link_*` / `host_capabilities` 等主窗命令族工作（完整 55 条命令面见
-`crates/tauron-adapter/src/tauri.rs` 的 `generate_handler!`）：
+`host_market_*` / `host_deep_link_*` / `host_capabilities` 等主窗命令族工作（完整命令面见
+`crates/tauron-adapter/src/tauri.rs` 的 `tauron_substrate_handler!` / `tauron_plugin_handler!`
+宏：底座 **39** + 插件运行时 **21** = **60** 条；`plugin-install` 2 条**已进默认特性**，
+默认装配共 **62** 条）：
 
-- `ShellClient` / `ShellController` — 标题栏动作、主题、更新事件路由（`bootstrap()` 已接线）
+- `ShellClient` / `ShellController` — 标题栏动作、主题、更新事件路由（已接线）
 - `AutoUpdateClient` — 检查/下载/安装/重启状态机 + 定时自动检查
 - `DialogClient` — 文件对话框 / 消息框 / 剪贴板
 - `DeepLinkClient` — 协议注册 + `deep-link` 事件分发（OS 回调经 Rust
   `tauron_adapter::tauri::deliver_deep_link` 双管道投递：Tauri 原生事件 + EventBus）
 - `WindowState` — 窗口几何持久化（恢复/保存，越界钳制）
-- `bootstrap()` — 7 阶段启动编排（配置 → 动效 → splash → 插件拓扑注册 → …）
 
-### 可选运行时集成 `@tauron/ui`
-
-`bootstrap()` 的 motion 主题与 Splash 在运行时动态加载 `@tauron/ui`。
-它**不是**包依赖（避免 ui↔host 循环）：应用装了 `@tauron/ui` 就生效，未装则静默跳过。
+> **启动编排不在本包**：曾经有一个 `bootstrap()`（7 阶段启动编排：配置 → 动效 →
+> splash → 插件拓扑注册 → …），但它**只被自己的测试引用**，且是 `@tauron/host`
+> 里唯一一处运行时 import `@tauron/core` 的地方——本包声明 `sideEffects: false`，
+> 于是它在示例产物里根本不存在。它已在 1.0-W1 删除。启动编排属**应用装配层**：
+> 接入方按自己的顺序组合上面的客户端（见 `examples/minimal-app/src/main.ts`）。
 
 ## 开发
 
 ```bash
-pnpm --filter @tauron/host test         # vitest，288 tests
+pnpm --filter @tauron/host test         # vitest（全量用例，数量随门禁增长）
 pnpm --filter @tauron/host typecheck    # tsc --noEmit
 pnpm --filter @tauron/host build        # 产出 dist/
 ```

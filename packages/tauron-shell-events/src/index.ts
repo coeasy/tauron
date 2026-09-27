@@ -27,7 +27,13 @@ export const SHELL_EVENTS = {
   minimize: 'oc-minimize',
   /** 最大化 / 还原窗口。detail：无。 */
   maximize: 'oc-maximize',
-  /** 关闭窗口。detail：无。更新对话框的「稍后」也复用本事件。 */
+  /**
+   * 关闭窗口。detail：无。
+   *
+   * **只有标题栏的 ✕ 该派发本事件**。更新对话框的「稍后」曾复用它，后果是
+   * `ShellController` 把 `oc-close` 无条件路由到 `windowClose()`——用户点
+   * 「稍后」把主窗口关掉了。对话框的收起走 {@link SHELL_EVENTS.updaterDismiss}。
+   */
   close: 'oc-close',
 
   // ── 托盘菜单（<oc-tray-menu>）──────────────────────────────────────────
@@ -42,6 +48,15 @@ export const SHELL_EVENTS = {
   // ── 更新对话框（<oc-updater-dialog>）──────────────────────────────────
   /** 请求检查更新（「检查更新」按钮）。detail：无。 */
   updaterCheck: 'oc-updater-check',
+  /**
+   * 用户选择「稍后」（收起更新对话框）。detail：无。
+   *
+   * 语义是**关闭对话框本身**，不是关闭窗口——此前该按钮错误地派发
+   * {@link SHELL_EVENTS.close}，被 `ShellController` 当成关闭主窗口。
+   * 组件自身收到本动作后会收起；接入方若想持久化「稍后提醒」偏好，
+   * 可监听本事件并落到自己的存储（宿主命令面无更新偏好命令）。
+   */
+  updaterDismiss: 'oc-updater-dismiss',
   /** 开始下载 + 安装更新（「开始更新」按钮）。detail：无。 */
   updateStart: 'oc-update-start',
   /** 立即重启应用（`status === 'done'` 时的「立即重启」按钮）。detail：无。 */
@@ -51,8 +66,13 @@ export const SHELL_EVENTS = {
   /**
    * 选中的命令。detail：{@link CommandSelectEventDetail}。
    *
-   * 执行属**接入方域**：跨窗口命令调用走 `host_plugin_call` 的 C/D 后端路径，
-   * ShellController 不接本事件。
+   * 消费方是 `ShellController`（1.0-W3 起已接线）：它按
+   * `host_contributes_list('command')` 解析该命令的**归属插件**，再经跨主体调用
+   * 投递（`host_plugin_call` → 轮询 `host_call_take` 取回结果）。找不到归属
+   * （即宿主内建命令）时**如实报错**，不静默丢弃。
+   *
+   * 此前这里写的是「执行属接入方域、ShellController 不接本事件」——那句话
+   * 配上「注释声明即放行」的门禁，让命令面板长期「点了没反应且无处可查」。
    */
   commandSelect: 'oc-command-select',
 
@@ -156,11 +176,12 @@ export interface ToastActionEventDetail {
   label: string;
 }
 
-/** 无 detail 的壳层事件名（标题栏三键、更新对话框检查/开始、重启）。 */
+/** 无 detail 的壳层事件名（标题栏三键、更新对话框检查/稍后/开始、重启）。 */
 export type DetailLessShellEvent =
   | typeof SHELL_EVENTS.minimize
   | typeof SHELL_EVENTS.maximize
   | typeof SHELL_EVENTS.close
   | typeof SHELL_EVENTS.updaterCheck
+  | typeof SHELL_EVENTS.updaterDismiss
   | typeof SHELL_EVENTS.updateStart
   | typeof SHELL_EVENTS.restart;

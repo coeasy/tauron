@@ -10,9 +10,9 @@
 
 | 形态 | 用法 | 命令面 | 插件名 |
 | --- | --- | --- | --- |
-| root 注册（全量） | `state_init()` + `tauri::generate_context` 外的 `tauron_generate_handler![]`（= `tauron_plugin_handler![]`） | 59 条（底座 39 + 插件运行时 20；`plugin-install` feature 另注册 2 条） | 无（裸命令） |
-| **底座-only root 注册** | 自己 `manage(SubstrateState)` + `tauron_substrate_handler![]` | 39 条（不含插件运行时 20 条） | 无（裸命令） |
-| 插件注册（需 capability/ACL） | `init()` / `init_with_adapter_config(cfg)` | 59 条（同上，install 2 条 feature-gated） | `tauron` |
+| root 注册（全量） | `state_init()` + `tauri::generate_context` 外的 `tauron_generate_handler![]`（= `tauron_plugin_handler![]`） | 60 条（底座 39 + 插件运行时 21）；`plugin-install` 2 条**已进默认特性** → 默认 62 条 | 无（裸命令） |
+| **底座-only root 注册** | 自己 `manage(SubstrateState)` + `tauron_substrate_handler![]` | 39 条（不含插件运行时 21 条） | 无（裸命令） |
+| 插件注册（需 capability/ACL） | `init()` / `init_with_adapter_config(cfg)` | 同上；60 / 62 条取决于 `plugin-install`（默认开） | `tauron` |
 
 > ⚠️ **三种形态都不是"零配置"**（轮 12 改判，此前本表把 root 形态写成"零配置"是错的）：
 > Tauri v2 的规则是**不匹配任何 capability 的 webview 完全没有 IPC 访问**（原文见
@@ -481,7 +481,7 @@ capability/ACL 强制（生产客户端应采用——把 4 条特权命令只�
 ```
 
 - `code` 为 `E_*` 大写蛇形，**线名即 Rust 枚举变体名**（`ErrorCode` 未配
-  `rename_all`，`Display` 输出与序列化一致）；**19 个**变体与 TS
+  `rename_all`，`Display` 输出与序列化一致）；**21 个**变体与 TS
   `HOST_ERROR_CODES` 逐名、逐序镜像。
 - `retryable` 三值（`E_CALL_TIMEOUT` / `E_HOST_PANIC` / `E_PLUGIN_FILTERED`）
   与 Rust `ErrorCode::retryable()` 同集合；TS 侧以

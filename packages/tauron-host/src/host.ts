@@ -20,7 +20,7 @@ import type {
   TopicDescriptor,
 } from './events.js';
 import type { StreamFrame, StreamHandle, StreamKind, StreamWriteInput } from './stream.js';
-import type { LifecycleEvent } from './lifecycle.js';
+import type { LifecycleEvent, PluginReportableEvent } from './lifecycle.js';
 
 /** 插件 → 自己 C/D 后端的调用请求。 */
 export interface PluginCallRequest {
@@ -71,6 +71,25 @@ export interface ContributeEntryInput {
 }
 
 /**
+ * 贡献对账结果（`host_contributes_reconcile` 成功时的返回体，0.4-W3）。
+ *
+ * 只在**无分叉**时返回——有分叉时宿主抛 `E_CONTRIBUTES_DRIFT`，诊断细节在
+ * 错误的 `message` 里。因此 `missing` / `extra` 按构造恒为空数组；保留字段是
+ * 为了让调用方不必按分支读两种形状。
+ */
+export interface ContributesReconcileReport {
+  pluginId: string;
+  /** manifest 声明的贡献数（`kind:id` 去重后）。 */
+  declared: number;
+  /** activate 期实际注册的贡献数（`kind:id` 去重后）。 */
+  registered: number;
+  /** 声明了但没注册（成功时恒为空）。 */
+  missing: string[];
+  /** 注册了但没声明（成功时恒为空）。 */
+  extra: string[];
+}
+
+/**
  * 宿主服务客户端。
  *
  * 实例不持有状态；所有方法都是"一次 invoke"，便于在插件代码里按需构造。
@@ -118,6 +137,13 @@ export class HostClient {
     }
 
     const channel = new FrameSink(onFrame, this.backend);
+    // 已知残留（诚实标注，**不是**遗忘）：这里的通道没有释放点，进程内传输
+    // （`MemoryTransport` / `MockBackend`）会为每次 `pluginCall` 留一个条目。
+    // 原因是**这一侧没有可靠的"调用已结束"信号**：帧载体是宿主在 `plugin_call`
+    // 时绑定的，而流的终态由**写入方**发 `host_stream_close` 决定，发起方看不见。
+    // 该调用若后续被 `openStreamHandle` 接管，宿主用的可能仍是这里绑定的载体——
+    // 提前 `dispose()` 会把接管后的帧静默丢掉，比泄漏更糟。
+    // `openStreamHandle` 那条路径没有这个问题（流的终态就在自己手里），已释放。
     return this.call<PendingCallInfo>('host_plugin_call', {
       req: {
         callId: req.callId,
@@ -153,21 +179,38 @@ export class HostClient {
    * 也没有写帧出口，`open → write → close` 这条链在前端是断的。
    *
    * `write()` 支持 `argsRaw`：字节不经 base64 夹带 JSON（§4.8 R6）。
-   * `close()` 幂等；句柄最终还有调用回收兜底。
+   * `close()` 幂等；**在开流落定之前调用也安全**——关流命令会在 `streamId`
+   * 到手后补发，不会留下无人关闭的宿主侧流。句柄最终还有调用回收兜底。
    */
   openStreamHandle(callId: string, onFrame: (frame: StreamFrame) => void): StreamHandle {
     const sink = new FrameSink(onFrame, this.backend);
     let streamId: string | null = null;
-    let closed = false;
+    // 「已请求关闭」与「关闭已送出」必须分开：开流是异步的，调用方完全可能在
+    // `ready` 落定**之前**就 `close()`（例如开流后立刻取消）。若只用一个
+    // `closed` 标志，close() 会因 `streamId` 还是 null 而不发命令，随后开流
+    // 落定时又因 `closed` 已为 true 而提前返回——`host_stream_close` **永远
+    // 不会发出**，宿主侧那条流就泄漏了。两个标志各自幂等即可闭合这条路径。
+    let closeRequested = false;
+    let closeSent = false;
+
+    /** 幂等送出 `host_stream_close`（仅在「已请求关闭」且 `streamId` 已知时才有意义）。 */
+    const sendClose = (): void => {
+      if (!closeRequested || closeSent || streamId === null) return;
+      closeSent = true;
+      void this.call('host_stream_close', { req: { streamId, kind: 'end' } })
+        .then(() => {
+          // 关流成功 = 流已终态，之后不会再有帧 → 通道可以释放（见 FrameSink.dispose）。
+          sink.dispose();
+        })
+        .catch(() => {
+          // 关流失败不抛出：退订是尽力而为，句柄最终会被调用回收兜底。
+          // **不释放通道**——流可能仍在推帧，清了 onmessage 会把后续帧静默丢掉。
+        });
+    };
 
     const close = (): void => {
-      if (closed) return;
-      closed = true;
-      if (streamId !== null) {
-        void this.call('host_stream_close', { req: { streamId, kind: 'end' } }).catch(() => {
-          // 关流失败不抛出：退订是尽力而为，句柄最终会被调用回收兜底。
-        });
-      }
+      closeRequested = true;
+      sendClose();
     };
 
     const ready = this.call<{ streamId: string }>('host_stream_open', {
@@ -176,13 +219,16 @@ export class HostClient {
     })
       .then((opened) => {
         streamId = opened.streamId;
-        if (closed) close();
+        // 补发：调用方可能在开流落定前就要求关闭（见上面 `closeRequested` 注释）。
+        sendClose();
         return opened.streamId;
       })
       .catch((err: unknown) => {
         // 开流失败（如未注册插件）：把失败留给调用方通过后续 write/close 暴露，
         // 但退订仍是幂等的关流尝试。
-        closed = true;
+        closeRequested = true;
+        // 流从未存在 → 不会有帧到达 → 通道立刻释放（否则这条失败路径每次都漏一个）。
+        sink.dispose();
         throw err;
       });
 
@@ -193,7 +239,7 @@ export class HostClient {
     void ready.catch(() => {});
 
     const write = (frame: StreamWriteInput): Promise<StreamFrame> => {
-      if (closed) {
+      if (closeRequested) {
         return Promise.reject(new Error('openStreamHandle: 流已关闭，不得再写帧'));
       }
       return ready.then((id) =>
@@ -313,6 +359,21 @@ export class HostClient {
     await this.call('host_contributes_register', { entry });
   }
 
+  /**
+   * 对账「manifest 声明」与「activate 期注册」（self 档，0.4-W3）。
+   *
+   * 为什么需要：`contributesRegister` 只是往宿主表里增删，**没有任何东西比对
+   * 声明与事实**——声明了却漏注册（入口点了没反应）与注册了却没声明（来源不明
+   * 的入口）都无人发现。本方法把这份落差变成可检出的错误。
+   *
+   * 纯只读（不改状态）。无分叉返回报告；有分叉宿主抛
+   * `E_CONTRIBUTES_DRIFT`（诊断细节在 `message` 里）。身份由宿主从 label 解析，
+   * 因此**只能对账自己**。
+   */
+  async contributesReconcile(): Promise<ContributesReconcileReport> {
+    return await this.call<ContributesReconcileReport>('host_contributes_reconcile', {});
+  }
+
   /** 取消传播到 sidecar/supervisor。 */
   async cancel(callId: string): Promise<void> {
     await this.call('host_cancel', { callId });
@@ -324,10 +385,15 @@ export class HostClient {
    * 上报生命周期**事件**（不是状态）。
    *
    * 宿主是状态的唯一写入者（§4.3 单一写入者原则）：插件只能上报事件
-   * （{@link LifecycleEvent}，SCREAMING_SNAKE_CASE 线名），由宿主决定迁移。
-   * 上报状态线名会被宿主拒绝。
+   * （SCREAMING_SNAKE_CASE 线名），由宿主决定迁移。上报状态线名会被宿主拒绝。
+   *
+   * 事件类型收窄为 {@link PluginReportableEvent}（不是完整的 {@link LifecycleEvent}）：
+   * `host_lifecycle_report` 是 self 档，插件不得自报 `ENABLE`/`SAFEMODE_EXIT`/
+   * `UNINSTALL`/`INSTALL_OK` 等越权事件——Rust 侧以 `E_AUTH_DENIED` 硬拒，这里
+   * 在编译期就把它们挡在类型外，让越权调用根本写不出来。用户放行走
+   * `AdminClient.registryAdmin({ op: 'ENABLE' })`。
    */
-  async lifecycleReport(evt: { event: LifecycleEvent; reason?: string }): Promise<void> {
+  async lifecycleReport(evt: { event: PluginReportableEvent; reason?: string }): Promise<void> {
     await this.call('host_lifecycle_report', {
       evt: {
         event: evt.event,
@@ -471,12 +537,14 @@ export class FrameSink {
   /** 真实通道对象：必须**原样**作为 `channel` 参数传给 invoke。 */
   readonly port: ChannelPort<StreamFrame>;
   private readonly onFrame: ((frame: StreamFrame) => void) | undefined;
+  private readonly backend: Backend;
 
   constructor(
     onFrame: ((frame: StreamFrame) => void) | undefined,
     backend: Backend,
   ) {
     this.onFrame = onFrame;
+    this.backend = backend;
     this.port = backend.channel<StreamFrame>();
     this.port.onmessage = (frame: StreamFrame) => {
       this.onFrame?.(frame);
@@ -486,6 +554,24 @@ export class FrameSink {
   /** 测试注入：模拟宿主推送一帧（走与真机相同的 `onmessage` 入口）。 */
   sink(frame: StreamFrame): void {
     this.port.onmessage?.(frame);
+  }
+
+  /**
+   * 释放通道（幂等）：清掉收帧入口，并在传输层支持时注销该通道。
+   *
+   * **只能在确认不会再有帧到达之后调用**——清了 `onmessage` 之后到达的帧会被
+   * 静默丢弃（`sendChannel` 返回 `false`），这正是「静默断链」最难查的形态。
+   * 目前的调用点只有「关流成功」（流已终态）与「开流失败」（流从未存在）。
+   *
+   * 为什么必须显式释放：进程内传输（`MemoryTransport` / `MockBackend`）的通道
+   * 存在自己的 Map 里，而 `onmessage` 闭包强引用整条流的状态——不释放就是每次
+   * 调用累积一个不可回收的对象图。真实 Tauri `Channel` 由 Tauri 管生命周期，
+   * 其 `Backend` 不实现 `closeChannel`，此处为 no-op（口径见 `Backend.closeChannel`）。
+   */
+  dispose(): void {
+    this.port.onmessage = null;
+    const id = this.port.id;
+    if (id !== undefined) this.backend.closeChannel?.(id);
   }
 }
 

@@ -9,13 +9,13 @@ import {
 } from './capabilities.js';
 
 describe('CAPABILITIES（计划 §2.1 命令面镜像）', () => {
-  it('共 23 条：17 条插件命令 + 6 条主窗特权命令', () => {
-    expect(CAPABILITIES).toHaveLength(23);
+  it('共 24 条：18 条插件命令 + 6 条主窗特权命令', () => {
+    expect(CAPABILITIES).toHaveLength(24);
   });
 
-  it('插件命令 17 条，其中 scoped-read 恰好 2 条（host_registry_list / host_contributes_list）', () => {
+  it('插件命令 18 条，其中 scoped-read 恰好 2 条（host_registry_list / host_contributes_list）', () => {
     const plugin = CAPABILITIES.filter((c) => c.consumer === 'plugin');
-    expect(plugin).toHaveLength(17);
+    expect(plugin).toHaveLength(18);
     expect(plugin.filter((c) => c.tier === 'scoped-read')).toEqual([
       expect.objectContaining({ command: 'host_registry_list' }),
       expect.objectContaining({ command: 'host_contributes_list' }),
@@ -85,17 +85,17 @@ describe('isAvailable / capabilityMatrix', () => {
     expect(isAvailable(backend, 'totally-unknown')).toBe(false);
   });
 
-  it('capabilityMatrix 覆盖全部 23 条命令', () => {
+  it('capabilityMatrix 覆盖全部 24 条命令', () => {
     const backend = new MockBackend({
       capabilities: CAPABILITIES.map((c) => c.command),
     });
     const matrix = capabilityMatrix(backend);
-    expect(Object.keys(matrix)).toHaveLength(23);
+    expect(Object.keys(matrix)).toHaveLength(24);
     expect(Object.values(matrix).every(Boolean)).toBe(true);
   });
 
   it('插件 webview 视图看不到主窗特权命令（含 P0-2 进程运行时）', () => {
-    // 模拟：插件 webview 只注册了 17 条插件命令。
+    // 模拟：插件 webview 只注册了 18 条插件命令。
     const pluginCaps = CAPABILITIES.filter((c) => c.consumer === 'plugin').map((c) => c.command);
     const backend = new MockBackend({ capabilities: pluginCaps, pluginId: 'com.example.x' });
     const matrix = capabilityMatrix(backend);
@@ -103,7 +103,7 @@ describe('isAvailable / capabilityMatrix', () => {
     // 进程执行原语：插件侧必须不可见（可见 = 任何插件都能起别人的 sidecar）。
     expect(matrix['host_runtime_spawn']).toBe(false);
     expect(matrix['host_runtime_health']).toBe(false);
-    expect(Object.values(matrix).filter(Boolean)).toHaveLength(17);
+    expect(Object.values(matrix).filter(Boolean)).toHaveLength(18);
   });
 
   it('capabilityOf 查无则 undefined', () => {

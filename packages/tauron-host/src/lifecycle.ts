@@ -57,3 +57,35 @@ export const LIFECYCLE_EVENTS = [
 ] as const;
 
 export type LifecycleEvent = (typeof LIFECYCLE_EVENTS)[number];
+
+/**
+ * 插件（webview 侧）**可自行上报**的事件子集（Rust `Event::PLUGIN_REPORTABLE`）。
+ *
+ * 线格式枚举 {@link LIFECYCLE_EVENTS} 是完整的——宿主内部路径与管理面要用全部
+ * 18 条。但 `host_lifecycle_report` 是 **self 档**入口，插件能自报什么必须比枚举
+ * 小一圈，否则这条通道就是越权写状态的捷径：
+ *
+ * - 自报 `ENABLE` / `TRIAL_ENABLE` / `SAFEMODE_EXIT` → 绕过用户放行与安全模式
+ *   （`SAFEMODE_EXIT` 能让插件**自己给自己解禁**）；
+ * - 自报 `UNINSTALL` / `PURGE` → 落到终态 `UNINSTALLED`，此后管理面卸载在终态
+ *   非法 → 槽位永远收不回；
+ * - 自报 `INSTALL_START` / `INSTALL_OK` / `INSTALL_FAIL` → 伪造安装结果
+ *   （`INSTALL_OK` 跳过签名校验与权限审批）；
+ * - 自报 `DISABLE` / `SAFEMODE_ENTER` → 只坑自己，但同属「被管对象宣告自己的
+ *   状态」，破坏 §4.3 单一写入者原则，一并排除。
+ *
+ * 留下的是宿主**无法从外部观测**的运行时事实。Rust 侧是单一真相源：本数组由
+ * `@tauron/contract-tests` 的线格式门禁逐名比对，越权事件写进来会直接红。
+ */
+export const PLUGIN_REPORTABLE_EVENTS = [
+  'ATTACH',
+  'DETACH',
+  'ERROR_RETRYABLE',
+  'ERROR_FATAL',
+  'RETRY_OK',
+  'RETRY_EXHAUSTED',
+  'HEALTH_OK',
+  'RUNTIME_CRASH',
+] as const satisfies readonly LifecycleEvent[];
+
+export type PluginReportableEvent = (typeof PLUGIN_REPORTABLE_EVENTS)[number];

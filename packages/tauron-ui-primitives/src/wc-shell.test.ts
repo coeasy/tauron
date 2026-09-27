@@ -6,6 +6,8 @@
 
 import { describe, expect, it, beforeEach } from 'vitest';
 import './wc-shell.js';
+import type { OcShortcutRecorder } from './wc-shell.js';
+import { ShortcutRecorderStore } from './shortcut-recorder.js';
 
 describe('<oc-title-bar>', () => {
   beforeEach(() => {
@@ -61,6 +63,40 @@ describe('<oc-updater-dialog>', () => {
     const dialog = el.shadowRoot?.querySelector('.dialog');
     expect(dialog).toBeTruthy();
   });
+
+  it('open 反映到宿主属性（`:host([open])` 才是可见性开关）', async () => {
+    const el = document.createElement('oc-updater-dialog');
+    document.body.appendChild(el);
+    expect(el.hasAttribute('open')).toBe(false);
+    el.open = true;
+    expect(el.hasAttribute('open'), 'open=true 必须反映到属性，否则组件永远不可见').toBe(true);
+    el.open = false;
+    expect(el.hasAttribute('open')).toBe(false);
+  });
+
+  it('「稍后」派发 oc-updater-dismiss 并收起对话框——**不得**派发 oc-close', async () => {
+    // 回归锁：该按钮曾派发 `SHELL_EVENTS.close`，而 ShellController 把
+    // `oc-close` 无条件路由到 `windowClose()` → 点「稍后」把主窗口关掉。
+    //
+    // 无法走 `later.click()`：happy-dom 的 EventTarget 派发 click 时以错误的
+    // 接收者调用 Lit 监听器的 `handleEvent`（TypeError，见 theme-picker.test.ts
+    // 同一处注释）。`_dismiss` 是私有方法，因此这里保留一处局部 any 驱动该入口。
+    const el = document.createElement('oc-updater-dialog');
+    el.open = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const seen: string[] = [];
+    for (const type of ['oc-updater-dismiss', 'oc-close', 'oc-minimize']) {
+      document.body.addEventListener(type, () => seen.push(type));
+    }
+
+    (el as unknown as { _dismiss(): void })._dismiss();
+
+    expect(seen).toEqual(['oc-updater-dismiss']);
+    expect(el.open, '「稍后」后对话框应收起').toBe(false);
+    expect(el.hasAttribute('open')).toBe(false);
+  });
 });
 
 describe('<oc-command-palette>', () => {
@@ -94,6 +130,29 @@ describe('<oc-shortcut-recorder>', () => {
     await el.updateComplete;
     const recorder = el.shadowRoot?.querySelector('.recorder');
     expect(recorder?.textContent).toContain('Ctrl+K');
+  });
+
+  // 订阅此前挂在 `firstUpdated`（每个元素实例只跑一次），而 `disconnectedCallback`
+  // 会退订——「摘掉再插回」之后组件就与 store 永久脱钩，且没有任何报错。
+  it('重连后仍然跟随 store（订阅不得只建在 firstUpdated）', async () => {
+    const store = new ShortcutRecorderStore({ current: 'Ctrl+K' });
+    const el = document.createElement('oc-shortcut-recorder') as OcShortcutRecorder;
+    el.store = store;
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    store.setConfig({ current: 'Ctrl+J' });
+    store.start();
+    expect(el.shortcut, '挂载期间应跟随 store').toBe('Ctrl+J');
+
+    // 摘掉再插回：firstUpdated 不会重跑，只有 connectedCallback 会
+    el.remove();
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    store.setConfig({ current: 'Ctrl+M' });
+    store.stop();
+    expect(el.shortcut, '重连后必须仍然跟随 store（否则组件已静默脱钩）').toBe('Ctrl+M');
   });
 });
 

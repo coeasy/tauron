@@ -34,7 +34,6 @@
     "lint": "eslint ."
   },
   "dependencies": {
-    "@tauron/core": "workspace:*",
     "@tauron/shell-events": "workspace:*",
     "@tauron/types": "workspace:*"
   },

@@ -458,13 +458,34 @@ impl Registry {
     ///
     /// 身份从 webview label 取，**忽略入参 plugin_id**（self 档，§2.1）；
     /// 跨插件冒充（伪造 plugin_id）在此硬拒。
+    ///
+    /// 第二道闸：事件必须在 [`Event::PLUGIN_REPORTABLE`] 内。这条通道由插件
+    /// 自己调用，若不加白名单，插件就能自报 `Enable`/`SafemodeExit`/`Uninstall`
+    /// 直接写状态——绕过用户放行、自己解禁、或把自己推进终态让槽位收不回
+    /// （详见 `lifecycle.rs` 里 [`Event::PLUGIN_REPORTABLE`] 的说明）。宿主内部
+    /// 驱动状态请用 [`Registry::report_event`]，那条路径不受限。
     pub fn lifecycle_report(
         &self,
         webview_label: &str,
         claimed_id: Option<&str>,
         event: Event,
     ) -> HostResult<TransitionOutcome> {
+        // 先判身份、再判权限：冒充者应拿到身份错误，而不是被「事件不允许」掩盖。
         let id = crate::authz::resolve_self_identity(webview_label, claimed_id)?;
+        if !event.plugin_reportable() {
+            return Err(HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                format!(
+                    "事件 `{event}` 不在插件可自报集合内：`host_lifecycle_report` 是 self 档，\
+                     插件只能上报运行时事实（{}）；`{event}` 只能由宿主内部或管理面驱动",
+                    Event::PLUGIN_REPORTABLE
+                        .iter()
+                        .map(|e| e.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                ),
+            ));
+        }
         self.report_event(&id, event)
     }
 
@@ -1120,6 +1141,13 @@ impl Registry {
                     }
                 }
             }
+            // **租约回收**：淘汰等价于「状态离开可用态」，与 `report_event` 的
+            // 「不可用就不许有进程」是同一条规则。此前这里只内联了状态迁移、
+            // 没回收租约，于是被淘汰的插件会留下**还在跑的 sidecar**——
+            // 「注册表说已禁用、进程却在跑」正是本仓最不该容忍的不自洽。
+            // 放在 `entries` 写锁释放之后（`reclaim_if_unusable` 会取 `runtime`
+            // 锁，域内锁序是 `pending → streams → runtime`，与 `entries` 不重叠）。
+            self.reclaim_if_unusable(&evict);
             // 无论淘汰成功与否都移出顺序表（成功则已非活跃，失败则本就无效）。
             self.active_order.lock().retain(|x| x != &evict);
 
@@ -1419,38 +1447,74 @@ mod tests {
     #[test]
     fn lifecycle_report_ignores_claimed_id_and_rejects_spoof() {
         let r = Registry::default();
-        r.install(&index(), manifest("com.example.a", None)).unwrap();
+        let a = r.install(&index(), manifest("com.example.a", None)).unwrap();
         r.install(&index(), manifest("com.example.b", None)).unwrap();
+        // 先由管理面放行到 ENABLED——`Enable` 不在插件可自报集合里（见白名单）。
+        r.admin_op(&a, crate::authz::RegistryAdminOp::Enable).unwrap();
 
-        // label 指向 a、声称 a → 通过。
+        // label 指向 a、声称 a → 通过（`Attach` 是插件可自报的运行时事实）。
         let o = r
-            .lifecycle_report("plugin-com.example.a", Some("com.example.a"), Event::Enable)
+            .lifecycle_report("plugin-com.example.a", Some("com.example.a"), Event::Attach)
             .unwrap();
         assert!(!o.illegal);
         assert_eq!(
             r.find(&PluginId::new("com.example.a").unwrap()).unwrap().state.state,
-            State::Enabled
+            State::Running
         );
 
         // label 指向 a、声称 b → 硬拒（伪造 plugin_id）。
         let e = r
-            .lifecycle_report("plugin-com.example.a", Some("com.example.b"), Event::Enable)
+            .lifecycle_report("plugin-com.example.a", Some("com.example.b"), Event::Attach)
             .unwrap_err();
         assert_eq!(e.code, ErrorCode::E_AUTH_DENIED);
         assert!(e.message.contains("com.example.b"));
     }
 
     #[test]
+    fn lifecycle_report_rejects_privileged_events() {
+        // self 档白名单：插件不得自报用户放行 / 安全模式 / 安装结果 / 终态迁移。
+        // 若这道闸漏了，`Enable` 就是「插件自己给自己放行」，
+        // `Uninstall` 就是「插件把自己推进终态、槽位再也收不回」。
+        let r = Registry::default();
+        let id = r.install(&index(), manifest("com.example.a", None)).unwrap();
+        let label = "plugin-com.example.a";
+
+        for ev in [
+            Event::Enable,
+            Event::Disable,
+            Event::TrialEnable,
+            Event::SafemodeEnter,
+            Event::SafemodeExit,
+            Event::InstallStart,
+            Event::InstallOk,
+            Event::InstallFail,
+            Event::Uninstall,
+            Event::Purge,
+        ] {
+            let e = r.lifecycle_report(label, None, ev).unwrap_err();
+            assert_eq!(e.code, ErrorCode::E_AUTH_DENIED, "{ev} 应被 self 档白名单拒绝");
+            assert!(e.message.contains(ev.as_str()), "错误消息应点名事件：{}", e.message);
+        }
+
+        // 状态没被这些尝试改动过——拒绝必须是**纯**拒绝（不留半截副作用）。
+        assert_eq!(r.find(&id).unwrap().state.state, State::Installed);
+
+        // 反向对照：白名单内的事件不被这道闸挡住（此时非法是状态机的事，不是权限）。
+        let o = r.lifecycle_report(label, None, Event::Attach).unwrap();
+        assert!(o.illegal, "Installed + Attach 无出边，应为非法迁移而非权限拒绝");
+    }
+
+    #[test]
     fn non_plugin_label_is_rejected() {
         let r = Registry::default();
-        let e = r.lifecycle_report("main", None, Event::Enable).unwrap_err();
+        let e = r.lifecycle_report("main", None, Event::Attach).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_AUTH_DENIED);
     }
 
     #[test]
     fn unknown_plugin_lifecycle_report_errors() {
         let r = Registry::default();
-        let e = r.lifecycle_report("plugin-com.example.ghost", None, Event::Enable).unwrap_err();
+        let e = r.lifecycle_report("plugin-com.example.ghost", None, Event::Attach).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_UNKNOWN_PLUGIN);
     }
 
@@ -1923,6 +1987,27 @@ mod tests {
         assert!(!r.active_ids().is_empty());
         r.admin_op(&a, crate::authz::RegistryAdminOp::Uninstall).unwrap();
         assert!(r.active_ids().iter().all(|x| x != &a));
+    }
+
+    #[test]
+    fn lru_eviction_reaps_sidecar_lease() {
+        // 回归锁：`evict_overflow` 只内联了状态迁移、**没回收租约**——被 LRU 淘汰
+        // 的插件会留下还在跑的 sidecar，也就是「注册表说已禁用、进程却在跑」。
+        // 淘汰等价于「状态离开可用态」，与 `report_event` 的
+        // 「不可用就不许有进程」必须是同一条规则。
+        let cfg = RegistryConfig { max_active_identities: 1, max_plugins: 8, ..default_config() };
+        let r = Registry::new(cfg);
+        let a = r.install(&index(), manifest("com.example.a", None)).unwrap();
+        let b = r.install(&index(), manifest("com.example.b", None)).unwrap();
+        enable(&r, &a);
+        r.runtime_ensure_lease(&a, || Ok(4242)).unwrap();
+        assert_eq!(r.live_pid_of(a.as_str()), Some(4242));
+
+        // 活跃槽只有 1 个 → 启用 b 必然淘汰最旧的 a。
+        enable(&r, &b);
+        assert_eq!(r.find(&a).unwrap().state.state, State::Disabled, "a 应被 LRU 淘汰");
+        assert_eq!(r.live_pid_of(a.as_str()), None, "淘汰后不得留下还在跑的 sidecar");
+        assert_eq!(r.live_pid_of(b.as_str()), None, "b 没起过进程，不该凭空有租约");
     }
 
     // ── 状态单写者 ───────────────────────────────────────────────

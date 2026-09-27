@@ -104,7 +104,19 @@ export function toHostRpc(client: HostClient, options: HostRpcOptions = {}): Hos
     try {
       const frames = await client.eventsDrain('event');
       for (const frame of frames) {
-        handlers.get(frame.topic)?.forEach((h) => h(frame.payload));
+        const set = handlers.get(frame.topic);
+        if (!set) continue;
+        // 逐订阅者隔离：**一个订阅者抛错不得吞掉同批其余帧**。
+        // 帧在 `eventsDrain` 时已从宿主队列取走（拉取模型，取走即删），
+        // 所以抛错中断这一拍 = 这批帧永久丢失，且没有任何出口可查。
+        // 与旧 SDK 的事件分发（`plugin-context.ts` 的 `onEvent` 派发）同一做法。
+        for (const h of set) {
+          try {
+            h(frame.payload);
+          } catch (err) {
+            console.error(`[tauron] 事件订阅者处理 \`${frame.topic}\` 时抛错：`, err);
+          }
+        }
       }
     } catch {
       // 单拍失败**不打断**泵：断一拍就是永久断链，下一拍重试。
@@ -126,10 +138,14 @@ export function toHostRpc(client: HostClient, options: HostRpcOptions = {}): Hos
     subscribe: async (topic, handler) => {
       let set = handlers.get(topic);
       if (!set) {
+        // 先建立宿主订阅，再挂本地回调：反过来的话第一帧可能丢在建立之前。
+        // 且**必须在宿主订阅成功后才登记 topic**：若先 `handlers.set` 再 await，
+        // 订阅失败就会留下一个空 `Set`；重试时 `handlers.get(topic)` 命中它、
+        // 跳过宿主订阅，订阅者从此**永远收不到帧且没有任何出口可查**，
+        // 那个空 `Set` 也再无回收路径（`handlers` 只增不减）。
+        const sub = await client.eventsSubscribe([{ topic }]);
         set = new Set();
         handlers.set(topic, set);
-        // 先建立宿主订阅，再挂本地回调：反过来的话第一帧可能丢在建立之前。
-        const sub = await client.eventsSubscribe([{ topic }]);
         tokens.set(topic, sub.token);
       }
       set.add(handler);
