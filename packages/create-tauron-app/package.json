@@ -1,0 +1,40 @@
+{
+  "name": "create-tauron-app",
+  "version": "1.0.0",
+  "description": "Create a Tauri 2 client project powered by Tauron",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coeasy/tauron.git",
+    "directory": "packages/create-tauron-app"
+  },
+  "homepage": "https://github.com/coeasy/tauron",
+  "bugs": {
+    "url": "https://github.com/coeasy/tauron/issues"
+  },
+  "keywords": [
+    "tauron",
+    "tauri",
+    "create",
+    "scaffold",
+    "client"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "bin": {
+    "create-tauron-app": "./dist/create-tauron-app.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "dependencies": {
+    "@tauron/app-cli": "workspace:*"
+  }
+}

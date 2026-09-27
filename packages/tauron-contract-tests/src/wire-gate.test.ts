@@ -11,7 +11,7 @@
  * 4. 命令核心入口存在性 —— `HostState::handle_*` 必须齐全
  */
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -711,7 +711,8 @@ function tsHostCallSites(): TsCallSite[] {
     }
   };
   for (const pkg of readdirSync(join(workspaceRoot, 'packages'), { withFileTypes: true })) {
-    if (pkg.isDirectory()) walk(join(workspaceRoot, 'packages', pkg.name, 'src'));
+    const sourceDir = join(workspaceRoot, 'packages', pkg.name, 'src');
+    if (pkg.isDirectory() && existsSync(sourceDir)) walk(sourceDir);
   }
   return sites;
 }

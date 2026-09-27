@@ -231,13 +231,26 @@ jobs:
           # 安装包本身已压缩，再压一遍没有收益。
           compression-level: 0
 
+  registry-check:
+    name: 确认 SDK packages 已公开发布
+    needs: version-check
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: npm and crates.io versions must already exist
+        run: node scripts/check-published-versions.mjs "${GITHUB_REF_NAME#v}"
+
   # ══════════════════════════════════════════════════════════════════
   # 汇总发布：单点创建 Release，避免 4 个 matrix 分支并发写同一个
   # Release 造成的竞态。
   # ══════════════════════════════════════════════════════════════════
   release:
     name: 创建 GitHub Release
-    needs: build
+    needs: [build, registry-check]
     if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.dry_run == false)
     runs-on: ubuntu-latest
     permissions:
@@ -257,9 +270,10 @@ jobs:
 
       - uses: softprops/action-gh-release@v3
         with:
-          # 通过完整构建和版本校验的 tag 直接发布安装包。
+          # Release 页以公开 SDK registry 发布说明为主体，并保留示例应用安装包资产。
           draft: false
-          generate_release_notes: true
+          generate_release_notes: false
+          overwrite_files: true
           # `body` 会**前置**到自动生成的 notes（action README：the body will be
           # pre-pended to the automatically generated notes），因此这里是给 Releases
           # 页面访问者的「这是什么 / 下载哪个 / 安装前必读 / 装完怎么自检」，后面
@@ -267,12 +281,31 @@ jobs:
           body: |
             ## tauron ${{ github.ref_name }}
 
-            **tauron 是跑在 Tauri 2 之上的插件化桌面客户端基础设施**——它交付的是
-            **框架**（15 个 Rust crate + 20 个 npm 包），不是一个开箱即用的成品应用。
-            本 Release 提供的是仓库里**唯一可安装**的东西：`examples/minimal-app`
-            示例应用，用来把框架的真实链路跑给人看。
+            **Tauron SDK v1 正式版**：20 个 npm 包与 15 个 Rust crate 已发布到各自的
+            公共 registry。GitHub 上的安装包是 `examples/minimal-app` 演示客户端，不是
+            Tauron SDK 本身的安装器。
 
-            ### 下载哪个
+            ### 第三方 Tauri 2 项目快速接入
+
+            ```bash
+            npm create tauron-app@1.0.0 -- ./my-app --framework react
+            cd my-app
+            npm install
+            npm run tauri dev
+            ```
+
+            前端支持 React、Vue、Svelte 与原生 TypeScript。已有 Tauri 2 项目可用
+            `npx @tauron/app-cli@1.0.0 init --dir ./my-app`；已有命令处理器与权限配置会保留，
+            需要手工合并时 CLI 会明确报告。其他宿主必须实现自己的 `Backend` / `HostTransport`
+            适配，Tauron v1 不承诺同一安装器覆盖所有客户端。
+
+            - [安装与使用](https://github.com/coeasy/tauron/blob/main/docs/installation.md)
+            - [Tauron v1 支持边界](https://github.com/coeasy/tauron/blob/main/docs/integration/support-boundary.md)
+            - [渐进接入指南](https://github.com/coeasy/tauron/blob/main/docs/integration/incremental-adoption.md)
+
+            ### 演示客户端安装包
+
+            以下资产用于体验示例应用，不代表 SDK 安装包。
 
             | 平台 | 文件 | 格式 |
             |---|---|---|
@@ -304,12 +337,10 @@ jobs:
 
             ### 文档
 
-            - [安装与使用](https://github.com/coeasy/tauron/blob/main/docs/installation.md)
-              —— 三种「安装」怎么选、各平台步骤、从源码构建、装完自检
             - [架构概览](https://github.com/coeasy/tauron/blob/main/docs/architecture/overview.md)
               —— 含「接线状态（诚实披露）」
             - [CHANGELOG / 已知债务](https://github.com/coeasy/tauron/blob/main/CHANGELOG.md)
-              —— 未发布到 registry、MSI 缺失、进程插件 JSON-RPC 未接线等边界逐条登记
+              —— 运行时成熟度、平台打包限制与已知边界
 
             ---
           # 只上传真正的安装包，**不要**写 `artifacts/**/*`。

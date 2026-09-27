@@ -20,7 +20,8 @@
     "fmt:rust:check": "cargo fmt --all -- --check",
     "verify": "pnpm -r build && pnpm -r --no-bail typecheck && pnpm -r --no-bail test",
     "publish:npm": "node scripts/publish-npm.mjs",
-    "publish:crates": "node scripts/publish-crates.mjs"
+    "publish:crates": "node scripts/publish-crates.mjs",
+    "verify:registry-consumer": "node scripts/verify-registry-consumer.mjs"
   },
   "devDependencies": {
     "@tauri-apps/api": "2.11.1",

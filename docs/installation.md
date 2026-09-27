@@ -3,7 +3,7 @@
 本文是 tauron 的**落地入口**：怎么装、怎么跑、怎么验证装对了。
 
 > **先看这一句，能省掉大半困惑**：本仓库交付的是**框架**（15 个 Rust crate +
-> 20 个 npm 包），不是一个可以直接下载双击运行的成品应用。仓库里**唯一能装的东西**
+> 20 个可发布 npm 包，另有 1 个私有契约测试包），不是一个可以直接下载双击运行的成品应用。仓库里**唯一能装的东西**
 > 是 `examples/minimal-app` 这个**示例应用**——它的作用是把框架的链路真正跑起来给人看。
 
 ---
@@ -17,7 +17,7 @@
 | A | **跑起来看看**（拿安装包装上就开） | §1 | ⚠️ 部分可以：Windows NSIS **出包**实测过；macOS / Linux 的包 CI 能出，但三种平台的包**都未做过真机安装验证**（出包 ≠ 装过） |
 | B | **改代码 / 自己构建** | §2 | ✅ 可以，源码可构建 |
 | C | **把 tauron 当库接进自己的项目** | §3 | ⚠️ 分 5 种方式，**今天只有「源码集成（`path` / `file:`）」真正可用**，其余待发布——见 §3.0 |
-| D | **一键脚手架起新工程**（`tauron-app new`） | §3.2 | ✅ 可以（生成物用的是 C 的 `path` 坐标） |
+| D | **一键脚手架起新工程**（`tauron-app new`） | §3.2 | ✅ 已生成固定 `1.0.0` 坐标；registry 发布完成后可直接安装 |
 
 ---
 
@@ -219,16 +219,16 @@ pnpm --filter minimal-app build
 | # | 方式 | 具体做法 | 现在能不能用 | 依据 |
 |---|---|---|---|---|
 | 1 | **源码集成** | `path` / `file:` 指向本机 tauron checkout | ✅ **唯一真正可用** | §3.3 |
-| 2 | **npm 包集成** | `npm i @tauron/...` | ❌ 待发布后可用（19 个包已就绪，未 `npm publish`） | §3.4 |
+| 2 | **npm 包集成** | `npm i @tauron/...` | ❌ 待发布后可用（20 个包已就绪，未 `npm publish`） | §3.4 |
 | 3 | **crate 集成** | `cargo add tauron-*` | ❌ 待发布后可用（15 个 crate 已就绪，未 `cargo publish`） | §3.5 |
-| 4 | **一键脚手架** | `tauron-app new` / `create-tauron-app` | ✅ 可用（内部仍走方式 1 的 `path` 坐标） | §3.2 |
+| 4 | **一键脚手架** | `npm create tauron-app@1.0.0` | ✅ 默认生成固定 registry 坐标；发布完成后可直接使用 | §3.2 |
 | 5 | **安装包** | 从 Releases 取 Tauri bundle 装上即用 | ⚠️ 仅限**示例应用**；Windows 腿 `--bundles nsis` 出包实测过，**装机未验证** | §1 |
 
 ### 3.1 现状：已就绪 ≠ 已发布
 
 一句话：**「可以打包发布」这件事已经做到了，「已经发布」还没有**。
 
-- **npm**：20 个包里 **19 个已去掉 `private`** 并补齐发布元数据（`license` /
+- **npm**：21 个 package manifests 中 **20 个可发布**并补齐发布元数据（`license` /
   `repository` / `homepage` / `bugs` / `keywords` / `engines` / `publishConfig.access=public`
   / `files` 白名单）；第 20 个 `@tauron/contract-tests` **刻意保留 `private`**
   （它是仓库内的契约测试 harness，`dist/` 里只有 `*.test.js`、没有 `index.js`，
@@ -243,24 +243,25 @@ pnpm --filter minimal-app build
 
 ### 3.2 一键脚手架（最快路径）
 
-不想手工接线就用 `@tauron/app-cli` 的 `new` 命令（`tauron-app` 本身也没发布到 npm，
-在仓库根直接跑 dist）：
+正式发布后，可从 npm 直接启动脚手架：
 
 ```bash
-# 新建工程：产出真装配的 src-tauri + capability + build.rs + 前端骨架
-node packages/tauron-app-cli/dist/cli.js new ./my-app --name my-app
-# 等价 bin：create-tauron-app ./my-app
+# npm create 会运行 create-tauron-app 包，生成已接线的 Tauri 2 工程
+npm create tauron-app@1.0.0 -- ./my-app --framework react
 
-# 已有 Tauri 项目：注入式接入（加 path 依赖、接线 Builder、补 capability/build.rs）
-node packages/tauron-app-cli/dist/cli.js init --dir ./my-existing-app
+# 已有 Tauri 2 项目：注入接入
+npx @tauron/app-cli@1.0.0 init --dir ./my-existing-app
 ```
+
+发布前在 Tauron 仓库中开发时，可运行 `node packages/tauron-app-cli/dist/cli.js new ./my-app
+--tauron-path <checkout>`；该选项明确生成本地 `path` / `file:` 依赖。
 
 **能一键跑通到哪一步**：
 
 | 产出 | 状态 |
 |---|---|
 | `src-tauri/`（`Cargo.toml` / `main.rs` / `build.rs` / `capabilities/default.json` / `tauri.conf.json`） | ✅ 真装配，与 `examples/minimal-app` 同源 |
-| 依赖坐标 | ✅ `path` / `file:` 指向本机 tauron 检出根（检出根默认自动探测，可用 `--tauron-path` 覆盖） |
+| 依赖坐标 | ✅ 默认固定到 `1.0.0` registry；源码开发时 `--tauron-path` 显式使用本地 checkout |
 | 前端 bundler / dev-server 配置 | ✅ 生成 `vite.config.ts`（端口/产物目录与 `tauri.conf.json` 对齐）+ 根 `index.html` + `beforeDevCommand` / `beforeBuildCommand` |
 | `src-tauri/icons/` | ⚠️ 生成**纯色占位图**（6 个文件，覆盖 Windows / macOS / Linux 打包所需）；**发布前须替换成品牌图标**。缺这组文件连 `cargo check` 都过不去（`tauri-build` 在 Windows 上要 `icons/icon.ico`） |
 
@@ -278,8 +279,9 @@ cd my-app && npm install && npm run tauri dev
 > `packages/*/dist` 已构建——因为 `file:` 依赖是软链，`@tauron/host` 自解析其
 > `workspace:*` 依赖走的是检出根自己的 `node_modules`。
 
-`init` 的**覆盖语义**提醒：若目标项目已有 `.invoke_handler(..)`，`init` 不会改动源码
-（Tauri 的 `invoke_handler` 是覆盖语义，自动追加会丢掉原有命令），只把要手工合并的那一行打印出来。
+`init` 仅自动接入 Tauri 2。若目标项目已有 `.invoke_handler(..)`，CLI 保留宿主源码并报告手工
+合并 Tauron 命令的步骤；检查未完成会返回非零状态。已有 `client-config.json` 与 capability
+文件也会保留。修改 `package.json` 后需运行项目所用包管理器的 install 命令。
 
 ### 3.3 方式 1：源码集成（`path` / `file:`）——今天唯一真正可用
 
@@ -315,12 +317,12 @@ tauron-shell = { path = "../tauron/crates/tauron-shell", features = ["tauri"] }
 包本身已「发布就绪」，但**还没有任何包出现在 npm registry 上**，所以现在
 `npm i @tauron/...` 必然 404。本机可验证的就绪状态：
 
-- 19 个包已去掉 `private`，补齐 `license` / `repository` / `homepage` / `bugs` /
+- 20 个可发布包已补齐 `license` / `repository` / `homepage` / `bugs` /
   `keywords` / `engines`（`>=22`，与 README 徽章一致）/ `publishConfig.access=public`
   与 `files` 白名单（至少 `dist` + `README.md`）。
 - 顺带修掉一处发布缺陷：8 个包原本 `main` 指向 `./dist/index.cjs`，而构建**从不产出
   任何 `.cjs`**（`tsc` 单趟只出 ESM）；已改指真实入口 `./dist/index.js`。
-- `pnpm publish:npm -- --check` 本机跑通：对 19 个包逐一 `pnpm pack` 并**解包校验**
+- `pnpm publish:npm -- --check` 本机跑通：对 20 个包逐一 `pnpm pack` 并**解包校验**
   「含 `dist/`、入口文件齐全、版本同源、无 `workspace:` 残留」。
 
 **发布必须用 pnpm（不是 npm）——这是实测结论**：`npm pack` 会把 `workspace:*`
@@ -358,9 +360,9 @@ pnpm add @tauron/types @tauron/core @tauron/host   # npm / yarn 同理
 ```toml
 [dependencies]
 # 应用层：整套 host_* 命令（默认 80 条）
-tauron-adapter = { version = "0.1", features = ["tauri"] }
+tauron-adapter = { version = "=1.0.0", features = ["tauri"] }
 # 或框架层：只要信封协议 3 条命令
-tauron-shell = { version = "0.1", features = ["tauri"] }
+tauron-shell = { version = "=1.0.0", features = ["tauri"] }
 ```
 
 ### 3.6 三档装配——先决定你要哪一档
@@ -393,7 +395,7 @@ tauron 的装配是**分档**的，别一上来就全接：
 
 **本机实测（2026-09-27，Windows，Node 25 运行时 / 目标 Node 22 语法）**：
 
-- npm：19 个可发布包**全部通过**；`@tauron/contract-tests` 按设计跳过（`private`）。
+- npm：20 个可发布包**全部通过**；`@tauron/contract-tests` 按设计跳过（`private`）。
 - crates：15 个 crate**全部通过**，产物 `Cargo.toml` 的 `[dependencies.tauron-*]`
   已剥成 `version`、无 `path`。
 - crates `--check` 会**临时**用 `--config patch.crates-io.<dep>.path=…` 把内部依赖指回

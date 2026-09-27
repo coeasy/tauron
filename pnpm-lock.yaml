@@ -52,6 +52,12 @@ importers:
         specifier: ^7.0.0
         version: 7.3.6(@types/node@22.20.4)
 
+  packages/create-tauron-app:
+    dependencies:
+      '@tauron/app-cli':
+        specifier: workspace:*
+        version: link:../tauron-app-cli
+
   packages/tauron-adapter-react:
     dependencies:
       '@tauron/core':

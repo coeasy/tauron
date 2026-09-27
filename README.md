@@ -31,7 +31,7 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
   用来演示链路，不是产品形态的客户端。
 - **不是 Tauri 的替代品**。它建在 Tauri 2 之上——Tauri 管窗口 / WebView / IPC，
   tauron 管其上的插件运行时与能力治理。
-- **不是「已发布、可 `install` 的 SDK」**。20 个 npm 包与 15 个 crate **都未发布到
+- **不是「已发布、可 `install` 的 SDK」**。20 个可发布 npm 包与 15 个 crate **都未发布到
   registry**，只能 path / workspace 接入。
 - **当前版本为 1.0.0**。公开 API 遵循语义化版本；具体未接入的运行时与平台能力见下方成熟度说明。
 
@@ -90,7 +90,7 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
 | 产出 | 状态 |
 |---|---|
 | `src-tauri/`（`Cargo.toml` / `main.rs` / `build.rs` / `capabilities/default.json` / `tauri.conf.json`） | ✅ **真装配**：`state_init_with_adapter_config` + `tauron_generate_handler![]`（80 条）+ 窗口销毁回收 + capability 覆盖 `plugin-*` 窗。形态与 `examples/minimal-app` 同源 |
-| 依赖坐标 | ✅ `path` / `file:` 指向**本机 tauron 检出根**（20 个 npm 包与 15 个 crate 都没发布，registry 坐标今天解析不了，所以脚手架不写那种坐标） |
+| 依赖坐标 | ✅ 默认固定到 `1.0.0` registry；源码开发须显式使用 `--tauron-path`。公开 registry 发布完成前生成工程无法解析这些包 |
 | 前端 bundler / dev-server 配置 | ✅ `vite.config.ts`（`server.port` 与 `devUrl` 一致、`outDir` 与 `frontendDist` 一致、排除 `src-tauri/`）+ 根 `index.html` + `tauri.conf.json` 的 `beforeDevCommand` / `beforeBuildCommand` |
 | `src-tauri/icons/` | ⚠️ 生成**纯色占位图**（`32x32.png` / `128x128.png` / `128x128@2x.png` / `icon.png` / `icon.ico` / `icon.icns`）——**发布前须替换成品牌图标**。不给文件连 `cargo check` 都过不去：`tauri-build` 在 Windows 上要 `icons/icon.ico` 才能生成资源文件 |
 
@@ -103,9 +103,11 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
 > 解析它自己的 `workspace:*` 依赖）；② `packages/*/dist` 必须是已构建状态（`pnpm -r build`）。
 
 ```bash
-# `tauron-app` 尚未发布到 npm，在仓库根直接跑 dist：
-node packages/tauron-app-cli/dist/cli.js new ./my-app --name my-app
-# 等价写法（同一个 bin）：create-tauron-app ./my-app
+# npm / crates.io 正式发布完成后：
+npm create tauron-app@1.0.0 -- ./my-app --framework react
+
+# 在 Tauron 仓库内开发时，显式启用本地源码依赖：
+node packages/tauron-app-cli/dist/cli.js new ./my-app --tauron-path ..
 
 # 一步到位：
 cd my-app && npm install && npm run tauri dev
@@ -117,16 +119,19 @@ cargo check --features substrate-only                       # 只取底座：57 
 
 常用参数：`--framework react|vue|svelte|vanilla`、`--shell tauri|electron`、
 `--capabilities host_registry_list,host_lifecycle_report`、`--tauron-path <检出根相对路径>`
-（默认自动从 CLI 自身位置上溯探测）、`--dry-run`、`--force`。
+（显式切换为本地源码）、`--dry-run`、`--force`。
 
-**已有 Tauri 项目**改用注入式接入：`tauron-app init --dir <你的项目>`——它会加
-`path` 依赖、接线 Builder 链、补 capability 与 `build.rs`；若你原有 `.invoke_handler(..)`
-已存在，它**不会**动你的源码（Tauri 的 `invoke_handler` 是覆盖语义，自动追加会丢命令），
-而是把需要手工合并的那一行如实打印出来。
+**已有 Tauri 2 项目**改用注入式接入：`tauron-app init --dir <你的项目>`——它会加固定
+`1.0.0` 依赖、接线 Builder 链，并保留现有权限与 client config；若你原有 `.invoke_handler(..)`
+已存在，它会保留该处理器、报告需要手工合并的步骤，并以非零状态结束。
+
+v1 官方宿主范围为 Tauri 2；React、Vue、Svelte 与原生 TypeScript 是前端选择。其他客户端宿主
+须实现自己的 `Backend`/`HostTransport` 适配并保留宿主授权边界。详情见[支持边界](./docs/integration/support-boundary.md)。
 
 ### 1. 安装依赖
 
-> ⚠️ **尚未发布到 registry**：20 个 npm 包当前都是 `private: true`，15 个 crate 的内部
+> ⚠️ **尚未发布到 registry**：21 个 npm package manifests 中有 20 个可发布包，另有
+> 1 个 `private` 契约测试包；15 个 crate 的内部
 > 互引用是 path 依赖（cargo 打包要求 path 依赖同时给出 `version`）。
 > 所以下面**不能**用 `pnpm add @tauron/...` / `cargo add tauron-*` 的 registry 形式，
 > 现阶段请按 path / workspace 方式接入：
@@ -152,7 +157,7 @@ tauron-shell = { path = "../tauron/crates/tauron-shell", features = ["tauri"] }
 ```toml
 # src-tauri/Cargo.toml
 [dependencies]
-tauron-shell = { version = "0.1", features = ["tauri"] }
+tauron-shell = { version = "=1.0.0", features = ["tauri"] }
 ```
 
 ```rust
@@ -428,7 +433,7 @@ const error = checkPluginPermission(
 
 ## CLI 工具
 
-> ⚠️ `@tauron/cli` **尚未发布到 npm**（20 个 npm 包当前均为 `private: true`），
+> ⚠️ `@tauron/cli` **尚未发布到 npm**（20 个可发布 npm 包都尚未发布），
 > `npx tauron` 装不到东西。下文用 `tauron` 代指
 > `node packages/tauron-cli/bin/tauron.js`（在仓库根执行）。
 

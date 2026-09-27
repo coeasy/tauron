@@ -7,13 +7,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { generateClientConfig } from './client-config.js';
-import {
-  ensureDir,
-  writeFile,
-  pathExists,
-  findTauronRoot,
-  toPosixRelative,
-} from './fs-operations.js';
+import { ensureDir, writeFile, pathExists, toPosixRelative } from './fs-operations.js';
+
+const FRAMEWORK_VERSION = '1.0.0';
 
 // ── 类型 ──
 
@@ -25,14 +21,15 @@ export interface InitConfig {
   /**
    * tauron 源码检出根（可选）。
    *
-   * 省略时从 **CLI 自身位置**逐级上溯探测——即「在 tauron 仓库内跑这一命令」的场景。
-   * 若目标工程与 CLI 不在同一检出树内，必须显式给出，否则探测失败会如实报错。
+   * 只有显式传入时才使用本地源码；普通使用从 registry 获取固定版本。
    */
   tauronPath?: string;
 }
 
 export interface InitResult {
   ok: boolean;
+  /** false means the existing command handler needs a manual, reported merge. */
+  complete?: boolean;
   steps?: string[];
   error?: string;
 }
@@ -48,11 +45,62 @@ function detectTauriProject(
   const libRs = path.join(srcTauri, 'src', 'lib.rs');
   const mainRs = path.join(srcTauri, 'src', 'main.rs');
   if (!pathExists(cargoToml)) return null;
-  // Tauri 2 项目使用 lib.rs，Tauri 1 使用 main.rs
+  const cargo = readFileContent(cargoToml) ?? '';
+  if (!hasTauri2Dependency(cargo, dir)) return null;
+  // Tauri 2 工程通常使用 lib.rs，也兼容仍使用 main.rs 的自定义工程布局。
   if (pathExists(libRs)) {
     return { srcTauri, cargoToml, mainRs: libRs };
   }
   return { srcTauri, cargoToml, mainRs: mainRs };
+}
+
+function hasTauri2Dependency(cargo: string, projectDir: string): boolean {
+  const versionPattern = /(?:^|\n)\s*version\s*=\s*["']([^"']+)["']/m;
+  const inline = /(?:^|\n)\s*tauri\s*=\s*\{([^}\n]+)\}/m.exec(cargo)?.[1];
+  const simple = /(?:^|\n)\s*tauri\s*=\s*["']([^"']+)["']/m.exec(cargo)?.[1];
+  let inTauriTable = false;
+  const tauriTableLines: string[] = [];
+  for (const line of cargo.split(/\r?\n/)) {
+    if (line.trim().startsWith('[')) {
+      inTauriTable = line.trim() === '[dependencies.tauri]';
+      continue;
+    }
+    if (inTauriTable) tauriTableLines.push(line);
+  }
+  let version =
+    (inline && versionPattern.exec(inline)?.[1]) ??
+    simple ??
+    versionPattern.exec(tauriTableLines.join('\n'))?.[1];
+
+  if (version === undefined && inline?.includes('workspace = true')) {
+    let parent = path.resolve(projectDir);
+    for (let depth = 0; depth < 6; depth += 1) {
+      const workspaceManifest = path.join(parent, 'Cargo.toml');
+      if (pathExists(workspaceManifest)) {
+        const workspaceCargo = readFileContent(workspaceManifest) ?? '';
+        const workspaceLines: string[] = [];
+        let inWorkspaceDependencies = false;
+        for (const line of workspaceCargo.split(/\r?\n/)) {
+          if (line.trim().startsWith('[')) {
+            inWorkspaceDependencies = line.trim() === '[workspace.dependencies]';
+            continue;
+          }
+          if (inWorkspaceDependencies) workspaceLines.push(line);
+        }
+        const section = workspaceLines.join('\n');
+        const workspaceInline =
+          section && /(?:^|\n)\s*tauri\s*=\s*\{([^}\n]+)\}/m.exec(section)?.[1];
+        const workspaceSimple =
+          section && /(?:^|\n)\s*tauri\s*=\s*["']([^"']+)["']/m.exec(section)?.[1];
+        version = (workspaceInline && versionPattern.exec(workspaceInline)?.[1]) ?? workspaceSimple;
+        if (version !== undefined) break;
+      }
+      const next = path.dirname(parent);
+      if (next === parent) break;
+      parent = next;
+    }
+  }
+  return version !== undefined && /^2(?:\.|$|\s|\*)/.test(version);
 }
 
 function detectFrontendPackageJson(dir: string): string | null {
@@ -75,39 +123,38 @@ function writeFileContent(filePath: string, content: string): void {
 // ── Cargo.toml 操作 ──
 
 /**
- * 在 `[dependencies]` 段末尾追加一条依赖（幂等：同名已存在则跳过）。
+ * 在 `[dependencies]` 段追加一条依赖（幂等：同名已存在则跳过）。
  *
  * `depValue` 是完整的一行右侧（例如
  * `{ path = "../../crates/tauron-adapter", default-features = false, features = ["tauri"] }`）。
- * **不做版本号拼装**：tauron 的 crate 还没发布到 crates.io，写 `version` 只会产出
- * 一份 `cargo` 解析不了的坐标——这不是"待完善"，是错。
+ * 若宿主没有 `[dependencies]` 段，则创建该段并追加依赖。
  */
-function addCargoDependency(cargoPath: string, depName: string, depValue: string): boolean {
+function addCargoDependency(
+  cargoPath: string,
+  depName: string,
+  depValue: string,
+  sectionName = 'dependencies',
+): boolean {
   const content = readFileContent(cargoPath);
   if (!content) return false;
 
-  // 按「独立依赖名」判重，避免 `tauron-adapter` 命中 `tauron-adapter-extra`
+  // 按「独立依赖名」判重，避免 `tauron-adapter` 命中 `tauron-adapter-extra`。
   const dupRe = new RegExp(`^\\s*${depName.replace(/[-]/g, '\\-')}\\s*=`, 'm');
   if (dupRe.test(content)) return false;
 
   const lines = content.split('\n');
-  let inDeps = false;
-  let insertIdx = -1;
-  for (const [i, line] of lines.entries()) {
-    if (line.trim() === '[dependencies]') {
-      inDeps = true;
-      continue;
-    }
-    if (inDeps) {
-      if (line.trim().startsWith('[')) break;
-      if (line.trim() !== '' && !line.trim().startsWith('#')) {
-        insertIdx = i;
-      }
-    }
+  const sectionHeader = `[${sectionName}]`;
+  const sectionIndex = lines.findIndex((line) => line.trim() === sectionHeader);
+  if (sectionIndex !== -1) {
+    // Place the plain dependency before any nested table such as [dependencies.tauri].
+    lines.splice(sectionIndex + 1, 0, `${depName} = ${depValue}`);
+  } else {
+    const nestedPrefix = `[${sectionName}.`;
+    const nestedIndex = lines.findIndex((line) => line.trim().startsWith(nestedPrefix));
+    const block = [sectionHeader, `${depName} = ${depValue}`, ''];
+    if (nestedIndex === -1) lines.push('', ...block);
+    else lines.splice(nestedIndex, 0, ...block);
   }
-  if (insertIdx === -1) return false;
-
-  lines.splice(insertIdx + 1, 0, `${depName} = ${depValue}`);
   writeFileContent(cargoPath, lines.join('\n'));
   return true;
 }
@@ -134,7 +181,7 @@ interface BuilderWiring {
  * **不自动改动已有的 `.invoke_handler(..)`**：Tauri 的 `invoke_handler` 是覆盖语义，
  * 追加第二次等于把宿主原有命令整片丢掉。这种情况只**如实报告**并给出合并指引。
  */
-function wireTauriBuilder(mainRsPath: string): BuilderWiring | null {
+function wireTauriBuilder(mainRsPath: string, dryRun = false): BuilderWiring | null {
   const content = readFileContent(mainRsPath);
   if (!content) return null;
 
@@ -178,7 +225,7 @@ function wireTauriBuilder(mainRsPath: string): BuilderWiring | null {
     }
   }
 
-  if (inserts.length > 0) {
+  if (inserts.length > 0 && !dryRun) {
     lines.splice(runIdx, 0, ...inserts);
     writeFileContent(mainRsPath, lines.join('\n'));
   }
@@ -240,6 +287,7 @@ export async function initProject(config: InitConfig = {}): Promise<InitResult> 
   const dir = config.dir ?? '.';
   const dryRun = config.dryRun ?? false;
   const preset = config.preset ?? 'full';
+  let requiresManual = false;
 
   try {
     // 1. 检测 Tauri 项目结构
@@ -247,78 +295,78 @@ export async function initProject(config: InitConfig = {}): Promise<InitResult> 
     if (!tauriProject) {
       return {
         ok: false,
-        error: '未检测到 Tauri 项目结构（需要 src-tauri/Cargo.toml）',
+        error: '未检测到受支持的 Tauri 2 项目（需要 src-tauri/Cargo.toml 且依赖 tauri 2.x）',
       };
     }
     steps.push(`检测到 Tauri 项目：${tauriProject.srcTauri}`);
 
-    // 2. 定位 tauron 检出根 —— 定位不到就**如实失败**，不写解析不了的依赖坐标。
-    //    显式 --tauron-path 优先；判据仍是 crates/tauron-adapter/Cargo.toml 存在，
-    //    给错目录会当场报错而不是写出一个指向空目录的依赖。
-    const explicitRoot = config.tauronPath !== undefined ? path.resolve(config.tauronPath) : null;
-    const tauronRoot = explicitRoot ?? findTauronRoot();
-    if (tauronRoot === null) {
+    // 2. 默认使用固定 registry 版本；只有显式提供 --tauron-path 才切换到本地源码。
+    const tauronRoot =
+      config.tauronPath === undefined ? null : path.resolve(path.resolve(dir), config.tauronPath);
+    if (
+      tauronRoot !== null &&
+      !pathExists(path.join(tauronRoot, 'crates', 'tauron-adapter', 'Cargo.toml'))
+    ) {
       return {
         ok: false,
-        error:
-          '未能在当前目录树定位 tauron 源码检出根（判据 crates/tauron-adapter/Cargo.toml）。tauron 尚未发布到 crates.io / npm，接入必须指向本机检出根；可用 --tauron-path 显式指定。',
+        error: `--tauron-path 指向的目录不是 Tauron 源码根：${tauronRoot}（缺少 crates/tauron-adapter/Cargo.toml）`,
       };
     }
-    if (!pathExists(path.join(tauronRoot, 'crates', 'tauron-adapter', 'Cargo.toml'))) {
-      return {
-        ok: false,
-        error: `--tauron-path 指向的目录不是 tauron 检出根：${tauronRoot}（判据 crates/tauron-adapter/Cargo.toml 不存在）`,
-      };
-    }
-    const relRoot = toPosixRelative(path.resolve(dir), tauronRoot);
-    const relCargoRoot = toPosixRelative(tauriProject.srcTauri, tauronRoot);
-    steps.push(`tauron 检出根：${tauronRoot}（相对本项目 ${relRoot}）`);
+    const relRoot = tauronRoot === null ? null : toPosixRelative(path.resolve(dir), tauronRoot);
+    const relCargoRoot =
+      tauronRoot === null ? null : toPosixRelative(tauriProject.srcTauri, tauronRoot);
+    steps.push(
+      tauronRoot === null
+        ? `Tauron 来源：registry 固定版本 ${FRAMEWORK_VERSION}`
+        : `Tauron 来源：本地源码 ${tauronRoot}`,
+    );
 
-    // 3. Cargo.toml 添加 path 依赖（不写 version：那个坐标今天解析不了）
-    // Cargo resolves dependency paths from src-tauri/Cargo.toml; frontend file: specs
-    // below are resolved from the project-root package.json and therefore use relRoot.
-    const depValue = `{ path = "${relCargoRoot}/crates/tauron-adapter", default-features = false, features = ["tauri"] }`;
+    // 3. Cargo path 以 src-tauri/Cargo.toml 为基准；registry 模式 pin 到同版本。
+    const depValue =
+      relCargoRoot === null
+        ? `{ version = "=${FRAMEWORK_VERSION}", default-features = false, features = ["tauri"] }`
+        : `{ version = "=${FRAMEWORK_VERSION}", path = "${relCargoRoot}/crates/tauron-adapter", default-features = false, features = ["tauri"] }`;
     if (dryRun) {
       steps.push(`Cargo.toml：将添加 tauron-adapter = ${depValue}`);
     } else if (addCargoDependency(tauriProject.cargoToml, 'tauron-adapter', depValue)) {
-      steps.push(
-        `Cargo.toml：添加 tauron-adapter（path 依赖，78 条命令；需要签名安装再加 plugin-install 特性）`,
-      );
+      steps.push(`Cargo.toml：添加 tauron-adapter（固定 ${FRAMEWORK_VERSION}，Tauri 2 特性）`);
     } else {
       steps.push(`Cargo.toml：tauron-adapter 已存在或无法定位 [dependencies]，跳过`);
     }
 
-    // 4. Rust 源码接线（root 注册形态）
-    if (dryRun) {
-      steps.push('Rust 源码：将注入 root 注册的 .plugin(..) 与 .invoke_handler(..)');
+    // 4. Rust 源码接线（root 注册形态）；dry-run 只分析，不写源码。
+    const wiring = wireTauriBuilder(tauriProject.mainRs, dryRun);
+    if (wiring === null) {
+      steps.push(`Rust 源码：无法读取 ${tauriProject.mainRs}，跳过`);
+      requiresManual = true;
     } else {
-      const wiring = wireTauriBuilder(tauriProject.mainRs);
-      if (wiring === null) {
-        steps.push(`Rust 源码：无法读取 ${tauriProject.mainRs}，跳过`);
-      } else {
-        for (const item of wiring.applied) {
-          steps.push(`Rust 源码：${item}`);
-        }
-        for (const item of wiring.manual) {
-          steps.push(`⚠ 需手工处理：${item}`);
-        }
+      for (const item of wiring.applied) {
+        steps.push(`${dryRun ? 'Rust 源码（预览）' : 'Rust 源码'}：${item}`);
       }
+      for (const item of wiring.manual) {
+        steps.push(`⚠ 需手工处理：${item}`);
+      }
+      requiresManual = wiring.manual.length > 0;
     }
 
-    // 5. 前端依赖（file: 指向检出根，而不是 workspace:* —— 后者只在同一 pnpm
-    //    workspace 内成立，跨仓库必失败）
+    // 5. 前端依赖固定到 registry；本地贡献开发使用 file: checkout。
     const pkgJsonPath = detectFrontendPackageJson(dir);
     if (pkgJsonPath) {
-      const hostSpec = `file:${relRoot}/packages/tauron-host`;
-      const uiSpec = `file:${relRoot}/packages/tauron-ui`;
+      const hostSpec =
+        relRoot === null ? FRAMEWORK_VERSION : `file:${relRoot}/packages/tauron-host`;
+      const uiSpec = relRoot === null ? FRAMEWORK_VERSION : `file:${relRoot}/packages/tauron-ui`;
       if (dryRun) {
         steps.push(
           `前端 package.json：将添加 @tauron/host（${hostSpec}）与 @tauron/ui（${uiSpec}）`,
         );
       } else {
-        addFrontendDependency(pkgJsonPath, '@tauron/host', hostSpec);
-        addFrontendDependency(pkgJsonPath, '@tauron/ui', uiSpec);
-        steps.push(`前端 package.json：@tauron/host / @tauron/ui 指向 ${relRoot}/packages/`);
+        const hostAdded = addFrontendDependency(pkgJsonPath, '@tauron/host', hostSpec);
+        const uiAdded = addFrontendDependency(pkgJsonPath, '@tauron/ui', uiSpec);
+        steps.push(
+          hostAdded || uiAdded
+            ? `前端 package.json：已添加 @tauron/host / @tauron/ui（${hostSpec}）`
+            : '前端 package.json：依赖已存在，保留原版本和配置',
+        );
       }
     }
 
@@ -326,45 +374,68 @@ export async function initProject(config: InitConfig = {}): Promise<InitResult> 
     const configPath = config.configPath ?? 'client-config.json';
     // 相对路径以项目目录（--dir）为基准，避免写到当前工作目录
     const configTarget = path.isAbsolute(configPath) ? configPath : path.join(dir, configPath);
-    const configResult = generateClientConfig({ preset, outputPath: configTarget });
-    if (configResult.errors.length > 0) {
-      steps.push(`client-config.json：${configResult.errors.join('; ')}`);
+    if (pathExists(configTarget)) {
+      steps.push(`client-config.json：${configTarget} 已存在，保留原文件`);
     } else {
-      if (!dryRun) {
-        const written = writeFile(configTarget, configResult.content);
-        if (!written.ok) {
-          return { ok: false, error: written.error ?? `写入 ${configTarget} 失败` };
+      const configResult = generateClientConfig({ preset, outputPath: configTarget });
+      if (configResult.errors.length > 0) {
+        steps.push(`client-config.json：${configResult.errors.join('; ')}`);
+      } else {
+        if (!dryRun) {
+          const written = writeFile(configTarget, configResult.content);
+          if (!written.ok) {
+            return { ok: false, error: written.error ?? `写入 ${configTarget} 失败` };
+          }
         }
+        steps.push(`生成 ${configTarget}`);
       }
-      steps.push(`生成 ${configTarget}`);
     }
 
-    // 7. 生成 capabilities/default.json
+    // 7. 生成独立 Tauron capability；保留用户现有 default.json 与自定义 ACL。
     const capabilitiesDir = path.join(tauriProject.srcTauri, 'capabilities');
+    const tauronCapabilityPath = path.join(capabilitiesDir, 'tauron.json');
     if (!dryRun) {
-      await ensureDir(capabilitiesDir);
-      writeFileContent(path.join(capabilitiesDir, 'default.json'), generateCapabilitiesJson());
+      if (!pathExists(tauronCapabilityPath)) {
+        await ensureDir(capabilitiesDir);
+        writeFileContent(tauronCapabilityPath, generateCapabilitiesJson());
+      }
     }
     steps.push(
-      `生成 capabilities/default.json（Tauri 2 IPC 授权：core:default + 覆盖 plugin-* 窗）`,
+      pathExists(tauronCapabilityPath)
+        ? 'capabilities/tauron.json 已存在，保留原权限配置'
+        : '生成 capabilities/tauron.json（独立权限文件，保留现有 capability 文件）',
     );
 
     // 8. build.rs —— Tauri 工程缺它 cargo 构建必失败
     const buildRs = path.join(tauriProject.srcTauri, 'build.rs');
     if (!pathExists(buildRs)) {
-      if (!dryRun) writeFileContent(buildRs, 'fn main() {\n    tauri_build::build()\n}\n');
-      steps.push('生成 src-tauri/build.rs');
+      if (!dryRun) {
+        addCargoDependency(
+          tauriProject.cargoToml,
+          'tauri-build',
+          '{ version = "2", features = [] }',
+          'build-dependencies',
+        );
+        writeFileContent(buildRs, 'fn main() {\n    tauri_build::build()\n}\n');
+      }
+      steps.push('生成 src-tauri/build.rs，并确保存在 tauri-build 构建依赖');
     } else {
       steps.push('src-tauri/build.rs 已存在，跳过');
     }
 
     // 9. 输出验证清单
     steps.push(``);
-    steps.push(`✓ 接入完成。请运行以下命令验证：`);
+    steps.push(
+      requiresManual
+        ? '检查结论：保留了现有 Tauri 命令处理器；请按上面的说明手工合并 Tauron 命令后再运行。'
+        : '检查结论：Tauri Builder 已接线；现有配置均保留，重复运行不会重复写入。',
+    );
+    steps.push(`验证命令：`);
     steps.push(`  cd src-tauri && cargo check`);
+    if (pkgJsonPath) steps.push(`  在项目根目录运行对应包管理器的 install，更新前端依赖锁文件`);
     steps.push(`  tauron-app doctor`);
 
-    return { ok: true, steps };
+    return { ok: true, complete: !requiresManual, steps };
   } catch (err) {
     return {
       ok: false,

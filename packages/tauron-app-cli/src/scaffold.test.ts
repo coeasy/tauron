@@ -437,8 +437,18 @@ describe('generatePackageJson', () => {
     expect(pkg.scripts.dev).toBe('vite');
     expect(pkg.scripts.build).toBe('vite build');
     expect(pkg.scripts.tauri).toBe('tauri');
-    // 没给 tauronPath 时只能写版本号占位：tauron 的 npm 包尚未发布，`pnpm i` 装不到。
-    expect(pkg.dependencies['@tauron/host']).toBe('^1.0.0');
+    // 普通使用固定 registry 版本，避免无范围浮动到破坏性更新。
+    expect(pkg.dependencies['@tauron/host']).toBe('1.0.0');
+    const cargo = scaffold({
+      name: 'my-app',
+      framework: 'react',
+      targets: ['desktop'],
+      shell: 'tauri',
+      capabilities: [],
+    }).files.get('src-tauri/Cargo.toml');
+    expect(cargo).toContain('tauron-shell = { version = "=1.0.0"');
+    expect(cargo).toContain('tauron-adapter = { version = "=1.0.0"');
+    expect(cargo).not.toContain('path =');
     // `tauri dev` / `tauri build` 两个 script 的执行体必须来自 devDependencies。
     expect(pkg.devDependencies['@tauri-apps/cli']).toBeDefined();
     // before*Command 会调到 `npm run dev` / `npm run build`，执行体是 vite。
@@ -811,22 +821,26 @@ describe('tauron 装配', () => {
   it('给了 tauronPath：Cargo.toml 生成可编译的 path 依赖 + 两档 feature', () => {
     const cargo = generateFiles(config).get('src-tauri/Cargo.toml')!;
     // tauronPath 以工程根为基准，Cargo.toml 在 src-tauri/ 下，所以多一层 ..。
-    expect(cargo).toContain('tauron-shell = { path = "../../../../crates/tauron-shell"');
-    expect(cargo).toContain('tauron-adapter = { path = "../../../../crates/tauron-adapter"');
+    expect(cargo).toContain(
+      'tauron-shell = { version = "=1.0.0", path = "../../../../crates/tauron-shell"',
+    );
+    expect(cargo).toContain(
+      'tauron-adapter = { version = "=1.0.0", path = "../../../../crates/tauron-adapter"',
+    );
     expect(cargo).toContain('features = ["tauri"]');
     expect(cargo).toContain('default = ["plugin-install"]');
     expect(cargo).toContain('substrate-only = []');
     expect(cargo).toContain('tauron-adapter/plugin-install');
-    // 不再写不可解析的 registry 版本号。
-    expect(cargo).not.toContain('version = "0.1"');
+    // 本地 checkout 仍固定版本，避免路径源码与发布版本错配。
+    expect(cargo).toContain('version = "=1.0.0"');
   });
 
-  it('没给 tauronPath：如实标注占位依赖不可解析', () => {
+  it('没给 tauronPath：使用精确 registry 版本，不写本地路径', () => {
     const withoutPath: ScaffoldConfig = { ...config };
     delete withoutPath.tauronPath;
     const cargo = generateFiles(withoutPath).get('src-tauri/Cargo.toml')!;
-    expect(cargo).toContain('尚未发布到 crates.io');
-    expect(cargo).toContain('version = "0.1"');
+    expect(cargo).toContain('tauron-adapter = { version = "=1.0.0"');
+    expect(cargo).not.toContain('path =');
   });
 
   it('main.rs 生成真装配，不是裸 Builder', () => {

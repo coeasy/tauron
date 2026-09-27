@@ -4,7 +4,7 @@ tauron 应用 CLI（`tauron-app` 命令）：配置生成、主题生成、插�
 
 ## 安装
 
-> ⚠️ **尚未发布到 npm**（本包当前 `private: true`）。在仓库内直接跑：
+> npm 与 crates.io 发布完成前，可在仓库内直接运行：
 
 ```bash
 node packages/tauron-app-cli/dist/cli.js --help
@@ -33,6 +33,12 @@ tauron-app new ./my-app --framework react --shell tauri
 tauron-app new ./my-app --tauron-path ../tauron --dry-run   # 只报告产物、不落盘
 ```
 
+正式发布后也可直接运行：
+
+```bash
+npm create tauron-app@1.0.0 -- ./my-app --framework react
+```
+
 生成的工程包含 `src-tauri/{Cargo.toml,src/main.rs,build.rs,capabilities/default.json,tauri.conf.json}`
 与前端入口、`package.json`、`tsconfig.json`、`vite.config.ts`、根 `index.html`。
 `src-tauri` 是 `examples/minimal-app` 同形态的**真装配**（`state_init_with_adapter_config` +
@@ -43,10 +49,9 @@ capability 覆盖 `main` 与 `plugin-*` 窗。
 `beforeBuildCommand`（拉起 vite），`vite.config.ts` 的 `server.port` 与 `devUrl` 一致、
 `outDir` 与 `frontendDist` 一致，`index.html` 位于工程根（vite 的 root 约定）。
 
-依赖坐标：tauron 的 20 个 npm 包与 15 个 crate **都未发布到 registry**，所以脚手架写的是
-**指向本机检出根的 `path` / `file:` 坐标**（检出根默认从 CLI 自身位置上溯探测，可用
-`--tauron-path <相对路径|绝对路径>` 覆盖）。registry 版本号今天解析不了——写那种坐标是错的，
-不是"待完善"。
+依赖坐标：默认使用精确的 `1.0.0` registry 版本；贡献 Tauron 源码时，显式使用
+`--tauron-path <相对路径|绝对路径>` 生成 `path` / `file:` 本地依赖。发布前，registry
+安装暂不可用；发布状态见[安装与使用](../../docs/installation.md)。
 
 > **需自行替换的部分**：`src-tauri/icons/` 是**纯色占位图**（6 个文件，覆盖 Windows / macOS /
 > Linux 打包所需）——**发布前必须换成品牌图标**。不给这组文件连 `cargo check` 都过不去：
@@ -62,12 +67,14 @@ capability 覆盖 `main` 与 `plugin-*` 窗。
 
 ### init —— 接入现有 Tauri 项目
 
-`tauron-app init --dir <你的项目>` 会加 `path` 依赖、接线 Builder 链、补 capability 与 `build.rs`。
+`tauron-app init --dir <你的项目>` 面向 Tauri 2，会加固定版本依赖、接线 Builder 链、补
+Tauron capability 与缺少的 `build.rs` / `tauri-build` 依赖。现有权限配置与 client config 会保留。
 若目标项目**已有** `.invoke_handler(..)`，它**不会**改动源码——Tauri 的 `invoke_handler` 是
 **覆盖语义**，自动追加会丢掉你原有的命令——而是把需要手工合并的那一行如实打印出来。
 
 常用参数：`--dir <path>`（目标项目根，缺省为当前目录）、`--tauron-path <path>`
-（tauron 检出根，缺省从 CLI 自身位置上溯探测）、`--config <file>`、`--dry-run`。
+（明确启用本地源码依赖）、`--config <file>`、`--dry-run`。支持边界见
+[Tauron v1 支持范围](../../docs/integration/support-boundary.md)。
 
 ### plugin pack / sign
 

@@ -1,0 +1,127 @@
+#!/usr/bin/env node
+// Authenticated preflight: ensure registry names are free or writable by this publisher.
+import { execFileSync } from 'node:child_process';
+import { readFileSync, readdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const npmToken = process.env.NPM_TOKEN;
+const cargoToken = process.env.CARGO_REGISTRY_TOKEN;
+if (!npmToken || !cargoToken) throw new Error('NPM_TOKEN and CARGO_REGISTRY_TOKEN are required.');
+
+function run(command, args) {
+  return execFileSync(command, args, { cwd: ROOT, encoding: 'utf8', env: process.env });
+}
+
+function missingOnNpm(name) {
+  try {
+    run('npm', ['view', name, 'name', '--json', '--fetch-retries=0']);
+    return false;
+  } catch (error) {
+    const output = `${error.stdout ?? ''}\n${error.stderr ?? ''}`;
+    if (/E404|404 Not Found/.test(output)) return true;
+    throw new Error(`Could not verify npm package ${name}: ${output.trim()}`);
+  }
+}
+
+function assertNpmWritable(name, npmUser) {
+  if (missingOnNpm(name)) {
+    console.log(`npm ${name}: name is not registered`);
+    return;
+  }
+  let access;
+  try {
+    access = JSON.parse(run('npm', ['access', 'list', 'collaborators', name, npmUser, '--json']));
+  } catch (error) {
+    throw new Error(`npm ${name} exists, but write access could not be verified: ${error.message}`);
+  }
+  const role = access[npmUser];
+  if (role !== 'read-write') {
+    throw new Error(`npm ${name} exists but ${npmUser} has no verified read-write access.`);
+  }
+  console.log(`npm ${name}: ${npmUser} has read-write access`);
+}
+
+const npmUser = run('npm', ['whoami', '--registry=https://registry.npmjs.org/']).trim();
+const packageFiles = readdirSync(join(ROOT, 'packages')).map((directory) =>
+  join(ROOT, 'packages', directory, 'package.json'),
+);
+const packages = packageFiles
+  .map((file) => JSON.parse(readFileSync(file, 'utf8')))
+  .filter((pkg) => pkg.private !== true);
+
+if (packages.some((pkg) => pkg.name.startsWith('@tauron/')) && npmUser !== 'tauron') {
+  let hasWriteScopeAccess = false;
+  try {
+    const membership = run('npm', ['org', 'ls', 'tauron', npmUser]);
+    hasWriteScopeAccess = /owner|admin/i.test(membership);
+  } catch {
+    hasWriteScopeAccess = false;
+  }
+  if (!hasWriteScopeAccess) {
+    try {
+      const developers = run('npm', ['team', 'ls', '@tauron:developers']);
+      hasWriteScopeAccess = developers
+        .split(/\s+/)
+        .some((entry) => entry.replace(/^@/, '') === npmUser);
+    } catch {
+      hasWriteScopeAccess = false;
+    }
+  }
+  if (!hasWriteScopeAccess) {
+    throw new Error(
+      `npm user ${npmUser} is not verified as a member of the @tauron publishing organization.`,
+    );
+  }
+}
+for (const pkg of packages) assertNpmWritable(pkg.name, npmUser);
+
+const cratesDir = join(ROOT, 'crates');
+const crateNames = readdirSync(cratesDir, { withFileTypes: true })
+  .filter((entry) => entry.isDirectory())
+  .map((entry) => {
+    const manifest = readFileSync(join(cratesDir, entry.name, 'Cargo.toml'), 'utf8');
+    const name = /^name\s*=\s*"([^"]+)"/m.exec(manifest)?.[1];
+    if (!name) throw new Error(`Could not read crate name from crates/${entry.name}/Cargo.toml`);
+    return name;
+  });
+const cratesIdentityResponse = await fetch('https://crates.io/api/v1/me', {
+  headers: { authorization: cargoToken, 'user-agent': 'Tauron SDK release preflight' },
+});
+if (!cratesIdentityResponse.ok) {
+  throw new Error(
+    `CARGO_REGISTRY_TOKEN could not authenticate with crates.io (HTTP ${cratesIdentityResponse.status}).`,
+  );
+}
+const cratesUser = (await cratesIdentityResponse.json()).user?.login;
+if (!cratesUser) throw new Error('crates.io did not return the token owner identity.');
+for (const name of crateNames) {
+  const response = await fetch(`https://crates.io/api/v1/crates/${name}`, {
+    headers: { 'user-agent': 'Tauron SDK release preflight' },
+  });
+  if (response.status === 404) {
+    console.log(`crates.io ${name}: name is not registered`);
+    continue;
+  }
+  if (!response.ok) throw new Error(`Could not verify crates.io ${name}: HTTP ${response.status}`);
+  let owners;
+  try {
+    owners = run('cargo', ['owner', '--list', name]);
+  } catch (error) {
+    throw new Error(
+      `crate ${name} exists, but publisher ownership could not be verified: ${error.message}`,
+    );
+  }
+  const normalized = owners.toLowerCase();
+  if (!normalized.includes(cratesUser.toLowerCase())) {
+    throw new Error(
+      `crate ${name} exists; crates.io publisher ${cratesUser} is not listed as its owner.`,
+    );
+  }
+  console.log(`crates.io ${name}: publisher ${cratesUser} is an owner`);
+}
+
+console.log(
+  `Registry ownership preflight passed for ${packages.length} npm packages and ${crateNames.length} Rust crates.`,
+);

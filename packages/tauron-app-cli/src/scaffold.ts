@@ -46,10 +46,8 @@ export interface ScaffoldConfig {
   /**
    * tauron 源码检出根相对**生成工程根**的路径（可选）。
    *
-   * 给出时 `src-tauri/Cargo.toml` 生成 `path` 依赖、`package.json` 生成 `file:`
-   * 依赖——可直接编译（tauron 尚未发布到 crates.io / npm，这是当前唯一的可解析
-   * 接入方式）。省略时按 registry 版本号生成**占位**依赖，并在文件里如实标注
-   * 「不可解析」，不谎报可编译。
+   * 给出时生成本地源码 `path` / `file:` 依赖，适用于 Tauron 贡献开发；省略时
+   * 生成固定 `1.0.0` registry 依赖，适用于第三方项目。
    */
   tauronPath?: string;
 }
@@ -294,15 +292,13 @@ function cargoTauronPath(tauronPath: string): string {
 /**
  * 生成 package.json 内容。
  *
- * 依赖坐标的诚实口径：tauron 的 npm 包**尚未发布**（全部 `private: true`），
- * 因此只有拿到 `tauronPath`（源码检出根）时才能生成**可解析**的 `file:` 依赖；
- * 否则写出版本号占位并在 CLI 输出里明确警告，不谎报 `npm install` 能装上。
+ * npm 依赖固定到框架同版本；Tauron 源码开发者可用 tauronPath 覆盖为 file: 依赖。
  */
 export function generatePackageJson(config: ScaffoldConfig): string {
   const hostDependency =
     config.tauronPath !== undefined
       ? `file:${trimTrailingSlash(config.tauronPath)}/packages/tauron-host`
-      : `^${FRAMEWORK_VERSION}`;
+      : FRAMEWORK_VERSION;
   const pkg: Record<string, unknown> = {
     name: config.name,
     version: '0.1.0',
@@ -692,9 +688,8 @@ export function generateTauriCapabilities(config: ScaffoldConfig): string {
 /**
  * 生成 `src-tauri/Cargo.toml`。
  *
- * 两种坐标形态：
- * - 给了 `tauronPath` → `path` 依赖，**可直接编译**（当前唯一可解析的形态）；
- * - 没给 → 版本号占位，并在文件里如实标注"不可解析"，不假装能构建。
+ * 两种坐标形态：本地贡献开发使用 `tauronPath` 的 path 依赖；普通用户固定安装
+ * registry 上的同版本 crate。
  *
  * `plugin-install` 进 `default` 特性是刻意与 `examples/minimal-app` 对齐：
  * 装插件是「多插件框架」的动词，不该默认缺席；它的运行期前提
@@ -703,12 +698,10 @@ export function generateTauriCapabilities(config: ScaffoldConfig): string {
 function generateCargoToml(config: ScaffoldConfig): string {
   const deps =
     config.tauronPath !== undefined
-      ? `tauron-shell = { path = "${cargoTauronPath(config.tauronPath)}/crates/tauron-shell", features = ["tauri"] }
-tauron-adapter = { path = "${cargoTauronPath(config.tauronPath)}/crates/tauron-adapter", features = ["tauri"] }`
-      : `# ⚠️ tauron 尚未发布到 crates.io，下面两行是**占位版本号**——\`cargo check\` 会失败。
-# 重新生成并传 --tauron-path <tauron 检出根相对本工程根的路径> 可得到可编译的 path 依赖。
-tauron-shell = { version = "0.1", features = ["tauri"] }
-tauron-adapter = { version = "0.1", features = ["tauri"] }`;
+      ? `tauron-shell = { version = "=${FRAMEWORK_VERSION}", path = "${cargoTauronPath(config.tauronPath)}/crates/tauron-shell", features = ["tauri"] }
+tauron-adapter = { version = "=${FRAMEWORK_VERSION}", path = "${cargoTauronPath(config.tauronPath)}/crates/tauron-adapter", features = ["tauri"] }`
+      : `tauron-shell = { version = "=${FRAMEWORK_VERSION}", features = ["tauri"] }
+tauron-adapter = { version = "=${FRAMEWORK_VERSION}", default-features = false, features = ["tauri"] }`;
 
   return `[package]
 name = "${config.slug}"

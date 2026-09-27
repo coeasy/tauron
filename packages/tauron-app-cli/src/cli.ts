@@ -216,9 +216,8 @@ function printWarn(msg: string): void {
  * - 产出的 `src-tauri/` 是**真装配**（`state_init_with_adapter_config` +
  *   `tauron_generate_handler![]` + 窗口销毁回收 + `capabilities/default.json`），
  *   形态与 `examples/minimal-app` 同源，实测两档 `cargo check` 均通过；
- * - 依赖坐标是 `path` / `file:` 指向**本机 tauron 检出根**——因为 20 个 npm 包与
- *   15 个 crate 都还没发布，registry 坐标今天不可能解析。所以这条路径要求目标
- *   工程与 tauron 检出同机可见（`--tauron-path` 可显式指定）；
+ * - 普通使用把依赖固定到 registry 的 1.0.0；源码贡献时可用 `--tauron-path`
+ *   显式指向本地 checkout；
  * - 前端链路已闭合到 `npm run tauri dev`：`vite.config.ts`（端口/产物目录与
  *   `tauri.conf.json` 对齐）+ 根 `index.html` + `beforeDevCommand` / `beforeBuildCommand`；
  * - `src-tauri/icons/` 是**纯色占位图**——文件必须给（否则 Windows 上 `tauri-build`
@@ -244,26 +243,21 @@ async function newAppProject(
         .filter((c) => c !== '')
     : [];
 
-  // tauron 检出根：显式 --tauron-path 优先；否则从 CLI 自身位置逐级上溯。
-  let tauronPath = options['tauron-path'] as string | undefined;
-  if (tauronPath === undefined) {
-    const root = findTauronRoot();
-    if (root === null) {
-      printError(
-        '未能在当前目录树定位 tauron 源码检出根（判据：crates/tauron-adapter/Cargo.toml）。',
-      );
-      printInfo('tauron 尚未发布到 npm / crates.io，path/file 依赖必须指向本机检出根；');
-      printInfo('请显式传 --tauron-path <tauron 检出根相对目标工程根的路径>。');
+  // 普通消费默认使用固定 registry 版本；Tauron 源码开发显式选择本地 checkout。
+  const tauronPath = options['tauron-path'] as string | undefined;
+  if (tauronPath !== undefined) {
+    const tauronRoot = path.resolve(absTarget, tauronPath);
+    if (!fs.existsSync(path.join(tauronRoot, 'crates', 'tauron-adapter', 'Cargo.toml'))) {
+      printError(`--tauron-path 不是有效的 Tauron 源码根：${tauronRoot}`);
       process.exitCode = 1;
       return;
     }
-    tauronPath = toPosixRelative(absTarget, root);
   }
 
   const input: ScaffoldConfigInput = {
     name,
     capabilities,
-    tauronPath,
+    ...(tauronPath !== undefined ? { tauronPath } : {}),
     ...(options.description !== undefined ? { description: options.description as string } : {}),
     ...(options.framework !== undefined ? { framework: options.framework as string } : {}),
     ...(options.shell !== undefined ? { shell: options.shell as string } : {}),
@@ -312,7 +306,9 @@ async function newAppProject(
   const fileCount = written.written.length + writtenBinaries.written.length;
   printSuccess(`工程已生成：${absTarget}（${fileCount} 个文件）`);
   printInfo(
-    `tauron 检出根：${tauronPath}（已写入 Cargo.toml 的 path 依赖与 package.json 的 file: 依赖）`,
+    tauronPath === undefined
+      ? 'Tauron 依赖：固定使用 registry 版本 1.0.0'
+      : `Tauron 源码：${tauronPath}（已写入 Cargo path 与 npm file: 依赖）`,
   );
   printInfo('下一步：');
   printInfo(`  cd ${targetDir} && npm install`);
@@ -354,7 +350,12 @@ const HELP_COMMANDS: CommandDef[] = [
         dryRun: options['dry-run'] === true,
       });
       if (result.ok) {
-        printSuccess('项目已接入 tauron');
+        if (result.complete === false) {
+          printWarn('接入检查未完成：保留了现有命令处理器，请先按提示手动合并 Tauron 命令。');
+          process.exitCode = 2;
+        } else {
+          printSuccess('项目接入检查通过');
+        }
         if (result.steps) {
           for (const step of result.steps) {
             printInfo(step);
@@ -479,9 +480,7 @@ const HELP_COMMANDS: CommandDef[] = [
               }
               printSuccess(`插件已创建：${baseDir}`);
               if (tauronPath !== undefined) {
-                printInfo(
-                  `依赖坐标：file:${tauronPath}/packages/...（tauron 未发布到 npm，这是唯一可解析的形态）`,
-                );
+                printInfo(`依赖坐标：file:${tauronPath}/packages/...（本地源码开发模式）`);
               }
             } else {
               console.log(JSON.stringify(result, null, 2));
