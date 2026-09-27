@@ -56,8 +56,8 @@ tauron 插件系统在**清单层**定义了四种插件类型（`PluginType` �
 
 ### 获取 CLI
 
-> ⚠️ `@tauron/cli` **尚未发布到 npm**（20 个 npm 包当前都是 `private: true`），
-> 所以 `npm install -g @tauron/cli` 装不到任何东西。在仓库内直接跑 bin。
+`@tauron/cli@1.0.0` 已发布到 npm，可通过 `npm install -g @tauron/cli@1.0.0` 安装；
+在 Tauron 仓库内开发时也可直接运行 bin。
 
 **下文一律用 `tauron` 代指 `node packages/tauron-cli/bin/tauron.js`（在仓库根执行）。**
 

@@ -238,7 +238,33 @@ const npmrc = join(tmpRoot, '.npmrc');
 writeFileSync(npmrc, `//registry.npmjs.org/:_authToken=${token}\n`, 'utf8');
 const publishEnv = { ...process.env, NPM_CONFIG_USERCONFIG: npmrc };
 
+function isPublishedVersion(pkg) {
+  try {
+    const found = run(
+      'npm',
+      ['view', `${pkg.name}@${pkg.version}`, 'version', '--json', '--fetch-retries=0'],
+      ROOT,
+      publishEnv,
+    ).trim();
+    return JSON.parse(found) === pkg.version;
+  } catch (e) {
+    const output = `${e.stdout?.toString() ?? ''}\n${e.stderr?.toString() ?? ''}`;
+    if (/E404|404 Not Found|No match found for version/i.test(output)) return false;
+    throw new Error(`无法确认 ${pkg.name}@${pkg.version} 是否已发布：${output.trim()}`);
+  }
+}
+
 for (const p of order) {
+  try {
+    if (isPublishedVersion(p.pkg)) {
+      console.log(`→ ${p.pkg.name}@${p.pkg.version} 已存在于 npm，跳过（支持安全续发）`);
+      continue;
+    }
+  } catch (e) {
+    console.error(`\x1b[31m✗ ${e.message}\x1b[0m`);
+    rmSync(tmpRoot, { recursive: true, force: true });
+    process.exit(1);
+  }
   process.stdout.write(`→ pnpm publish ${p.pkg.name} ... `);
   try {
     run(

@@ -138,13 +138,10 @@ const patchArgs = crates.flatMap((c) => [
 
 // ── 2. 逐 crate 打包 + 校验产物 manifest ─────────────────────────
 log('\n── 2/3 逐 crate 打包并校验（cargo package --no-verify --allow-dirty --offline）──');
-if (isCheck) {
-  warn(
-    '说明：本机无网络，cargo 无法从 crates.io 解析尚未发布的内部依赖；' +
-      '故 --check 额外传入 [patch.crates-io] 指回本地路径以完成解析。' +
-      '该 patch 不影响产物内容（下面会逐 crate 断言）。',
-  );
-}
+warn(
+  '打包阶段将内部 crate 解析到本地 workspace；cargo package 产物会移除 path 依赖，' +
+    '并逐 crate 检查发布 manifest 只保留版本约束。',
+);
 
 function internalDepVersionsInManifest(manifestText) {
   // 解析生成的 Cargo.toml，收集 [dependencies.*] / [dev-dependencies.*] / [build-dependencies.*]
@@ -174,7 +171,10 @@ function internalDepVersionsInManifest(manifestText) {
 let failures = 0;
 for (const c of order) {
   const pkgArgs = ['package', '-p', c.name, '--no-verify', '--allow-dirty', '--offline'];
-  const withPatch = isCheck ? [...pkgArgs, ...patchArgs] : pkgArgs;
+  // Pre-package the complete release set before publishing any crate. This must
+  // work in both check and publish modes because later crates may not yet exist
+  // on crates.io; the patch is only used for resolution and is not shipped.
+  const withPatch = [...pkgArgs, ...patchArgs];
   let out = '';
   try {
     out = run('cargo', withPatch, ROOT);
@@ -259,6 +259,27 @@ if (failures) {
 
 log('\n── 开始真实发布（严格按拓扑顺序；cargo 会自动等待依赖在 index 上生效）──');
 for (const c of order) {
+  let alreadyPublished = false;
+  try {
+    const response = await fetch(`https://crates.io/api/v1/crates/${c.name}`, {
+      headers: { 'user-agent': 'Tauron SDK release publisher' },
+    });
+    if (response.status === 404) {
+      alreadyPublished = false;
+    } else if (!response.ok) {
+      throw new Error(`crates.io returned HTTP ${response.status}`);
+    } else {
+      const details = await response.json();
+      alreadyPublished = details.versions?.some((version) => version.num === c.version) ?? false;
+    }
+  } catch (e) {
+    fail(`无法确认 ${c.name}@${c.version} 的 registry 状态：${e.message}`);
+    process.exit(1);
+  }
+  if (alreadyPublished) {
+    console.log(`→ ${c.name}@${c.version} 已存在于 crates.io，跳过（支持安全续发）`);
+    continue;
+  }
   process.stdout.write(`→ cargo publish -p ${c.name} ... `);
   try {
     run('cargo', ['publish', '-p', c.name, '--allow-dirty'], ROOT);

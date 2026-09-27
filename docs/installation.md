@@ -16,8 +16,8 @@
 |---|---|---|---|
 | A | **跑起来看看**（拿安装包装上就开） | §1 | ⚠️ 部分可以：Windows NSIS **出包**实测过；macOS / Linux 的包 CI 能出，但三种平台的包**都未做过真机安装验证**（出包 ≠ 装过） |
 | B | **改代码 / 自己构建** | §2 | ✅ 可以，源码可构建 |
-| C | **把 tauron 当库接进自己的项目** | §3 | ⚠️ 分 5 种方式，**今天只有「源码集成（`path` / `file:`）」真正可用**，其余待发布——见 §3.0 |
-| D | **一键脚手架起新工程**（`tauron-app new`） | §3.2 | ✅ 已生成固定 `1.0.0` 坐标；registry 发布完成后可直接安装 |
+| C | **把 tauron 当库接进自己的项目** | §3 | ✅ npm 包已发布；Rust crate 的可安装性以本次 crates.io 发布和干净工程验收为准 |
+| D | **一键脚手架起新工程**（`tauron-app new`） | §3.2 | ✅ `create-tauron-app@1.0.0` 已发布，可直接运行 |
 
 ---
 
@@ -225,20 +225,19 @@ pnpm --filter minimal-app build
 
 ### 3.0 五种「安装/集成」方式一览（先说边界）
 
-「支持多种安装方式」拆开是下面五条路径。**今天真正可用的只有第 1 条**（第 4 条
-是它的封装），第 2、3 条依赖「包已发布」而这件事还没发生——写清楚比含糊更有用：
+「支持多种安装方式」拆开是下面五条路径：
 
 | # | 方式 | 具体做法 | 现在能不能用 | 依据 |
 |---|---|---|---|---|
-| 1 | **源码集成** | `path` / `file:` 指向本机 tauron checkout | ✅ **唯一真正可用** | §3.3 |
-| 2 | **npm 包集成** | `npm i @tauron/...` | ❌ 待发布后可用（20 个包已就绪，未 `npm publish`） | §3.4 |
-| 3 | **crate 集成** | `cargo add tauron-*` | ❌ 待发布后可用（15 个 crate 已就绪，未 `cargo publish`） | §3.5 |
-| 4 | **一键脚手架** | `npm create tauron-app@1.0.0` | ✅ 默认生成固定 registry 坐标；发布完成后可直接使用 | §3.2 |
+| 1 | **源码集成** | `path` / `file:` 指向本机 tauron checkout | ✅ 可用于源码联调 | §3.3 |
+| 2 | **npm 包集成** | `npm i @tauron/...` | ✅ 20 个公开包已发布为 `1.0.0` | §3.4 |
+| 3 | **crate 集成** | `cargo add tauron-*` | ⏳ 正在发布；需通过 crates.io 干净工程验收 | §3.5 |
+| 4 | **一键脚手架** | `npm create tauron-app@1.0.0` | ✅ npm 上可直接运行 | §3.2 |
 | 5 | **安装包** | 从 Releases 取 Tauri bundle 装上即用 | ⚠️ 仅限**示例应用**；Windows 腿 `--bundles nsis` 出包实测过，**装机未验证** | §1 |
 
-### 3.1 现状：已就绪 ≠ 已发布
+### 3.1 发布状态
 
-一句话：**「可以打包发布」这件事已经做到了，「已经发布」还没有**。
+npm 侧 20 个公开包已发布为 `1.0.0`；Rust crates 将在本次发布工作流中按依赖顺序发布，并在干净目录验收通过后完成正式 Release。
 
 - **npm**：21 个 package manifests 中 **20 个可发布**并补齐发布元数据（`license` /
   `repository` / `homepage` / `bugs` / `keywords` / `engines` / `publishConfig.access=public`
@@ -247,15 +246,14 @@ pnpm --filter minimal-app build
   用例还依赖 monorepo 目录布局，发布出去对第三方无意义）。
 - **crates**：15 个 crate 的内部互引用都已同时给出 `version`，`cargo package`
   不再报错；产物 manifest 里 `path` 会被 cargo 剥离，只剩 `version`。
-- **没有发布**：npm registry 与 crates.io 上都没有 tauron 的任何包，所以
-  `pnpm add @tauron/core` / `cargo add tauron-host` 现在装不到。阻塞项逐条登记在
-  [CHANGELOG.md 的「已知债务」](../CHANGELOG.md)。
+- **npm**：`@tauron/*@1.0.0` 与 `create-tauron-app@1.0.0` 已发布，可从公共 npm registry 安装。
+- **Rust crates**：以 crates.io 上 `tauron-adapter@1.0.0` 发布完成为正式可安装条件；发布前可使用下文源码集成方式。
 
-发布编排脚本与实测见 §3.7。**在那之前，唯一可用的库接入方式是方式 1（源码集成）**。
+发布编排脚本、发布状态与验收见 §3.7。
 
 ### 3.2 一键脚手架（最快路径）
 
-正式发布后，可从 npm 直接启动脚手架：
+可从 npm 直接启动脚手架：
 
 ```bash
 # npm create 会运行 create-tauron-app 包，生成已接线的 Tauri 2 工程
@@ -265,7 +263,7 @@ npm create tauron-app@1.0.0 -- ./my-app --framework react
 npx @tauron/app-cli@1.0.0 init --dir ./my-existing-app
 ```
 
-发布前在 Tauron 仓库中开发时，可运行 `node packages/tauron-app-cli/dist/cli.js new ./my-app
+在 Tauron 仓库中进行本地源码开发时，可运行 `node packages/tauron-app-cli/dist/cli.js new ./my-app
 --tauron-path <checkout>`；该选项明确生成本地 `path` / `file:` 依赖。
 
 **能一键跑通到哪一步**：
@@ -295,7 +293,7 @@ cd my-app && npm install && npm run tauri dev
 合并 Tauron 命令的步骤；检查未完成会返回非零状态。已有 `client-config.json` 与 capability
 文件也会保留。修改 `package.json` 后需运行项目所用包管理器的 install 命令。
 
-### 3.3 方式 1：源码集成（`path` / `file:`）——今天唯一真正可用
+### 3.3 方式 1：源码集成（`path` / `file:`）
 
 **前端（TS 包）**：
 
@@ -317,17 +315,16 @@ tauron-shell = { path = "../tauron/crates/tauron-shell", features = ["tauri"] }
 # tauron-adapter = { path = "../tauron/crates/tauron-adapter", features = ["tauri"] }
 ```
 
-> `file:` / `path` 都是**指向本机 checkout**，不会从 registry 取包——所以它今天
-> 就能用，也是唯一能用的方式。代价：接入方的依赖里出现了一个本地绝对/相对路径，
+> `file:` / `path` 都是**指向本机 checkout**，不会从 registry 取包。适合修改 Tauron 源码或联调；
+> 普通新项目优先用上面的 registry 脚手架。代价：接入方的依赖里出现了一个本地绝对/相对路径，
 > 换机器、换目录都要重新对齐。
 
 完整的 Rust 侧命令注册与前端运行时初始化代码见
 [README 的「快速开始」](../README.md#快速开始第三方集成)。
 
-### 3.4 方式 2：npm 包集成（**待发布后可用**）
+### 3.4 方式 2：npm 包集成
 
-包本身已「发布就绪」，但**还没有任何包出现在 npm registry 上**，所以现在
-`npm i @tauron/...` 必然 404。本机可验证的就绪状态：
+20 个公共 npm 包已发布为 `1.0.0`，可以通过常规包管理器安装：
 
 - 20 个可发布包已补齐 `license` / `repository` / `homepage` / `bugs` /
   `keywords` / `engines`（`>=22`，与 README 徽章一致）/ `publishConfig.access=public`
@@ -349,19 +346,17 @@ tauron-shell = { path = "../tauron/crates/tauron-shell", features = ["tauri"] }
 pnpm add @tauron/types @tauron/core @tauron/host   # npm / yarn 同理
 ```
 
-> **待网络 + 待凭据**：真实 `npm publish` 未在本机验证（沙箱无网络、无 npm token），
-> 见 §3.7。
+真实发布状态以 [npm 包列表](https://www.npmjs.com/org/tauron) 和 [正式 GitHub Release](https://github.com/coeasy/tauron/releases) 为准。
 
-### 3.5 方式 3：crate 集成（**待发布后可用**）
+### 3.5 方式 3：crate 集成
 
-15 个 crate 已「打包就绪」：`cargo package` 不再报错，产物 manifest 里内部依赖
-已只剩 `version`（`path` 由 cargo 剥离）。但 **crates.io 上还没有这些 crate**，
-`cargo add tauron-host` 现在装不到。
+15 个 crate 均已通过 `cargo package` 检查：产物 manifest 里内部依赖已只剩 `version`
+（`path` 由 cargo 剥离）。本次发布工作流按依赖顺序上传，完成后再由 Windows 干净消费者工程实际安装构建。
 
 - ✅ **本机已验证**：`cargo package -p <crate> --no-verify --allow-dirty --offline`
   能对全部 15 个 crate 产出 `.crate`，且产物内 `[dependencies.tauron-*]` 只剩
   `version = "1.0.0"`、没有 `path`。
-- ❌ **本机不可验证**：真实 `cargo publish`（无网络、无 `CARGO_REGISTRY_TOKEN`）。
+- ⏳ **CI 发布与验收**：由配置了发布凭据的 GitHub Actions 执行；失败可从断点安全续发。
 
 **发布必须按依赖拓扑顺序逐个来**（被依赖者先发）——`cargo publish` 剥离 `path` 后
 会去 crates.io 解析内部依赖，被依赖者不在 registry 上就解析失败。顺序由
@@ -396,7 +391,7 @@ tauron 的装配是**分档**的，别一上来就全接：
 逐档的依赖清单、装配代码与注意事项见
 [渐进接入指南](./integration/incremental-adoption.md)——**这是集成方的第一入口**。
 
-### 3.7 发布编排脚本（`--check` 本机已跑通，真发布未验证）
+### 3.7 发布编排与验收
 
 两个脚本都是 **Node 22、零新依赖、默认 `--check`（只校验不发布）**：
 
@@ -426,8 +421,7 @@ tauron-host → tauron-acl → tauron-brand → tauron-distribute → tauron-i18
 > `tauron-schema`，`tauron-adapter` 依赖其余 12 个——所以 adapter 必须排在最后一批。
 > 脚本每次运行都从 `cargo metadata` 重算，**新增/删除内部依赖不会让顺序漂移**。
 
-> **待网络 / 待凭据**：两条 `--publish` 分支**均未在本机验证**（沙箱无网络、
-> 无 npm / crates.io 凭据）。因此它们的验收口径只是「打包内容正确」，不是「发布成功」。
+**当前状态**：20 个 npm 包已发布。此前 Rust 发布失败于预打包时没有为 workspace 内部依赖启用本地解析；现已修复，并增加 npm 版本已存在时的安全跳过逻辑。本轮待重跑 crates 发布和全新消费端验收。正式 Release 以 GitHub Releases 页面及通过验收的 Actions 运行为准。
 
 ---
 
@@ -439,8 +433,8 @@ tauron-host → tauron-acl → tauron-brand → tauron-distribute → tauron-i18
 |---|---|
 | **安装包未签名 / 未公证** | Windows 会弹 SmartScreen，macOS 会被 Gatekeeper 拦。**不是**安装包坏了 |
 | **Windows 只有 NSIS，没有 MSI** | 见 §1.1 与 CHANGELOG 债务 #11；`--bundles nsis,msi` 未在 CI 验证 |
-| **未发布到 npm / crates.io** | 只能 `path` / `file:` 源码集成，见 §3.0 / §3.1 |
-| **发布脚本只验证到「打包内容」** | `--check` 本机可跑；真实 `npm publish` / `cargo publish` 需要网络与凭据，**未验证**，见 §3.7 |
+| **Rust crate 发布尚在验收** | npm 包已发布；Rust 公共安装以 crates.io 发布成功和干净消费端构建通过为准，见 §3.5 / §3.7 |
+| **跨平台安装体验** | 示例应用安装包需要完成签名、公证和真机安装验证，见 §1 / §3.7 |
 | **示例应用是示例** | 界面极简，提供插件调用、窗口、系统能力、恢复与命令面板等演示链路，不是产品形态的客户端 |
 | **更新检查是模拟的** | 返回带 `simulated: true` 的响应，不真连更新服务器 |
 | **图标是示例图标** | 由 `app-icon.svg` 生成的几何标记，非正式品牌资产 |
