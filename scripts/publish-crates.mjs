@@ -260,20 +260,20 @@ if (failures) {
 }
 
 log('\n── 开始真实发布（严格按拓扑顺序；cargo 会自动等待依赖在 index 上生效）──');
+async function crateVersionPublished(crate) {
+  const response = await fetch(`https://crates.io/api/v1/crates/${crate.name}`, {
+    headers: { 'user-agent': 'Tauron SDK release publisher' },
+  });
+  if (response.status === 404) return false;
+  if (!response.ok) throw new Error(`crates.io returned HTTP ${response.status}`);
+  const details = await response.json();
+  return details.versions?.some((version) => version.num === crate.version) ?? false;
+}
+
 for (const c of order) {
   let alreadyPublished = false;
   try {
-    const response = await fetch(`https://crates.io/api/v1/crates/${c.name}`, {
-      headers: { 'user-agent': 'Tauron SDK release publisher' },
-    });
-    if (response.status === 404) {
-      alreadyPublished = false;
-    } else if (!response.ok) {
-      throw new Error(`crates.io returned HTTP ${response.status}`);
-    } else {
-      const details = await response.json();
-      alreadyPublished = details.versions?.some((version) => version.num === c.version) ?? false;
-    }
+    alreadyPublished = await crateVersionPublished(c);
   } catch (e) {
     fail(`无法确认 ${c.name}@${c.version} 的 registry 状态：${e.message}`);
     process.exit(1);
@@ -282,20 +282,48 @@ for (const c of order) {
     console.log(`→ ${c.name}@${c.version} 已存在于 crates.io，跳过（支持安全续发）`);
     continue;
   }
-  process.stdout.write(`→ cargo publish -p ${c.name} ... `);
-  try {
-    run('cargo', ['publish', '-p', c.name, '--allow-dirty'], ROOT);
-    console.log('\x1b[32m成功\x1b[0m');
-  } catch (e) {
-    console.log('\x1b[31m失败\x1b[0m');
-    const output = (e.stdout?.toString() ?? '') + (e.stderr?.toString() ?? '');
-    if (/verified email address is required/i.test(output)) {
-      fail(
-        'crates.io 发布账号尚未验证邮箱。请在 https://crates.io/settings/profile 完成验证后重新运行；已发布的 npm 版本会自动跳过。',
-      );
+  let rateLimitRetries = 0;
+  while (true) {
+    process.stdout.write(`→ cargo publish -p ${c.name} ... `);
+    try {
+      run('cargo', ['publish', '-p', c.name, '--allow-dirty'], ROOT);
+      console.log('\x1b[32m成功\x1b[0m');
+      break;
+    } catch (e) {
+      console.log('\x1b[31m失败\x1b[0m');
+      const output = (e.stdout?.toString() ?? '') + (e.stderr?.toString() ?? '');
+      const retryAfter = /try again after ([^\r\n]+?) and see https?:\/\//i.exec(output)?.[1];
+      const retryAt = retryAfter ? Date.parse(retryAfter) : Number.NaN;
+      if (
+        /429 Too Many Requests/i.test(output) &&
+        Number.isFinite(retryAt) &&
+        rateLimitRetries < 3
+      ) {
+        rateLimitRetries++;
+        const waitMs = Math.max(0, retryAt - Date.now()) + 1500;
+        console.log(
+          `crates.io 限流，按服务端时间 ${new Date(retryAt).toISOString()} UTC 等待后自动续发（${rateLimitRetries}/3）。`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        try {
+          if (await crateVersionPublished(c)) {
+            console.log(`→ ${c.name}@${c.version} 已在等待期间上架，跳过重复上传`);
+            break;
+          }
+        } catch (statusError) {
+          fail(`等待后无法确认 ${c.name}@${c.version} 状态：${statusError.message}`);
+          process.exit(1);
+        }
+        continue;
+      }
+      if (/verified email address is required/i.test(output)) {
+        fail(
+          'crates.io 发布账号尚未验证邮箱。请在 https://crates.io/settings/profile 完成验证后重新运行；已发布版本会自动跳过。',
+        );
+      }
+      console.error(output);
+      process.exit(1);
     }
-    console.error(output);
-    process.exit(1);
   }
 }
 ok('全部发布完成。');
