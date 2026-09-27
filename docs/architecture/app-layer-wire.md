@@ -135,6 +135,20 @@ export interface HostRpc {
 
 - **调用 id**：`req.callId` 仅作调用方关联；权威 `callId` 由宿主铸造
   （`PendingCall.callId`），取消与终帧确认必须使用返回值里的 id。
+- **`host_call_end` / `host_cancel` 的归属判定**：这两条是 self 档，但 `callId`
+  由调用方传入，故宿主在核心函数里比对 **pending 条目的归属主体**
+  （`pending.pluginId` = 发起方；主窗发起的调用归属键为 `"main"`）。主体不符返回
+  `E_AUTH_DENIED` 且**零副作用**（调用与它的流纹丝不动）。
+  **诚实边界**：判定的顺序是"先取条目、再比主体"，因此调用方能区分
+  `E_CALL_NOT_FOUND`（不存在）与 `E_AUTH_DENIED`（存在但不属于自己）——这与
+  `host_call_result` / `host_call_take` 同口径；由于 `callId` 是宿主铸造的 UUID v4、
+  只回给发起方，这不构成可用的枚举通道。
+- **跨主体调用无流式通路（诚实边界）**：`host_call_plugin` 线格式**没有** `channel`
+  形参，`call_begin_cross` 不为调用绑定帧载体 → 跨主体调用是一元的（回填/取件
+  `host_call_result` / `host_call_take` 同样一元）。流式命令 `host_stream_*`
+  只服务 `host_plugin_call`（自带后端）这条路径，且其身份取自 `plugin-<id>`
+  label（`subscriber_of`）——**主窗开流会被 `E_AUTH_DENIED` 拒**。两侧一致，
+  属「未接线」而非断链；补一侧即制造断链。
 - **返回形状**（Rust → TS 消费，与入参同受门禁锁定）：
   - `host_events_drain` 返回**事件总线帧** `EventFrame`（`{topic,seq,payload}`），
     不是流式帧 `StreamFrame`（后者经 Channel 承载，R5 起为**唯一**帧词表：

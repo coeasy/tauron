@@ -2683,14 +2683,65 @@ pub fn cmd_call_take(
     })?
 }
 
+/// 调用归属键：pending 条目的 `plugin_id`（= 配额归属者 = 发起主体）口径。
+///
+/// 与 `cmd_call_take` 里的 caller 映射同源：插件 → 自己的 id，主窗 → `"main"`。
+/// self 档命令的身份一律从 webview label 派生，不认调用方传入的身份字段。
+fn call_owner_key(caller: &Caller) -> &str {
+    match caller {
+        Caller::Plugin(id) => id.as_str(),
+        Caller::MainWindow => "main",
+    }
+}
+
 /// `host_call_end`：stream 终帧确认（self 档）。
-pub fn cmd_call_end(state: &PluginRuntimeState, call_id: &str) -> HostResult<PendingCall> {
-    guard("call_end", || state.registry.call_end(call_id))?
+///
+/// **归属校验（本轮补）**：只有该调用的归属主体（`pending.plugin_id`，即发起方）
+/// 能结束它。此前本命令只收 `callId`、不做任何身份判定——任何插件一旦拿到或
+/// 猜到别人的 callId，就能终结对方的 pending call 及其名下全部流（跨插件越权 +
+/// 拒绝服务）。这与 `COMMANDS` 表里 `host_call_end` 登记为 `self` 档（"只能作用于
+/// 调用者自己"）的契约相矛盾，故补上与 [`cmd_call_take`] 同一形状的归属判定。
+pub fn cmd_call_end(
+    state: &PluginRuntimeState,
+    caller: &Caller,
+    call_id: &str,
+) -> HostResult<PendingCall> {
+    guard("call_end", || {
+        let owner = call_owner_key(caller);
+        let pending = state.registry.peek_call(call_id)?;
+        if pending.plugin_id != owner {
+            return Err(HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                format!(
+                    "调用 `{call_id}` 的归属主体是 `{}`，`{owner}` 不得结束它",
+                    pending.plugin_id
+                ),
+            ));
+        }
+        state.registry.call_end(call_id)
+    })?
 }
 
 /// `host_cancel`：取消 pending call（self 档）。
-pub fn cmd_cancel(state: &PluginRuntimeState, call_id: &str) -> HostResult<()> {
-    guard("cancel", || state.registry.call_cancel(call_id))?
+///
+/// **归属校验（本轮补）**：与 [`cmd_call_end`] 同一判据——只有发起方能取消自己的
+/// 调用。缺此判定时 `host_cancel` 会成为"任意插件终止任意插件调用"的越权入口
+/// （`E_AUTH_DENIED` 在**任何副作用之前**返回，被取消的调用与流纹丝不动）。
+pub fn cmd_cancel(state: &PluginRuntimeState, caller: &Caller, call_id: &str) -> HostResult<()> {
+    guard("cancel", || {
+        let owner = call_owner_key(caller);
+        let pending = state.registry.peek_call(call_id)?;
+        if pending.plugin_id != owner {
+            return Err(HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                format!(
+                    "调用 `{call_id}` 的归属主体是 `{}`，`{owner}` 不得取消它",
+                    pending.plugin_id
+                ),
+            ));
+        }
+        state.registry.call_cancel(call_id)
+    })?
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -5762,7 +5813,8 @@ mod tests {
             cmd_plugin_call(&state, "plugin-com.install.e2e", None, "hello", serde_json::json!({}))
                 .unwrap();
         assert_eq!(pending.plugin_id, "com.install.e2e");
-        cmd_call_end(&state, &pending.call_id).unwrap();
+        cmd_call_end(&state, &Caller::Plugin("com.install.e2e".to_string()), &pending.call_id)
+            .unwrap();
 
         let uninstalled = cmd_registry_admin_as(
             &Caller::MainWindow,
@@ -6146,7 +6198,8 @@ mod tests {
     #[test]
     fn cmd_cancel_unknown_call() {
         let state = CommandState::new();
-        let result = cmd_cancel(&state, "unknown-call-id");
+        let result =
+            cmd_cancel(&state, &Caller::Plugin("com.example.a".to_string()), "unknown-call-id");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ErrorCode::E_CALL_NOT_FOUND);
     }
@@ -6154,9 +6207,36 @@ mod tests {
     #[test]
     fn cmd_call_end_unknown_call() {
         let state = CommandState::new();
-        let result = cmd_call_end(&state, "unknown-call-id");
+        let result =
+            cmd_call_end(&state, &Caller::Plugin("com.example.a".to_string()), "unknown-call-id");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ErrorCode::E_CALL_NOT_FOUND);
+    }
+
+    /// 第 4 轮回归：`host_call_end` / `host_cancel` 是 `self` 档（"只能作用于自己"），
+    /// 但此前完全不校验归属——任何插件拿到别人的 callId 就能终结对方的调用与流。
+    /// 本测试钉住"跨插件一律拒绝，且拒绝时零副作用"。
+    #[test]
+    fn call_end_and_cancel_reject_cross_plugin() {
+        let state = CommandState::new();
+        let index = empty_index();
+        state.registry.install(&index, test_manifest("p.call")).unwrap();
+        cmd_registry_admin(&state, "p.call", RegistryAdminOp::Enable).unwrap();
+        cmd_lifecycle_report(&state, "plugin-p.call", None, Event::Attach).unwrap();
+        let pending =
+            cmd_plugin_call(&state, "plugin-p.call", None, "m", serde_json::json!({})).unwrap();
+        let intruder = Caller::Plugin("com.example.other".to_string());
+
+        let denied = cmd_call_end(&state, &intruder, &pending.call_id).unwrap_err();
+        assert_eq!(denied.code, ErrorCode::E_AUTH_DENIED);
+        assert!(state.registry.peek_call(&pending.call_id).is_ok(), "被拒时调用必须仍在");
+
+        let denied = cmd_cancel(&state, &intruder, &pending.call_id).unwrap_err();
+        assert_eq!(denied.code, ErrorCode::E_AUTH_DENIED);
+        assert!(state.registry.peek_call(&pending.call_id).is_ok(), "被拒时调用必须仍在");
+
+        // 归属者自己可以做这两件事。
+        cmd_call_end(&state, &Caller::Plugin("p.call".to_string()), &pending.call_id).unwrap();
     }
 
     #[test]
@@ -8882,11 +8962,11 @@ mod tests {
         assert_eq!(pending.seq, 1);
 
         // 结束调用
-        let end = cmd_call_end(&state, &pending.call_id);
+        let end = cmd_call_end(&state, &Caller::Plugin("p.call".to_string()), &pending.call_id);
         assert!(end.is_ok());
 
         // 再次结束 → 应报错
-        let end2 = cmd_call_end(&state, &pending.call_id);
+        let end2 = cmd_call_end(&state, &Caller::Plugin("p.call".to_string()), &pending.call_id);
         assert!(end2.is_err());
         assert_eq!(end2.unwrap_err().code, ErrorCode::E_CALL_NOT_FOUND);
     }

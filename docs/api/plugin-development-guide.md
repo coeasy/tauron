@@ -354,6 +354,17 @@ if (done.state === 'settled') {
 js / process 两条通路都在 `tauron-adapter::default_deliveries` 里生产装配；未装配
 任何通路时落到 `UnwiredDelivery`，返回有类型的 `Unsupported` 而非静默成功。
 
+### 诚实边界：跨主体调用是**一元**的（今天没有流式通路）
+
+- `host_call_plugin` 线格式**没有** `channel` 形参，核心 `call_begin_cross` 也**不**
+  为调用绑定帧载体；TS 侧 `HostClient.callPlugin` 只返回一元簿记，结算口
+  （`reportCallResult` / `takeCallResult`）同样一元。故**跨主体调用无流式通路**。
+- 流式命令（`host_stream_open` / `write` / `close`）只服务 `host_plugin_call`
+  这条**自带后端**的调用路径；其身份取自 `plugin-<id>` label（`subscriber_of`），
+  因此**主窗不能开流**（主窗 label 不是 `plugin-` 前缀，会被 `E_AUTH_DENIED` 拒）。
+- 这是**两侧对称**的"未接线"，**不是**某一侧的断链：需要跨主体流式时按新链路立项，
+  不要只补一侧（补一侧会立刻变成断链）。
+
 ---
 
 ## 宿主命令面
@@ -370,8 +381,8 @@ js / process 两条通路都在 `tauron-adapter::default_deliveries` 里生产�
 | 命令 | 说明 |
 |---|---|
 | `host_plugin_call` | C/D 类插件的 JS↔宿主调用往返（取代信封式 `host_call_begin`） |
-| `host_call_end` | 流式调用终帧确认 |
-| `host_cancel` | 取消调用，取消传播到 sidecar / supervisor |
+| `host_call_end` | 流式调用终帧确认（**仅该调用的发起方**可结束，见下） |
+| `host_cancel` | 取消调用，取消传播到 sidecar / supervisor（**仅该调用的发起方**可取消） |
 | `host_lifecycle_report` | 上报生命周期事件（state / reason） |
 | `host_contributes_register` | 注册 contributes（commands / menus / panels / …） |
 | `host_contributes_reconcile` | 对账本插件已注册的贡献（检出漂移并如实上报，0.4-W3） |
@@ -385,6 +396,14 @@ js / process 两条通路都在 `tauron-adapter::default_deliveries` 里生产�
 | `host_call_plugin` | 跨主体调用：宿主调插件或插件调插件（caller / target 显式，见[跨主体调用](#跨主体调用04-a1)） |
 | `host_call_result` | 执行方回填一次调用的结果（仅 target 可回填） |
 | `host_call_take` | 发起方取走一次已结算的结果（仅 caller 可取） |
+
+> **"self 档 = 只能作用于调用者自己"的三条落地点**（改这些命令时不要只看表）：
+> `host_call_end` / `host_cancel` 会先取 pending 条目并比对**归属主体**
+> （`pending.pluginId`，即发起方；主窗发起的调用归属键为 `"main"`），主体不符一律
+> `E_AUTH_DENIED` 且**零副作用**（调用与它的流纹丝不动）；`host_call_result` 只认
+> 执行方（`target`），`host_call_take` 只认发起方（`caller`）。
+> 唯一例外是 `host_events_unsubscribe`：它的凭据是 `subscribe` 返回的**不可猜
+> token**（只回给订阅者本人），属能力 token 模型而非 label 绑定。
 
 **ScopedRead（2 条）**——按身份过滤结果集而非拒绝：
 

@@ -460,6 +460,40 @@
   同时给 `watch()` 补上**诚实边界**文档：它目前**没有生产调用点**，`plugin_id` 参数
   被忽略（广播不按命名空间过滤）——要用得先在宿主侧接一条事件出口。
 
+#### 第四轮（发布收口终检）：self 档命令的归属校验
+
+- **`host_call_end` / `host_cancel` 跨插件越权**（`tauron-adapter`）：两条命令在
+  `authz::COMMANDS` 里登记为 `self` 档（契约是「只能作用于调用者自己」），但 wire
+  包装器既不解析 webview label、核心函数也不比对归属——任意插件一旦拿到别人的
+  `callId`，就能终结对方的 pending call 及其名下**全部流**（越权 + 拒绝服务）。
+  现在两条命令的主体从 label 派生（`Caller::from_label`，与 `host_call_result` /
+  `host_call_take` 同源），核心函数先取 pending 条目、再比对归属主体
+  （`pending.pluginId` = 发起方，主窗发起的调用归属键为 `"main"`），不符即
+  `E_AUTH_DENIED` 且**零副作用**。补回归测试
+  `call_end_and_cancel_reject_cross_plugin`。
+- **显式登记 `host_events_unsubscribe` 的身份口径**（`tauron-host/src/authz.rs`）：
+  它是唯一不按 label 绑定的 self 档命令——凭据是 `subscribe` 返回的**不可猜 token**
+  （能力 token 模型，token 只回给订阅者本人，分组 token 另有 `subscriber` 一致性
+  校验）。在授权表里写明这条边界，免得后续读者把它误当越权入口或误改成 label 绑定。
+
+#### 第五 / 六轮（发布收口终检）：跨主体链路的诚实边界与示例能力面口径
+
+- **跨主体调用「无流式通路」显式登记**（`docs/api/plugin-development-guide.md` +
+  `docs/architecture/app-layer-wire.md`）：`host_call_plugin` 线格式**没有** `channel`
+  形参、`call_begin_cross` 不绑帧载体，TS 侧 `callPlugin` 也一元——跨主体调用今天
+  **没有**流式通路；流式 `host_stream_*` 只服务 `host_plugin_call`（自带后端）这条
+  路径，且身份取自 `plugin-<id>` label，故**主窗不能开流**。这是**两侧对称**的
+  「未接线」——只补一侧会立刻变成断链，故按仓库规矩如实登记而不是留白。
+- **示例能力文件口径修正**（`examples/minimal-app/src-tauri/capabilities/default.json`）：
+  描述里仍写「54 条 `host_*` 命令」（过时两代），已改为「底座 39 + 插件运行时 21；
+  `plugin-install` 已进默认特性 → 默认 62 条」，与其余文档同口径。
+- **交叉复核（无缺陷，仅登记结论）**：`host_stream_write` / `host_stream_close` 的
+  归属校验在 `stream.rs::push`（`handle.subscriber != subscriber → E_AUTH_DENIED`）；
+  `host_events_drain` / `host_stream_*` 的身份一律由 label 派生（`Principal` /
+  `resolve_self_identity`）；`host_resource_stats` 的逐插件计数与
+  `pending_for` / `stream_active_for` / `subscription_count` / `group_counts`
+  **同源**（不存在第二份计数状态）。
+
 ### 文档
 
 - **删除已失效的历史文档**（4 份，均无引用或状态为假）：

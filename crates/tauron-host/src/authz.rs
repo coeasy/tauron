@@ -119,6 +119,10 @@ pub static COMMANDS: &[CommandAuth] = &[
         consumer: "plugin-sdk",
         description: "事件订阅（跨插件订阅需对方 public:true）",
     },
+    // **退订的身份口径（诚实边界）**：与其余 self 档不同，本命令的凭据是
+    // `subscribe` 返回的**不可猜 token**（UUID），而不是 label 派生身份——token 只
+    // 回给订阅者本人，故"退别人的订阅"没有可达路径；分组 token 的整组退订路径
+    // 另有 `subscriber` 一致性校验。这是**能力 token 模型**，不是越权入口。
     CommandAuth {
         command: "host_events_unsubscribe",
         tier: AuthTier::Self_,

@@ -434,8 +434,12 @@ pub fn wire_stream_close(
 pub const STREAM_KINDS: [&str; 3] = ["data", "end", "error"];
 
 /// `host_call_end` 线格式 → 核心。
-pub fn wire_call_end(state: &CommandState, req: &HostCallEndReq) -> HostResult<PendingCall> {
-    crate::cmd_call_end(state, &req.call_id)
+pub fn wire_call_end(
+    state: &CommandState,
+    caller: &crate::Caller,
+    req: &HostCallEndReq,
+) -> HostResult<PendingCall> {
+    crate::cmd_call_end(state, caller, &req.call_id)
 }
 
 /// `host_lifecycle_report` 线格式 → 核心。
@@ -588,21 +592,28 @@ pub fn host_plugin_call(
 }
 
 /// `host_call_end`：stream 终帧确认（线格式：`{ req: { callId, … } }`）。
+///
+/// 主体从 webview label 解析（与 `host_call_take` 同源），只有该调用的发起方
+/// 能结束它——身份**不**由客户端传入。
 #[tauri::command]
 pub fn host_call_end(
     state: State<'_, PluginRuntimeState>,
+    window: TauriCallerSource,
     req: HostCallEndReq,
 ) -> Result<PendingCall, TauriError> {
-    wire_call_end(&state, &req).map_err(to_tauri_err)
+    let caller = window.caller().map_err(to_tauri_err)?;
+    wire_call_end(&state, &caller, &req).map_err(to_tauri_err)
 }
 
-/// `host_cancel`：取消 pending call。
+/// `host_cancel`：取消 pending call（self 档，仅发起方可取消自己的调用）。
 #[tauri::command]
 pub fn host_cancel(
     state: State<'_, PluginRuntimeState>,
+    window: TauriCallerSource,
     call_id: String,
 ) -> Result<(), TauriError> {
-    crate::cmd_cancel(&state, &call_id).map_err(to_tauri_err)
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_cancel(&state, &caller, &call_id).map_err(to_tauri_err)
 }
 
 /// `host_call_plugin`：跨主体调用（宿主 → 插件 / 插件 → 插件，0.4-A1）。
