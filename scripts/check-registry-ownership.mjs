@@ -53,11 +53,13 @@ const packages = packageFiles
 
 if (packages.some((pkg) => pkg.name.startsWith('@tauron/')) && npmUser !== 'tauron') {
   let hasWriteScopeAccess = false;
+  const scopeCheckErrors = [];
   try {
     const membership = run('npm', ['org', 'ls', 'tauron', npmUser]);
     hasWriteScopeAccess = /owner|admin/i.test(membership);
-  } catch {
+  } catch (error) {
     hasWriteScopeAccess = false;
+    scopeCheckErrors.push(`${error.stdout ?? ''}\n${error.stderr ?? ''}`);
   }
   if (!hasWriteScopeAccess) {
     try {
@@ -65,14 +67,24 @@ if (packages.some((pkg) => pkg.name.startsWith('@tauron/')) && npmUser !== 'taur
       hasWriteScopeAccess = developers
         .split(/\s+/)
         .some((entry) => entry.replace(/^@/, '') === npmUser);
-    } catch {
+    } catch (error) {
       hasWriteScopeAccess = false;
+      scopeCheckErrors.push(`${error.stdout ?? ''}\n${error.stderr ?? ''}`);
     }
   }
   if (!hasWriteScopeAccess) {
-    throw new Error(
-      `npm user ${npmUser} is not verified as a member of the @tauron publishing organization.`,
+    const registryDenied = scopeCheckErrors.some((output) =>
+      /E403|403 Forbidden|You may not perform that action/i.test(output),
     );
+    if (registryDenied) {
+      console.warn(
+        `npm authenticated as ${npmUser}, but npm denied organization membership metadata checks for @tauron (HTTP 403). This does not prove the account lacks access. Continuing to per-package access checks; npm publish will authoritatively verify permission for new package names.`,
+      );
+    } else {
+      throw new Error(
+        `npm authenticated as ${npmUser}, but its membership in the @tauron publishing organization could not be verified. Grant this account publishing access in npm organization settings and rerun the release preflight.`,
+      );
+    }
   }
 }
 for (const pkg of packages) assertNpmWritable(pkg.name, npmUser);
