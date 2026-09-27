@@ -250,7 +250,13 @@ for (const p of order) {
     console.log('\x1b[32m成功\x1b[0m');
   } catch (e) {
     console.log('\x1b[31m失败\x1b[0m');
-    console.error((e.stdout?.toString() ?? '') + (e.stderr?.toString() ?? ''));
+    const output = (e.stdout?.toString() ?? '') + (e.stderr?.toString() ?? '');
+    if (/Scope not found/i.test(output)) {
+      console.error(
+        `npm scope for ${p.pkg.name} does not exist. Create the @tauron organization on npmjs.com using the free public-packages plan, ensure the publishing account is an organization owner/member, then rerun the package workflow. No later package was attempted.`,
+      );
+    }
+    console.error(output);
     rmSync(tmpRoot, { recursive: true, force: true });
     process.exit(1);
   }
