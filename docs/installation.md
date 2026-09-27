@@ -211,6 +211,18 @@ pnpm --filter minimal-app build
 
 ## 3. 把 tauron 接进自己的项目
 
+### 推荐路径：用户不需要逐个安装 20 个 npm 包或 15 个 Rust crate
+
+包数是 Tauron 仓库的发布/维护单元，不是应用开发者的必装清单。直接集成时只需选入口：
+
+| 目标 | 前端直接依赖 | Rust 直接依赖 | 最短路径 |
+|---|---|---|---|
+| 新建 Tauri 2 客户端 | 脚手架生成 `@tauron/host` | 脚手架生成 `tauron-adapter` | `npm create tauron-app@1.0.0 -- ./my-app --framework react`，然后 `cd my-app && npm install` |
+| 接入已有 Tauri 2 客户端 | CLI 自动加 `@tauron/host` 与 `@tauron/ui` | CLI 自动加 `tauron-adapter` | `npx @tauron/app-cli@1.0.0 init --dir ./my-app`，再按 CLI 提示安装依赖 |
+| 手工集成 | 从 `@tauron/host` 开始；需要组件时再加 `@tauron/ui` | 只加 `tauron-adapter` 并启用 `tauri` feature | 只需安装直接使用的包；npm / Cargo 会解析 Tauron 的传递依赖 |
+
+`tauron-adapter` 是 Rust 侧聚合入口，下面 10+ 个内部 crate 会作为传递依赖处理；前端包同样会自动解析内部包依赖。React、Vue、Svelte 是脚手架选择的前端方案，用户不需要同时安装三套框架适配器。需要更细粒度控制时，再按后续章节逐包集成。
+
 ### 3.0 五种「安装/集成」方式一览（先说边界）
 
 「支持多种安装方式」拆开是下面五条路径。**今天真正可用的只有第 1 条**（第 4 条

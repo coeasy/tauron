@@ -47,6 +47,20 @@ function run(cmd, cmdArgs, cwd) {
   return execFileSync(cmd, cmdArgs, opts);
 }
 
+function reportMetadataFailure(error) {
+  const stderr = (error.stderr?.toString() || error.message).trim();
+  const uncached = /failed to download `([^`]+)`/.exec(stderr)?.[1];
+  if (/attempting to make an HTTP request, but --offline was specified/i.test(stderr)) {
+    fail(
+      uncached ? `cargo metadata 缺少离线缓存依赖：${uncached}` : 'cargo metadata 缺少离线缓存依赖',
+    );
+    log('  请先在可联网环境运行 `cargo fetch --locked`，再重新执行 crate 打包检查。');
+  } else {
+    fail('cargo metadata 失败');
+  }
+  console.error(stderr);
+}
+
 // ── 1. 用 cargo metadata 实算拓扑序 ──────────────────────────────
 log('── 1/3 读取 cargo metadata，实算依赖拓扑序 ──');
 let meta;
@@ -65,13 +79,11 @@ try {
     try {
       meta = JSON.parse(run('cargo', metaArgs, ROOT));
     } catch (e2) {
-      fail('cargo metadata 失败');
-      console.error((e2.stderr?.toString() || e2.message).trim());
+      reportMetadataFailure(e2);
       process.exit(1);
     }
   } else {
-    fail('cargo metadata 失败');
-    console.error(stderr);
+    reportMetadataFailure(e);
     process.exit(1);
   }
 }

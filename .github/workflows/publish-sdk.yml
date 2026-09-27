@@ -31,6 +31,11 @@ jobs:
       - run: pnpm verify
       - run: cargo test --workspace --locked
       - run: pnpm publish:npm -- --check
+      # The crate preflight intentionally uses --offline so it can validate
+      # crates whose internal dependencies are not on crates.io yet. Cargo test
+      # may not fetch target-only crates, so warm every locked platform dependency.
+      - name: Fetch locked Rust dependencies for offline package preflight
+        run: cargo fetch --locked
       - run: pnpm publish:crates -- --check
       - name: Require registry publish credentials
         env:
