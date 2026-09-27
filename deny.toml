@@ -26,7 +26,6 @@ wildcards = "allow"
 
 [advisories]
 ignore = []
-db-urls = ["https://github.com/rustsec/advisories-db"]
 unmaintained = "workspace"
 
 [sources]
