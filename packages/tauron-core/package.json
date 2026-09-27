@@ -1,6 +1,6 @@
 {
   "name": "@tauron/core",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "tauron 框架无关核心层（设计文档 §1.1/§2/§3/§4/§9）：信封调用、双层 ACL、注册表、事件总线、配置管理、运行时探测",
   "license": "MIT",
   "repository": {

@@ -1703,8 +1703,9 @@ impl crate::WindowSink for TauriWindowSink {
     ///
     /// # 真的做了什么
     ///
-    /// 用 `WebviewWindowBuilder` 以 `spec.label`（= `plugin-<id>`）与
-    /// `WebviewUrl::App(entry.ui)` 建一个 webview 窗口，标题/内尺寸取自 spec。
+    /// 用 `WebviewWindowBuilder` 以 `spec.label`（= `plugin-<id>`）建一个 webview 窗口。
+    /// 配置了插件安装根目录时，从已安装插件目录的自定义协议加载；否则从应用资源
+    /// 目录加载 `entry.ui`，用于内置/示例插件。标题和内尺寸取自 spec。
     /// 创建后窗口销毁的回收**不需要新钩子**：宿主已有的
     /// `on_window_event(Destroyed) → cleanup_closed_window` 就是按这个 label 回收的。
     ///
@@ -1733,32 +1734,30 @@ impl crate::WindowSink for TauriWindowSink {
         let url = if spec.label.starts_with("plugin-") {
             #[cfg(feature = "plugin-install")]
             {
-                let plugin_id = &spec.label["plugin-".len()..];
                 let state = self.app.state::<crate::PluginRuntimeState>();
-                let installed = crate::installed_plugin_ui(&state, plugin_id)?;
-                let install_root = state.install_config_root().ok_or_else(|| {
-                    HostError::new(ErrorCode::E_INSTALL_FAILED, "插件安装目录未配置")
-                })?;
-                let relative =
-                    installed.entry.strip_prefix(install_root.as_path()).map_err(|e| {
-                        HostError::new(
-                            ErrorCode::E_INSTALL_FAILED,
-                            format!("插件 UI 越出安装目录：{e}"),
-                        )
-                    })?;
-                let entry = relative
-                    .strip_prefix(plugin_id)
-                    .unwrap_or(relative)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                tauri::WebviewUrl::CustomProtocol(make_plugin_asset_url(plugin_id, &entry)?)
+                if let Some(install_root) = state.install_config_root() {
+                    let plugin_id = &spec.label["plugin-".len()..];
+                    let installed = crate::installed_plugin_ui(&state, plugin_id)?;
+                    let relative =
+                        installed.entry.strip_prefix(install_root.as_path()).map_err(|e| {
+                            HostError::new(
+                                ErrorCode::E_INSTALL_FAILED,
+                                format!("插件 UI 越出安装目录：{e}"),
+                            )
+                        })?;
+                    let entry = relative
+                        .strip_prefix(plugin_id)
+                        .unwrap_or(relative)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    tauri::WebviewUrl::CustomProtocol(make_plugin_asset_url(plugin_id, &entry)?)
+                } else {
+                    tauri::WebviewUrl::App(std::path::PathBuf::from(&spec.url))
+                }
             }
             #[cfg(not(feature = "plugin-install"))]
             {
-                return Err(HostError::new(
-                    ErrorCode::E_PLUGIN_TYPE_NO_RUNTIME,
-                    "此构建未启用 plugin-install，不能加载磁盘插件页面",
-                ));
+                tauri::WebviewUrl::App(std::path::PathBuf::from(&spec.url))
             }
         } else {
             tauri::WebviewUrl::App(std::path::PathBuf::from(&spec.url))

@@ -3416,7 +3416,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-acl"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "hex",
  "hmac",
@@ -3428,8 +3428,9 @@ dependencies = [
 
 [[package]]
 name = "tauron-adapter"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
+ "chrono",
  "ed25519-dalek",
  "hex",
  "parking_lot",
@@ -3439,6 +3440,8 @@ dependencies = [
  "sha2 0.10.9",
  "tauri",
  "tauron-acl",
+ "tauron-brand",
+ "tauron-distribute",
  "tauron-host",
  "tauron-i18n",
  "tauron-market",
@@ -3446,13 +3449,34 @@ dependencies = [
  "tauron-proc",
  "tauron-recovery",
  "tauron-settings",
+ "tauron-theme",
+ "tauron-wasm",
  "uuid",
  "zip",
 ]
 
 [[package]]
+name = "tauron-brand"
+version = "1.0.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "tauron-distribute"
+version = "1.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "tauron-host"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "hex",
@@ -3467,7 +3491,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-i18n"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3476,7 +3500,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-market"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ed25519-dalek",
  "serde",
@@ -3489,7 +3513,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-minimal-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "indexmap 1.9.3",
  "serde",
@@ -3502,7 +3526,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-notify"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3511,7 +3535,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-proc"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "parking_lot",
@@ -3522,7 +3546,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-recovery"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3531,7 +3555,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-schema"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "regex",
  "serde",
@@ -3541,7 +3565,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-settings"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3551,7 +3575,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-shell"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "hex",
@@ -3564,6 +3588,27 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "tauron-theme"
+version = "1.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
+name = "tauron-wasm"
+version = "1.0.0"
+dependencies = [
+ "chrono",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

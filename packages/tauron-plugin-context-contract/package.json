@@ -1,6 +1,6 @@
 {
   "name": "@tauron/plugin-context-contract",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "tauron 插件上下文共享契约：PluginContext 及其窄接口（仅类型，零运行时依赖；两代插件 SDK 共用的唯一事实源）",
   "license": "MIT",
   "repository": {

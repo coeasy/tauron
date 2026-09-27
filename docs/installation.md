@@ -26,7 +26,7 @@
 ### 1.1 下载
 
 到 [Releases](https://github.com/coeasy/tauron/releases) 页面，在最新版本的
-**Assets** 里按平台取文件。命名形如 `Tauron Minimal App_0.1.0_<平台>.<后缀>`：
+**Assets** 里按平台取文件。命名形如 `Tauron Minimal App_1.0.0_<平台>.<后缀>`：
 
 | 平台 | 取哪个文件 | 格式 |
 |---|---|---|
@@ -35,9 +35,8 @@
 | macOS（Intel） | `..._x64.dmg` | 磁盘映像 |
 | Linux | `..._amd64.deb` / `..._x86_64.rpm` / `..._amd64.AppImage` | 三种任选 |
 
-> **发布状态**：Release 由 `release.yml` 在推 `v*` tag 时自动构建，产物先落成
-> **草稿**（`draft: true`），需要维护者人工过一眼再点发布。所以如果你在 Releases
-> 页看不到东西，是因为草稿还没发布——见 §5「没有安装包可下怎么办」。
+> **发布状态**：Release 由 `release.yml` 在推 `v*` tag 时自动构建并创建公开版本，
+> Windows、macOS 和 Linux 的安装包会作为 Release assets 上传。
 >
 > **Windows 只提供 NSIS，不提供 MSI**：`targets: "all"` 在 Windows 上等于
 > nsis + msi，而 MSI 需要构建期下载 WiX 工具链，属额外网络依赖，失败时会连
@@ -51,7 +50,7 @@
 
 ### 1.2 Windows
 
-1. 双击 `Tauron Minimal App_0.1.0_x64-setup.exe`。
+1. 双击 `Tauron Minimal App_1.0.0_x64-setup.exe`。
 2. 会弹 **Windows SmartScreen**（「Windows 已保护你的电脑」）——因为安装包
    **没有代码签名**。点「更多信息」→「仍要运行」。
 3. 按向导装完，从开始菜单启动。
@@ -109,8 +108,7 @@ AppImage → 直接删文件。
 
 ### 1.5 装完怎么确认「真的通了」
 
-启动后你会看到一个主窗，里面有四条可点的演示链路。**这四条就是验收清单**——
-它们各自对应框架里一条真实链路，点一遍就知道装对了没有：
+启动后你会看到一个主窗。下面四条是快速验收清单；插件管理、命令面板、启动恢复和跨主体调用也可以继续检查：
 
 | 点它 | 应该看到 | 背后走的链路 |
 |---|---|---|
@@ -328,7 +326,7 @@ tauron-shell = { path = "../tauron/crates/tauron-shell", features = ["tauri"] }
 **发布必须用 pnpm（不是 npm）——这是实测结论**：`npm pack` 会把 `workspace:*`
 **原样写进 tarball 的 `package.json`**，而 npm 在 workspace 之外解析 `workspace:`
 会直接报 `EUNSUPPORTEDPROTOCOL`；`pnpm pack` / `pnpm publish` 则会把它改写成具体
-版本（本机解包实测：`"@tauron/types": "0.1.0"`）。发布脚本因此固定走 pnpm，
+版本（本机解包实测：`"@tauron/types": "1.0.0"`）。发布脚本因此固定走 pnpm，
 且把「无 `workspace:` 残留」作为硬校验项。
 
 发布后用法：
@@ -348,7 +346,7 @@ pnpm add @tauron/types @tauron/core @tauron/host   # npm / yarn 同理
 
 - ✅ **本机已验证**：`cargo package -p <crate> --no-verify --allow-dirty --offline`
   能对全部 15 个 crate 产出 `.crate`，且产物内 `[dependencies.tauron-*]` 只剩
-  `version = "0.1.0"`、没有 `path`。
+  `version = "1.0.0"`、没有 `path`。
 - ❌ **本机不可验证**：真实 `cargo publish`（无网络、无 `CARGO_REGISTRY_TOKEN`）。
 
 **发布必须按依赖拓扑顺序逐个来**（被依赖者先发）——`cargo publish` 剥离 `path` 后
@@ -429,7 +427,7 @@ tauron-host → tauron-acl → tauron-brand → tauron-distribute → tauron-i18
 | **Windows 只有 NSIS，没有 MSI** | 见 §1.1 与 CHANGELOG 债务 #11；`--bundles nsis,msi` 未在 CI 验证 |
 | **未发布到 npm / crates.io** | 只能 `path` / `file:` 源码集成，见 §3.0 / §3.1 |
 | **发布脚本只验证到「打包内容」** | `--check` 本机可跑；真实 `npm publish` / `cargo publish` 需要网络与凭据，**未验证**，见 §3.7 |
-| **示例应用是示例** | 界面极简，只有四条演示链路，不是产品形态的客户端 |
+| **示例应用是示例** | 界面极简，提供插件调用、窗口、系统能力、恢复与命令面板等演示链路，不是产品形态的客户端 |
 | **更新检查是模拟的** | 返回带 `simulated: true` 的响应，不真连更新服务器 |
 | **图标是示例图标** | 由 `app-icon.svg` 生成的几何标记，非正式品牌资产 |
 | **安装包未做真机安装验证** | CI 能出包（Windows / Linux / macOS 三条腿），但「装完能不能用」**三个平台都没验证过**；Windows 本机只到「出包成功」这一步 |
@@ -439,8 +437,8 @@ tauron-host → tauron-acl → tauron-brand → tauron-distribute → tauron-i18
 ## 5. 常见问题
 
 **Q：Releases 页面什么都没有。**
-产物先落成**草稿**，需要维护者点发布；或者当前还没有推过 `v*` tag。
-想自己出包看 §2。
+可能还没有推过 `v*` tag，或多平台构建仍在进行。推送 tag 后，矩阵构建成功会自动创建公开
+Release 并附上安装包；想自己出包看 §2。
 
 **Q：`pnpm -r test` 报一堆 "Failed to resolve import"。**
 没先 `pnpm -r build`。测试是从各包的 `dist/` 解析 workspace 导入的。

@@ -102,17 +102,17 @@ fn decode_hex(raw: &str) -> Option<Vec<u8>> {
 /// 因此不适用"跨边界强制 camelCase"那条约定）；`type` 是唯一的重命名项
 /// （`#[serde(rename = "type")]`）。
 ///
-/// `entry.js` 指向打包后的插件页面——`vite` 把 `plugin.html` 与它的 chunk 产到
-/// `dist/`，宿主按 `frontendDist` 提供。
+/// `entry.js` 指向 legacy iframe 页面，`entry.ui` 指向主推 SDK 的插件窗口页；
+/// 两个页面都由 Vite 产到 `dist/`，宿主分别按 iframe 和 `host_window_create` 加载。
 #[cfg(not(feature = "substrate-only"))]
 const DEMO_PLUGIN_MANIFEST: &str = r#"{
   "id": "com.example.formatter",
   "name": "Formatter",
   "version": "1.0.0",
   "type": "js",
-  "entry": { "js": "plugin.html" },
+  "entry": { "js": "plugin.html", "ui": "plugin-window.html" },
   "permissions": [],
-  "framework": ">=0.1.0, <0.2.0"
+  "framework": ">=1.0.0, <2.0.0"
 }"#;
 
 fn main() {

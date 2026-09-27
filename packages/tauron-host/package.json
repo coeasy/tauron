@@ -1,6 +1,6 @@
 {
   "name": "@tauron/host",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "tauron 能力编排层：invoke/event/channel 封装、错误规范化、能力探测、Backend provider 抽象",
   "license": "MIT",
   "repository": {

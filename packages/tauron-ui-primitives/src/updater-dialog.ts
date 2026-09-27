@@ -104,7 +104,7 @@ export class UpdaterStore {
 
   constructor(config: Partial<UpdaterConfig> = {}) {
     this._config = {
-      currentVersion: config.currentVersion ?? '0.1.0',
+      currentVersion: config.currentVersion ?? '1.0.0',
       checkInterval: config.checkInterval ?? 3600000, // 1 hour
       autoDownload: config.autoDownload ?? false,
       autoInstall: config.autoInstall ?? false,

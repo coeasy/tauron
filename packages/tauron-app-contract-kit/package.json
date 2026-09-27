@@ -1,6 +1,6 @@
 {
   "name": "@tauron/app-contract-kit",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "tauron 应用契约测试套件：core API 行为 / 事件协议 / 错误码用例集 + mock Backend",
   "license": "MIT",
   "repository": {

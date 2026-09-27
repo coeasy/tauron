@@ -583,11 +583,11 @@ tauri::Builder::default().plugin(tauron_adapter::tauri::state_init())
 
 | 维度 | 状态 | 说明 |
 |------|------|------|
-| API 稳定性 | ⚠️ | `@tauron/*` 包尚无 semver 承诺（版本 0.1.0） |
+| API 稳定性 | ✅ | 版本 1.0.0，公开 API 遵循 semver；npm / crates.io 发布仍待完成 |
 | 文档完整性 | ✅ | 2026-09-24 复核：原文"docs/ 目录几乎为空"**已过时**；2026-09-25 再复核：架构 / 线格式 / 插件开发 / 渐进接入 / 竞品分析 / **安装与使用** / 示例 README 齐备 |
 | 示例应用 | ⚠️ | 仅 minimal-app 一个示例（可构建、可打包、有跨平台安装包） |
 | 包发布 | ❌ | 未发布到 npm / crates.io（只能 path / workspace 接入） |
-| CI/CD | ✅ | 2026-09-25 复核：原文"GitHub Actions 未确认"**已过时**；`ci.yml`（TS build→typecheck→lint→test / Rust 默认特性 / Rust `tauri` feature / wire-gate）与 `release.yml`（四平台矩阵 → 草稿 Release）均已落地，v0.1.0 首次 Release 六作业全绿 |
+| CI/CD | ✅ | 2026-09-27 复核：`ci.yml` 覆盖 TS 构建 / 类型检查 / 测试、Rust 默认与 Tauri 特性、跨语言契约及示例底座装配；`release.yml` 校验版本后构建 Windows / macOS（双架构）/ Linux 安装包并创建公开 Release |
 | 版本管理 | ✅ | semver 规范、`Cargo.lock` 和 `pnpm-lock.yaml` 均入版本控制 |
 
 ---

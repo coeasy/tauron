@@ -11,7 +11,7 @@
 
 ---
 
-## [0.1.0] - 未发布
+## [1.0.0] - 2026-09-27
 
 首个版本。框架层（`@tauron/types|core|plugin-sdk|adapter-*|cli|market|shell-matrix|dual-world|contract-tests` + `tauron-shell`）
 与应用层（`@tauron/host|framework|ui|ui-primitives|app-*` + `tauron-host`/`tauron-adapter`）双栈成型。
@@ -793,9 +793,9 @@ RPC 握手时自报指纹（**尚未实现**：0.4-A1 已把 `tauron-proc` 的 R
    - `Cargo.toml` 的 `[workspace.package] version`（15 个 crate 全部继承它）
    - 根 `package.json` 的 `version`
    - 20 个 `packages/*/package.json` 的 `version`
-2. 在本文件顶部新增一节，把「未发布」改为实际日期
+2. 在本文件顶部新增一节，记下发布日期与本版变更
 3. `git tag vX.Y.Z && git push origin vX.Y.Z`
-4. `release.yml` 会先校验三处版本号与 tag 一致，再矩阵构建，最后落成**草稿** Release
-   （人工过一眼再点发布）
+4. `release.yml` 会校验工作区、npm 包与示例应用版本一致，再矩阵构建并自动创建公开 Release
 
+[1.0.0]: https://github.com/coeasy/tauron/releases/tag/v1.0.0
 [0.1.0]: https://github.com/coeasy/tauron/releases/tag/v0.1.0

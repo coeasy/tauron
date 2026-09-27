@@ -156,22 +156,19 @@ jobs:
         run: cargo check --workspace --all-targets --all-features --locked
 
   # ══════════════════════════════════════════════════════════════════
-  # 示例工程「任意宿主底座」装配路径
+  # 示例工程「任意宿主底座」装配路径（硬门禁）
   #
   # 这是方案 §9-1 验收标准 1 的命令，取自
   # `examples/minimal-app/src-tauri/Cargo.toml` 的注释：只 manage 底座状态、
   # 不建 PluginRuntimeState、不注册插件命令，证明「底座可以脱离插件框架
   # 单独装配」。
   #
-  # ⚠️ advisory（continue-on-error）：该工程被 workspace `exclude`，是独立
-  # 依赖树（自带 Cargo.lock，需单独缓存与 `--locked` 校验）。图标已补齐
-  # （见 examples/minimal-app/app-icon.svg 与 tauri.conf.json 的 bundle.icon），
-  # 不再是 advisory 的理由；待该 job 首次跑通后再转硬门禁。
+  # 该工程被 workspace `exclude`，是独立依赖树（自带 Cargo.lock，需单独缓存与
+  # `--locked` 校验）。图标已补齐；这条验收路径作为硬门禁，防止示例底座装配断裂。
   # ══════════════════════════════════════════════════════════════════
   example-substrate-only:
-    name: 示例工程 substrate-only（advisory）
+    name: 示例工程 substrate-only
     runs-on: ubuntu-22.04
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 

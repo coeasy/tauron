@@ -438,7 +438,7 @@ describe('ShellController', () => {
     });
     c.start([container]);
     container.dispatchEvent(new CustomEvent('oc-command-select', { detail: { id: 'fmt.run' } }));
-    await new Promise((r) => setTimeout(r, 40));
+    await vi.waitFor(() => expect(take.mock.calls.length).toBeGreaterThanOrEqual(3));
 
     expect(list).toHaveBeenCalledWith('command');
     expect(call).toHaveBeenCalledWith('com.fmt', 'fmt.run');
@@ -460,7 +460,7 @@ describe('ShellController', () => {
     });
     c.start([container]);
     container.dispatchEvent(new CustomEvent('oc-command-select', { detail: { id: 'fmt.run' } }));
-    await new Promise((r) => setTimeout(r, 40));
+    await vi.waitFor(() => expect(seen.some((s) => s.context === 'command.select')).toBe(true));
 
     expect(take.mock.calls.length, '必须把预算用满').toBe(3);
     const hit = seen.find((s) => s.context === 'command.select');
@@ -482,7 +482,7 @@ describe('ShellController', () => {
     });
     c.start([container]);
     container.dispatchEvent(new CustomEvent('oc-command-select', { detail: { id: 'fmt.run' } }));
-    await new Promise((r) => setTimeout(r, 40));
+    await vi.waitFor(() => expect(seen.some((s) => s.context === 'command.select')).toBe(true));
 
     const hit = seen.find((s) => s.context === 'command.select');
     expect(hit).toBeDefined();
@@ -502,7 +502,7 @@ describe('ShellController', () => {
     container.dispatchEvent(
       new CustomEvent('oc-command-select', { detail: { id: 'builtin.quit' } }),
     );
-    await new Promise((r) => setTimeout(r, 40));
+    await vi.waitFor(() => expect(seen.some((s) => s.context === 'command.select')).toBe(true));
 
     expect(call, '找不到归属时不得投递').not.toHaveBeenCalled();
     const hit = seen.find((s) => s.context === 'command.select');

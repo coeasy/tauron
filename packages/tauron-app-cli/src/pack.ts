@@ -107,7 +107,7 @@ export function createNativePluginManifest(config: PluginConfig): NativePluginMa
     name: config.name,
     version: config.version,
     type: config.pluginType,
-    framework: '^0.1.0',
+    framework: '^1.0.0',
     entry,
     permissions: [...config.permissions],
     platforms: ['win', 'mac', 'linux'],
@@ -371,7 +371,7 @@ export function validateSignConfig(config: SignConfig): ResolvedSignConfig {
     kid: config.kid,
     privateKey: config.privateKey,
     includeSource: config.includeSource ?? false,
-    frameworkRange: config.frameworkRange ?? '>=0.1.0',
+    frameworkRange: config.frameworkRange ?? '>=1.0.0',
   };
 }
 

@@ -50,11 +50,11 @@ export function createApp(config: AppConfig, _options: CliOptions): AppScaffoldR
         typecheck: 'tsc --noEmit',
       },
       dependencies: {
-        '@tauron/core': '^0.1.0',
-        '@tauron/types': '^0.1.0',
+        '@tauron/core': '^1.0.0',
+        '@tauron/types': '^1.0.0',
         ...(isReact
           ? {
-              '@tauron/adapter-react': '^0.1.0',
+              '@tauron/adapter-react': '^1.0.0',
               react: '^18.3.1',
               'react-dom': '^18.3.1',
             }

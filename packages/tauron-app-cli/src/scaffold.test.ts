@@ -438,7 +438,7 @@ describe('generatePackageJson', () => {
     expect(pkg.scripts.build).toBe('vite build');
     expect(pkg.scripts.tauri).toBe('tauri');
     // 没给 tauronPath 时只能写版本号占位：tauron 的 npm 包尚未发布，`pnpm i` 装不到。
-    expect(pkg.dependencies['@tauron/host']).toBe('0.1.0');
+    expect(pkg.dependencies['@tauron/host']).toBe('^1.0.0');
     // `tauri dev` / `tauri build` 两个 script 的执行体必须来自 devDependencies。
     expect(pkg.devDependencies['@tauri-apps/cli']).toBeDefined();
     // before*Command 会调到 `npm run dev` / `npm run build`，执行体是 vite。

@@ -267,7 +267,7 @@ export function validateConfig(config: ScaffoldConfigInput): ScaffoldConfig {
 // ──────────────────────────────────────────────────────────────────────────
 
 /** 框架包版本（与 @tauron/host 同源发版）。 */
-const FRAMEWORK_VERSION = '0.1.0';
+const FRAMEWORK_VERSION = '1.0.0';
 
 /** 去掉路径尾部的 `/` 与 `\`。 */
 function trimTrailingSlash(p: string): string {
@@ -302,7 +302,7 @@ export function generatePackageJson(config: ScaffoldConfig): string {
   const hostDependency =
     config.tauronPath !== undefined
       ? `file:${trimTrailingSlash(config.tauronPath)}/packages/tauron-host`
-      : FRAMEWORK_VERSION;
+      : `^${FRAMEWORK_VERSION}`;
   const pkg: Record<string, unknown> = {
     name: config.name,
     version: '0.1.0',

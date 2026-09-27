@@ -281,7 +281,7 @@ el<HTMLButtonElement>('btn-open-plugin-window').addEventListener('click', () => 
 el<HTMLButtonElement>('btn-cross-call').addEventListener('click', () => {
   const code = el<HTMLInputElement>('cross-input').value;
   const run = async (): Promise<PendingCallInfo> => {
-    const accepted = await shell.callPlugin('com.example.formatter', 'format', { code });
+    const accepted = await shell.callPlugin('com.example.formatter', 'formatter.format', { code });
     if (!accepted.callId) {
       throw new Error(`宿主未受理：${accepted.errorCode ?? '（无错误码）'}`);
     }

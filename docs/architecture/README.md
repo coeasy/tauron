@@ -56,4 +56,4 @@
 | 测试 | vitest（TS）、cargo test（Rust） |
 | 构建 | tsc、`pnpm -r build`、Tauri v2 |
 | CI / 发布 | GitHub Actions（`ci.yml` 门禁 / `release.yml` 矩阵构建） |
-| Lint | ESLint（硬门禁）、rustfmt / clippy / cargo-deny（advisory） |
+| Lint | ESLint / rustfmt / clippy（硬门禁）、cargo-deny（advisory） |

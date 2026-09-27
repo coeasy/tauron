@@ -33,7 +33,7 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
   tauron 管其上的插件运行时与能力治理。
 - **不是「已发布、可 `install` 的 SDK」**。20 个 npm 包与 15 个 crate **都未发布到
   registry**，只能 path / workspace 接入。
-- **不是 1.0**。版本 0.1.0，API 未冻结。
+- **当前版本为 1.0.0**。公开 API 遵循语义化版本；具体未接入的运行时与平台能力见下方成熟度说明。
 
 ### 成熟度：哪些是真的，哪些还是占位
 
@@ -56,7 +56,7 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
 | 做一个要装第三方插件的桌面客户端 | ✅ 接应用层，按「三档装配」选档 |
 | 需要一个带设置中心 / 白标 / 崩溃恢复的客户端底座 | ✅ 接应用层 |
 | 想要开箱即用的成品桌面应用 | ❌ 这是框架，没有成品 |
-| 想要 `pnpm add` 就能用的稳定 SDK | ❌ 未发布 registry，且 API 未冻结（0.x） |
+| 想要 `pnpm add` 就能用的稳定 SDK | ⚠️ API 进入 1.0.0 semver 阶段，但 npm / crates.io 发布尚未完成 |
 
 **准备上手**：[安装与使用](./docs/installation.md) —— 三种「安装」怎么选、
 各平台安装步骤、从源码构建、装完怎么自检。
@@ -549,7 +549,7 @@ pnpm install
 #    不先 build 会得到一批 "Failed to resolve import" 的假失败。
 pnpm -r build
 pnpm -r --no-bail typecheck
-pnpm -r lint          # ESLint（当前 0 error / 81 warning）
+pnpm lint             # ESLint（0 error / 0 warning）
 pnpm -r --no-bail test
 
 # 等价的一键命令（build → typecheck → test）
@@ -560,7 +560,7 @@ cargo test --workspace                  # 默认特性：不依赖 tauri，无�
 cargo test -p tauron-shell   --features tauri
 cargo test -p tauron-adapter --features tauri
 
-# 格式化与 lint（详见 CHANGELOG.md「已知债务」：当前为 advisory）
+# 格式化与 lint（硬门禁）
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -612,20 +612,19 @@ cargo clippy --workspace --all-targets -- -D warnings
 | 工作流 | 触发 | 做什么 |
 |---|---|---|
 | [`ci.yml`](./.github/workflows/ci.yml) | `main` push / PR | TS（build→typecheck→lint→test）、Rust 默认特性、Rust `tauri` feature、wire-gate |
-| [`release.yml`](./.github/workflows/release.yml) | 推 `v*` tag | 版本号一致性校验 → windows / macOS(arm64+x64) / linux 矩阵构建 → 草稿 Release |
+| [`release.yml`](./.github/workflows/release.yml) | 推 `v*` tag | 版本号一致性校验 → Windows / macOS（arm64 + x64）/ Linux 安装包构建 → 公开 Release |
 
 发布流程：
 
 ```bash
-# 1. 三处版本号一起升（Cargo.toml 的 [workspace.package] + 根 package.json
-#    + 20 个 packages/*/package.json；release 工作流会强校验它们一致）
+# 1. 更新工作区与所有 npm 包版本，并同步示例应用的 package.json、Cargo.toml、
+#    tauri.conf.json；release 工作流会校验全部版本一致
 # 2. 更新 CHANGELOG.md
-git tag v0.1.0 && git push origin v0.1.0
+git tag v1.0.0 && git push origin v1.0.0
 ```
 
-> `ci.yml` 里 `cargo fmt` / `cargo clippy` / `cargo-deny` 三个 job 目前是
-> **advisory**（`continue-on-error`），只报不拦。原因与转正条件见
-> [`rustfmt.toml`](./rustfmt.toml) 与 [`CHANGELOG.md`](./CHANGELOG.md)。
+> `cargo fmt`、`cargo clippy`、ESLint 和应用示例装配均为硬门禁。`cargo-deny`
+> 仍为 advisory，因为它使用持续更新的 RustSec 公告数据库；结果见 CI 的 deny job。
 
 ---
 

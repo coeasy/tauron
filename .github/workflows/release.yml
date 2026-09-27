@@ -1,9 +1,9 @@
 name: Release
 
-# 触发：推 `v*` tag（如 v0.1.1），或手动触发做一次干跑。
+# 触发：推 `v*` tag，或手动触发做一次干跑。
 #
-# 约定：tag 必须从 **CI 已绿的 main** 上打。本工作流不重跑全量测试，
-# 只做一件廉价的强校验 —— tag 号与三处版本号必须一致（见 version-check）。
+# 约定：正式发布 tag 必须从 **CI 已绿的 main** 上打。本工作流不重跑全量测试，
+# 只做一件廉价的强校验 —— tag 号与各处版本号必须一致（见 version-check）。
 # 这样「打了 v0.2.0 但忘了升版本号」不会产出错版安装包。
 on:
   push:
@@ -42,7 +42,12 @@ jobs:
 
       - name: tag 与 Cargo.toml / package.json 必须一致
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME#v}"
+          else
+            # 手动分支运行只构建当前版本的预览产物，不创建 Release。
+            tag=$(node -p "require('./package.json').version")
+          fi
           cargo_ws=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           root_pkg=$(node -p "require('./package.json').version")
           echo "tag=${tag}  Cargo.toml=${cargo_ws}  package.json=${root_pkg}"
@@ -88,6 +93,13 @@ jobs:
           echo "examples/minimal-app/src-tauri/Cargo.toml=${ex_cargo}"
           if [ "$tag" != "$ex_cargo" ]; then
             echo "::error::tag v${tag} 与 examples/minimal-app/src-tauri/Cargo.toml 的 version=${ex_cargo} 不一致"
+            rc=1
+          fi
+
+          ex_tauri=$(node -p "require('./examples/minimal-app/src-tauri/tauri.conf.json').version")
+          echo "examples/minimal-app/src-tauri/tauri.conf.json=${ex_tauri}"
+          if [ "$tag" != "$ex_tauri" ]; then
+            echo "::error::tag v${tag} 与 tauri.conf.json 的 version=${ex_tauri} 不一致"
             rc=1
           fi
 
@@ -258,7 +270,7 @@ jobs:
             **tauron 是跑在 Tauri 2 之上的插件化桌面客户端基础设施**——它交付的是
             **框架**（15 个 Rust crate + 20 个 npm 包），不是一个开箱即用的成品应用。
             本 Release 提供的是仓库里**唯一可安装**的东西：`examples/minimal-app`
-            示例应用，用来把框架的四条真实链路跑给人看。
+            示例应用，用来把框架的真实链路跑给人看。
 
             ### 下载哪个
 
@@ -286,6 +298,9 @@ jobs:
 
             > 「检查更新」目前会明确说明更新源未接入；不会把模拟响应显示为「已是最新」。
             > 本项目刻意区分真实实现与接口占位，不伪造成功。
+
+            插件面板会在打开后注册 `formatter.format` 命令；命令面板可把它投递给插件，
+            主窗也可单独进行跨主体调用。
 
             ### 文档
 

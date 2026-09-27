@@ -181,7 +181,7 @@ mod tests {
             permissions: Vec::new(),
             scopes: serde_json::Map::new(),
             platforms: Vec::new(),
-            framework: tauron_host::manifest::parse_version_range(">=0.1.0, <0.2.0").unwrap(),
+            framework: tauron_host::manifest::parse_version_range(">=1.0.0, <2.0.0").unwrap(),
             abi: abi.map(|h| tauron_host::manifest::AbiFingerprint {
                 rust: None,
                 wasm: Some(h.to_string()),

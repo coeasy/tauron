@@ -9,7 +9,7 @@
 不想自己构建的话，[Releases](https://github.com/coeasy/tauron/releases) 页有各平台
 安装包（Windows NSIS / macOS dmg / Linux deb·rpm·AppImage）。注意两点：
 
-- Release 产物先落成**草稿**，需维护者点发布后才可见；
+- 推送版本 tag 后，Release 工作流自动构建并创建公开版本；
 - 安装包**未签名、未公证**，Windows 会弹 SmartScreen、macOS 会被 Gatekeeper 拦——
   这不是安装包坏了。处理办法与「装完怎么自检」见
   [安装与使用](../../docs/installation.md)。
@@ -79,7 +79,7 @@ pnpm dlx @tauri-apps/cli@2 icon app-icon.svg
 
 1. **命令注册两种形态，选其一**（重复 `manage::<CommandState>` 会 panic）：
    - **root 注册（本示例，零配置）**：
-     `.plugin(tauron_adapter::tauri::state_init())` +
+     `.plugin(tauron_adapter::tauri::state_init_with_adapter_config(...))` +
      `.invoke_handler(tauron_adapter::tauron_generate_handler![])`；
      前端 `new TauriBackend({ commandPrefix: '' })`（裸命令名）。
    - **插件注册（生产客户端）**：`.plugin(tauron_adapter::tauri::init())`；

@@ -1,6 +1,6 @@
 {
   "name": "@tauron/ui",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "tauron UI 便利包：转出零宿主依赖的原语（@tauron/ui-primitives）+ 需要宿主命令面的 PluginManagerStore",
   "license": "MIT",
   "repository": {

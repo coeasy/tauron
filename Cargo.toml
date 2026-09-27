@@ -5,7 +5,7 @@ members = ["crates/*"]
 exclude = ["examples/minimal-app/src-tauri"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.98"
 license = "MIT"
@@ -15,7 +15,7 @@ homepage = "https://github.com/coeasy/tauron"
 # 指向它会让 crates.io 的「Documentation」按钮落到非 API 文档上。留空即由
 # docs.rs 自动接管。
 # 注意：`crates.io` 发布**须按依赖顺序逐个执行**。内部互引用已全部补齐
-# `version = "0.1.0"`（cargo 要求 path 依赖同时给出 `version` 才能打包），
+# `version = "1.0.0"`（cargo 要求 path 依赖同时给出 `version` 才能打包），
 # 因此 `cargo package` 本身不再报错；但 `cargo publish` 会在剥离 `path` 之后
 # 去 crates.io 解析内部依赖——必须先把被依赖的 crate 发出去，再发依赖方。
 # 另：`examples/minimal-app/src-tauri` 被 `exclude` 在外，不参与发布。
@@ -47,10 +47,10 @@ criterion = "0.5"
 proptest = "1"
 tempfile = "3"
 # ── 内部 crate 互引用 ───────────────────────────────────────────
-tauron-host = { path = "crates/tauron-host", version = "0.1.0" }
-tauron-i18n = { path = "crates/tauron-i18n", version = "0.1.0" }
-tauron-notify = { path = "crates/tauron-notify", version = "0.1.0" }
-tauron-recovery = { path = "crates/tauron-recovery", version = "0.1.0" }
+tauron-host = { path = "crates/tauron-host", version = "1.0.0" }
+tauron-i18n = { path = "crates/tauron-i18n", version = "1.0.0" }
+tauron-notify = { path = "crates/tauron-notify", version = "1.0.0" }
+tauron-recovery = { path = "crates/tauron-recovery", version = "1.0.0" }
 
 [profile.release]
 lto = "thin"

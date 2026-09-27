@@ -6493,6 +6493,7 @@ pub fn cmd_window_create_as(
                 ),
             )
         })?;
+        validate_plugin_ui_entry(&url)?;
 
         let spec = WindowCreateSpec {
             // 身份 label 的**唯一**铸造点（与 `PluginIdentity::new` 同一约定）。
@@ -6516,6 +6517,26 @@ pub fn cmd_window_create_as(
             }),
         })
     })?
+}
+
+/// `entry.ui` is consumed by Tauri as an application asset path when no on-disk
+/// plugin installation root is configured. Keep it a portable relative path on
+/// every host OS; in particular, reject Windows separators and drive prefixes
+/// even when validation runs on Unix.
+fn validate_plugin_ui_entry(raw: &str) -> HostResult<()> {
+    let invalid = raw.trim().is_empty()
+        || raw.starts_with('/')
+        || raw.starts_with('\\')
+        || raw.contains('\\')
+        || raw.contains(':')
+        || raw.split('/').any(|part| part.is_empty() || part == "." || part == "..");
+    if invalid {
+        return Err(HostError::new(
+            ErrorCode::E_INVALID_MANIFEST,
+            "插件 entry.ui 必须是安全的相对路径".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -7176,7 +7197,7 @@ mod tests {
             "type": "js",
             "entry": { "js": "src/index.js", "ui": "index.html" },
             "permissions": ["store:allow-get"],
-            "framework": ">=0.1.0, <0.2.0"
+            "framework": ">=1.0.0, <2.0.0"
         });
         let files = vec![
             ("manifest.json".to_string(), serde_json::to_vec(&manifest).unwrap()),
@@ -7220,7 +7241,7 @@ mod tests {
             "type": "js",
             "entry": { "js": "src/index.js", "ui": "index.html" },
             "permissions": [],
-            "framework": ">=0.1.0, <0.2.0"
+            "framework": ">=1.0.0, <2.0.0"
         });
         let mut files = vec![
             ("manifest.json".to_string(), serde_json::to_vec(&manifest).unwrap()),
@@ -7264,7 +7285,7 @@ mod tests {
             "type": "js",
             "entry": { "js": "src/index.js", "ui": "index.html" },
             "permissions": [],
-            "framework": ">=0.1.0, <0.2.0"
+            "framework": ">=1.0.0, <2.0.0"
         });
         let files = vec![
             ("manifest.json".to_string(), serde_json::to_vec(&manifest).unwrap()),
@@ -12876,6 +12897,31 @@ mod tests {
             .expect_err("没有 UI 入口就没有可加载的页面");
             assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST);
             assert!(sink.specs().is_empty());
+        }
+
+        #[test]
+        fn window_create_rejects_unsafe_ui_paths_before_touching_the_sink() {
+            let sink = Arc::new(RecordingWindowSink::with_results(true, true));
+            let state = noop_only(sink.clone());
+            for (i, ui) in
+                ["../outside.html", "/absolute.html", "C:/outside.html", "ui\\panel.html"]
+                    .into_iter()
+                    .enumerate()
+            {
+                let id = format!("com.example.path{i}");
+                state
+                    .registry
+                    .install(&empty_index(), manifest_with_ui(&id, "Path test", ui))
+                    .unwrap();
+                let err = cmd_window_create_as(
+                    &Caller::MainWindow,
+                    &state,
+                    &WindowCreateRequest { plugin_id: id, ..WindowCreateRequest::default() },
+                )
+                .expect_err("unsafe entry.ui must be rejected");
+                assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST);
+            }
+            assert!(sink.specs().is_empty(), "拒绝路径不得创建任何窗口");
         }
 
         /// 开窗是宿主管理面动作：插件主体一律拒绝。

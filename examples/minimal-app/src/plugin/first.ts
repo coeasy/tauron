@@ -21,6 +21,7 @@ import { HostClient } from '@tauron/host';
 import { createPlugin, createPluginContext } from '@tauron/app-plugin-sdk';
 
 const PLUGIN_ID = 'com.example.formatter';
+const FORMAT_COMMAND_ID = 'formatter.format';
 
 const status = document.getElementById('status');
 const show = (text: string): void => {
@@ -36,11 +37,14 @@ const plugin = createPlugin({
   commands: {
     // 帧到达时由执行泵自动调用；返回值经 host_call_result 回填给发起方，
     // handler 抛异常则按 E_CALL_EXEC_FAILED 回填（同样自动，无需手写）。
-    async format(args) {
+    [FORMAT_COMMAND_ID]: async (args) => {
       const { code } = (args ?? {}) as { code?: string };
       // 演示逻辑：合并空白 + 去首尾（与 legacy-first.ts 一致，便于对照）
       return (code ?? '').replace(/[ \t]+/g, ' ').trim();
     },
+  },
+  contributes: {
+    commands: [{ id: FORMAT_COMMAND_ID, title: 'Formatter: 格式化文本' }],
   },
   activate(ctx) {
     show(`插件 ${ctx.pluginId} 已激活：命令 format 已注册，执行泵运行中，等待跨主体调用…`);

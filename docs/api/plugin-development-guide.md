@@ -64,7 +64,7 @@ tauron 插件系统在**清单层**定义了四种插件类型（`PluginType` �
 ### 验证
 
 ```bash
-tauron --version   # tauron v0.1.0
+tauron --version   # tauron v1.0.0
 tauron doctor      # 环境诊断：探测 Node / pnpm / Rust / Tauri CLI
 ```
 
@@ -159,7 +159,7 @@ tauron plugin new com.example.sys  --type process  # 骨架含 main.js
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.js",
-  "devDependencies": { "@tauron/plugin-sdk": "^0.1.0" }
+  "devDependencies": { "@tauron/plugin-sdk": "^1.0.0" }
 }
 ```
 

@@ -12,7 +12,7 @@ homepage.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tauron-schema = { path = "../tauron-schema", version = "0.1.0" }
+tauron-schema = { path = "../tauron-schema", version = "1.0.0" }
 
 [dev-dependencies]
 tempfile = "3"

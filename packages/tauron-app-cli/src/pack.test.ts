@@ -304,7 +304,7 @@ describe('validateSignConfig', () => {
       privateKey: 'base64-encoded-key',
     });
     expect(config.includeSource).toBe(false);
-    expect(config.frameworkRange).toBe('>=0.1.0');
+    expect(config.frameworkRange).toBe('>=1.0.0');
   });
 
   it('拒绝空目录', () => {

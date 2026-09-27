@@ -1740,6 +1740,34 @@ describe('门禁：断链回归（贡献身份绑定 / 事件取件泵 / 声明�
     read('examples/minimal-app/plugin-window.html');
     const vite = read('examples/minimal-app/vite.config.ts');
     expect(vite, 'plugin-window.html 必须是 vite 构建入口').toMatch(/plugin-window\.html/);
+
+    // 安装入口、窗口入口、Vite 多页产物必须指向同一条插件链。此前示例只登记
+    // entry.js，host_window_create 因缺 entry.ui 必然拒绝，执行泵页面永远打不开。
+    const app = read('examples/minimal-app/src-tauri/src/main.rs');
+    expect(app, '示例安装的插件必须声明可打开的插件窗口页面').toMatch(
+      /"entry"\s*:\s*\{\s*"js"\s*:\s*"plugin\.html"\s*,\s*"ui"\s*:\s*"plugin-window\.html"/,
+    );
+    expect(app, '窗口页面必须进 Vite 构建产物').toContain('plugin-window.html');
+    const windowSink = read('crates/tauron-adapter/src/tauri.rs');
+    expect(windowSink, '无外部插件安装根时必须从 app asset 加载内置插件 UI').toMatch(
+      /if let Some\(install_root\) = state\.install_config_root\(\)[\s\S]*?CustomProtocol[\s\S]*?else\s*\{\s*tauri::WebviewUrl::App\(std::path::PathBuf::from\(&spec\.url\)\)/,
+    );
+    expect(windowSink, '未启用插件磁盘安装时也必须支持内置 app asset 插件').toMatch(
+      /cfg\(not\(feature = "plugin-install"\)\)[\s\S]*?WebviewUrl::App\(std::path::PathBuf::from\(&spec\.url\)\)/,
+    );
+
+    // 命令面板需要「插件声明贡献 → 宿主收录 → UI 列出 → 控制器用同一 id 投递 →
+    // 插件执行泵找到处理器」闭环；只接上 UI 事件但插件没注册贡献会一直显示空表。
+    const main = read('examples/minimal-app/src/main.ts');
+    expect(first, '示例插件必须声明命令面板贡献').toMatch(
+      /contributes:\s*\{[\s\S]*?commands:\s*\[\{\s*id:\s*FORMAT_COMMAND_ID/,
+    );
+    expect(first, '贡献命令 id 必须有同名执行处理器').toMatch(
+      /commands:\s*\{[\s\S]*?\[FORMAT_COMMAND_ID\]:\s*async/,
+    );
+    expect(main, '演示跨主体调用必须使用命令面板登记的完整 id').toMatch(
+      /callPlugin\('com\.example\.formatter',\s*'formatter\.format'/,
+    );
   });
 
   it('声明式 contributes 必须有激活期注册路径（有类型无调用 = 孤儿配置）', () => {
