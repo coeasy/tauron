@@ -98,16 +98,35 @@ const crateNames = readdirSync(cratesDir, { withFileTypes: true })
     if (!name) throw new Error(`Could not read crate name from crates/${entry.name}/Cargo.toml`);
     return name;
   });
-const cratesIdentityResponse = await fetch('https://crates.io/api/v1/me', {
-  headers: { authorization: cargoToken, 'user-agent': 'Tauron SDK release preflight' },
+// crates.io does not accept API-token authentication on its account identity
+// endpoint. Probe the publish endpoint with an empty body instead: authentication
+// runs before archive validation, so a 400/422 confirms publish access without
+// creating a crate or uploading a package.
+const publishProbe = await fetch('https://crates.io/api/v1/crates/new', {
+  method: 'PUT',
+  headers: {
+    accept: 'application/json',
+    authorization: cargoToken,
+    'content-type': 'application/octet-stream',
+    'user-agent': 'Tauron SDK release preflight',
+  },
+  body: new Uint8Array(),
 });
-if (!cratesIdentityResponse.ok) {
+if (publishProbe.status === 401 || publishProbe.status === 403) {
   throw new Error(
-    `CARGO_REGISTRY_TOKEN could not authenticate with crates.io (HTTP ${cratesIdentityResponse.status}).`,
+    `CARGO_REGISTRY_TOKEN was rejected by the crates.io publish endpoint (HTTP ${publishProbe.status}). Create a token with permission to publish new crates (and a crate scope covering the Tauron crate names), update the repository secret, and rerun the release preflight.`,
   );
 }
-const cratesUser = (await cratesIdentityResponse.json()).user?.login;
-if (!cratesUser) throw new Error('crates.io did not return the token owner identity.');
+if (![200, 400, 422].includes(publishProbe.status)) {
+  const detail = (await publishProbe.text()).slice(0, 500);
+  throw new Error(
+    `Could not verify crates.io publishing access (HTTP ${publishProbe.status}): ${detail}`,
+  );
+}
+console.log(
+  `crates.io publish token: accepted (empty-body probe returned HTTP ${publishProbe.status}; no crate was created)`,
+);
+const expectedCratesUser = process.env.CRATES_IO_PUBLISHER?.trim();
 for (const name of crateNames) {
   const response = await fetch(`https://crates.io/api/v1/crates/${name}`, {
     headers: { 'user-agent': 'Tauron SDK release preflight' },
@@ -117,6 +136,11 @@ for (const name of crateNames) {
     continue;
   }
   if (!response.ok) throw new Error(`Could not verify crates.io ${name}: HTTP ${response.status}`);
+  if (!expectedCratesUser) {
+    throw new Error(
+      `crate ${name} already exists. Set CRATES_IO_PUBLISHER to the expected crates.io owner login so its ownership can be checked before publishing.`,
+    );
+  }
   let owners;
   try {
     owners = run('cargo', ['owner', '--list', name]);
@@ -126,12 +150,12 @@ for (const name of crateNames) {
     );
   }
   const normalized = owners.toLowerCase();
-  if (!normalized.includes(cratesUser.toLowerCase())) {
+  if (!normalized.includes(expectedCratesUser.toLowerCase())) {
     throw new Error(
-      `crate ${name} exists; crates.io publisher ${cratesUser} is not listed as its owner.`,
+      `crate ${name} exists; expected crates.io publisher ${expectedCratesUser} is not listed as its owner.`,
     );
   }
-  console.log(`crates.io ${name}: publisher ${cratesUser} is an owner`);
+  console.log(`crates.io ${name}: publisher ${expectedCratesUser} is an owner`);
 }
 
 console.log(
