@@ -879,8 +879,7 @@ impl std::fmt::Display for PluginIdentity {
 /// 被加载过**（`manifest.rs` 的 `SCHEMA_PATH` 常量），生产侧压根没有加载点——
 /// 于是 `Registry::install` 也从未被生产代码调用过，整条插件链在生产上是断的。
 /// 内嵌之后宿主二进制不再依赖"运行目录下正好有 `schema/`"。
-pub const EMBEDDED_PERMISSION_INDEX_JSON: &str =
-    include_str!("../schema/permissions.index.json");
+pub const EMBEDDED_PERMISSION_INDEX_JSON: &str = include_str!("../schema/permissions.index.json");
 
 /// 解析内嵌词表。
 ///
