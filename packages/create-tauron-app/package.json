@@ -34,6 +34,9 @@
     "README.md"
   ],
   "sideEffects": false,
+  "scripts": {
+    "build": "node scripts/build.mjs"
+  },
   "dependencies": {
     "@tauron/app-cli": "workspace:*"
   }
