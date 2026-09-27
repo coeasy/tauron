@@ -809,7 +809,12 @@ function inferTsType(value: unknown): string {
  */
 function normalizeArgv(argv: string[]): string[] {
   const invoked = argv[1] ?? '';
-  const base = path.basename(invoked).replace(/\.(c|m)?js$/, '');
+  // npm/yarn/pnpm create command shims on Windows can pass the .cmd/.bat
+  // launcher path as argv[1]. Normalize both Windows separators and shim
+  // suffixes so the direct `create-tauron-app <dir>` form works cross-platform.
+  const base = path
+    .basename(invoked.replaceAll('\\', '/'))
+    .replace(/\.(?:(?:c|m)?js|cmd|bat)$/i, '');
   if (base === 'create-tauron-app') {
     return [...argv.slice(0, 2), 'new', ...argv.slice(2)];
   }

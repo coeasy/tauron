@@ -181,6 +181,22 @@ describe('app scaffold CLI（一键路径）', () => {
     }
   });
 
+  it('Windows 的 .cmd shim 也支持 create-tauron-app <dir>', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tauron-cli-cta-cmd-'));
+    const target = path.join(root, 'cta-cmd-app');
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    process.exitCode = 0;
+    try {
+      await main(['node', 'C:\\Users\\runner\\create-tauron-app.cmd', target]);
+      expect(process.exitCode).toBe(0);
+      expect(fs.existsSync(path.join(target, 'package.json'))).toBe(true);
+      expect(fs.existsSync(path.join(target, 'src-tauri', 'src', 'main.rs'))).toBe(true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('--dry-run 只报告、不落盘', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tauron-cli-dry-'));
     const target = path.join(root, 'dry-app');
