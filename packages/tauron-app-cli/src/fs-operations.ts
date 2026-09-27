@@ -11,6 +11,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** 文件写入结果。 */
 export interface WriteResult {
@@ -45,7 +46,7 @@ export function ensureDir(dirPath: string): WriteResult {
 /**
  * 写入单个文件（自动创建父目录）。
  */
-export function writeFile(filePath: string, content: string | Buffer): WriteResult {
+export function writeFile(filePath: string, content: string | Uint8Array): WriteResult {
   try {
     const resolved = path.resolve(filePath);
     const dir = path.dirname(resolved);
@@ -73,7 +74,7 @@ export function writeFile(filePath: string, content: string | Buffer): WriteResu
  * ```
  */
 export function writeFiles(
-  files: Map<string, string>,
+  files: Map<string, string | Uint8Array>,
   baseDir: string,
 ): BatchWriteResult {
   const written: string[] = [];
@@ -95,7 +96,9 @@ export function writeFiles(
 /**
  * 读取 JSON 配置文件。
  */
-export function readJsonFile<T = unknown>(filePath: string): { ok: boolean; data?: T; error?: string } {
+export function readJsonFile<T = unknown>(
+  filePath: string,
+): { ok: boolean; data?: T; error?: string } {
   try {
     const resolved = path.resolve(filePath);
     const content = fs.readFileSync(resolved, 'utf-8');
@@ -141,9 +144,7 @@ export function listFiles(dirPath: string): { ok: boolean; files?: string[]; err
       return { ok: false, error: `目录不存在 "${dirPath}"` };
     }
     const entries = fs.readdirSync(resolved, { withFileTypes: true });
-    const files = entries
-      .filter((e) => e.isFile())
-      .map((e) => e.name);
+    const files = entries.filter((e) => e.isFile()).map((e) => e.name);
     return { ok: true, files };
   } catch (e) {
     return {
@@ -190,8 +191,51 @@ export function copyFile(srcPath: string, destPath: string): WriteResult {
  * ```
  */
 export function writeScaffoldResult(
-  files: Map<string, string>,
+  files: Map<string, string | Uint8Array>,
   outputDir: string,
 ): BatchWriteResult {
   return writeFiles(files, outputDir);
+}
+
+// ── tauron 检出根定位 ──
+
+/**
+ * 从 `startDir` 起逐级上溯，定位 tauron 源码检出根。
+ *
+ * 判据是 `crates/tauron-adapter/Cargo.toml` 存在——这是「这个目录就是 tauron
+ * 检出根」的最小充分特征（`cargo` 侧所有 path 依赖都从它展开）。
+ *
+ * 默认从**本模块自身所在目录**起溯，因此无论跑 `src/`（vitest）还是 `dist/`
+ * （构建产物）都能找到同一个根。
+ *
+ * 返回 `null` 表示当前不在 tauron 检出树内——调用方必须据此**如实失败**，
+ * 而不是写下一份解析不了的依赖坐标。
+ */
+export function findTauronRoot(startDir?: string): string | null {
+  let dir = path.resolve(startDir ?? path.dirname(fileURLToPath(import.meta.url)));
+  for (;;) {
+    if (fs.existsSync(path.join(dir, 'crates', 'tauron-adapter', 'Cargo.toml'))) {
+      return dir;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/**
+ * 计算 `fromDir` → `toPath` 的相对路径，并统一成 POSIX 分隔符。
+ *
+ * `Cargo.toml` 的 `path =` 与 npm 的 `file:` 都按字面拼接，Windows 的反斜杠
+ * 会让它们（以及被提交进版本库的配置）不可移植，所以这里强制 `/`。
+ *
+ * **跨盘符回落**：Windows 上 `path.relative` 在两盘之间**给不出**相对路径（会返回
+ * 目标盘的绝对路径）。此时只能回落成 POSIX 形式的绝对路径——Cargo 的 path 依赖与
+ * npm 的 `file:` 都接受绝对路径，总好过产出一份拼错的相对路径。
+ */
+export function toPosixRelative(fromDir: string, toPath: string): string {
+  const resolvedTarget = path.resolve(toPath);
+  const rel = path.relative(path.resolve(fromDir), resolvedTarget);
+  const base = path.isAbsolute(rel) ? resolvedTarget : rel;
+  return base.split(path.sep).join('/');
 }

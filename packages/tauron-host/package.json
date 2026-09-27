@@ -1,10 +1,33 @@
 {
   "name": "@tauron/host",
   "version": "0.1.0",
-  "private": true,
   "description": "tauron 能力编排层：invoke/event/channel 封装、错误规范化、能力探测、Backend provider 抽象",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coeasy/tauron.git",
+    "directory": "packages/tauron-host"
+  },
+  "homepage": "https://github.com/coeasy/tauron",
+  "bugs": {
+    "url": "https://github.com/coeasy/tauron/issues"
+  },
+  "keywords": [
+    "tauron",
+    "tauri",
+    "plugin",
+    "host",
+    "ipc",
+    "desktop"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
-  "main": "./dist/index.cjs",
+  "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

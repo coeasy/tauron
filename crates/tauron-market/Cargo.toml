@@ -19,4 +19,4 @@ thiserror = { workspace = true }
 sha2 = "0.10"
 ed25519-dalek = { version = "3", optional = true }
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
-tauron-host = { path = "../tauron-host", optional = true }
+tauron-host = { path = "../tauron-host", version = "0.1.0", optional = true }

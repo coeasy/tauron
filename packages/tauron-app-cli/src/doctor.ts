@@ -6,7 +6,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import { validateClientConfigFilePath } from './client-config.js';
 import { pathExists, readJsonFile } from './fs-operations.js';
 
 // ── 类型 ──
@@ -34,11 +33,20 @@ export interface DoctorResult {
 function checkCargoDependency(dir: string): DoctorCheck {
   const cargoPath = path.join(dir, 'src-tauri', 'Cargo.toml');
   if (!pathExists(cargoPath)) {
-    return { name: 'Cargo.toml', status: 'fail', message: '未找到 src-tauri/Cargo.toml', fix: '确认项目是 Tauri 项目' };
+    return {
+      name: 'Cargo.toml',
+      status: 'fail',
+      message: '未找到 src-tauri/Cargo.toml',
+      fix: '确认项目是 Tauri 项目',
+    };
   }
   const content = fs.readFileSync(cargoPath, 'utf-8');
   if (content.includes('tauron-adapter')) {
-    return { name: 'tauron-adapter 依赖', status: 'pass', message: 'Cargo.toml 已包含 tauron-adapter' };
+    return {
+      name: 'tauron-adapter 依赖',
+      status: 'pass',
+      message: 'Cargo.toml 已包含 tauron-adapter',
+    };
   }
   return {
     name: 'tauron-adapter 依赖',
@@ -80,7 +88,11 @@ function checkFrontendDeps(dir: string): DoctorCheck {
   const hasCore = !!deps['@tauron/host'];
   const hasUi = !!deps['@tauron/ui'];
   if (hasCore && hasUi) {
-    return { name: '前端依赖', status: 'pass', message: 'package.json 已包含 @tauron/host + @tauron/ui' };
+    return {
+      name: '前端依赖',
+      status: 'pass',
+      message: 'package.json 已包含 @tauron/host + @tauron/ui',
+    };
   }
   const missing: string[] = [];
   if (!hasCore) missing.push('@tauron/host');
@@ -107,7 +119,18 @@ function checkClientConfig(dir: string): DoctorCheck {
   try {
     const config = JSON.parse(content);
     // 基本结构检查
-    const sections = ['registry', 'plugins', 'sandbox', 'security', 'lifecycle', 'i18n', 'recovery', 'observability', 'brand', 'upgrade'];
+    const sections = [
+      'registry',
+      'plugins',
+      'sandbox',
+      'security',
+      'lifecycle',
+      'i18n',
+      'recovery',
+      'observability',
+      'brand',
+      'upgrade',
+    ];
     const missingSections = sections.filter((s) => !(s in config));
     if (missingSections.length > 0) {
       return {

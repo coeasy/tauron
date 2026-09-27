@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createPlugin, createPluginContext } from './index.js';
+import { createPlugin } from './index.js';
 import { createPluginTestContext, createMockContext } from './testing.js';
 import type {
   CommandHandler,
@@ -57,7 +57,9 @@ describe('createPlugin', () => {
     let count = 0;
     const plugin = createPlugin({
       ...def,
-      async activate() { count++; },
+      async activate() {
+        count++;
+      },
     });
     const ctx = createMockContext();
     await plugin.activate(ctx);
@@ -98,7 +100,9 @@ describe('createPlugin', () => {
     const plugin = createPlugin({
       ...def,
       async activate() {},
-      async dispose() { disposed = true; },
+      async dispose() {
+        disposed = true;
+      },
     });
     const ctx = createMockContext();
     await plugin.activate(ctx);
@@ -208,7 +212,15 @@ function createTrackingContext(options?: { failSubscribeOn?: string }): {
     },
   };
 
-  return { ctx, registered, unregistered, tabsRegistered, tabsUnregistered, subscriptions, unsubscribed };
+  return {
+    ctx,
+    registered,
+    unregistered,
+    tabsRegistered,
+    tabsUnregistered,
+    subscriptions,
+    unsubscribed,
+  };
 }
 
 describe('createPlugin activate 失败回滚', () => {

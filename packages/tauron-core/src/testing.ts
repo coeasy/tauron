@@ -4,16 +4,8 @@
  * 提供 MockBackend 用于测试信封调用、事件订阅等。
  */
 
-import type {
-  PluginInvokeRequest,
-  PluginInvokeResponse,
-  ProgressEvent,
-} from '@tauron/types';
-import {
-  buildOkResponse,
-  buildErrorResponse,
-  PluginErrorCode,
-} from '@tauron/types';
+import type { PluginInvokeRequest, PluginInvokeResponse } from '@tauron/types';
+import { buildOkResponse } from '@tauron/types';
 import type { TauronBackend, ProgressCallback } from './backend.js';
 
 /** 调用记录 */
@@ -110,7 +102,9 @@ export class MockBackend implements TauronBackend {
 /**
  * 创建一个简单的测试夹具
  */
-export function createTestBackend(handler?: (req: PluginInvokeRequest) => PluginInvokeResponse): MockBackend {
+export function createTestBackend(
+  handler?: (req: PluginInvokeRequest) => PluginInvokeResponse,
+): MockBackend {
   return new MockBackend({
     onInvoke: async (request) => {
       if (handler) {

@@ -10,11 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { HOST_ERROR_CODES, RETRYABLE_HOST_ERROR_CODES } from './errors.js';
 import { CAPABILITIES } from './capabilities.js';
 import { CHANNEL_KINDS, MAX_QUEUE, OVERFLOW_STREAK_LIMIT } from './channels.js';
-import {
-  GRANT_SET_SCHEMA_VERSION,
-  IDENTITY_LABEL_PREFIX,
-  RISKS,
-} from './grants.js';
+import { GRANT_SET_SCHEMA_VERSION, IDENTITY_LABEL_PREFIX, RISKS } from './grants.js';
 
 import { describe, expect, it } from 'vitest';
 
@@ -40,9 +36,9 @@ const TAIL_IMPORT = /from\s+['"]@tauri-apps\/api|import\s*\(\s*['"]@tauri-apps\/
 
 describe('门禁 §8-1：唯一 @tauri-apps/api 引用点', () => {
   it('整个 src/ 只有 tauri-backend.ts 导入 @tauri-apps/api', () => {
-    const offenders = SRC_FILES.filter((f) =>
-      TAIL_IMPORT.test(readFileSync(f, 'utf8')),
-    ).map((f) => basename(f));
+    const offenders = SRC_FILES.filter((f) => TAIL_IMPORT.test(readFileSync(f, 'utf8'))).map((f) =>
+      basename(f),
+    );
     expect(offenders).toEqual(['tauri-backend.ts']);
   });
 
@@ -79,11 +75,21 @@ describe('门禁：错误码线与 Rust ErrorCode 完全一致', () => {
 describe('门禁：命令面与 Rust 授权表完全一致', () => {
   const src = read('crates/tauron-host/src/authz.rs');
   const beforeTests = src.slice(0, src.indexOf('mod tests'));
-  const rustCommands = [...beforeTests.matchAll(/command:\s*"([^"]+)"/g)].map((m) => m[1]!);
   const adapter = read('crates/tauron-adapter/src/lib.rs');
-  const optionalAuth = adapter.slice(adapter.indexOf('pub const PLUGIN_INSTALL_AUTH'), adapter.indexOf('/// 命令状态'));
-  const optionalCommands = [...optionalAuth.matchAll(/command:\s*"(host_[^"]+)"/g)].map((m) => m[1]!);
-  const rustAllCommands = [...new Set([...beforeTests.matchAll(/command:\s*"(host_[^"]+)"/g)].map((m) => m[1]!).concat(optionalCommands))];
+  const optionalAuth = adapter.slice(
+    adapter.indexOf('pub const PLUGIN_INSTALL_AUTH'),
+    adapter.indexOf('/// 命令状态'),
+  );
+  const optionalCommands = [...optionalAuth.matchAll(/command:\s*"(host_[^"]+)"/g)].map(
+    (m) => m[1]!,
+  );
+  const rustAllCommands = [
+    ...new Set(
+      [...beforeTests.matchAll(/command:\s*"(host_[^"]+)"/g)]
+        .map((m) => m[1]!)
+        .concat(optionalCommands),
+    ),
+  ];
 
   it('命令数量一致', () => {
     expect(rustAllCommands.length).toBe(CAPABILITIES.length);
@@ -132,9 +138,7 @@ describe('门禁：授予集契约与 Rust tauron-acl 一致', () => {
   const authz = read('crates/tauron-host/src/authz.rs');
 
   it('授予集 schema 版本一致', () => {
-    const n = Number(
-      schema.match(/pub const GRANT_SET_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/)?.[1],
-    );
+    const n = Number(schema.match(/pub const GRANT_SET_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/)?.[1]);
     expect(GRANT_SET_SCHEMA_VERSION).toBe(n);
   });
 
@@ -234,7 +238,10 @@ describe('门禁 §8-17：命令面消费方登记（D13–D16）', () => {
 
   it('每条登记命令都写明了消费方（consumer 非空）', () => {
     const empty = commandAuths().filter((c) => c.consumer.trim().length === 0);
-    expect(empty.map((c) => c.command), '以下命令未登记消费方（孤儿命令面）').toEqual([]);
+    expect(
+      empty.map((c) => c.command),
+      '以下命令未登记消费方（孤儿命令面）',
+    ).toEqual([]);
   });
 
   it('所有 self 档命令在 tauri-backend 中有 invoke 入口', () => {
@@ -262,7 +269,9 @@ describe('门禁 §8-17：命令面消费方登记（D13–D16）', () => {
     const clients =
       read('packages/tauron-host/src/shell-client.ts') + read('packages/tauron-host/src/host.ts');
     for (const { command } of priv) {
-      expect(tauriBackend, `privileged 命令 ${command} 在 tauri-backend.ts 无入口`).toContain(command);
+      expect(tauriBackend, `privileged 命令 ${command} 在 tauri-backend.ts 无入口`).toContain(
+        command,
+      );
       expect(clients, `privileged 命令 ${command} 在任何主窗客户端都没有调用点`).toContain(command);
     }
   });
@@ -286,7 +295,7 @@ describe('门禁 §8-18：事件发布唯一入口（D1/ADR-19）', () => {
   });
 
   it('host.ts 的事件发布方法调用 host_events_publish', () => {
-    expect(host).toContain("host_events_publish");
+    expect(host).toContain('host_events_publish');
   });
 
   it('authz.rs 中 host_events_publish 为 self 档', () => {

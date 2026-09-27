@@ -29,11 +29,15 @@ tauron-i18n = { workspace = true }
 tauron-notify = { workspace = true }
 tauron-recovery = { workspace = true }
 # 设置存储（R7-2 激活孤儿 crate）：宿主设置的 schema 校验与版本迁移都在它的
-# `SettingsStore` 里，适配层不再自己持一个裸 `HashMap`。用 path 而非 workspace
-# 依赖：workspace 根的 `[workspace.dependencies]` 属**只读文件**，本轮不改。
-tauron-settings = { path = "../tauron-settings" }
-tauron-acl = { path = "../tauron-acl", optional = true }
-tauron-market = { path = "../tauron-market", default-features = false, optional = true }
+# `SettingsStore` 里，适配层不再自己持一个裸 `HashMap`。
+# 这四个（settings / acl / market / proc）写 path + version 而非
+# `workspace = true`：`[workspace.dependencies]` 只登记了 host / i18n / notify /
+# recovery；且 `workspace = true` 不允许在使用处覆盖 `default-features`，而
+# tauron-market 这里必须 `default-features = false`。version 与根 `[workspace.package]`
+# 的 0.1.0 同源。
+tauron-settings = { path = "../tauron-settings", version = "0.1.0" }
+tauron-acl = { path = "../tauron-acl", version = "0.1.0", optional = true }
+tauron-market = { path = "../tauron-market", version = "0.1.0", default-features = false, optional = true }
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
 ed25519-dalek = { version = "3", optional = true }
 sha2 = { version = "0.10", optional = true }
@@ -41,14 +45,26 @@ hex = { workspace = true, optional = true }
 # 进程插件 host（P0-2 激活孤儿 crate）：只被**插件运行时域**用到——
 # `tauron_host` 不依赖它（租约表认识的是 plugin_id/pid，不认识进程 API），
 # 启动/探测存活留在适配层这一侧，平台细节与进程细节都不进核心。
-tauron-proc = { path = "../tauron-proc" }
+tauron-proc = { path = "../tauron-proc", version = "0.1.0" }
+# ── 任务二：孤儿 crate 接通（此前无任何 crate 依赖它们）──────────────────────
+# 品牌配置合并/校验（`host_brand_info` 的真实实现）。
+tauron-brand = { path = "../tauron-brand", version = "0.1.0" }
+# 主题注册表（`host_theme_*` 域；与既有 settings 的 `theme` 键不冲突——那是键值，
+# 这里是真的主题定义表）。
+tauron-theme = { path = "../tauron-theme", version = "0.1.0" }
+# 更新通道（`host_updater_*` 域）：`check_for_update` / 灰度 / 崩溃门禁 / 清单校验。
+tauron-distribute = { path = "../tauron-distribute", version = "0.1.0" }
+# WASM 插件形态的**状态层**校验（配置/ABI/崩溃预算）。执行层无运行时（诚实失败）。
+tauron-wasm = { path = "../tauron-wasm", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 parking_lot = { workspace = true }
 uuid = { workspace = true }
 semver = { workspace = true }
+# WASM 投递器构造 ABI 指纹的 `generated_at`（tauron-wasm 的 `DateTime<Utc>`）。
+chrono = { workspace = true }
 # 可选：仅在 `tauri` feature 下编译，核心逻辑保持平台无关
-tauri = { version = "2", optional = true, default-features = false, features = ["wry"] }
+tauri = { version = "2", optional = true, default-features = false, features = ["wry", "tray-icon"] }
 
 [dev-dependencies]
 # 恢复标记持久化的单测需要一个可删除的临时目录（已在 workspace dev-deps 中）。

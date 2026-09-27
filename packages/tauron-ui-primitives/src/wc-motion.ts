@@ -14,7 +14,7 @@
 
 import { LitElement, html, css, type CSSResultGroup } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
-import { shouldAnimate, prefersReducedMotion } from './motion.js';
+import { shouldAnimate } from './motion.js';
 
 // ──────────────────────────────────────────────────────────────────────────
 // 类型
@@ -231,16 +231,19 @@ export class OcSplash extends LitElement {
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      transition: opacity var(--oc-motion-duration-normal, 300ms) var(--oc-motion-easing-standard, ease-in-out);
+      transition: opacity var(--oc-motion-duration-normal, 300ms)
+        var(--oc-motion-easing-standard, ease-in-out);
     }
-    :host([data-phase="entering"]) {
-      animation: oc-splash-fade-in var(--oc-motion-duration-normal, 300ms) var(--oc-motion-easing-decelerated, ease-out) both;
+    :host([data-phase='entering']) {
+      animation: oc-splash-fade-in var(--oc-motion-duration-normal, 300ms)
+        var(--oc-motion-easing-decelerated, ease-out) both;
     }
-    :host([data-phase="exiting"]) {
+    :host([data-phase='exiting']) {
       opacity: 0;
-      transition: opacity var(--oc-motion-duration-normal, 300ms) var(--oc-motion-easing-accelerated, ease-in);
+      transition: opacity var(--oc-motion-duration-normal, 300ms)
+        var(--oc-motion-easing-accelerated, ease-in);
     }
-    :host([data-phase="done"]) {
+    :host([data-phase='done']) {
       display: none;
     }
     .splash-container {
@@ -292,7 +295,8 @@ export class OcSplash extends LitElement {
       height: 100%;
       background: #fff;
       border-radius: 2px;
-      transition: width var(--oc-motion-duration-normal, 300ms) var(--oc-motion-easing-standard, ease-in-out);
+      transition: width var(--oc-motion-duration-normal, 300ms)
+        var(--oc-motion-easing-standard, ease-in-out);
     }
     .splash-spinner {
       width: 24px;
@@ -315,23 +319,48 @@ export class OcSplash extends LitElement {
       background: rgba(255, 255, 255, 0.4);
       animation: oc-splash-dot 1.4s ease-in-out infinite;
     }
-    .splash-dot:nth-child(2) { animation-delay: 0.2s; }
-    .splash-dot:nth-child(3) { animation-delay: 0.4s; }
+    .splash-dot:nth-child(2) {
+      animation-delay: 0.2s;
+    }
+    .splash-dot:nth-child(3) {
+      animation-delay: 0.4s;
+    }
 
     @keyframes oc-splash-fade-in {
-      from { opacity: 0; }
-      to { opacity: 1; }
+      from {
+        opacity: 0;
+      }
+      to {
+        opacity: 1;
+      }
     }
     @keyframes oc-splash-pulse {
-      0%, 100% { transform: scale(1); opacity: 1; }
-      50% { transform: scale(1.05); opacity: 0.85; }
+      0%,
+      100% {
+        transform: scale(1);
+        opacity: 1;
+      }
+      50% {
+        transform: scale(1.05);
+        opacity: 0.85;
+      }
     }
     @keyframes oc-splash-spin {
-      to { transform: rotate(360deg); }
+      to {
+        transform: rotate(360deg);
+      }
     }
     @keyframes oc-splash-dot {
-      0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
-      40% { transform: scale(1); opacity: 1; }
+      0%,
+      80%,
+      100% {
+        transform: scale(0.6);
+        opacity: 0.4;
+      }
+      40% {
+        transform: scale(1);
+        opacity: 1;
+      }
     }
   `;
 
@@ -444,9 +473,11 @@ export class OcSplash extends LitElement {
 
     return html`
       <div class="splash-container">
-        ${snap.config.logo
-          ? html`<div class="splash-logo"><img src="${snap.config.logo}" alt="logo" /></div>`
-          : html`<div class="splash-logo">${snap.config.title.charAt(0)}</div>`}
+        ${
+          snap.config.logo
+            ? html`<div class="splash-logo"><img src="${snap.config.logo}" alt="logo" /></div>`
+            : html`<div class="splash-logo">${snap.config.title.charAt(0)}</div>`
+        }
         <h1 class="splash-title">${snap.config.title}</h1>
         ${snap.config.subtitle ? html`<p class="splash-subtitle">${snap.config.subtitle}</p>` : ''}
         ${this._renderProgress(snap)}
@@ -457,14 +488,16 @@ export class OcSplash extends LitElement {
   private _renderProgress(snap: SplashSnapshot) {
     switch (snap.config.progress) {
       case 'bar':
-        return html`
-          <div class="splash-progress">
-            <div class="splash-progress-bar" style="width: ${snap.progress * 100}%"></div>
-          </div>`;
+        return html` <div class="splash-progress">
+          <div class="splash-progress-bar" style="width: ${snap.progress * 100}%"></div>
+        </div>`;
       case 'spinner':
         return html`<div class="splash-spinner"></div>`;
       case 'dots':
-        return html`<div class="splash-dots"><span class="splash-dot"></span><span class="splash-dot"></span><span class="splash-dot"></span></div>`;
+        return html`<div class="splash-dots">
+          <span class="splash-dot"></span><span class="splash-dot"></span
+          ><span class="splash-dot"></span>
+        </div>`;
       case 'none':
         return html``;
     }

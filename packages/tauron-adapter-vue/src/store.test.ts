@@ -22,14 +22,21 @@ describe('createStore', () => {
   it('subscribes with immediate option', () => {
     const store = createStore({ count: 0 });
     let called = false;
-    store.subscribe(() => { called = true; }, { immediate: true });
+    store.subscribe(
+      () => {
+        called = true;
+      },
+      { immediate: true },
+    );
     expect(called).toBe(true);
   });
 
   it('unsubscribes listener', () => {
     const store = createStore({ count: 0 });
     let callCount = 0;
-    const unsub = store.subscribe(() => { callCount++; });
+    const unsub = store.subscribe(() => {
+      callCount++;
+    });
     unsub();
     // After unsubscribe, state changes should not trigger callback
     expect(callCount).toBe(0);

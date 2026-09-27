@@ -45,8 +45,12 @@ describe('门禁：壳层事件不允许「有派发、无消费者」', () => {
   // 统一按**事件名**（`oc-*` 字面值）比较：`SHELL_EVENTS` 的键是标识符
   // （`trayItem`），值是事件名（`oc-tray-item`），两者混用会得到假结果。
   const all = SHELL_EVENTS as Record<string, string>;
-  const declared = declaredKeys().map((k) => all[k] as string).sort();
-  const listened = listenedKeys().map((k) => all[k] as string).sort();
+  const declared = declaredKeys()
+    .map((k) => all[k] as string)
+    .sort();
+  const listened = listenedKeys()
+    .map((k) => all[k] as string)
+    .sort();
   const unwired = [...UNWIRED_EVENT_NAMES].sort();
 
   it('解析到的已声明事件数 > 0（防解析失败假绿）', () => {

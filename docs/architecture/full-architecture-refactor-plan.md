@@ -28,7 +28,7 @@ A4–A8 与轮 23–29 **未开工**；本文先做**整体重评估**（不假�
 | **W1-b 单线收敛（TS 侧）** | ⚠️ **部分** | 已落：**删除死编排器 `bootstrap()`**（P1-1 的载体：它 import `@tauron/core` 三个**运行时类**，而本包 `sideEffects:false` → 真实构建里这些类不存在，一用即崩）；`@tauron/host` 的 `package.json` / `pnpm-lock.yaml` 移除 `@tauron/core` 依赖 → **活线不再依赖死线**；P1-5 的「TS `maxPlugins: 32` vs Rust `max_plugins: 8`」第二事实源随之消失，并加门禁「TS 不得出现硬编码 `maxPlugins:` 字面量」+「host 全目录不得 import `@tauron/core`」。**未落**：P1-2 两套 IPC 后端合表（两套是**两层协议**——框架层 `plugin_*` vs 应用层 `host_*`，合并需先定框架层存废，与 W1-a 同题）；P1-10 已单独完成（见下） |
 | **P1-10 档位表生产自检** | ✅ **完成** | `authz_table_selfcheck()`（`OnceLock` 缓存、可断言）+ 在 `SubstrateState::with_adapter_config` 装配期调用，失败即 panic（构建缺陷不得带病运行）；新增 wire-gate 门禁「必须在**非测试**区域调用」。adapter +1 test |
 | W1-a 单线收敛（Rust 侧） | ⬜ 待做 | 需先定框架层（`plugin_invoke` 三命令）的存废：`PluginDispatcher::dispatch` 是**同步**签名，而真实投递是**异步**（`host_plugin_call` + 取件），「复活」需设计有界阻塞桥或改协议语义——**这是设计决策，不是编码量** |
-| W4 平台五域 Provider | ⬜ 待做 | — |
+| W4 平台五域 Provider | ✅ **完成（R9）** | menu（3）/ tray（3）/ fs（6）/ http（1）/ updater（2）共 18 条命令进底座命令面，57 条；menu/tray 在 `tauri` feature 下真实现，fs 走 `std::fs`（允许根内），updater 接 `tauron-distribute`，http 诚实降级为可注入 `HttpSink` |
 | W5 插件形态四通（Native / Wasm） | ⬜ 待做 | — |
 | W8 横切组件打通 | ⬜ 待做 | — |
 | W9 内存传输统一 | ⬜ 待做 | — |
@@ -92,9 +92,9 @@ A4–A8 与轮 23–29 **未开工**；本文先做**整体重评估**（不假�
 
 | 集合 | 条数 | 定义处 |
 |---|---:|---|
-| 底座 `tauron_substrate_handler!` | **39** | `crates/tauron-adapter/src/tauri.rs` |
-| 插件运行时 `tauron_plugin_handler!` | **60**（底座 39 + 运行时 21；`plugin-install` 另 2 条 gated，启用后 **62**） | 同上 |
-| TS `FRAMEWORK_COMMANDS` / `OPTIONAL_FRAMEWORK_COMMANDS` | **60 / 2** | `packages/tauron-host/src/tauri-backend.ts` |
+| 底座 `tauron_substrate_handler!` | **57** | `crates/tauron-adapter/src/tauri.rs`（R9 五域补齐后 39→57） |
+| 插件运行时 `tauron_plugin_handler!` | **78**（底座 57 + 运行时 21；`plugin-install` 另 2 条 gated，**已进默认特性** → 默认 **80**） | 同上 |
+| TS `FRAMEWORK_COMMANDS` / `OPTIONAL_FRAMEWORK_COMMANDS` | **78 / 2** | `packages/tauron-host/src/tauri-backend.ts` |
 | `authz::COMMANDS`（插件面档位表） | **18**（Self_ 16 + ScopedRead 2） | `crates/tauron-host/src/authz.rs:78-200` |
 | `authz::ADMIN_COMMANDS`（主窗特权） | **4** | 同上 `:240-268` |
 
@@ -118,7 +118,7 @@ A4–A8 与轮 23–29 **未开工**；本文先做**整体重评估**（不假�
 ┌─ ② 应用层（真正活着的那条线）────────────────────────┐
 │  @tauron/host · framework · ui · ui-primitives · app-cli       │
 │  app-plugin-sdk · app-contract-kit · shell-events              │
-│  Rust: tauron-host（引擎）+ tauron-adapter（host_* 60）        │
+│  Rust: tauron-host（引擎）+ tauron-adapter（host_* 78）        │
 └────────────────────────────────────────────────────────┘
 ┌─ ③ 平台层 ────────────────────────────────────────────┐
 │  Tauri v2（唯一真实传输实现）                                  │
@@ -246,7 +246,7 @@ tauron-market ───→ tauron-host
 | **P0-1** ✅ 已修（W2） | **唯一的可运行 app 里，插件管理 UI 完全惰性**：示例只 `import '@tauron/ui/wc'`，该入口只注册 `oc-toast`；`oc-plugin-manager` 等 6 个组件定义在 `wc-shell.ts`，仅经 `ui-primitives/index.ts` 暴露，示例从不 import | `examples/minimal-app/src/main.ts:14`；`packages/tauron-ui/src/wc.ts:5`；`packages/tauron-ui-primitives/src/wc.ts:195`（仅 `oc-toast`）；`wc-shell.ts:554-559`；构建产物 `dist/assets/main-*.js` 中 `customElements.define` **只有 `"oc-toast"`** | 「命令登记了但最后一跳没送出去」的教科书案例：`main.ts:152` 拿到的 `<oc-plugin-manager>` 永不 upgrade，`:162-185` 注册的 `oc-plugin-install/toggle/uninstall` 监听永不触发。**这是「插件管理器」这个功能在示例里的唯一落点** |
 | **P0-2** ⚠️ 部分（W1-a 待做） | **框架层整条产品线不可用却按可用文档发布**：`PluginDispatcher` 生产实现为零 → `plugin_invoke` 恒返回 `SC-9001` | `crates/tauron-shell/src/dispatch.rs:278`（唯一 `impl` 是测试 `EchoDispatcher`）；示例 `main.rs:273` 唯一引用是**注释**；`examples/minimal-app/src-tauri/Cargo.toml` 却依赖 `tauron-shell` | 第三方按 README 集成必然拿到 SC-9001——对外承诺与实现的直接冲突 |
 | **P0-3** | ~~**安装链路默认不可达**~~ → **已部分闭环**（1.0-W6）：feature `plugin-install` **已进默认特性**（`crates/tauron-adapter/Cargo.toml:21`）；剩余缺口是 `plugin_install_dir` 默认 `None`（未配置时安装仍明确不可用，属**诚实不可用**而非静默失败） | `crates/tauron-adapter/Cargo.toml:21`；`lib.rs:226-228` | 「多插件框架」的「装」这件事默认可达，但需接入方配置安装目录 |
-| **P0-4** | **底座缺 5 个域**：menu / tray / fs / http / updater 全仓 0 命中 | `grep` 于 `crates/tauron-adapter/src/tauri.rs` | 插件读写文件、发网络请求的能力完全没有；且**无 `trait *Provider` 骨架**（`grep "trait .*Provider" crates/` → 空） |
+| **P0-4** ✅ 已修（R9） | **底座缺 5 个域** → **已补齐**：menu（3）/ tray（3）/ fs（6）/ http（1）/ updater（2）共 18 条命令进底座命令面（39→57）；menu/tray 在 `tauri` feature 下真实现，fs 走 `std::fs`（允许根内），updater 接 `tauron-distribute`，http 诚实降级为可注入 `HttpSink` | `crates/tauron-adapter/src/tauri.rs` 宏体 |
 | **P0-5** | **四种插件形态只有 2 种有执行器** | `lib.rs:1464-1469`（`PluginType → DeliveryKind`）；`lib.rs:1431-1446`（`default_deliveries` **只注册 Js + Process**） | `Rust → Native`、`Wasm → Wasm` 未注册 → 落 `UnwiredDelivery` → `E_PLUGIN_TYPE_NO_RUNTIME`。对外文档写「4+1 形态」，代码里三变体无执行器 |
 | **P0-6** ✅ 已修（W3） | **contributes 不驱动 UI、无对账**：`host_contributes_reconcile` 与 `E_CONTRIBUTES_DRIFT` 全仓 0 命中 | `grep` 于 `crates/` + `packages/` | 扩展点声明了但没有消费者；`host_contributes_register` 只是 Vec 增删 |
 | **P0-7** ✅ 已修（W7） | **spawner 三处真实缺陷**：① `register_frame_sink` 的 `closed` 检查与 `sinks.insert` 是**两把锁非原子** → 与读线程 EOF 的 `sinks.remove` + `closed.insert` 交错时 sink 永不回收（反复崩溃→重启无界累积）；② `write_frame` 持**全局** `stdin_writers` 锁做阻塞 `write_all` → 一个不读 stdin 的 sidecar 会阻塞**所有**进程的帧投递（无超时）；③ 读线程用 `BufReader::lines()` **无行长上限** | `crates/tauron-proc/src/spawner.rs:319-325` vs `:234-238`；`:300-306`；`:216-238` | ①是我在轮 21 引入 `closed` 集合时的修复不完整（TOCTOU 仍在）；②③是可被恶意/故障 sidecar 触发的可用性缺陷 |
@@ -647,7 +647,7 @@ tauron-market ───→ tauron-host
 |---|---|:--|
 | Rust 库测试（默认特性，含 `plugin-install`） | host **290** / adapter **224** / proc **46** / settings **99** / schema **131** / market **74** / types **67**（15 suite 合计 **1264**） | `cargo test --workspace --locked --lib --tests` |
 | wire-gate | **126 / 126**（本包合计 **147** 条 / 2 文件） | `pnpm --filter @tauron/contract-tests test` |
-| 命令面 | 底座 **39** / 插件 **60**（= 39 + 运行时 21）；`plugin-install` 2 条**已进默认特性**，默认装配共 **62** | wire-gate 解析器 |
+| 命令面 | 底座 **57** / 插件 **78**（= 57 + 运行时 21）；`plugin-install` 2 条**已进默认特性**，默认装配共 **80** | wire-gate 解析器 |
 | 档位表 | 插件面 **18**（Self_ 16 + ScopedRead 2）+ 特权 **4** | `crates/tauron-host/src/authz.rs` |
 | 孤儿 crate | brand / theme / wasm / distribute / shell（**7536 行**） | 依赖图 |
 | 示例可运行组件 | **10**（W2 已修：`ui-primitives/wc` 补 4 条副作用导入，含 `oc-plugin-manager`） | `grep customElements.define dist/assets/*.js` |

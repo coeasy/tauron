@@ -12,13 +12,11 @@
  */
 
 import {
-  BRIDGE_MESSAGE_TYPE,
   buildInitMessage,
   buildInvokeResultMessage,
   buildEventMessage,
   buildCancelMessage,
   isPluginToHost,
-  isHostToPlugin,
   type BridgeToPluginMessage,
   type PluginToBridgeMessage,
   type BridgeMessage,
@@ -36,9 +34,6 @@ interface InflightCall {
 
 /** 事件处理器 */
 type EventHandler = (payload: unknown) => void;
-
-/** 权限表 */
-type PermissionGrants = Map<string, string[]>;
 
 /**
  * 握手 token 的 URL 片段键。

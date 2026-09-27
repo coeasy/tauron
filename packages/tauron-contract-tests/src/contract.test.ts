@@ -96,20 +96,20 @@ describe('Response Contract', () => {
 
 describe('Error Code Contract', () => {
   const expectedCodes: PluginErrorCode[] = [
-    PluginErrorCode.PLUGIN_NOT_FOUND,      // SC-0001
-    PluginErrorCode.PLUGIN_DISABLED,        // SC-0002
-    PluginErrorCode.PLUGIN_ERRORED,         // SC-0003
-    PluginErrorCode.PERMISSION_DENIED,      // SC-1001
+    PluginErrorCode.PLUGIN_NOT_FOUND, // SC-0001
+    PluginErrorCode.PLUGIN_DISABLED, // SC-0002
+    PluginErrorCode.PLUGIN_ERRORED, // SC-0003
+    PluginErrorCode.PERMISSION_DENIED, // SC-1001
     PluginErrorCode.PLUGIN_PERMISSION_DENIED, // SC-1002
-    PluginErrorCode.CAPABILITY_REQUIRED,    // SC-1003
-    PluginErrorCode.TIMEOUT,                // SC-2001
-    PluginErrorCode.CANCELLED,              // SC-2002
-    PluginErrorCode.INVALID_PAYLOAD,        // SC-2003
-    PluginErrorCode.CHANNEL_BROKEN,         // SC-2004
-    PluginErrorCode.PLUGIN_PANIC,           // SC-3001
-    PluginErrorCode.PLUGIN_OOM,             // SC-3002
-    PluginErrorCode.PLUGIN_EXITED,          // SC-3003
-    PluginErrorCode.INTERNAL,               // SC-9001
+    PluginErrorCode.CAPABILITY_REQUIRED, // SC-1003
+    PluginErrorCode.TIMEOUT, // SC-2001
+    PluginErrorCode.CANCELLED, // SC-2002
+    PluginErrorCode.INVALID_PAYLOAD, // SC-2003
+    PluginErrorCode.CHANNEL_BROKEN, // SC-2004
+    PluginErrorCode.PLUGIN_PANIC, // SC-3001
+    PluginErrorCode.PLUGIN_OOM, // SC-3002
+    PluginErrorCode.PLUGIN_EXITED, // SC-3003
+    PluginErrorCode.INTERNAL, // SC-9001
   ];
 
   it('error codes follow SC-xxxx format', () => {

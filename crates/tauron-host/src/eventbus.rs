@@ -600,14 +600,8 @@ impl EventBus {
         let key = (target.to_string(), ChannelKind::Request);
         let q = qs.entry(key).or_insert_with(|| Queue::new(self.capacity));
         let seq = q.frames.len() as u64;
-        let result = q.enqueue(
-            ChannelKind::Request,
-            Frame {
-                topic: topic.to_string(),
-                seq,
-                payload,
-            },
-        );
+        let result =
+            q.enqueue(ChannelKind::Request, Frame { topic: topic.to_string(), seq, payload });
         match result {
             EnqueueResult::Queued | EnqueueResult::QueuedWithOverflow => Ok(1),
             EnqueueResult::Full | EnqueueResult::DroppedCircuitOpen => Err(HostError::new(

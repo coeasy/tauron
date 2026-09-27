@@ -18,9 +18,7 @@
 export * from '@tauron/ui-primitives';
 
 // 需要宿主命令面的便利 Store。
-export {
-  PluginManagerStore,
-} from './plugin-manager.js';
+export { PluginManagerStore } from './plugin-manager.js';
 export type {
   AdminOp,
   PluginActionResult,

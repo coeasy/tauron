@@ -7,7 +7,6 @@ import {
   validateRequest,
   DEFAULT_TIMEOUT_MS,
   type PluginInvokeRequest,
-  type PluginInvokeResponse,
 } from './envelope.js';
 import { PluginErrorCode } from './errors.js';
 
@@ -96,12 +95,24 @@ describe('envelope', () => {
     });
 
     it('rejects negative timeoutMs', () => {
-      const req = { pluginId: 'com.example.test', method: 'format', callId: 'call-123', timeoutMs: -1 };
-      expect(validateRequest(req as PluginInvokeRequest)).toBe('timeoutMs must be a non-negative number');
+      const req = {
+        pluginId: 'com.example.test',
+        method: 'format',
+        callId: 'call-123',
+        timeoutMs: -1,
+      };
+      expect(validateRequest(req as PluginInvokeRequest)).toBe(
+        'timeoutMs must be a non-negative number',
+      );
     });
 
     it('allows zero timeoutMs (no timeout)', () => {
-      const req = { pluginId: 'com.example.test', method: 'format', callId: 'call-123', timeoutMs: 0 };
+      const req = {
+        pluginId: 'com.example.test',
+        method: 'format',
+        callId: 'call-123',
+        timeoutMs: 0,
+      };
       expect(validateRequest(req as PluginInvokeRequest)).toBeNull();
     });
   });

@@ -90,7 +90,20 @@ export interface TestContext {
  * 提供轻量级的测试执行环境，支持插件单元测试。
  */
 export class PluginTestRunner {
-  private suites: Map<string, { beforeEach: Array<() => void | Promise<void>>; afterEach: Array<() => void | Promise<void>>; tests: Array<{ name: string; fn: () => void | Promise<void>; skip: boolean; only: boolean; timeout: number }> }>;
+  private suites: Map<
+    string,
+    {
+      beforeEach: Array<() => void | Promise<void>>;
+      afterEach: Array<() => void | Promise<void>>;
+      tests: Array<{
+        name: string;
+        fn: () => void | Promise<void>;
+        skip: boolean;
+        only: boolean;
+        timeout: number;
+      }>;
+    }
+  >;
   private results: RunResult | null;
   private assertions: Assertion[];
   private startedAt: number;
@@ -106,7 +119,17 @@ export class PluginTestRunner {
    * 创建测试套件。
    */
   describe(suiteName: string, fn: (suite: TestSuite) => void): void {
-    const suite: { beforeEach: Array<() => void | Promise<void>>; afterEach: Array<() => void | Promise<void>>; tests: Array<{ name: string; fn: () => void | Promise<void>; skip: boolean; only: boolean; timeout: number }> } = {
+    const suite: {
+      beforeEach: Array<() => void | Promise<void>>;
+      afterEach: Array<() => void | Promise<void>>;
+      tests: Array<{
+        name: string;
+        fn: () => void | Promise<void>;
+        skip: boolean;
+        only: boolean;
+        timeout: number;
+      }>;
+    } = {
       beforeEach: [],
       afterEach: [],
       tests: [],
@@ -173,7 +196,7 @@ export class PluginTestRunner {
             await Promise.race([
               test.fn(),
               new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error(`测试超时（${test.timeout}ms）`)), test.timeout)
+                setTimeout(() => reject(new Error(`测试超时（${test.timeout}ms）`)), test.timeout),
               ),
             ]);
 
@@ -452,7 +475,9 @@ export class Expectation {
   toContain(expected: unknown): void {
     if (Array.isArray(this.actual)) {
       if (!this.actual.includes(expected)) {
-        throw new Error(`期望包含 ${JSON.stringify(expected)}，实际为 ${JSON.stringify(this.actual)}`);
+        throw new Error(
+          `期望包含 ${JSON.stringify(expected)}，实际为 ${JSON.stringify(this.actual)}`,
+        );
       }
     } else if (typeof this.actual === 'string') {
       if (!this.actual.includes(expected as string)) {

@@ -45,14 +45,28 @@ export interface DegradedValue<T> {
 export type ProviderResult<T> = T | UnsupportedBody;
 
 export function isUnsupportedBody(value: unknown): value is UnsupportedBody {
-  return typeof value === 'object' && value !== null && 'supported' in value && value.supported === false &&
-    'reason' in value && typeof value.reason === 'string';
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'supported' in value &&
+    value.supported === false &&
+    'reason' in value &&
+    typeof value.reason === 'string'
+  );
 }
 
 export function isDegradedValue<T = unknown>(value: unknown): value is DegradedValue<T> {
-  return typeof value === 'object' && value !== null && 'supported' in value && value.supported === false &&
-    'reason' in value && typeof value.reason === 'string' && 'fallback' in value &&
-    typeof value.fallback === 'string' && 'value' in value;
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'supported' in value &&
+    value.supported === false &&
+    'reason' in value &&
+    typeof value.reason === 'string' &&
+    'fallback' in value &&
+    typeof value.fallback === 'string' &&
+    'value' in value
+  );
 }
 
 /** 文件过滤器 */
@@ -138,7 +152,9 @@ export class DialogClient {
    *
    * 返回选中目录路径，真实取消返回 null；缺少 provider 时返回 UnsupportedBody。
    */
-  async openDirectory(options: { defaultPath?: string } = {}): Promise<ProviderResult<string | null>> {
+  async openDirectory(
+    options: { defaultPath?: string } = {},
+  ): Promise<ProviderResult<string | null>> {
     return this._backend.invoke<ProviderResult<string | null>>('host_dialog_open', {
       directory: true,
       defaultPath: options.defaultPath,

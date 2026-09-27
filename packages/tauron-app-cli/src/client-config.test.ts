@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  generateClientConfig,
-  validateClientConfigFile,
-} from './client-config.js';
+import { generateClientConfig, validateClientConfigFile } from './client-config.js';
 
 describe('generateClientConfig', () => {
   it('template 预设生成完整配置', () => {

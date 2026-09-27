@@ -15,7 +15,8 @@ node packages/tauron-app-cli/dist/cli.js --help
 ## 命令总览
 
 ```text
-tauron-app init     生成 tauron.config.json 应用配置
+tauron-app new      创建新的 tauron 应用工程（真装配的 src-tauri + capability）；create 为别名
+tauron-app init     一键接入现有 Tauri 项目
 tauron-app doctor   环境自检
 tauron-app client   config — 客户端本地配置
 tauron-app theme    generate [--output <file>] [--css] 生成主题 JSON / CSS 变量
@@ -23,6 +24,50 @@ tauron-app plugin   new | create | dev | pack | sign | check | audit
 ```
 
 所有命令支持 `--key=value` 与 `--key value` 两种参数语法。
+
+### new / create —— 一键脚手架
+
+```bash
+tauron-app new ./my-app --name my-app                       # 也支持 create-tauron-app ./my-app
+tauron-app new ./my-app --framework react --shell tauri
+tauron-app new ./my-app --tauron-path ../tauron --dry-run   # 只报告产物、不落盘
+```
+
+生成的工程包含 `src-tauri/{Cargo.toml,src/main.rs,build.rs,capabilities/default.json,tauri.conf.json}`
+与前端入口、`package.json`、`tsconfig.json`、`vite.config.ts`、根 `index.html`。
+`src-tauri` 是 `examples/minimal-app` 同形态的**真装配**（`state_init_with_adapter_config` +
+`tauron_generate_handler![]`，默认 80 条命令；`--features substrate-only` 走 57 条底座），
+capability 覆盖 `main` 与 `plugin-*` 窗。
+
+「一键」到 `npm run tauri dev` 的链路已闭合：`tauri.conf.json` 带 `beforeDevCommand` /
+`beforeBuildCommand`（拉起 vite），`vite.config.ts` 的 `server.port` 与 `devUrl` 一致、
+`outDir` 与 `frontendDist` 一致，`index.html` 位于工程根（vite 的 root 约定）。
+
+依赖坐标：tauron 的 20 个 npm 包与 15 个 crate **都未发布到 registry**，所以脚手架写的是
+**指向本机检出根的 `path` / `file:` 坐标**（检出根默认从 CLI 自身位置上溯探测，可用
+`--tauron-path <相对路径|绝对路径>` 覆盖）。registry 版本号今天解析不了——写那种坐标是错的，
+不是"待完善"。
+
+> **需自行替换的部分**：`src-tauri/icons/` 是**纯色占位图**（6 个文件，覆盖 Windows / macOS /
+> Linux 打包所需）——**发布前必须换成品牌图标**。不给这组文件连 `cargo check` 都过不去：
+> `tauri-build` 在 Windows 上要 `icons/icon.ico` 才能生成资源文件。
+>
+> **实测（2026-09-27）**：生成物（含占位图标与 vite 配置）开箱即可编译——默认形态与
+> `--features substrate-only` 两档 `cargo check` 均通过。
+>
+> **这条实测只覆盖 Rust 侧**：`npm install` / `npm run tauri dev` 未在本机验证（要从
+> registry 取 `vite` / `@tauri-apps/cli`，沙箱无网络）。前置两条：本机 tauron 检出已
+> `pnpm install`、且 `packages/*/dist` 已构建——`file:` 依赖是软链，`@tauron/host` 解析
+> 自己的 `workspace:*` 依赖走的是检出根自己的 `node_modules`。
+
+### init —— 接入现有 Tauri 项目
+
+`tauron-app init --dir <你的项目>` 会加 `path` 依赖、接线 Builder 链、补 capability 与 `build.rs`。
+若目标项目**已有** `.invoke_handler(..)`，它**不会**改动源码——Tauri 的 `invoke_handler` 是
+**覆盖语义**，自动追加会丢掉你原有的命令——而是把需要手工合并的那一行如实打印出来。
+
+常用参数：`--dir <path>`（目标项目根，缺省为当前目录）、`--tauron-path <path>`
+（tauron 检出根，缺省从 CLI 自身位置上溯探测）、`--config <file>`、`--dry-run`。
 
 ### plugin pack / sign
 

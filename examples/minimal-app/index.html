@@ -6,15 +6,24 @@
     <title>tauron minimal app</title>
   </head>
   <body>
-    <main style="font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem">
+    <main
+      style="
+        font-family: system-ui, sans-serif;
+        max-width: 720px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      "
+    >
       <h1>tauron 应用层贯通示例</h1>
-      <p id="status" style="color:#666">初始化中…</p>
+      <p id="status" style="color: #666">初始化中…</p>
 
       <section>
         <h2>1. iframe 沙箱插件（握手 + 方法调用）</h2>
-        <p>插件页在 <code>sandbox="allow-scripts"</code> 的 iframe 中运行，
-        宿主经 URL hash 注入握手 token；调用走 <code>__invoke:/__result:</code> 协议。</p>
-        <input id="plugin-input" value="  let  x = 1;  " style="width:14rem" />
+        <p>
+          插件页在 <code>sandbox="allow-scripts"</code> 的 iframe 中运行， 宿主经 URL hash 注入握手
+          token；调用走 <code>__invoke:/__result:</code> 协议。
+        </p>
+        <input id="plugin-input" value="  let  x = 1;  " style="width: 14rem" />
         <button id="btn-plugin" disabled>调用插件 format</button>
         <pre id="plugin-out"></pre>
       </section>
@@ -41,22 +50,25 @@
 
       <section>
         <h2>5. 跨主体调用（0.4-A1 投递 + 0.4-A2 主推 SDK）</h2>
-        <p>插件面板窗口（<code>plugin-com.example.formatter</code>）内运行
-        <code>@tauron/app-plugin-sdk</code> 插件：注册命令即开执行泵。调用经
-        宿主事件总线投递，结果由插件自动回填、发起方取走——全程无需宿主侧
-        写任何桥接代码。</p>
+        <p>
+          插件面板窗口（<code>plugin-com.example.formatter</code>）内运行
+          <code>@tauron/app-plugin-sdk</code> 插件：注册命令即开执行泵。调用经
+          宿主事件总线投递，结果由插件自动回填、发起方取走——全程无需宿主侧 写任何桥接代码。
+        </p>
         <p><strong>先装并启用插件，再按顺序点：</strong></p>
         <button id="btn-open-plugin-window">① 打开插件面板窗口</button>
-        <input id="cross-input" value="  let  x = 1;  " style="width:12rem" />
+        <input id="cross-input" value="  let  x = 1;  " style="width: 12rem" />
         <button id="btn-cross-call">② 跨主体调用 format</button>
         <pre id="cross-out"></pre>
       </section>
 
       <section>
         <h2>6. 命令面板（贡献命令 → 跨主体投递，1.0-W3）</h2>
-        <p>命令列表来自 <code>host_contributes_list('command')</code>（插件声明的
-        贡献命令）。选中一条后由 <code>ShellController</code> 解析归属插件并投递
-        ——此前该事件无消费者（点了没反应且无处可查）。</p>
+        <p>
+          命令列表来自 <code>host_contributes_list('command')</code>（插件声明的
+          贡献命令）。选中一条后由 <code>ShellController</code> 解析归属插件并投递
+          ——此前该事件无消费者（点了没反应且无处可查）。
+        </p>
         <button id="btn-command-palette">打开命令面板</button>
       </section>
     </main>

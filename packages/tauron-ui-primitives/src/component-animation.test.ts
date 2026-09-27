@@ -1,8 +1,14 @@
 // @vitest-environment happy-dom
 // component-animation.ts 测试（P2-8：组件动画工具）
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { animateEnter, animateLeave, staggerIn, staggerOut, animateListUpdate } from './component-animation.js';
+import { describe, it, expect, beforeEach } from 'vitest';
+import {
+  animateEnter,
+  animateLeave,
+  staggerIn,
+  staggerOut,
+  animateListUpdate,
+} from './component-animation.js';
 
 describe('animateEnter()', () => {
   let el: HTMLElement;

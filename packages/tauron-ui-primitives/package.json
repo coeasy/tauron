@@ -1,10 +1,33 @@
 {
   "name": "@tauron/ui-primitives",
   "version": "0.1.0",
-  "private": true,
   "description": "tauron UI 原语：零宿主依赖的 Web Components + 设计令牌 + 动效基础设施（任意宿主可直接取用）",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coeasy/tauron.git",
+    "directory": "packages/tauron-ui-primitives"
+  },
+  "homepage": "https://github.com/coeasy/tauron",
+  "bugs": {
+    "url": "https://github.com/coeasy/tauron/issues"
+  },
+  "keywords": [
+    "tauron",
+    "tauri",
+    "ui",
+    "web-components",
+    "design-tokens",
+    "lit"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
-  "main": "./dist/index.cjs",
+  "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -42,11 +65,11 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint ."
   },
-  "peerDependencies": {
-    "lit": "^3.0.0"
-  },
   "dependencies": {
     "@tauron/shell-events": "workspace:*"
+  },
+  "peerDependencies": {
+    "lit": "^3.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.13.5",

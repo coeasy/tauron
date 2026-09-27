@@ -8,15 +8,16 @@
 
 ---
 
-## 0. 先分清三种「安装」
+## 0. 先分清几种「安装」
 
-「装 tauron」在不同语境下指三件完全不同的事，先对号入座再看后面：
+「装 tauron」在不同语境下指完全不同的事，先对号入座再看后面：
 
 | # | 你想做什么 | 用哪一节 | 现在能不能做 |
 |---|---|---|---|
-| A | **跑起来看看**（拿安装包装上就开） | §1 | ✅ 可以，Release 有各平台安装包 |
+| A | **跑起来看看**（拿安装包装上就开） | §1 | ⚠️ 部分可以：Windows NSIS **出包**实测过；macOS / Linux 的包 CI 能出，但三种平台的包**都未做过真机安装验证**（出包 ≠ 装过） |
 | B | **改代码 / 自己构建** | §2 | ✅ 可以，源码可构建 |
-| C | **把 tauron 当库接进自己的项目** | §3 | ⚠️ 可以，但**只能 path/workspace 接入**——尚未发布到 npm / crates.io |
+| C | **把 tauron 当库接进自己的项目** | §3 | ⚠️ 分 5 种方式，**今天只有「源码集成（`path` / `file:`）」真正可用**，其余待发布——见 §3.0 |
+| D | **一键脚手架起新工程**（`tauron-app new`） | §3.2 | ✅ 可以（生成物用的是 C 的 `path` 坐标） |
 
 ---
 
@@ -41,6 +42,12 @@
 > **Windows 只提供 NSIS，不提供 MSI**：`targets: "all"` 在 Windows 上等于
 > nsis + msi，而 MSI 需要构建期下载 WiX 工具链，属额外网络依赖，失败时会连
 > NSIS 一起拿不到。原因与转正条件登记在 [CHANGELOG 的「已知债务」第 11 条](../CHANGELOG.md)。
+>
+> **跨平台边界（如实说明）**：`release.yml` 的构建矩阵**有** Linux（deb / rpm /
+> AppImage）与 macOS（aarch64 / x64 的 dmg 与 .app）两条腿，**也有** Windows 腿——
+> 但 CI 只保证「能出包」，**三种平台的包都没有做过真机安装验证**：Windows 的 NSIS
+> 包本机只实测到 `tauri build --bundles nsis` **出包成功**这一步（出包 ≠ 装过）。
+> 另外 `--bundles nsis,msi` 这类组合**未在 CI 验证**（Windows 腿固定写 `--bundles nsis`）。
 
 ### 1.2 Windows
 
@@ -206,52 +213,209 @@ pnpm --filter minimal-app build
 
 ## 3. 把 tauron 接进自己的项目
 
-### 3.1 ⚠️ 尚未发布到 registry
+### 3.0 五种「安装/集成」方式一览（先说边界）
 
-**20 个 npm 包全部是 `private: true`，15 个 crate 的内部互引用是 path 依赖**
-（cargo 打包要求 path 依赖同时给出 `version`）。所以：
+「支持多种安装方式」拆开是下面五条路径。**今天真正可用的只有第 1 条**（第 4 条
+是它的封装），第 2、3 条依赖「包已发布」而这件事还没发生——写清楚比含糊更有用：
 
-- ❌ `pnpm add @tauron/core` —— 装不到
-- ❌ `cargo add tauron-host` —— 装不到
-- ✅ 用 `workspace:*`（同一个 workspace 内）或 `file:` / `path`（跨仓库）
+| # | 方式 | 具体做法 | 现在能不能用 | 依据 |
+|---|---|---|---|---|
+| 1 | **源码集成** | `path` / `file:` 指向本机 tauron checkout | ✅ **唯一真正可用** | §3.3 |
+| 2 | **npm 包集成** | `npm i @tauron/...` | ❌ 待发布后可用（19 个包已就绪，未 `npm publish`） | §3.4 |
+| 3 | **crate 集成** | `cargo add tauron-*` | ❌ 待发布后可用（15 个 crate 已就绪，未 `cargo publish`） | §3.5 |
+| 4 | **一键脚手架** | `tauron-app new` / `create-tauron-app` | ✅ 可用（内部仍走方式 1 的 `path` 坐标） | §3.2 |
+| 5 | **安装包** | 从 Releases 取 Tauri bundle 装上即用 | ⚠️ 仅限**示例应用**；Windows 腿 `--bundles nsis` 出包实测过，**装机未验证** | §1 |
 
-阻塞项逐条登记在 [CHANGELOG.md 的「已知债务」](../CHANGELOG.md)。
+### 3.1 现状：已就绪 ≠ 已发布
 
-### 3.2 最小接入
+一句话：**「可以打包发布」这件事已经做到了，「已经发布」还没有**。
+
+- **npm**：20 个包里 **19 个已去掉 `private`** 并补齐发布元数据（`license` /
+  `repository` / `homepage` / `bugs` / `keywords` / `engines` / `publishConfig.access=public`
+  / `files` 白名单）；第 20 个 `@tauron/contract-tests` **刻意保留 `private`**
+  （它是仓库内的契约测试 harness，`dist/` 里只有 `*.test.js`、没有 `index.js`，
+  用例还依赖 monorepo 目录布局，发布出去对第三方无意义）。
+- **crates**：15 个 crate 的内部互引用都已同时给出 `version`，`cargo package`
+  不再报错；产物 manifest 里 `path` 会被 cargo 剥离，只剩 `version`。
+- **没有发布**：npm registry 与 crates.io 上都没有 tauron 的任何包，所以
+  `pnpm add @tauron/core` / `cargo add tauron-host` 现在装不到。阻塞项逐条登记在
+  [CHANGELOG.md 的「已知债务」](../CHANGELOG.md)。
+
+发布编排脚本与实测见 §3.7。**在那之前，唯一可用的库接入方式是方式 1（源码集成）**。
+
+### 3.2 一键脚手架（最快路径）
+
+不想手工接线就用 `@tauron/app-cli` 的 `new` 命令（`tauron-app` 本身也没发布到 npm，
+在仓库根直接跑 dist）：
 
 ```bash
-# 前端：同一 pnpm workspace 内
-pnpm add @tauron/types@workspace:* @tauron/core@workspace:*
-# 跨仓库则用 file: 指向本仓库的 packages/<包名>
+# 新建工程：产出真装配的 src-tauri + capability + build.rs + 前端骨架
+node packages/tauron-app-cli/dist/cli.js new ./my-app --name my-app
+# 等价 bin：create-tauron-app ./my-app
+
+# 已有 Tauri 项目：注入式接入（加 path 依赖、接线 Builder、补 capability/build.rs）
+node packages/tauron-app-cli/dist/cli.js init --dir ./my-existing-app
 ```
+
+**能一键跑通到哪一步**：
+
+| 产出 | 状态 |
+|---|---|
+| `src-tauri/`（`Cargo.toml` / `main.rs` / `build.rs` / `capabilities/default.json` / `tauri.conf.json`） | ✅ 真装配，与 `examples/minimal-app` 同源 |
+| 依赖坐标 | ✅ `path` / `file:` 指向本机 tauron 检出根（检出根默认自动探测，可用 `--tauron-path` 覆盖） |
+| 前端 bundler / dev-server 配置 | ✅ 生成 `vite.config.ts`（端口/产物目录与 `tauri.conf.json` 对齐）+ 根 `index.html` + `beforeDevCommand` / `beforeBuildCommand` |
+| `src-tauri/icons/` | ⚠️ 生成**纯色占位图**（6 个文件，覆盖 Windows / macOS / Linux 打包所需）；**发布前须替换成品牌图标**。缺这组文件连 `cargo check` 都过不去（`tauri-build` 在 Windows 上要 `icons/icon.ico`） |
+
+生成后的下一步：
+
+```bash
+cd my-app && npm install && npm run tauri dev
+```
+
+> **实测（2026-09-27）**：生成物（含占位图标与 vite 配置）开箱即可编译——默认形态
+> （80 条）与 `--features substrate-only`（57 条）两档 `cargo check` **均通过**。
+>
+> **仅覆盖 Rust 侧**：`npm install` / `npm run tauri dev` 未在本机验证（要从 registry
+> 取包，沙箱无网络）。前置条件两条：本机 tauron 检出已 `pnpm install`、且
+> `packages/*/dist` 已构建——因为 `file:` 依赖是软链，`@tauron/host` 自解析其
+> `workspace:*` 依赖走的是检出根自己的 `node_modules`。
+
+`init` 的**覆盖语义**提醒：若目标项目已有 `.invoke_handler(..)`，`init` 不会改动源码
+（Tauri 的 `invoke_handler` 是覆盖语义，自动追加会丢掉原有命令），只把要手工合并的那一行打印出来。
+
+### 3.3 方式 1：源码集成（`path` / `file:`）——今天唯一真正可用
+
+**前端（TS 包）**：
+
+```bash
+# 同一个 pnpm workspace 内：直接用 workspace 协议
+pnpm add @tauron/types@workspace:* @tauron/core@workspace:*
+
+# 跨仓库：file: 指向本机 checkout 的 packages/<包名>（一键脚手架用的就是这一招）
+pnpm add @tauron/types@file:../tauron/packages/types
+```
+
+**Rust 侧（crate）**：
 
 ```toml
 # src-tauri/Cargo.toml
 [dependencies]
 tauron-shell = { path = "../tauron/crates/tauron-shell", features = ["tauri"] }
+# 应用层整套（含 80 条命令）：
+# tauron-adapter = { path = "../tauron/crates/tauron-adapter", features = ["tauri"] }
 ```
+
+> `file:` / `path` 都是**指向本机 checkout**，不会从 registry 取包——所以它今天
+> 就能用，也是唯一能用的方式。代价：接入方的依赖里出现了一个本地绝对/相对路径，
+> 换机器、换目录都要重新对齐。
 
 完整的 Rust 侧命令注册与前端运行时初始化代码见
 [README 的「快速开始」](../README.md#快速开始第三方集成)。
 
-### 3.3 三档装配——先决定你要哪一档
+### 3.4 方式 2：npm 包集成（**待发布后可用**）
+
+包本身已「发布就绪」，但**还没有任何包出现在 npm registry 上**，所以现在
+`npm i @tauron/...` 必然 404。本机可验证的就绪状态：
+
+- 19 个包已去掉 `private`，补齐 `license` / `repository` / `homepage` / `bugs` /
+  `keywords` / `engines`（`>=22`，与 README 徽章一致）/ `publishConfig.access=public`
+  与 `files` 白名单（至少 `dist` + `README.md`）。
+- 顺带修掉一处发布缺陷：8 个包原本 `main` 指向 `./dist/index.cjs`，而构建**从不产出
+  任何 `.cjs`**（`tsc` 单趟只出 ESM）；已改指真实入口 `./dist/index.js`。
+- `pnpm publish:npm -- --check` 本机跑通：对 19 个包逐一 `pnpm pack` 并**解包校验**
+  「含 `dist/`、入口文件齐全、版本同源、无 `workspace:` 残留」。
+
+**发布必须用 pnpm（不是 npm）——这是实测结论**：`npm pack` 会把 `workspace:*`
+**原样写进 tarball 的 `package.json`**，而 npm 在 workspace 之外解析 `workspace:`
+会直接报 `EUNSUPPORTEDPROTOCOL`；`pnpm pack` / `pnpm publish` 则会把它改写成具体
+版本（本机解包实测：`"@tauron/types": "0.1.0"`）。发布脚本因此固定走 pnpm，
+且把「无 `workspace:` 残留」作为硬校验项。
+
+发布后用法：
+
+```bash
+pnpm add @tauron/types @tauron/core @tauron/host   # npm / yarn 同理
+```
+
+> **待网络 + 待凭据**：真实 `npm publish` 未在本机验证（沙箱无网络、无 npm token），
+> 见 §3.7。
+
+### 3.5 方式 3：crate 集成（**待发布后可用**）
+
+15 个 crate 已「打包就绪」：`cargo package` 不再报错，产物 manifest 里内部依赖
+已只剩 `version`（`path` 由 cargo 剥离）。但 **crates.io 上还没有这些 crate**，
+`cargo add tauron-host` 现在装不到。
+
+- ✅ **本机已验证**：`cargo package -p <crate> --no-verify --allow-dirty --offline`
+  能对全部 15 个 crate 产出 `.crate`，且产物内 `[dependencies.tauron-*]` 只剩
+  `version = "0.1.0"`、没有 `path`。
+- ❌ **本机不可验证**：真实 `cargo publish`（无网络、无 `CARGO_REGISTRY_TOKEN`）。
+
+**发布必须按依赖拓扑顺序逐个来**（被依赖者先发）——`cargo publish` 剥离 `path` 后
+会去 crates.io 解析内部依赖，被依赖者不在 registry 上就解析失败。顺序由
+`scripts/publish-crates.mjs` 从 `cargo metadata` **运行时实算**（不写死），实测序列见 §3.7。
+
+发布后用法：
+
+```toml
+[dependencies]
+# 应用层：整套 host_* 命令（默认 80 条）
+tauron-adapter = { version = "0.1", features = ["tauri"] }
+# 或框架层：只要信封协议 3 条命令
+tauron-shell = { version = "0.1", features = ["tauri"] }
+```
+
+### 3.6 三档装配——先决定你要哪一档
 
 tauron 的装配是**分档**的，别一上来就全接：
 
 | 档位 | 拿到什么 | 命令面 | 适用 |
 |---|---|---|---|
-| **只取底座** | 窗口/剪贴板/对话框/事件/设置/恢复/i18n/通知/品牌 | 39 条 | 不跑插件系统的普通客户端 |
-| **底座 + 插件运行时** | 上面 + 注册表/生命周期/流式调用 | 60 条（`plugin-install` 已进默认特性，默认装配含安装 2 条 → 共 **62**） | 要装插件 |
-| **完整客户端** | 上面 + 设置中心/白标/主题/UI 组件 | 60 条 + UI 层（同上） | 交付完整产品 |
+| **只取底座** | 窗口/剪贴板/对话框/事件/设置/恢复/i18n/通知/品牌/主题，以及菜单/托盘/文件系统/HTTP/更新通道五个宿主能力域 | 57 条 | 不跑插件系统的普通客户端 |
+| **底座 + 插件运行时** | 上面 + 注册表/生命周期/流式调用 | 78 条（`plugin-install` 已进默认特性，默认装配含安装 2 条 → 共 **80**） | 要装插件 |
+| **完整客户端** | 上面 + 设置中心/白标/主题/UI 组件 | 78 条 + UI 层（同上） | 交付完整产品 |
 
-> 命令面口径：底座 `tauron_substrate_handler!` **39** 条；`tauron_plugin_handler!` 在其上
-> 加插件运行时 **21** 条 = **60**；`plugin-install` feature 另加 `host_registry_install` /
+> 命令面口径：底座 `tauron_substrate_handler!` **57** 条；`tauron_plugin_handler!` 在其上
+> 加插件运行时 **21** 条 = **78**；`plugin-install` feature 另加 `host_registry_install` /
 > `host_registry_install_preview` 2 条，该 feature **已进 `tauron-adapter` 默认特性**
-> （`crates/tauron-adapter/Cargo.toml:21`），默认装配即 **62** 条——只有接入方显式
-> `default-features = false` 时才回到 60。
+> （`crates/tauron-adapter/Cargo.toml:21`），默认装配即 **80** 条——只有接入方显式
+> `default-features = false` 时才回到 78。
 
 逐档的依赖清单、装配代码与注意事项见
 [渐进接入指南](./integration/incremental-adoption.md)——**这是集成方的第一入口**。
+
+### 3.7 发布编排脚本（`--check` 本机已跑通，真发布未验证）
+
+两个脚本都是 **Node 22、零新依赖、默认 `--check`（只校验不发布）**：
+
+| 命令 | `--check` 做什么 | 真发布（显式，缺 token 即拒绝） |
+|---|---|---|
+| `pnpm publish:npm -- --check` | `pnpm -r build` 后逐包 `pnpm pack`，**解包**校验 tarball 内容 | `pnpm publish:npm -- --publish`，需 `NPM_TOKEN` |
+| `pnpm publish:crates -- --check` | 按 `cargo metadata` 实算的拓扑序逐 crate `cargo package`，**解包**校验产物 manifest | `pnpm publish:crates -- --publish`，需 `CARGO_REGISTRY_TOKEN` |
+
+**本机实测（2026-09-27，Windows，Node 25 运行时 / 目标 Node 22 语法）**：
+
+- npm：19 个可发布包**全部通过**；`@tauron/contract-tests` 按设计跳过（`private`）。
+- crates：15 个 crate**全部通过**，产物 `Cargo.toml` 的 `[dependencies.tauron-*]`
+  已剥成 `version`、无 `path`。
+- crates `--check` 会**临时**用 `--config patch.crates-io.<dep>.path=…` 把内部依赖指回
+  本地，仅为在**无网络**下让 cargo 完成依赖解析；脚本会解包**断言该 patch 不影响产物内容**。
+
+**crates 发布顺序（脚本运行时实算，不写死；2026-09-27 实测序列）**：
+
+```
+tauron-host → tauron-acl → tauron-brand → tauron-distribute → tauron-i18n
+→ tauron-market → tauron-notify → tauron-proc → tauron-recovery → tauron-schema
+→ tauron-settings → tauron-theme → tauron-wasm → tauron-adapter → tauron-shell
+```
+
+> 顺序不是「按字母」而是**拓扑序**：11 个叶子 crate 无内部依赖可任意先发；
+> `tauron-acl` / `tauron-market` 依赖 `tauron-host`，`tauron-settings` 依赖
+> `tauron-schema`，`tauron-adapter` 依赖其余 12 个——所以 adapter 必须排在最后一批。
+> 脚本每次运行都从 `cargo metadata` 重算，**新增/删除内部依赖不会让顺序漂移**。
+
+> **待网络 / 待凭据**：两条 `--publish` 分支**均未在本机验证**（沙箱无网络、
+> 无 npm / crates.io 凭据）。因此它们的验收口径只是「打包内容正确」，不是「发布成功」。
 
 ---
 
@@ -262,12 +426,13 @@ tauron 的装配是**分档**的，别一上来就全接：
 | 限制 | 说明 |
 |---|---|
 | **安装包未签名 / 未公证** | Windows 会弹 SmartScreen，macOS 会被 Gatekeeper 拦。**不是**安装包坏了 |
-| **Windows 只有 NSIS，没有 MSI** | 见 §1.1 与 CHANGELOG 债务 #11 |
-| **未发布到 npm / crates.io** | 只能 path / workspace 接入，见 §3.1 |
+| **Windows 只有 NSIS，没有 MSI** | 见 §1.1 与 CHANGELOG 债务 #11；`--bundles nsis,msi` 未在 CI 验证 |
+| **未发布到 npm / crates.io** | 只能 `path` / `file:` 源码集成，见 §3.0 / §3.1 |
+| **发布脚本只验证到「打包内容」** | `--check` 本机可跑；真实 `npm publish` / `cargo publish` 需要网络与凭据，**未验证**，见 §3.7 |
 | **示例应用是示例** | 界面极简，只有四条演示链路，不是产品形态的客户端 |
 | **更新检查是模拟的** | 返回带 `simulated: true` 的响应，不真连更新服务器 |
 | **图标是示例图标** | 由 `app-icon.svg` 生成的几何标记，非正式品牌资产 |
-| **Linux / macOS 未在真机安装验证** | CI 能出包，但「装完能不能用」只在 Windows 上实测过 |
+| **安装包未做真机安装验证** | CI 能出包（Windows / Linux / macOS 三条腿），但「装完能不能用」**三个平台都没验证过**；Windows 本机只到「出包成功」这一步 |
 
 ---
 

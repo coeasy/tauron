@@ -126,7 +126,7 @@ export function toHostRpc(client: HostClient, options: HostRpcOptions = {}): Hos
   };
 
   return {
-    request: <T,>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
+    request: <T>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
       client.request<T>(cmd, args),
 
     stream: (callId, onFrame) => client.openStream(callId, onFrame),

@@ -1,12 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { MockBackend } from './backend.js';
-import {
-  CAPABILITIES,
-  capabilityMatrix,
-  capabilityOf,
-  isAvailable,
-} from './capabilities.js';
+import { CAPABILITIES, capabilityMatrix, capabilityOf, isAvailable } from './capabilities.js';
 
 describe('CAPABILITIES（计划 §2.1 命令面镜像）', () => {
   it('共 24 条：18 条插件命令 + 6 条主窗特权命令', () => {

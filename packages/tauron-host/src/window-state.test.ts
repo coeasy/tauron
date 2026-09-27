@@ -108,19 +108,31 @@ describe('WindowState', () => {
   describe('isValid()', () => {
     it('有效状态返回 true', () => {
       const ws = new WindowState();
-      const valid = ws.isValid({ x: 100, y: 100, width: 800, height: 600, isMaximized: false }, 1920, 1080);
+      const valid = ws.isValid(
+        { x: 100, y: 100, width: 800, height: 600, isMaximized: false },
+        1920,
+        1080,
+      );
       expect(valid).toBe(true);
     });
 
     it('超出屏幕范围返回 false', () => {
       const ws = new WindowState();
-      const invalid = ws.isValid({ x: 2000, y: 100, width: 800, height: 600, isMaximized: false }, 1920, 1080);
+      const invalid = ws.isValid(
+        { x: 2000, y: 100, width: 800, height: 600, isMaximized: false },
+        1920,
+        1080,
+      );
       expect(invalid).toBe(false);
     });
 
     it('窗口太小返回 false', () => {
       const ws = new WindowState();
-      const invalid = ws.isValid({ x: 100, y: 100, width: 50, height: 50, isMaximized: false }, 1920, 1080);
+      const invalid = ws.isValid(
+        { x: 100, y: 100, width: 50, height: 50, isMaximized: false },
+        1920,
+        1080,
+      );
       expect(invalid).toBe(false);
     });
   });
@@ -133,8 +145,8 @@ describe('WindowState', () => {
       const ws = new WindowState({ storageKey: 'test.window7' });
       ws.save({ x: 200, y: 150, width: 1024, height: 768 });
       await ws.apply(backend);
-      expect(backend.invocations.some(i => i.cmd === 'host_window_set_position')).toBe(true);
-      expect(backend.invocations.some(i => i.cmd === 'host_window_set_size')).toBe(true);
+      expect(backend.invocations.some((i) => i.cmd === 'host_window_set_position')).toBe(true);
+      expect(backend.invocations.some((i) => i.cmd === 'host_window_set_size')).toBe(true);
     });
   });
 });

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { invokePlugin, cancelPlugin, listenEvent, emitEvent } from './invoke.js';
 import { MockBackend, createTestBackend } from './testing.js';
-import { PluginErrorCode, type PluginInvokeResponse } from '@tauron/types';
+import { PluginErrorCode } from '@tauron/types';
 
 describe('invoke', () => {
   let backend: MockBackend;
@@ -12,7 +12,9 @@ describe('invoke', () => {
 
   describe('invokePlugin', () => {
     it('calls plugin method and returns response', async () => {
-      const response = await invokePlugin(backend, 'com.example.test', 'format', { code: 'let x = 1;' });
+      const response = await invokePlugin(backend, 'com.example.test', 'format', {
+        code: 'let x = 1;',
+      });
 
       expect(response.ok).toBe(true);
       expect(response.callId).toBeDefined();

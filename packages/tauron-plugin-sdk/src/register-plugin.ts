@@ -106,9 +106,7 @@ interface InvokeResult {
  */
 export function registerPlugin(config: RegisterPluginConfig): PluginContext {
   const ctx = createPluginContext(
-    config.handshakeToken !== undefined
-      ? { handshakeToken: config.handshakeToken }
-      : {},
+    config.handshakeToken !== undefined ? { handshakeToken: config.handshakeToken } : {},
   );
 
   // ── 方法注册 ──

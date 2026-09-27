@@ -1,12 +1,7 @@
 // @tauron/app-plugin-sdk — 测试工具。
 
 import { HostClient, MockBackend } from '@tauron/host';
-import type {
-  CommandHandler,
-  PluginContext,
-  PluginDefinition,
-  PluginInstance,
-} from './types.js';
+import type { CommandHandler, PluginContext, PluginDefinition, PluginInstance } from './types.js';
 import { createPlugin } from './createPlugin.js';
 import { createPluginContext } from './context.js';
 
@@ -131,13 +126,19 @@ export function createMockContext(pluginId = 'com.example.test'): PluginContext 
     },
 
     settings: {
-      registerTab(): { ok: boolean } { return { ok: true }; },
-      unregisterTab(): boolean { return true; },
+      registerTab(): { ok: boolean } {
+        return { ok: true };
+      },
+      unregisterTab(): boolean {
+        return true;
+      },
     },
 
     events: {
       async publish(): Promise<void> {},
-      subscribe(): () => void { return () => {}; },
+      subscribe(): () => void {
+        return () => {};
+      },
     },
 
     log: {

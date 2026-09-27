@@ -18,11 +18,9 @@ import {
   validatePlatforms,
   validateBuildType,
   checkUniqueness,
-  generateBrandTauriConfig,
   generateBrandManifest,
   generateCiMatrix,
   generateIconReport,
-  generateBrandFiles,
   UniquenessConflictError,
   SUPPORTED_PLATFORMS,
   SUPPORTED_BUILD_TYPES,
@@ -254,37 +252,85 @@ describe('checkUniqueness', () => {
 
   it('identifier 冲突', () => {
     expect(() =>
-      checkUniqueness(baseConfig, [{ identifier: 'my-brand', protocolName: 'other', autostartName: 'Other', dataDirName: 'other', shortcut: 'Ctrl+Shift+J' }]),
+      checkUniqueness(baseConfig, [
+        {
+          identifier: 'my-brand',
+          protocolName: 'other',
+          autostartName: 'Other',
+          dataDirName: 'other',
+          shortcut: 'Ctrl+Shift+J',
+        },
+      ]),
     ).toThrow(UniquenessConflictError);
   });
 
   it('protocolName 冲突', () => {
     expect(() =>
-      checkUniqueness(baseConfig, [{ identifier: 'other-brand', protocolName: 'myapp', autostartName: 'Other', dataDirName: 'other', shortcut: 'Ctrl+Shift+J' }]),
+      checkUniqueness(baseConfig, [
+        {
+          identifier: 'other-brand',
+          protocolName: 'myapp',
+          autostartName: 'Other',
+          dataDirName: 'other',
+          shortcut: 'Ctrl+Shift+J',
+        },
+      ]),
     ).toThrow(UniquenessConflictError);
   });
 
   it('autostartName 冲突', () => {
     expect(() =>
-      checkUniqueness(baseConfig, [{ identifier: 'other-brand', protocolName: 'other', autostartName: 'My App Autostart', dataDirName: 'other', shortcut: 'Ctrl+Shift+J' }]),
+      checkUniqueness(baseConfig, [
+        {
+          identifier: 'other-brand',
+          protocolName: 'other',
+          autostartName: 'My App Autostart',
+          dataDirName: 'other',
+          shortcut: 'Ctrl+Shift+J',
+        },
+      ]),
     ).toThrow(UniquenessConflictError);
   });
 
   it('dataDirName 冲突', () => {
     expect(() =>
-      checkUniqueness(baseConfig, [{ identifier: 'other-brand', protocolName: 'other', autostartName: 'Other', dataDirName: 'my-data', shortcut: 'Ctrl+Shift+J' }]),
+      checkUniqueness(baseConfig, [
+        {
+          identifier: 'other-brand',
+          protocolName: 'other',
+          autostartName: 'Other',
+          dataDirName: 'my-data',
+          shortcut: 'Ctrl+Shift+J',
+        },
+      ]),
     ).toThrow(UniquenessConflictError);
   });
 
   it('shortcut 冲突', () => {
     expect(() =>
-      checkUniqueness(baseConfig, [{ identifier: 'other-brand', protocolName: 'other', autostartName: 'Other', dataDirName: 'other', shortcut: 'Ctrl+Shift+K' }]),
+      checkUniqueness(baseConfig, [
+        {
+          identifier: 'other-brand',
+          protocolName: 'other',
+          autostartName: 'Other',
+          dataDirName: 'other',
+          shortcut: 'Ctrl+Shift+K',
+        },
+      ]),
     ).toThrow(UniquenessConflictError);
   });
 
   it('冲突错误包含字段名', () => {
     try {
-      checkUniqueness(baseConfig, [{ identifier: 'my-brand', protocolName: 'other', autostartName: 'Other', dataDirName: 'other', shortcut: 'Ctrl+Shift+J' }]);
+      checkUniqueness(baseConfig, [
+        {
+          identifier: 'my-brand',
+          protocolName: 'other',
+          autostartName: 'Other',
+          dataDirName: 'other',
+          shortcut: 'Ctrl+Shift+J',
+        },
+      ]);
       expect.fail('should have thrown');
     } catch (err) {
       expect((err as Error).message).toContain('identifier');
@@ -427,7 +473,15 @@ describe('brandBuild', () => {
         platforms: ['windows'],
         buildType: 'release',
       },
-      [{ identifier: 'my-brand', protocolName: 'other', autostartName: 'Other', dataDirName: 'other', shortcut: 'Ctrl+Shift+J' }],
+      [
+        {
+          identifier: 'my-brand',
+          protocolName: 'other',
+          autostartName: 'Other',
+          dataDirName: 'other',
+          shortcut: 'Ctrl+Shift+J',
+        },
+      ],
     );
     expect(result.ok).toBe(false);
     expect(result.error).toContain('唯一性冲突');
@@ -507,9 +561,21 @@ describe('generateCiMatrix', () => {
     const matrix = JSON.parse(generateCiMatrix(config));
     expect(matrix.version).toBe(1);
     expect(matrix.matrix).toHaveLength(3);
-    expect(matrix.matrix[0]).toEqual({ platform: 'windows', buildType: 'release', brand: 'my-brand' });
-    expect(matrix.matrix[1]).toEqual({ platform: 'macos', buildType: 'release', brand: 'my-brand' });
-    expect(matrix.matrix[2]).toEqual({ platform: 'linux', buildType: 'release', brand: 'my-brand' });
+    expect(matrix.matrix[0]).toEqual({
+      platform: 'windows',
+      buildType: 'release',
+      brand: 'my-brand',
+    });
+    expect(matrix.matrix[1]).toEqual({
+      platform: 'macos',
+      buildType: 'release',
+      brand: 'my-brand',
+    });
+    expect(matrix.matrix[2]).toEqual({
+      platform: 'linux',
+      buildType: 'release',
+      brand: 'my-brand',
+    });
   });
 
   it('不生成 CI 矩阵', () => {

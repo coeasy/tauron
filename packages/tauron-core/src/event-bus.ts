@@ -114,7 +114,7 @@ export class EventBus {
    */
   clearPlugin(pluginId: string): void {
     this.queues.delete(pluginId);
-    for (const [key, subs] of this.subscribers) {
+    for (const key of this.subscribers.keys()) {
       if (key.startsWith(`plugin:${pluginId}:`)) {
         this.subscribers.delete(key);
       }

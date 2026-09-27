@@ -1,8 +1,30 @@
 {
   "name": "@tauron/adapter-svelte",
   "version": "0.1.0",
-  "private": true,
   "description": "tauron Svelte 适配器（设计文档 §4.2）：invoke/event/capabilities stores",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coeasy/tauron.git",
+    "directory": "packages/tauron-adapter-svelte"
+  },
+  "homepage": "https://github.com/coeasy/tauron",
+  "bugs": {
+    "url": "https://github.com/coeasy/tauron/issues"
+  },
+  "keywords": [
+    "tauron",
+    "tauri",
+    "svelte",
+    "stores",
+    "frontend"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -12,7 +34,10 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "sideEffects": false,
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

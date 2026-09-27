@@ -16,8 +16,6 @@ import {
   generatePluginManifest,
   generatePluginPackageJson,
   generatePluginEntry,
-  generatePluginTsconfig,
-  generatePluginGitignore,
   generatePluginFiles,
   validateDevWatchConfig,
   isPathWithinDir,

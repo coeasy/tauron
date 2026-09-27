@@ -18,9 +18,7 @@ export type WindowState = 'normal' | 'minimized' | 'maximized';
 
 /** TitleBar 状态。 */
 export type TitleBarState =
-  | { status: 'idle'; windowState: WindowState }
-  | { status: 'minimizing' }
-  | { status: 'restoring' };
+  { status: 'idle'; windowState: WindowState } | { status: 'minimizing' } | { status: 'restoring' };
 
 /** TitleBar 配置。 */
 export interface TitleBarConfig {
@@ -52,9 +50,7 @@ export interface TitleBarSnapshot {
 }
 
 /** 窗口操作结果。 */
-export type WindowActionResult =
-  | { ok: true }
-  | { ok: false; code: string; message: string };
+export type WindowActionResult = { ok: true } | { ok: false; code: string; message: string };
 
 // ──────────────────────────────────────────────────────────────────────────
 // TitleBarStore

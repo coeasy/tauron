@@ -5,10 +5,9 @@
 # `use_small_heuristics = "Max"` 保留本仓库偏好的「链式调用压一行」写法
 # （例如 `grant_set.scope_of(&p).map(scope_to_string)`）。
 #
-# ⚠️ 诚实边界：本仓库**尚未**做过 rustfmt 规范化，`cargo fmt --check` 当前
-# 会报差异。因此 CI 里的 fmt 任务是 advisory（`continue-on-error: true`），
-# 不构成合并门禁。待「规范化轮」一次性 `cargo fmt --all` 并验证编译/测试后，
-# 再把它转为硬门禁。详见 CHANGELOG.md 的「已知债务」。
+# 本仓库已做过 rustfmt 规范化（`cargo fmt --all` 一次性落地并验证编译/测试）。
+# CI 里的 fmt 任务是**硬门禁**：`cargo fmt --all -- --check` 非零即失败。
+# 因此再出现差异就是**新引入**的未格式化代码。详见 CHANGELOG.md。
 edition = "2021"
 max_width = 100
 use_small_heuristics = "Max"

@@ -131,7 +131,8 @@ export const CAPABILITIES: readonly Capability[] = [
     command: 'host_contributes_reconcile',
     tier: 'self',
     consumer: 'plugin',
-    description: '对账 manifest 声明的贡献与 activate 期实际注册（分叉报 E_CONTRIBUTES_DRIFT；0.4-W3）',
+    description:
+      '对账 manifest 声明的贡献与 activate 期实际注册（分叉报 E_CONTRIBUTES_DRIFT；0.4-W3）',
   },
   {
     command: 'host_events_drain',

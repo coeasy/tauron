@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { useCapabilities, useIsTauri } from './use-capabilities.js';
 import { getCapabilities, isTauri, TAURI_CAPABILITIES, WEB_CAPABILITIES } from '@tauron/core';
 

@@ -60,8 +60,7 @@ export const PLUGIN_TOKEN_FRAGMENT_KEY = 'tauron-token';
  */
 export function readHandshakeTokenFromUrl(url?: string): string {
   const href =
-    url ??
-    (typeof window !== 'undefined' && window.location ? window.location.href : '');
+    url ?? (typeof window !== 'undefined' && window.location ? window.location.href : '');
   if (!href) return '';
   try {
     const hash = new URL(href).hash; // "#tauron-token=..."
@@ -155,7 +154,11 @@ export function createPluginContext(options: PluginContextOptions = {}): PluginC
       const payload = msg.payload as { callId: string; result: unknown };
       const pending = takePending(payload.callId);
       if (pending) {
-        const result = payload.result as { ok: boolean; result?: unknown; error?: { code: string; message: string } };
+        const result = payload.result as {
+          ok: boolean;
+          result?: unknown;
+          error?: { code: string; message: string };
+        };
         if (result.ok) {
           pending.resolve(result.result);
         } else {

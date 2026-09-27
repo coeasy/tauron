@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { PluginRegistry, type RegistryConfig } from './registry.js';
+import { PluginRegistry } from './registry.js';
 import { type PluginState } from '@tauron/types';
 
 describe('PluginRegistry', () => {

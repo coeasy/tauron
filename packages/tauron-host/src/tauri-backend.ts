@@ -21,9 +21,7 @@ export const IDENTITY_LABEL_PREFIX = 'plugin-';
  * 调用方传入的 id 一律忽略——这是防跨插件冒充的唯一可信身份来源。
  */
 export function pluginIdFromLabel(label: string): string | null {
-  return label.startsWith(IDENTITY_LABEL_PREFIX)
-    ? label.slice(IDENTITY_LABEL_PREFIX.length)
-    : null;
+  return label.startsWith(IDENTITY_LABEL_PREFIX) ? label.slice(IDENTITY_LABEL_PREFIX.length) : null;
 }
 
 /**
@@ -141,6 +139,26 @@ const FRAMEWORK_COMMANDS = [
   'host_dialog_save',
   'host_dialog_message',
   'host_dialog_confirm',
+  // R9：菜单 / 托盘 / 文件 / HTTP / 更新 / 主题（主窗特权面，共 18 条）。
+  // 全部由 `tauron-adapter` 的**底座**命令集注册（非 feature-gated），故进静态全集。
+  'host_menu_set',
+  'host_menu_popup',
+  'host_menu_reset',
+  'host_tray_create',
+  'host_tray_set_menu',
+  'host_tray_remove',
+  'host_fs_read',
+  'host_fs_write',
+  'host_fs_list',
+  'host_fs_stat',
+  'host_fs_mkdir',
+  'host_fs_remove',
+  'host_http_request',
+  'host_updater_check',
+  'host_updater_status',
+  'host_theme_list',
+  'host_theme_get',
+  'host_theme_set',
 ] as const;
 
 /**
@@ -163,8 +181,7 @@ export const OPTIONAL_FRAMEWORK_COMMANDS = [
 ] as const;
 
 export type FrameworkCommand =
-  | (typeof FRAMEWORK_COMMANDS)[number]
-  | (typeof OPTIONAL_FRAMEWORK_COMMANDS)[number];
+  (typeof FRAMEWORK_COMMANDS)[number] | (typeof OPTIONAL_FRAMEWORK_COMMANDS)[number];
 
 /**
  * 真实 Tauri 后端。

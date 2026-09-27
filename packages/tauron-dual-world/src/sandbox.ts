@@ -9,14 +9,7 @@
  * - 事件通信
  */
 
-import type {
-  SandboxCapabilities,
-  SandboxConfig,
-  SandboxContext,
-  SandboxResult,
-  HostFunction,
-  DEFAULT_SANDBOX_CAPABILITIES,
-} from './types.js';
+import type { SandboxConfig, SandboxContext, SandboxResult, HostFunction } from './types.js';
 
 /** 沙箱实例接口 */
 export interface SandboxInstance {
@@ -57,7 +50,10 @@ export function createSandbox(config: SandboxConfig): SandboxInstance {
   const state = new Map<string, unknown>();
   const eventHandlers: EventHandlers = new Map();
   const hostFunctions = new Map<string, HostFunction>();
-  const pendingCalls = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timeout: number }>();
+  const pendingCalls = new Map<
+    string,
+    { resolve: (v: unknown) => void; reject: (e: Error) => void; timeout: number }
+  >();
 
   const sandboxContext: SandboxContext = {
     pluginId: config.pluginId,
@@ -163,7 +159,7 @@ export function createSandbox(config: SandboxConfig): SandboxInstance {
 
     async destroy(): Promise<void> {
       // Clean up pending calls
-      for (const [id, pending] of pendingCalls) {
+      for (const [, pending] of pendingCalls) {
         clearTimeout(pending.timeout);
         pending.reject(new Error('Sandbox destroyed'));
       }

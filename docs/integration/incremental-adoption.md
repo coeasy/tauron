@@ -6,6 +6,12 @@
 > 交叉引用：[应用层线格式协议 · §1 注册形态](../architecture/app-layer-wire.md)、
 > [架构概览](../architecture/overview.md)（「两层架构」「接线状态（诚实披露）」两节）、
 > [canonical 归属](../architecture/canonical-owners.md)。
+>
+> **不想手工接线**：`@tauron/app-cli` 的 `tauron-app new`（新建工程）/ `tauron-app init`
+> （注入现有 Tauri 项目）会按本文档的装配生成 `src-tauri`，并写好 `path` / `file:` 依赖坐标
+> ——见 [安装与使用 · §3.2](../installation.md)。生成物已含 vite 配置、`before*Command` 钩子与
+> 占位图标，`npm install && npm run tauri dev` 可一键起步；`src-tauri/icons/` 是纯色占位图，
+> 发布前须替换成品牌图标。
 
 ---
 
@@ -13,15 +19,15 @@
 
 | 档 | Rust 装配 | handler 宏 | **实测命令数** | 典型宿主 |
 |---|---|---|---|---|
-| **档 1 只底座** | 只 `manage(SubstrateState)` | `tauron_substrate_handler![]` | **39** | harness 壳、单窗口工具壳 |
-| **档 2 底座 + i18n + notify** | 与档 1 **完全相同** | `tauron_substrate_handler![]` | **39**（i18n 6 + notify 3 已含在内） | 需要多语言 / 通知中心的壳 |
-| **档 3 再加插件运行时** | `state_init*()` 或 `init*()`（注册两份状态） | `tauron_plugin_handler![]`（= `tauron_generate_handler![]`） | **60**（= 底座 39 + 插件运行时 21） | 多插件客户端 |
+| **档 1 只底座** | 只 `manage(SubstrateState)` | `tauron_substrate_handler![]` | **57** | harness 壳、单窗口工具壳 |
+| **档 2 底座 + i18n + notify** | 与档 1 **完全相同** | `tauron_substrate_handler![]` | **57**（i18n 6 + notify 3 已含在内） | 需要多语言 / 通知中心的壳 |
+| **档 3 再加插件运行时** | `state_init*()` 或 `init*()`（注册两份状态） | `tauron_plugin_handler![]`（= `tauron_generate_handler![]`） | **78**（= 底座 57 + 插件运行时 21） | 多插件客户端 |
 
 > **一处必须如实说明的粒度问题**：i18n（6 条）与 notify（3 条）的命令**已经在底座宏的
-> 39 条里**（`tauron_substrate_handler!` 的命令列表），而 `tauron-adapter`
+> 57 条里**（`tauron_substrate_handler!` 的命令列表），而 `tauron-adapter`
 > 对 `tauron-i18n` / `tauron-notify` 是**非可选**依赖
 > （`crates/tauron-adapter/Cargo.toml:16-17`）。因此今天**做不到**「只要底座、不要
-> i18n/notify 的命令面」——**档 1 与档 2 的编译期命令面完全相同（都是 39 条）**，
+> i18n/notify 的命令面」——**档 1 与档 2 的编译期命令面完全相同（都是 57 条）**，
 > 两者的差别只在「宿主是否真的使用这两个域」（是否装载语言包、是否开通知中心读端）。
 > 真要按域裁剪，需要新增第三个族宏（当前只有两组编译期可选集合，理由见
 > [app-layer-wire.md §1](../architecture/app-layer-wire.md) 的「为什么是两组集合」）。
@@ -35,7 +41,7 @@
 > （底座 35 → **39**、全量 50 → **60**，插件域差集 15 → **21**；0.4-A1 后另加跨主体调用 3 条已含。**命令数以本节实测与
 > wire-gate 为准**；本文的行号引用以符号名为主，避免重构后漂移。
 
-### 0.1 底座 39 条按域拆分（实测）
+### 0.1 底座 57 条按域拆分（实测）
 
 来源：`crates/tauron-adapter/src/tauri.rs` 的 `tauron_substrate_handler!` 宏（行号会随重构漂移，以符号名为准）。
 
@@ -47,9 +53,25 @@
 | notify | 3 | `host_notify` `host_notifications_list` `host_notifications_read` |
 | settings | 4 | `host_settings_get` `host_settings_set` `host_settings_adopt_legacy` `host_settings_migrate` |
 | recovery | 2 | `host_recover_boot` `host_recover_report` |
+| menu（R9） | 3 | `host_menu_set` `host_menu_popup` `host_menu_reset` |
+| tray（R9） | 3 | `host_tray_create` `host_tray_set_menu` `host_tray_remove` |
+| fs（R9，允许根内 I/O） | 6 | `host_fs_read` `host_fs_write` `host_fs_list` `host_fs_stat` `host_fs_mkdir` `host_fs_remove` |
+| http（R9） | 1 | `host_http_request` |
+| updater（R9，接 `tauron-distribute`） | 2 | `host_updater_check` `host_updater_status` |
+| theme（接 `tauron-theme`） | 3 | `host_theme_list` `host_theme_get` `host_theme_set` |
 | brand | 1 | `host_brand_info` |
 | 能力协商 | 1 | `host_capabilities` |
-| **合计** | **39** | |
+| **合计** | **57** | |
+
+> **每域的真实性口径（不美化）**：`menu` / `tray` 在 `tauri` feature 下由
+> `TauriMenuSink` / `TauriTraySink` 做**真实现**；`fs` 是 `std::fs` 真实现，但
+> **必须以 `AdapterConfig::with_fs_roots` 配好允许根**（空 = 该域返回
+> `UnsupportedBody`）；`updater` 接 `tauron-distribute`，需 `EndpointClient` 注入，
+> 缺省无端点故如实降级；`http` **是诚实降级**——`reqwest` 的 TLS 后端不在离线依赖
+> 闭包内，只留可注入的 `HttpSink`；`theme` 用 `tauron-theme` 的内置 light/dark 注册表；
+> `brand` 由环境变量 `TAURON_BRAND_CONFIG_JSON` / `TAURON_BRAND_CONFIG` 提供。
+> 这些可用性会由 `host_capabilities` 的 `families` / `unsupported` **运行期推导**并
+> 如实落位（见 §4）。
 
 > 注意：`host_recover_trial_enable` **不在**底座集合里——它要读注册表里插件的当前状态，
 > 属插件运行时域；`host_window_create` 同理（要查注册表确认插件存在），而
@@ -89,11 +111,11 @@ foreach ($m in 'tauron_substrate_handler','tauron_plugin_handler') {
   $n = ([regex]::Matches($src.Substring($i, $end - $i), '\$crate::tauri::host_')).Count
   "$m = $n"
 }
-# 输出（2026-09-26 0.4 发布审计复核）：
-# tauron_substrate_handler = 39
-# tauron_plugin_handler = 62   ← 60 + 2 条 plugin-install（cfg-gated，宏体带 #[cfg]）
+# 输出（2026-09-27 复核；R9 五域 + 品牌/主题接通后）：
+# tauron_substrate_handler = 57
+# tauron_plugin_handler = 80   ← 78 + 2 条 plugin-install（cfg-gated，宏体带 #[cfg]）
 # 注：plugin-install 自 1.0-W6 起**已进 tauron-adapter 的默认特性**（Cargo.toml:21），
-# 故默认构建的 `tauron_plugin_handler!` 实际注册 62 条；`default-features = false` 时为 60 条。
+# 故默认构建的 `tauron_plugin_handler!` 实际注册 80 条；`default-features = false` 时为 78 条。
 ```
 
 另有**门禁**持续守住这两个数字之间的关系（不靠人眼）：
@@ -106,10 +128,10 @@ foreach ($m in 'tauron_substrate_handler','tauron_plugin_handler') {
 
 ---
 
-## 1. 档 1：只底座（39 条）
+## 1. 档 1：只底座（57 条）
 
 「不跑插件运行时」的宿主：harness 壳、单窗口工具、只有窗口/剪贴板/对话框/事件/
-设置/恢复/i18n/通知的桌面客户端。
+设置/恢复/i18n/通知/菜单/托盘/文件系统/HTTP/更新通道/主题的桌面客户端。
 
 ### 1.1 依赖（`src-tauri/Cargo.toml`）
 
@@ -148,7 +170,7 @@ fn main() {
             app.manage(SubstrateState::with_adapter_config(&cfg));
             Ok(())
         })
-        // 39 条底座命令：未注册即不可达（插件命令面不存在）
+        // 57 条底座命令：未注册即不可达（插件命令面不存在）
         .invoke_handler(tauron_adapter::tauron_substrate_handler![])
         .run(tauri::generate_context!())
         .expect("failed to run");
@@ -210,7 +232,7 @@ UI 取 **`@tauron/ui-primitives`**（只依赖 `@tauron/shell-events`），
 
 ### 1.4 命令面
 
-**39 条**（§0.1 的域拆分）。`tauron_plugin_handler!` 的 21 条全部不可达。
+**57 条**（§0.1 的域拆分）。`tauron_plugin_handler!` 的 21 条全部不可达。
 
 ### 1.5 会失去什么能力
 
@@ -218,13 +240,13 @@ UI 取 **`@tauron/ui-primitives`**（只依赖 `@tauron/shell-events`），
   contributes 注册、流式调用、进程 sidecar 的启动与健康探测、安全模式下的试验性启用。
   前端调用这些命令得到 `command not found`（未注册即不可达，正是期望行为）。
 - **`@tauron/ui` 与插件管理 UI**：只能用原语包。
-- **i18n 回退链 / 缺失键计数、通知中心的环形缓冲与未读计数**：命令在（39 条里），
+- **i18n 回退链 / 缺失键计数、通知中心的环形缓冲与未读计数**：命令在（57 条里），
   但本档的语义是「不消费」——不装载语言包、不开通知读端，等于没有这两块能力。
 - **`host_recover_trial_enable`**：安全模式下无法试验性启用某个插件（它属插件域）。
 
 ---
 
-## 2. 档 2：底座 + i18n + notify（39 条）
+## 2. 档 2：底座 + i18n + notify（57 条）
 
 **Rust 侧的依赖与装配与档 1 逐字相同**（命令面也相同，原因见 §0 的粒度说明）。
 本档的增量在**真的把这两个域用起来**：
@@ -268,7 +290,7 @@ await shell.notificationsRead('notif-id');        // 缺省 = 全部已读
 
 ---
 
-## 3. 档 3：再加插件运行时（60 条）
+## 3. 档 3：再加插件运行时（78 条）
 
 多插件客户端：需要注册表、插件调用、contributes（命令面板/设置页）、流式调用、
 进程插件 sidecar。
@@ -296,7 +318,7 @@ fn main() {
     tauri::Builder::default()
         // 注册两份 managed 状态（底座 + 插件运行时，共享同一份底座 Arc）
         .plugin(tauron_adapter::tauri::state_init())
-        // 60 条 host_* 命令（= 底座 39 + 插件运行时 21），root 注册
+        // 78 条 host_* 命令（= 底座 57 + 插件运行时 21），root 注册
         .invoke_handler(tauron_adapter::tauron_generate_handler![])
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
@@ -333,8 +355,8 @@ tauri::Builder::default()
 | API | 位置（符号名为准，行号会随重构漂移） |
 |---|---|
 | `tauron_adapter::tauri::state_init()` / `state_init_with_adapter_config(cfg)` | `crates/tauron-adapter/src/tauri.rs`（注册两份状态，插件名为 `tauron-state`） |
-| `tauron_adapter::tauri::init()` / `init_with_adapter_config(cfg)` | `crates/tauron-adapter/src/tauri.rs`（插件名为 `tauron`，含 invoke_handler = 60 条；`plugin-install` 默认开启时 62 条） |
-| `tauron_adapter::tauron_generate_handler![]` / `tauron_plugin_handler![]` | `crates/tauron-adapter/src/tauri.rs`（后者为 60/62 条真身，前者是别名） |
+| `tauron_adapter::tauri::init()` / `init_with_adapter_config(cfg)` | `crates/tauron-adapter/src/tauri.rs`（插件名为 `tauron`，含 invoke_handler = 78 条；`plugin-install` 默认开启时 80 条） |
+| `tauron_adapter::tauron_generate_handler![]` / `tauron_plugin_handler![]` | `crates/tauron-adapter/src/tauri.rs`（后者为 78/80 条真身，前者是别名） |
 | `tauron_adapter::CommandState` | `crates/tauron-adapter/src/lib.rs` 的类型别名（= `PluginRuntimeState`，含注册表） |
 | `tauron_adapter::tauri::cleanup_closed_window(&state, label)` | `examples/minimal-app/src-tauri/src/main.rs` 使用 |
 | `PluginRuntimeState::with_substrate(Arc<SubstrateState>, AdapterConfig)` | `crates/tauron-adapter/src/lib.rs`（手动装配时用；测试须用 `with_spawner`） |
@@ -344,7 +366,7 @@ tauri::Builder::default()
 > `AdapterConfig` 是唯一能配 `origin_allowlist` / `registry` / `required_plugins` /
 > `recovery_data_dir` 的入口；缺省入口等价于 `AdapterConfig::default()`。
 > ⚠️ `examples/minimal-app/src-tauri/src/main.rs` 与
-> `Cargo.toml` 的注释此前写的「45 条」是**过时注释**，轮 11 已就地修正为 **54 条**；当前命令总数为 **60 条**（底座 39 + 插件运行时 21）；`plugin-install` feature 另注册 2 条，且**该 feature 已进默认**（`Cargo.toml:21`，1.0-W6），故**默认构建实际注册 62 条**，`default-features = false` 时为 60 条
+> `Cargo.toml` 的注释此前写的「45 条」是**过时注释**，轮 11 已就地修正为 **54 条**；此后经 R9 五域（menu/tray/fs/http/updater）与品牌/主题接通，当前命令总数为 **底座 57 / 全量 78**（= 底座 + 插件运行时 21）；`plugin-install` feature 另注册 2 条，且**该 feature 已进默认**（`Cargo.toml:21`，1.0-W6），故**默认构建实际注册 80 条**，`default-features = false` 时为 78 条
 > （doc 里记录过的口径漂移已清零，不再只是"标注过时"）。
 
 ### 3.3 TS 侧
@@ -383,7 +405,7 @@ const health = await shell.runtimeHealth(handle.lease);                 // → {
 
 ### 3.4 命令面
 
-**60 条**（§0.1 的 39 + §0.2 的 21）；`plugin-install` 默认开启时 **62 条**（+2 条 install）。
+**78 条**（§0.1 的 57 + §0.2 的 21）；`plugin-install` 默认开启时 **80 条**（+2 条 install）。
 
 ### 3.5 会失去什么能力
 
@@ -440,7 +462,7 @@ const health = await shell.runtimeHealth(handle.lease);                 // → {
 
 ## 附录 A：框架层——只取信封协议（`tauron-shell`，3 条命令）
 
-如果连底座的 39 条都不需要，只要「插件调用信封」（`plugin_invoke` /
+如果连底座的 57 条都不需要，只要「插件调用信封」（`plugin_invoke` /
 `plugin_cancel` / `plugin_emit`），走**框架层**：
 
 ```toml
@@ -468,7 +490,7 @@ tauri::Builder::default()
 
 ## 附录 B：规划（尚未实现，不要当作可用）
 
-1. **按域裁剪命令族**：今天只有「底座 39 / 全量 60」两组编译期集合，无法只取
+1. **按域裁剪命令族**：今天只有「底座 57 / 全量 78」两组编译期集合，无法只取
    shell + ipc 或只取 i18n + notify（§0 的粒度问题）。
 2. **底座 API 不再能触达注册表**：`SubstrateState` 已不含 registry，但
    `SubstrateState::with_adapter_config` 仍会建恢复/通知/i18n 全量状态；更细的

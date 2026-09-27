@@ -56,11 +56,7 @@ export function createStore<T>(initialState: T): Store<T> {
  * @returns 当前状态
  */
 export function useStore<T>(store: Store<T>): T {
-  return useSyncExternalStore(
-    store.subscribe,
-    store.getState,
-    store.getState,
-  );
+  return useSyncExternalStore(store.subscribe, store.getState, store.getState);
 }
 
 /**

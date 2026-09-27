@@ -15,9 +15,7 @@ const gs = (patch: Partial<GrantSet> = {}): GrantSet => ({
   pluginId: 'com.example.formatter',
   pluginVersion: '1.0.0',
   framework: '>=2.0 <3.0',
-  grants: [
-    { permission: 'http:allow-fetch', risk: 'elevated', description: 'x', scoped: true },
-  ],
+  grants: [{ permission: 'http:allow-fetch', risk: 'elevated', description: 'x', scoped: true }],
   scopes: { 'http:allow-fetch': ['https://api.example.com/**'] },
   approvedAtUnix: 1_700_000_000,
   approver: 'user',

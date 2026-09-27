@@ -24,7 +24,8 @@
 import { prefersReducedMotion } from './motion.js';
 
 /** 动画类型 */
-export type AnimationType = 'fade' | 'slide-up' | 'slide-down' | 'slide-left' | 'slide-right' | 'scale' | 'none';
+export type AnimationType =
+  'fade' | 'slide-up' | 'slide-down' | 'slide-left' | 'slide-right' | 'scale' | 'none';
 
 /** 动画 hook 状态 */
 export interface AnimationState {

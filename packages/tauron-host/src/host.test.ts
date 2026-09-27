@@ -24,12 +24,46 @@ function pluginClient(): { client: HostClient; backend: MockBackend } {
     capabilities: ALL_CAPS,
     pluginId: 'com.example.formatter',
     cases: [
-      { cmd: 'host_plugin_call', result: { callId: 'host-1', pluginId: 'com.example.formatter', cmd: 'format', args: null, seq: 7, createdAt: 100, expiresAt: 200 } },
-      { cmd: 'host_registry_list', result: [{ id: 'com.example.formatter', name: 'Formatter', version: '1.0.0', state: 'ENABLED', disabledBySafemode: false }] },
+      {
+        cmd: 'host_plugin_call',
+        result: {
+          callId: 'host-1',
+          pluginId: 'com.example.formatter',
+          cmd: 'format',
+          args: null,
+          seq: 7,
+          createdAt: 100,
+          expiresAt: 200,
+        },
+      },
+      {
+        cmd: 'host_registry_list',
+        result: [
+          {
+            id: 'com.example.formatter',
+            name: 'Formatter',
+            version: '1.0.0',
+            state: 'ENABLED',
+            disabledBySafemode: false,
+          },
+        ],
+      },
       { cmd: 'host_events_publish', result: { delivered: 2, dropped: false } },
-      { cmd: 'host_events_subscribe', result: { token: 'sub-1', selectors: [{ topic: 'com.example.x.ready' }] } },
+      {
+        cmd: 'host_events_subscribe',
+        result: { token: 'sub-1', selectors: [{ topic: 'com.example.x.ready' }] },
+      },
       { cmd: 'host_events_drain', result: [] },
-      { cmd: 'host_contributes_reconcile', result: { pluginId: 'com.example.formatter', declared: 1, registered: 1, missing: [], extra: [] } },
+      {
+        cmd: 'host_contributes_reconcile',
+        result: {
+          pluginId: 'com.example.formatter',
+          declared: 1,
+          registered: 1,
+          missing: [],
+          extra: [],
+        },
+      },
     ],
   });
   return { client: new HostClient({ backend }), backend };
@@ -38,11 +72,21 @@ function pluginClient(): { client: HostClient; backend: MockBackend } {
 describe('HostClient — 命令镜像与参数形状', () => {
   it('pluginCall 发送 §2.1 定义的 req 形状，且 pluginId 不由调用方传入', async () => {
     const { client, backend } = pluginClient();
-    await client.pluginCall({ callId: 'c-1', method: 'format', argsJson: { text: 'hi' }, kind: 'unary' });
+    await client.pluginCall({
+      callId: 'c-1',
+      method: 'format',
+      argsJson: { text: 'hi' },
+      kind: 'unary',
+    });
 
     const call = backend.invocations[0];
     expect(call?.cmd).toBe('host_plugin_call');
-    expect(call?.args?.req).toEqual({ callId: 'c-1', method: 'format', kind: 'unary', argsJson: { text: 'hi' } });
+    expect(call?.args?.req).toEqual({
+      callId: 'c-1',
+      method: 'format',
+      kind: 'unary',
+      argsJson: { text: 'hi' },
+    });
     // ADR-17：身份只从 label 取，参数里不得出现 pluginId。
     expect(call?.args).not.toHaveProperty('pluginId');
     expect(call?.args).not.toHaveProperty('id');
@@ -58,7 +102,12 @@ describe('HostClient — 命令镜像与参数形状', () => {
       argsRaw: new Uint8Array([1, 2, 3]),
       kind: 'stream',
     });
-    expect(backend.invocations[0]?.args?.req).toEqual({ callId: 'c-2', method: 'm', kind: 'stream', argsJson: { a: 1 } });
+    expect(backend.invocations[0]?.args?.req).toEqual({
+      callId: 'c-2',
+      method: 'm',
+      kind: 'stream',
+      argsJson: { a: 1 },
+    });
   });
 
   it('pluginCall 只给 argsRaw 时抛错而非静默丢载荷（二进制通道未接线）', async () => {
@@ -119,7 +168,9 @@ describe('HostClient — 命令镜像与参数形状', () => {
     const res = await client.eventsPublish({ topic: 'com.example.x.ready', payload: { ok: true } });
     expect(res).toEqual({ delivered: 2, dropped: false });
     expect(backend.invocations[0]?.cmd).toBe('host_events_publish');
-    expect(backend.invocations[0]?.args).toEqual({ evt: { topic: 'com.example.x.ready', payload: { ok: true } } });
+    expect(backend.invocations[0]?.args).toEqual({
+      evt: { topic: 'com.example.x.ready', payload: { ok: true } },
+    });
   });
 
   it('eventsSubscribe / eventsUnsubscribe 分别走 subscribe/unsubscribe 命令', async () => {
@@ -170,10 +221,12 @@ describe('HostClient — 命令镜像与参数形状', () => {
   it('eventsDrain 返回事件总线帧 EventFrame（Rust Frame 线形：topic/seq/payload）', async () => {
     const backend = new MockBackend({
       capabilities: ALL_CAPS,
-      cases: [{
-        cmd: 'host_events_drain',
-        result: [{ topic: 'plugin:com.a:ready', seq: 3, payload: { ok: true } }],
-      }],
+      cases: [
+        {
+          cmd: 'host_events_drain',
+          result: [{ topic: 'plugin:com.a:ready', seq: 3, payload: { ok: true } }],
+        },
+      ],
     });
     const client = new HostClient({ backend });
     const frames = await client.eventsDrain('event');
@@ -205,7 +258,9 @@ describe('错误规范化', () => {
     const client = new HostClient({
       backend: new MockBackend({
         capabilities: ALL_CAPS,
-        cases: [{ cmd: 'host_cancel', error: { code: 'E_CALL_NOT_FOUND', message: 'call 已结束' } }],
+        cases: [
+          { cmd: 'host_cancel', error: { code: 'E_CALL_NOT_FOUND', message: 'call 已结束' } },
+        ],
       }),
     });
     await expect(client.cancel('gone')).rejects.toMatchObject({
@@ -217,7 +272,10 @@ describe('错误规范化', () => {
 
   it('命令未注册 → E_UNKNOWN（确定性失败，不重试）', async () => {
     const client = new HostClient({ backend: new MockBackend({}) });
-    await expect(client.registryList()).rejects.toMatchObject({ code: 'E_UNKNOWN', retryable: false });
+    await expect(client.registryList()).rejects.toMatchObject({
+      code: 'E_UNKNOWN',
+      retryable: false,
+    });
   });
 
   it('超时类错误可重试', async () => {

@@ -12,12 +12,7 @@
 export { runCli, type CliResult } from './cli.js';
 
 // ---- Doctor ----
-export {
-  runDoctor,
-  formatDoctorReport,
-  type DoctorReport,
-  type DoctorCheck,
-} from './doctor.js';
+export { runDoctor, formatDoctorReport, type DoctorReport, type DoctorCheck } from './doctor.js';
 
 // ---- Scaffold ----
 export { createApp, type AppScaffoldResult } from './scaffold.js';

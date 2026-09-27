@@ -21,16 +21,7 @@ export type {
 export { DEFAULT_SANDBOX_CAPABILITIES } from './types.js';
 
 // ---- Sandbox ----
-export {
-  createSandbox,
-  registerHostFunction,
-  type SandboxInstance,
-} from './sandbox.js';
+export { createSandbox, registerHostFunction, type SandboxInstance } from './sandbox.js';
 
 // ---- Bridge ----
-export {
-  createBridge,
-  DEFAULT_BRIDGE_CONFIG,
-  type Bridge,
-  type BridgeConfig,
-} from './bridge.js';
+export { createBridge, DEFAULT_BRIDGE_CONFIG, type Bridge, type BridgeConfig } from './bridge.js';

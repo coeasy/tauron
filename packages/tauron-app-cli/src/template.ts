@@ -121,9 +121,7 @@ export function validateTemplateName(name: string): string {
 function validateTemplateType(type: string): TemplateType {
   const match = SUPPORTED_TEMPLATE_TYPES.find((supported) => supported === type);
   if (match === undefined) {
-    throw new Error(
-      `不支持的模板类型 "${type}"，可选：${SUPPORTED_TEMPLATE_TYPES.join(', ')}`,
-    );
+    throw new Error(`不支持的模板类型 "${type}"，可选：${SUPPORTED_TEMPLATE_TYPES.join(', ')}`);
   }
   return match;
 }

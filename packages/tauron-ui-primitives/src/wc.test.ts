@@ -3,8 +3,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it, beforeEach, vi } from 'vitest';
-import { html, render } from 'lit';
+import { describe, expect, it, beforeEach } from 'vitest';
 
 import './wc.js';
 
@@ -118,7 +117,10 @@ describe('<oc-toast>', () => {
     el.push({
       title: 'Action',
       message: 'test',
-      actions: [{ id: 'ok', label: '确定' }, { id: 'cancel', label: '取消' }],
+      actions: [
+        { id: 'ok', label: '确定' },
+        { id: 'cancel', label: '取消' },
+      ],
     });
     await el.updateComplete;
     const btns = el.shadowRoot?.querySelectorAll('.toast-action') as NodeListOf<HTMLButtonElement>;

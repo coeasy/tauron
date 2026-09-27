@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   createSignal,
   createComputed,
@@ -7,9 +7,6 @@ import {
   enqueueBatch,
   useSignal,
   watchSignal,
-  Signal,
-  Computed,
-  Effect,
 } from './signals.js';
 
 describe('Signal', () => {

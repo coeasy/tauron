@@ -7,7 +7,7 @@ name: Release
 # 这样「打了 v0.2.0 但忘了升版本号」不会产出错版安装包。
 on:
   push:
-    tags: ["v*"]
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       dry_run:
@@ -107,8 +107,8 @@ jobs:
         include:
           - label: linux-x64
             platform: ubuntu-22.04
-            args: ""
-            rust-targets: ""
+            args: ''
+            rust-targets: ''
           - label: windows-x64
             platform: windows-latest
             # 只出 NSIS，不跟着 `tauri.conf.json` 的 `targets: "all"` 走。
@@ -118,16 +118,16 @@ jobs:
             # `Downloading .../wix314-binaries.zip` 失败即 `failed to bundle
             # project`）。NSIS 是 Windows 侧主安装包格式，先保证它确定可出。
             # MSI 待补齐 WiX 依赖后再加回（见 CHANGELOG「已知债务」）。
-            args: "--bundles nsis"
-            rust-targets: ""
+            args: '--bundles nsis'
+            rust-targets: ''
           - label: macos-arm64
             platform: macos-latest
-            args: "--target aarch64-apple-darwin"
-            rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+            args: '--target aarch64-apple-darwin'
+            rust-targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
           - label: macos-x64
             platform: macos-latest
-            args: "--target x86_64-apple-darwin"
-            rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+            args: '--target x86_64-apple-darwin'
+            rust-targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
 
     steps:
       - uses: actions/checkout@v4

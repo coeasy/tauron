@@ -46,12 +46,7 @@ export interface RegistryOpResult {
 }
 
 /** 插件状态。 */
-export type PluginState =
-  | 'installed'
-  | 'enabled'
-  | 'disabled'
-  | 'errored'
-  | 'uninstalled';
+export type PluginState = 'installed' | 'enabled' | 'disabled' | 'errored' | 'uninstalled';
 
 /** 插件条目。 */
 export interface RegistryEntry {
@@ -105,11 +100,7 @@ export class MockRegistry {
    * `error` 形参是必填 `string`，因此返回的对象满足
    * `exactOptionalPropertyTypes` 下 `error?: string` 的约束。
    */
-  private fail(
-    type: OperationRecord['type'],
-    pluginId: string,
-    error: string,
-  ): RegistryOpResult {
+  private fail(type: OperationRecord['type'], pluginId: string, error: string): RegistryOpResult {
     this.operations.push({
       type,
       pluginId,

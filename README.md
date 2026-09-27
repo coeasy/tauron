@@ -3,7 +3,7 @@
 > Tauri 2 之上的插件化桌面客户端基础设施 —— 插件隔离、受控能力面、跨语言契约与多形态插件执行。
 
 [![CI](https://github.com/coeasy/tauron/actions/workflows/ci.yml/badge.svg)](https://github.com/coeasy/tauron/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-1701%20TS%20%C2%B7%201299%20Rust-informational)](#测试)
+[![Tests](https://img.shields.io/badge/tests-1729%20TS%20%C2%B7%201299%20Rust-informational)](#测试)
 [![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![Node](https://img.shields.io/badge/Node-22.x-brightgreen)](#)
 [![Rust](https://img.shields.io/badge/Rust-1.98-orange)](#)
@@ -21,7 +21,7 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
 | 层 | 面向 | 拿到什么 |
 |---|---|---|
 | **框架层** | 通用集成 | 信封协议 `plugin_invoke`、`PluginType` 四形态（Js / Process 有生产执行器；Rust / Wasm 诚实返回 `E_PLUGIN_TYPE_NO_RUNTIME`，代码里**不存在**「B+ 混合模式」）、双层 ACL、事件总线、插件市场（Ed25519 验签）、CLI。**诚实边界**：`@tauron/dual-world` 的进程内沙箱是 fail-closed 模拟（`SANDBOX_UNAVAILABLE`），进程内 WASM 运行时仍为路线图项 |
-| **应用层** | 完整客户端交付 | `host_*` 命令族（60 条 = 底座 39 + 插件运行时 21；`plugin-install` 另加 2 条，该 feature **已进默认特性** → 默认装配共 62 条）、生命周期状态机、三档授权、设置中心、白标、崩溃恢复、UI 组件 |
+| **应用层** | 完整客户端交付 | `host_*` 命令族（78 条 = 底座 57 + 插件运行时 21；`plugin-install` 另加 2 条，该 feature **已进默认特性** → 默认装配共 80 条）、生命周期状态机、三档授权、设置中心、白标、主题、菜单/托盘、允许根内的文件 I/O、更新通道、崩溃恢复、UI 组件 |
 
 ### 它不是什么
 
@@ -82,6 +82,47 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
 ---
 
 ## 快速开始（第三方集成）
+
+### 0. 一键脚手架（推荐起点）
+
+**能一键跑通到哪一步**——先把边界说清，避免期待错位：
+
+| 产出 | 状态 |
+|---|---|
+| `src-tauri/`（`Cargo.toml` / `main.rs` / `build.rs` / `capabilities/default.json` / `tauri.conf.json`） | ✅ **真装配**：`state_init_with_adapter_config` + `tauron_generate_handler![]`（80 条）+ 窗口销毁回收 + capability 覆盖 `plugin-*` 窗。形态与 `examples/minimal-app` 同源 |
+| 依赖坐标 | ✅ `path` / `file:` 指向**本机 tauron 检出根**（20 个 npm 包与 15 个 crate 都没发布，registry 坐标今天解析不了，所以脚手架不写那种坐标） |
+| 前端 bundler / dev-server 配置 | ✅ `vite.config.ts`（`server.port` 与 `devUrl` 一致、`outDir` 与 `frontendDist` 一致、排除 `src-tauri/`）+ 根 `index.html` + `tauri.conf.json` 的 `beforeDevCommand` / `beforeBuildCommand` |
+| `src-tauri/icons/` | ⚠️ 生成**纯色占位图**（`32x32.png` / `128x128.png` / `128x128@2x.png` / `icon.png` / `icon.ico` / `icon.icns`）——**发布前须替换成品牌图标**。不给文件连 `cargo check` 都过不去：`tauri-build` 在 Windows 上要 `icons/icon.ico` 才能生成资源文件 |
+
+> **实测（2026-09-27）**：生成的工程（含占位图标与 vite 配置）开箱即可编译——默认形态
+> 与 `--features substrate-only` 两档 `cargo check` **均通过**（`Finished dev profile`）。
+>
+> **这条实测只覆盖 Rust 侧**。前端那一半（`npm install` → `npm run tauri dev`）**未在本机
+> 验证过**——它要从 registry 拉 `vite` / `@tauri-apps/cli`，沙箱没有网络。另有两条前置：
+> ① `file:` 依赖是**软链**，所以本机 tauron 检出必须已 `pnpm install`（供 `@tauron/host`
+> 解析它自己的 `workspace:*` 依赖）；② `packages/*/dist` 必须是已构建状态（`pnpm -r build`）。
+
+```bash
+# `tauron-app` 尚未发布到 npm，在仓库根直接跑 dist：
+node packages/tauron-app-cli/dist/cli.js new ./my-app --name my-app
+# 等价写法（同一个 bin）：create-tauron-app ./my-app
+
+# 一步到位：
+cd my-app && npm install && npm run tauri dev
+
+# 或先单独验证「真接上了 tauron」：
+cd my-app/src-tauri && cargo check                          # 80 条命令
+cargo check --features substrate-only                       # 只取底座：57 条命令
+```
+
+常用参数：`--framework react|vue|svelte|vanilla`、`--shell tauri|electron`、
+`--capabilities host_registry_list,host_lifecycle_report`、`--tauron-path <检出根相对路径>`
+（默认自动从 CLI 自身位置上溯探测）、`--dry-run`、`--force`。
+
+**已有 Tauri 项目**改用注入式接入：`tauron-app init --dir <你的项目>`——它会加
+`path` 依赖、接线 Builder 链、补 capability 与 `build.rs`；若你原有 `.invoke_handler(..)`
+已存在，它**不会**动你的源码（Tauri 的 `invoke_handler` 是覆盖语义，自动追加会丢命令），
+而是把需要手工合并的那一行如实打印出来。
 
 ### 1. 安装依赖
 
@@ -488,7 +529,7 @@ tauron/
 
 | 侧 | 用例数 | 口径 |
 |---|---|---|
-| TypeScript | **1701**（101 个测试文件 / 20 包） | `pnpm -r test` 实跑通过 |
+| TypeScript | **1729**（101 个测试文件 / 20 包） | `pnpm -r test` 实跑通过 |
 | Rust | **1299** | 源码内 `#[test]` 声明数（静态计数）；同修订 `cargo test --workspace --lib --tests` 实跑 **1264**（15 个测试二进制） |
 | 跨语言契约 | **126** | `@tauron/contract-tests` 的 wire-gate（`vitest run src/wire-gate.test.ts` 实跑）；本包合计 147 条 / 2 个文件 |
 

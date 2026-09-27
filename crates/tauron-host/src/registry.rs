@@ -613,10 +613,7 @@ impl Registry {
             return Err(HostError::new(ErrorCode::E_AUTH_DENIED, "调用命令为空"));
         }
         let mut pending = self.pending.lock();
-        let plugin_pending = pending
-            .values()
-            .filter(|call| call.plugin_id == quota_owner)
-            .count();
+        let plugin_pending = pending.values().filter(|call| call.plugin_id == quota_owner).count();
         if pending.len() >= self.config.max_pending_calls
             || plugin_pending >= MAX_PENDING_PER_PLUGIN
         {
@@ -631,10 +628,7 @@ impl Registry {
             self.gc_expired();
             pending = self.pending.lock();
         }
-        let plugin_pending = pending
-            .values()
-            .filter(|call| call.plugin_id == quota_owner)
-            .count();
+        let plugin_pending = pending.values().filter(|call| call.plugin_id == quota_owner).count();
         if pending.len() >= self.config.max_pending_calls
             || plugin_pending >= MAX_PENDING_PER_PLUGIN
         {

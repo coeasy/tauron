@@ -16,28 +16,13 @@ export {
 } from './context.js';
 
 // ---- Hooks ----
-export {
-  useInvoke,
-  type InvokeState,
-  type UseInvokeReturn,
-} from './use-invoke.js';
+export { useInvoke, type InvokeState, type UseInvokeReturn } from './use-invoke.js';
 
-export {
-  useEvent,
-  type UseEventReturn,
-} from './use-event.js';
+export { useEvent, type UseEventReturn } from './use-event.js';
 
-export {
-  useCapabilities,
-  useIsTauri,
-} from './use-capabilities.js';
+export { useCapabilities, useIsTauri } from './use-capabilities.js';
 
 export { usePluginId } from './use-plugin-id.js';
 
 // ---- Store ----
-export {
-  createStore,
-  useStore,
-  useStoreSelector,
-  type Store,
-} from './store.js';
+export { createStore, useStore, useStoreSelector, type Store } from './store.js';

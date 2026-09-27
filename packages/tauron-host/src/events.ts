@@ -7,12 +7,7 @@
 
 /** JSON 值（跨 IPC 的载荷只能是 JSON）。 */
 export type JsonValue =
-  | null
-  | boolean
-  | number
-  | string
-  | JsonValue[]
-  | { [key: string]: JsonValue };
+  null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 /** 事件主题命名约定：`<插件id>.<名字>`，最长 200 字符。 */
 export const TOPIC_MAX_LENGTH = 200;

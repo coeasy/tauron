@@ -121,9 +121,7 @@ export function validateIdentifier(identifier: string): string {
     throw new Error('品牌标识最多 100 个字符');
   }
   if (!/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(identifier)) {
-    throw new Error(
-      '品牌标识仅允许小写字母、数字、连字符和点，且不能以连字符或点开头或结尾',
-    );
+    throw new Error('品牌标识仅允许小写字母、数字、连字符和点，且不能以连字符或点开头或结尾');
   }
   return identifier;
 }
@@ -147,9 +145,7 @@ export function validateProtocolName(protocolName: string): string {
     throw new Error('协议名最多 50 个字符');
   }
   if (!/^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(protocolName)) {
-    throw new Error(
-      '协议名仅允许小写字母、数字和连字符，且不能以连字符开头或结尾',
-    );
+    throw new Error('协议名仅允许小写字母、数字和连字符，且不能以连字符开头或结尾');
   }
   return protocolName;
 }
@@ -186,9 +182,7 @@ export function validateDataDirName(dataDirName: string): string {
     throw new Error('数据目录名称最多 50 个字符');
   }
   if (!/^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(dataDirName)) {
-    throw new Error(
-      '数据目录名称仅允许小写字母、数字和连字符，且不能以连字符开头或结尾',
-    );
+    throw new Error('数据目录名称仅允许小写字母、数字和连字符，且不能以连字符开头或结尾');
   }
   return dataDirName;
 }
@@ -250,9 +244,7 @@ export function validatePlatforms(platforms: string[]): BuildPlatform[] {
   const result: BuildPlatform[] = [];
   for (const platform of platforms) {
     if (!SUPPORTED_PLATFORMS.includes(platform as BuildPlatform)) {
-      throw new Error(
-        `不支持的平台 "${platform}"，可选：${SUPPORTED_PLATFORMS.join(', ')}`,
-      );
+      throw new Error(`不支持的平台 "${platform}"，可选：${SUPPORTED_PLATFORMS.join(', ')}`);
     }
     result.push(platform as BuildPlatform);
   }
@@ -264,9 +256,7 @@ export function validatePlatforms(platforms: string[]): BuildPlatform[] {
  */
 export function validateBuildType(buildType: string): BuildType {
   if (!SUPPORTED_BUILD_TYPES.includes(buildType as BuildType)) {
-    throw new Error(
-      `不支持的构建类型 "${buildType}"，可选：${SUPPORTED_BUILD_TYPES.join(', ')}`,
-    );
+    throw new Error(`不支持的构建类型 "${buildType}"，可选：${SUPPORTED_BUILD_TYPES.join(', ')}`);
   }
   return buildType as BuildType;
 }
@@ -278,7 +268,12 @@ export function validateBuildType(buildType: string): BuildType {
  */
 export function checkUniqueness(
   config: BrandBuildConfig,
-  existing: Array<Pick<BrandBuildConfig, 'identifier' | 'protocolName' | 'autostartName' | 'dataDirName' | 'shortcut'>>,
+  existing: Array<
+    Pick<
+      BrandBuildConfig,
+      'identifier' | 'protocolName' | 'autostartName' | 'dataDirName' | 'shortcut'
+    >
+  >,
 ): void {
   for (const existingConfig of existing) {
     if (existingConfig.identifier === config.identifier) {
@@ -521,7 +516,12 @@ export function generateBrandFiles(config: BrandBuildConfig): Map<string, string
  */
 export function brandBuild(
   config: Partial<BrandBuildConfig>,
-  existing: Array<Pick<BrandBuildConfig, 'identifier' | 'protocolName' | 'autostartName' | 'dataDirName' | 'shortcut'>> = [],
+  existing: Array<
+    Pick<
+      BrandBuildConfig,
+      'identifier' | 'protocolName' | 'autostartName' | 'dataDirName' | 'shortcut'
+    >
+  > = [],
 ): BrandBuildResult {
   try {
     const validated = validateBrandBuildConfig(config);

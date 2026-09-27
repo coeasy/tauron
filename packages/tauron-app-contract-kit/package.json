@@ -1,9 +1,43 @@
 {
   "name": "@tauron/app-contract-kit",
   "version": "0.1.0",
-  "private": true,
   "description": "tauron 应用契约测试套件：core API 行为 / 事件协议 / 错误码用例集 + mock Backend",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coeasy/tauron.git",
+    "directory": "packages/tauron-app-contract-kit"
+  },
+  "homepage": "https://github.com/coeasy/tauron",
+  "bugs": {
+    "url": "https://github.com/coeasy/tauron/issues"
+  },
+  "keywords": [
+    "tauron",
+    "tauri",
+    "contract",
+    "testing",
+    "mock"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",

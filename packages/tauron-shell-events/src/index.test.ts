@@ -14,9 +14,7 @@ describe('@tauron/shell-events 契约自检', () => {
   });
 
   it('SHELL_EVENT_NAMES 与 SHELL_EVENTS 值域一致', () => {
-    expect([...SHELL_EVENT_NAMES].sort()).toEqual(
-      [...new Set(Object.values(SHELL_EVENTS))].sort(),
-    );
+    expect([...SHELL_EVENT_NAMES].sort()).toEqual([...new Set(Object.values(SHELL_EVENTS))].sort());
   });
 
   it('关键事件存在（回归锁：改名即失败）', () => {

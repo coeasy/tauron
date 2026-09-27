@@ -45,7 +45,16 @@ describe('PluginJsRuntime', () => {
     });
 
     it('无效插件 ID 拒绝', () => {
-      const invalidIds = ['invalid', 'UPPER', '123', 'test', 'test-plugin', '-test', 'test-', 'test..plugin'];
+      const invalidIds = [
+        'invalid',
+        'UPPER',
+        '123',
+        'test',
+        'test-plugin',
+        '-test',
+        'test-',
+        'test..plugin',
+      ];
       for (const id of invalidIds) {
         const result = runtime.createIdentity(id);
         expect(result.ok).toBe(false);
@@ -184,7 +193,9 @@ describe('PluginJsRuntime', () => {
     });
 
     it('正常注册', () => {
-      const result = runtime.registerContributes('test.plugin', 'view', 'main', { title: 'Main View' });
+      const result = runtime.registerContributes('test.plugin', 'view', 'main', {
+        title: 'Main View',
+      });
       expect(result.ok).toBe(true);
       expect(runtime.contributes.length).toBe(1);
     });

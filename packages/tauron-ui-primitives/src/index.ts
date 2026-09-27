@@ -19,17 +19,10 @@
 // 因为它要调宿主命令；哑组件 `oc-plugin-manager` 留在本包。
 // ──────────────────────────────────────────────────────────────────────────
 
-export {
-  designTokens,
-  safemodeTokens,
-  toCssVariables,
-  toCssText,
-} from './tokens.js';
+export { designTokens, safemodeTokens, toCssVariables, toCssText } from './tokens.js';
 export type { DesignTokens } from './tokens.js';
 
-export {
-  TitleBarStore,
-} from './title-bar.js';
+export { TitleBarStore } from './title-bar.js';
 export type {
   TitleBarConfig,
   TitleBarSnapshot,
@@ -38,9 +31,7 @@ export type {
   WindowState,
 } from './title-bar.js';
 
-export {
-  UpdaterStore,
-} from './updater-dialog.js';
+export { UpdaterStore } from './updater-dialog.js';
 export type {
   UpdaterActionResult,
   UpdaterConfig,
@@ -49,9 +40,7 @@ export type {
   UpdateInfo,
 } from './updater-dialog.js';
 
-export {
-  ToastStore,
-} from './toast.js';
+export { ToastStore } from './toast.js';
 export type {
   ToastAction,
   ToastActionResult,
@@ -61,9 +50,7 @@ export type {
   ToastSnapshot,
 } from './toast.js';
 
-export {
-  CommandPaletteStore,
-} from './command-palette.js';
+export { CommandPaletteStore } from './command-palette.js';
 export type {
   CommandItem,
   CommandPaletteActionResult,
@@ -72,9 +59,7 @@ export type {
   CommandPaletteState,
 } from './command-palette.js';
 
-export {
-  ShortcutRecorderStore,
-} from './shortcut-recorder.js';
+export { ShortcutRecorderStore } from './shortcut-recorder.js';
 export type {
   KeyInfo,
   ModifierKey,
@@ -110,11 +95,7 @@ export type {
 
 // 主题选择器（`<oc-theme-picker>` + ThemePickerStore）
 export { OcThemePicker, ThemePickerStore } from './theme-picker.js';
-export type {
-  ThemePreview,
-  ThemeChangeEventDetail,
-  ThemePickerSnapshot,
-} from './theme-picker.js';
+export type { ThemePreview, ThemeChangeEventDetail, ThemePickerSnapshot } from './theme-picker.js';
 
 // 动效基础设施（§5.4 动效与启动退出体验）
 export {
@@ -148,11 +129,7 @@ export type {
 } from './motion.js';
 
 // Splash 启动画面（<oc-splash> + SplashStore）
-export {
-  OcSplash,
-  SplashStore,
-  DEFAULT_SPLASH_CONFIG,
-} from './wc-motion.js';
+export { OcSplash, SplashStore, DEFAULT_SPLASH_CONFIG } from './wc-motion.js';
 export type {
   SplashConfig,
   SplashPhase,
@@ -174,5 +151,11 @@ export { ExitAnimation, createExitAnimation } from './exit-animation.js';
 export type { ExitAnimationConfig, ExitAnimationType, ExitPhase } from './exit-animation.js';
 
 // 组件动画（自 @tauron/host 迁入：纯 DOM 时序工具）
-export { animateEnter, animateLeave, staggerIn, staggerOut, animateListUpdate } from './component-animation.js';
+export {
+  animateEnter,
+  animateLeave,
+  staggerIn,
+  staggerOut,
+  animateListUpdate,
+} from './component-animation.js';
 export type { AnimationType, AnimationConfig, StaggerConfig } from './component-animation.js';

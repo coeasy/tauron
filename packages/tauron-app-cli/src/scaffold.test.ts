@@ -16,9 +16,9 @@ import {
   toSlug,
   generatePackageJson,
   generateTauriConfig,
+  generateViteConfig,
+  generateIconFiles,
   generateTsconfig,
-  generateAppEntry,
-  generateCapabilitiesJson,
   generateGitignore,
   generateFiles,
   InvalidTargetError,
@@ -29,6 +29,12 @@ import {
   UNSUPPORTED_TARGETS,
   type ScaffoldConfig,
 } from '../src/scaffold.js';
+import {
+  placeholderPng,
+  placeholderIco,
+  placeholderIcns,
+  placeholderIconFiles,
+} from '../src/icon-assets.js';
 
 // ──────────────────────────────────────────────────────────────────────────
 // validateName
@@ -196,11 +202,15 @@ describe('validateCapabilities', () => {
 
   it('拒绝未知能力', () => {
     expect(() => validateCapabilities(['unknown_cap'])).toThrow(ConfigValidationError);
-    expect(() => validateCapabilities(['host_registry_list', 'fake_cap'])).toThrow(ConfigValidationError);
+    expect(() => validateCapabilities(['host_registry_list', 'fake_cap'])).toThrow(
+      ConfigValidationError,
+    );
   });
 
   it('拒绝非数组', () => {
-    expect(() => validateCapabilities('host_registry_list' as unknown as string[])).toThrow(ConfigValidationError);
+    expect(() => validateCapabilities('host_registry_list' as unknown as string[])).toThrow(
+      ConfigValidationError,
+    );
   });
 });
 
@@ -264,6 +274,9 @@ describe('scaffold', () => {
     expect(result.files.has('package.json')).toBe(true);
     expect(result.files.has('tsconfig.json')).toBe(true);
     expect(result.files.has('.gitignore')).toBe(true);
+    // 图标是二进制，走单独一张表（文本与二进制写入路径不同）。
+    expect(result.binaryFiles.size).toBe(6);
+    expect(result.binaryFiles.has('src-tauri/icons/icon.ico')).toBe(true);
   });
 
   it('生成 React 入口', () => {
@@ -371,7 +384,8 @@ describe('scaffold', () => {
       capabilities: [],
     });
     expect(result.ok).toBe(true);
-    const html = result.files.get('src/index.html');
+    // HTML 入口在工程根：vite 的默认 root 是工程根，放 `src/` 下 rollup 找不到入口。
+    const html = result.files.get('index.html');
     expect(html).toContain('<!DOCTYPE html>');
     expect(html).toContain('my-app');
     expect(html).toContain('id="root"');
@@ -419,9 +433,32 @@ describe('generatePackageJson', () => {
     };
     const pkg = JSON.parse(generatePackageJson(config));
     expect(pkg.name).toBe('my-app');
-    expect(pkg.scripts.dev).toBe('tauri dev');
-    expect(pkg.dependencies['@tauron/host']).toBe('workspace:*');
+    // 脚本取 Tauri 官方模板规范形状：`dev` 起前端、`tauri` 起 Tauri CLI。
+    expect(pkg.scripts.dev).toBe('vite');
+    expect(pkg.scripts.build).toBe('vite build');
+    expect(pkg.scripts.tauri).toBe('tauri');
+    // 没给 tauronPath 时只能写版本号占位：tauron 的 npm 包尚未发布，`pnpm i` 装不到。
+    expect(pkg.dependencies['@tauron/host']).toBe('0.1.0');
+    // `tauri dev` / `tauri build` 两个 script 的执行体必须来自 devDependencies。
+    expect(pkg.devDependencies['@tauri-apps/cli']).toBeDefined();
+    // before*Command 会调到 `npm run dev` / `npm run build`，执行体是 vite。
+    expect(pkg.devDependencies.vite).toBeDefined();
     expect(pkg.dependencies.react).toBeDefined();
+  });
+
+  it('给了 tauronPath 时生成可解析的 file: 依赖', () => {
+    const config: ScaffoldConfig = {
+      name: 'my-app',
+      slug: 'my-app',
+      description: 'Test',
+      framework: 'react',
+      targets: ['desktop'],
+      shell: 'tauri',
+      capabilities: [],
+      tauronPath: '../..',
+    };
+    const pkg = JSON.parse(generatePackageJson(config));
+    expect(pkg.dependencies['@tauron/host']).toBe('file:../../packages/tauron-host');
   });
 
   it('不同框架生成不同依赖', () => {
@@ -439,8 +476,11 @@ describe('generatePackageJson', () => {
     const vuePkg = JSON.parse(generatePackageJson({ ...base, framework: 'vue' }));
     expect(vuePkg.dependencies.vue).toBeDefined();
 
+    // svelte 编译进产物、不进运行时依赖，因此只在 devDependencies。
     const sveltePkg = JSON.parse(generatePackageJson({ ...base, framework: 'svelte' }));
-    expect(sveltePkg.dependencies.svelte).toBeDefined();
+    expect(sveltePkg.dependencies.svelte).toBeUndefined();
+    expect(sveltePkg.devDependencies.svelte).toBeDefined();
+    expect(sveltePkg.devDependencies['@sveltejs/vite-plugin-svelte']).toBeDefined();
 
     const vanillaPkg = JSON.parse(generatePackageJson({ ...base, framework: 'vanilla' }));
     expect(vanillaPkg.dependencies.react).toBeUndefined();
@@ -464,6 +504,177 @@ describe('generateTauriConfig', () => {
     expect(conf.identifier).toBe('com.tauron.my-app');
     expect(conf.app.windows[0].title).toBe('Test');
   });
+
+  it('build 段带 before*Command 钩子（一键起前端的关键）', () => {
+    const config: ScaffoldConfig = {
+      name: 'my-app',
+      slug: 'my-app',
+      description: 'Test',
+      framework: 'react',
+      targets: ['desktop'],
+      shell: 'tauri',
+      capabilities: [],
+    };
+    const conf = JSON.parse(generateTauriConfig(config));
+    // 缺 beforeDevCommand 时 `tauri dev` 会去连没人监听的 devUrl；缺
+    // beforeBuildCommand 时 `tauri build` 会去读不存在的 dist/。
+    expect(conf.build.beforeDevCommand).toBe('npm run dev');
+    expect(conf.build.beforeBuildCommand).toBe('npm run build');
+    expect(conf.build.frontendDist).toBe('../dist');
+    expect(conf.build.devUrl).toBe('http://localhost:1420');
+  });
+
+  it('bundle.icon 声明脚手架实际产出的占位图标', () => {
+    const config: ScaffoldConfig = {
+      name: 'my-app',
+      slug: 'my-app',
+      description: 'Test',
+      framework: 'react',
+      targets: ['desktop'],
+      shell: 'tauri',
+      capabilities: [],
+    };
+    const conf = JSON.parse(generateTauriConfig(config));
+    expect(conf.bundle.icon).toContain('icons/icon.ico');
+    expect(conf.bundle.icon).toContain('icons/icon.icns');
+    expect(conf.bundle.icon).toContain('icons/32x32.png');
+  });
+});
+
+describe('generateViteConfig', () => {
+  const base: Omit<ScaffoldConfig, 'framework'> = {
+    name: 'my-app',
+    slug: 'my-app',
+    description: 'Test',
+    targets: ['desktop'],
+    shell: 'tauri',
+    capabilities: [],
+  };
+
+  it('端口与 devUrl 一致，outDir 与 frontendDist 一致', () => {
+    const vite = generateViteConfig({ ...base, framework: 'react' });
+    // port 必须等于 tauri.conf.json 的 devUrl；strictPort 让占用变成显式失败。
+    expect(vite).toContain('port: 1420');
+    expect(vite).toContain('strictPort: true');
+    // outDir 必须等于 tauri.conf.json 的 frontendDist（../dist）。
+    expect(vite).toContain("outDir: 'dist'");
+    // 排除 src-tauri：否则 Rust 编译产物会触发前端热重载风暴。
+    expect(vite).toContain('**/src-tauri/**');
+    // Tauri 自定义协议下绝对路径会 404。
+    expect(vite).toContain("base: './'");
+  });
+
+  it('React 带 plugin-react', () => {
+    const vite = generateViteConfig({ ...base, framework: 'react' });
+    expect(vite).toContain('@vitejs/plugin-react');
+    expect(vite).toContain('plugins: [react()]');
+  });
+
+  it('Vue 带 plugin-vue', () => {
+    const vite = generateViteConfig({ ...base, framework: 'vue' });
+    expect(vite).toContain('@vitejs/plugin-vue');
+    expect(vite).toContain('plugins: [vue()]');
+  });
+
+  it('Svelte 带 vite-plugin-svelte', () => {
+    const vite = generateViteConfig({ ...base, framework: 'svelte' });
+    expect(vite).toContain('@sveltejs/vite-plugin-svelte');
+    expect(vite).toContain('plugins: [svelte()]');
+  });
+
+  it('vanilla 无插件 import、plugins 为空数组', () => {
+    const vite = generateViteConfig({ ...base, framework: 'vanilla' });
+    expect(vite).toContain('plugins: []');
+    expect(vite).not.toContain('@vitejs/plugin-');
+    expect(vite).not.toContain('@sveltejs/vite-plugin-svelte');
+  });
+});
+
+describe('generateIconFiles', () => {
+  const base: Omit<ScaffoldConfig, 'shell'> = {
+    name: 'my-app',
+    slug: 'my-app',
+    description: 'Test',
+    framework: 'react',
+    targets: ['desktop'],
+    capabilities: [],
+  };
+
+  it('Tauri 壳产出 6 个占位图标，路径带 src-tauri/icons/ 前缀', () => {
+    const icons = generateIconFiles({ ...base, shell: 'tauri' });
+    expect(icons.size).toBe(6);
+    for (const key of icons.keys()) {
+      expect(key.startsWith('src-tauri/icons/')).toBe(true);
+    }
+    // Windows 资源文件要 .ico、macOS 打包要 .icns、Linux 要两个 PNG。
+    expect(icons.has('src-tauri/icons/icon.ico')).toBe(true);
+    expect(icons.has('src-tauri/icons/icon.icns')).toBe(true);
+    expect(icons.has('src-tauri/icons/32x32.png')).toBe(true);
+    expect(icons.has('src-tauri/icons/128x128.png')).toBe(true);
+    // 缺这组文件 `tauri-build` 直接失败（不是「打包才需要」）。
+    expect(icons.get('src-tauri/icons/icon.ico')!.length).toBeGreaterThan(0);
+  });
+
+  it('非 Tauri 壳不产图标（Electron 图标不在 src-tauri/ 下）', () => {
+    expect(generateIconFiles({ ...base, shell: 'electron' }).size).toBe(0);
+  });
+});
+
+describe('icon-assets（占位图标字节）', () => {
+  const startsWith = (bytes: Uint8Array, prefix: number[]): boolean =>
+    prefix.every((b, i) => bytes[i] === b);
+
+  it('PNG 带合法签名与 IHDR / IEND 块', () => {
+    const png = placeholderPng(32);
+    // 8 字节 PNG 签名——`tauri-bundler` / 图片库据此识别格式。
+    expect(startsWith(png, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])).toBe(true);
+    const text = new TextDecoder('latin1').decode(png);
+    expect(text).toContain('IHDR');
+    expect(text).toContain('IDAT');
+    expect(text).toContain('IEND');
+  });
+
+  it('PNG 逐字节确定（同尺寸两次调用完全相等）', () => {
+    expect(placeholderPng(32)).toEqual(placeholderPng(32));
+  });
+
+  it('ICO 头部合法：reserved=0 / type=1 / 单帧 / 尺寸=32', () => {
+    const ico = placeholderIco(32);
+    // ICONDIR：reserved(2) + type(2) + count(2)
+    expect(ico[0]).toBe(0);
+    expect(ico[1]).toBe(0);
+    expect(ico[2]).toBe(1); // type = 1（图标，非光标）
+    expect(ico[3]).toBe(0);
+    expect(ico[4]).toBe(1); // 帧数 = 1
+    expect(ico[5]).toBe(0);
+    // ICONDIRENTRY 的宽/高字段：32 可直接表示
+    expect(ico[6]).toBe(32);
+    expect(ico[7]).toBe(32);
+  });
+
+  it('ICNS 魔术数与长度字段自洽', () => {
+    const icns = placeholderIcns(128);
+    const text = new TextDecoder('latin1').decode(icns.slice(0, 4));
+    expect(text).toBe('icns');
+    // 文件第 4–7 字节是大端总长度，必须等于实际字节数。
+    const declared = (icns[4]! << 24) | (icns[5]! << 16) | (icns[6]! << 8) | icns[7]!;
+    expect(declared >>> 0).toBe(icns.length);
+  });
+
+  it('placeholderIconFiles 覆盖三平台所需的最小集合', () => {
+    const icons = placeholderIconFiles();
+    expect([...icons.keys()].sort()).toEqual([
+      '128x128.png',
+      '128x128@2x.png',
+      '32x32.png',
+      'icon.icns',
+      'icon.ico',
+      'icon.png',
+    ]);
+    for (const bytes of icons.values()) {
+      expect(bytes.length).toBeGreaterThan(0);
+    }
+  });
 });
 
 describe('generateTsconfig', () => {
@@ -478,8 +689,25 @@ describe('generateTsconfig', () => {
       capabilities: [],
     };
     const tsconfig = JSON.parse(generateTsconfig(config));
-    expect(tsconfig.extends).toBe('@tauron/base-tsconfig');
+    // 不自造 extends：`@tauron/base-tsconfig` 在本仓不存在，extends 它必报错。
+    expect(tsconfig.extends).toBeUndefined();
     expect(tsconfig.compilerOptions.outDir).toBe('dist');
+    expect(tsconfig.compilerOptions.strict).toBe(true);
+    expect(tsconfig.compilerOptions.jsx).toBe('react-jsx');
+  });
+
+  it('非 React 框架不带 jsx', () => {
+    const config: ScaffoldConfig = {
+      name: 'my-app',
+      slug: 'my-app',
+      description: 'Test',
+      framework: 'vue',
+      targets: ['desktop'],
+      shell: 'tauri',
+      capabilities: [],
+    };
+    const tsconfig = JSON.parse(generateTsconfig(config));
+    expect(tsconfig.compilerOptions.jsx).toBeUndefined();
   });
 });
 
@@ -507,12 +735,118 @@ describe('generateFiles', () => {
     expect(files.has('package.json')).toBe(true);
     expect(files.has('tsconfig.json')).toBe(true);
     expect(files.has('.gitignore')).toBe(true);
-    expect(files.has('src/index.html')).toBe(true);
+    expect(files.has('index.html')).toBe(true);
+    expect(files.has('vite.config.ts')).toBe(true);
     expect(files.has('src/main.ts')).toBe(true);
     expect(files.has('src/capabilities.json')).toBe(true);
     expect(files.has('src-tauri/tauri.conf.json')).toBe(true);
     expect(files.has('src-tauri/Cargo.toml')).toBe(true);
     expect(files.has('src-tauri/src/main.rs')).toBe(true);
+  });
+
+  it('Tauri 工程完整性：capabilities/default.json 与 build.rs', () => {
+    const config: ScaffoldConfig = {
+      name: 'my-app',
+      slug: 'my-app',
+      description: 'Test',
+      framework: 'react',
+      targets: ['desktop'],
+      shell: 'tauri',
+      capabilities: [],
+    };
+    const files = generateFiles(config);
+
+    // Tauri v2：不匹配任何 capability 的 webview 完全没有 IPC 访问权（界面空白）。
+    const capability = files.get('src-tauri/capabilities/default.json');
+    expect(capability).toBeDefined();
+    const parsed = JSON.parse(capability!) as {
+      identifier: string;
+      windows: string[];
+      permissions: string[];
+    };
+    expect(parsed.identifier).toBe('default');
+    // 插件面板窗 label 恒为 `plugin-<插件 id>`，必须一并覆盖。
+    expect(parsed.windows).toContain('main');
+    expect(parsed.windows).toContain('plugin-*');
+    expect(parsed.permissions).toEqual(['core:default']);
+    // 不该伪造 tauron 命名空间权限：host_* 走 root 注册，不受插件 ACL 管辖。
+    expect(parsed.permissions.some((p) => p.startsWith('core:host_'))).toBe(false);
+
+    // 缺 build.rs 时 `cargo check` 会在 tauri::generate_context!() 处失败。
+    expect(files.get('src-tauri/build.rs')).toContain('tauri_build::build()');
+  });
+
+  it('非 Tauri 壳不生成 src-tauri 产物', () => {
+    const config: ScaffoldConfig = {
+      name: 'my-app',
+      slug: 'my-app',
+      description: 'Test',
+      framework: 'react',
+      targets: ['desktop'],
+      shell: 'electron',
+      capabilities: [],
+    };
+    const files = generateFiles(config);
+    expect(files.has('src-tauri/build.rs')).toBe(false);
+    expect(files.has('src-tauri/capabilities/default.json')).toBe(false);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// tauron 装配（Cargo.toml / main.rs）——「一键」是否真的接了 tauron
+// ──────────────────────────────────────────────────────────────────────────
+
+describe('tauron 装配', () => {
+  const config: ScaffoldConfig = {
+    name: 'my-app',
+    slug: 'my-app',
+    description: 'Test',
+    framework: 'react',
+    targets: ['desktop'],
+    shell: 'tauri',
+    capabilities: [],
+    tauronPath: '../../..',
+  };
+
+  it('给了 tauronPath：Cargo.toml 生成可编译的 path 依赖 + 两档 feature', () => {
+    const cargo = generateFiles(config).get('src-tauri/Cargo.toml')!;
+    // tauronPath 以工程根为基准，Cargo.toml 在 src-tauri/ 下，所以多一层 ..。
+    expect(cargo).toContain('tauron-shell = { path = "../../../../crates/tauron-shell"');
+    expect(cargo).toContain('tauron-adapter = { path = "../../../../crates/tauron-adapter"');
+    expect(cargo).toContain('features = ["tauri"]');
+    expect(cargo).toContain('default = ["plugin-install"]');
+    expect(cargo).toContain('substrate-only = []');
+    expect(cargo).toContain('tauron-adapter/plugin-install');
+    // 不再写不可解析的 registry 版本号。
+    expect(cargo).not.toContain('version = "0.1"');
+  });
+
+  it('没给 tauronPath：如实标注占位依赖不可解析', () => {
+    const withoutPath: ScaffoldConfig = { ...config };
+    delete withoutPath.tauronPath;
+    const cargo = generateFiles(withoutPath).get('src-tauri/Cargo.toml')!;
+    expect(cargo).toContain('尚未发布到 crates.io');
+    expect(cargo).toContain('version = "0.1"');
+  });
+
+  it('main.rs 生成真装配，不是裸 Builder', () => {
+    const mainRs = generateFiles(config).get('src-tauri/src/main.rs')!;
+    // 默认档：底座 + 插件运行时（80 条）
+    expect(mainRs).toContain('tauron_adapter::tauri::state_init_with_adapter_config');
+    expect(mainRs).toContain('tauron_adapter::tauron_generate_handler![]');
+    expect(mainRs).toContain('tauron_adapter::tauri::cleanup_closed_window');
+    expect(mainRs).toContain('on_window_event');
+    expect(mainRs).toContain('TAURON_CLIENT_CONFIG');
+    // substrate-only 档：57 条底座命令
+    expect(mainRs).toContain('tauron_adapter::SubstrateState::with_adapter_config');
+    expect(mainRs).toContain('tauron_adapter::tauron_substrate_handler![]');
+    // 生成物自身不是裸 Builder（裸 Builder 与 tauron 零关联，等于没接）
+    expect(mainRs).not.toContain('tauri::Builder::default()\n    .run(');
+  });
+
+  it('tauronPath 透传：前后多余空白被裁掉', () => {
+    const padded = validateConfig({ name: 'my-app', tauronPath: '  ../..  ' });
+    expect(padded.tauronPath).toBe('../..');
   });
 });
 
@@ -566,7 +900,10 @@ describe('端到端：create-tauron', () => {
     // 检查生成的文件
     const pkg = JSON.parse(result.files.get('package.json')!);
     expect(pkg.name).toBe('my-portfolio');
-    expect(pkg.scripts.dev).toBe('tauri dev');
+    // dev / build 交给 vite（Tauri 官方模板形状）；`npm run tauri dev` 由
+    // tauri.conf.json 的 beforeDevCommand 拉起 vite，因此这里断言的是 vite。
+    expect(pkg.scripts.dev).toBe('vite');
+    expect(pkg.scripts.build).toBe('vite build');
 
     const tauriConf = JSON.parse(result.files.get('src-tauri/tauri.conf.json')!);
     expect(tauriConf.productName).toBe('my-portfolio');
@@ -576,7 +913,9 @@ describe('端到端：create-tauron', () => {
     expect(caps.capabilities).toContain('host_registry_list');
     expect(caps.capabilities).toContain('host_lifecycle_report');
 
-    const html = result.files.get('src/index.html')!;
+    // vite 的 root 是工程根，入口 `index.html` 必须在根（放 src/ 下 rollup 报
+    // "Could not resolve entry"）。
+    const html = result.files.get('index.html')!;
     expect(html).toContain('my-portfolio');
 
     const entry = result.files.get('src/main.ts')!;

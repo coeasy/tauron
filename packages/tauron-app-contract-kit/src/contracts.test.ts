@@ -275,11 +275,21 @@ describe('契约 5：HostClient 行为', () => {
   it('pluginCall 发送正确的命令和参数，并返回宿主铸造的 pending 簿记', async () => {
     const backend = new MockBackend({
       capabilities: ['host_plugin_call'],
-      cases: [{
-        cmd: 'host_plugin_call',
-        args: { req: { callId: 'c1', method: 'greet', kind: 'unary' } },
-        result: { callId: 'host-1', pluginId: 'p1', cmd: 'greet', args: null, seq: 1, createdAt: 10, expiresAt: 20 },
-      }],
+      cases: [
+        {
+          cmd: 'host_plugin_call',
+          args: { req: { callId: 'c1', method: 'greet', kind: 'unary' } },
+          result: {
+            callId: 'host-1',
+            pluginId: 'p1',
+            cmd: 'greet',
+            args: null,
+            seq: 1,
+            createdAt: 10,
+            expiresAt: 20,
+          },
+        },
+      ],
     });
     const client = new HostClient({ backend });
     const result = await client.pluginCall({
@@ -294,11 +304,21 @@ describe('契约 5：HostClient 行为', () => {
   it('pluginCall 传递 argsJson', async () => {
     const backend = new MockBackend({
       capabilities: ['host_plugin_call'],
-      cases: [{
-        cmd: 'host_plugin_call',
-        args: { req: { callId: 'c2', method: 'calc', kind: 'unary', argsJson: { x: 1 } } },
-        result: { callId: 'host-2', pluginId: 'p1', cmd: 'calc', args: { x: 1 }, seq: 2, createdAt: 10, expiresAt: 20 },
-      }],
+      cases: [
+        {
+          cmd: 'host_plugin_call',
+          args: { req: { callId: 'c2', method: 'calc', kind: 'unary', argsJson: { x: 1 } } },
+          result: {
+            callId: 'host-2',
+            pluginId: 'p1',
+            cmd: 'calc',
+            args: { x: 1 },
+            seq: 2,
+            createdAt: 10,
+            expiresAt: 20,
+          },
+        },
+      ],
     });
     const client = new HostClient({ backend });
     const result = await client.pluginCall({
@@ -313,11 +333,13 @@ describe('契约 5：HostClient 行为', () => {
   it('eventsPublish 发送正确命令', async () => {
     const backend = new MockBackend({
       capabilities: ['host_events_publish'],
-      cases: [{
-        cmd: 'host_events_publish',
-        args: { evt: { topic: 'plugin:p1.ready', payload: { ok: true } } },
-        result: { delivered: 2, dropped: false },
-      }],
+      cases: [
+        {
+          cmd: 'host_events_publish',
+          args: { evt: { topic: 'plugin:p1.ready', payload: { ok: true } } },
+          result: { delivered: 2, dropped: false },
+        },
+      ],
     });
     const client = new HostClient({ backend });
     const result = await client.eventsPublish({
@@ -330,11 +352,13 @@ describe('契约 5：HostClient 行为', () => {
   it('eventsSubscribe 返回订阅信息', async () => {
     const backend = new MockBackend({
       capabilities: ['host_events_subscribe'],
-      cases: [{
-        cmd: 'host_events_subscribe',
-        args: { sub: [{ topic: 'plugin:p1.ready' }] },
-        result: { token: 'tok-abc', selectors: [{ topic: 'plugin:p1.ready' }] },
-      }],
+      cases: [
+        {
+          cmd: 'host_events_subscribe',
+          args: { sub: [{ topic: 'plugin:p1.ready' }] },
+          result: { token: 'tok-abc', selectors: [{ topic: 'plugin:p1.ready' }] },
+        },
+      ],
     });
     const client = new HostClient({ backend });
     const result = await client.eventsSubscribe([{ topic: 'plugin:p1.ready' }]);
@@ -345,10 +369,12 @@ describe('契约 5：HostClient 行为', () => {
   it('eventsUnsubscribe 发送 token', async () => {
     const backend = new MockBackend({
       capabilities: ['host_events_unsubscribe'],
-      cases: [{
-        cmd: 'host_events_unsubscribe',
-        args: { token: 'tok-abc' },
-      }],
+      cases: [
+        {
+          cmd: 'host_events_unsubscribe',
+          args: { token: 'tok-abc' },
+        },
+      ],
     });
     const client = new HostClient({ backend });
     await client.eventsUnsubscribe('tok-abc');
@@ -361,11 +387,13 @@ describe('契约 5：HostClient 行为', () => {
   it('registryList 传递 scope 参数', async () => {
     const backend = new MockBackend({
       capabilities: ['host_registry_list'],
-      cases: [{
-        cmd: 'host_registry_list',
-        args: { scope: 'public' },
-        result: [{ id: 'p.audio', name: 'Audio' }],
-      }],
+      cases: [
+        {
+          cmd: 'host_registry_list',
+          args: { scope: 'public' },
+          result: [{ id: 'p.audio', name: 'Audio' }],
+        },
+      ],
     });
     const client = new HostClient({ backend });
     const plugins = await client.registryList('public');
@@ -375,10 +403,12 @@ describe('契约 5：HostClient 行为', () => {
   it('lifecycleReport 上报生命周期事件（不是状态）', async () => {
     const backend = new MockBackend({
       capabilities: ['host_lifecycle_report'],
-      cases: [{
-        cmd: 'host_lifecycle_report',
-        args: { evt: { event: 'ATTACH' } },
-      }],
+      cases: [
+        {
+          cmd: 'host_lifecycle_report',
+          args: { evt: { event: 'ATTACH' } },
+        },
+      ],
     });
     const client = new HostClient({ backend });
     await client.lifecycleReport({ event: 'ATTACH' });
@@ -391,10 +421,12 @@ describe('契约 5：HostClient 行为', () => {
   it('cancel 传递 callId', async () => {
     const backend = new MockBackend({
       capabilities: ['host_cancel'],
-      cases: [{
-        cmd: 'host_cancel',
-        args: { callId: 'c-123' },
-      }],
+      cases: [
+        {
+          cmd: 'host_cancel',
+          args: { callId: 'c-123' },
+        },
+      ],
     });
     const client = new HostClient({ backend });
     await client.cancel('c-123');
@@ -407,10 +439,12 @@ describe('契约 5：HostClient 行为', () => {
   it('callEnd 传递 callId 和 ok', async () => {
     const backend = new MockBackend({
       capabilities: ['host_call_end'],
-      cases: [{
-        cmd: 'host_call_end',
-        args: { req: { callId: 'c-456', ok: true } },
-      }],
+      cases: [
+        {
+          cmd: 'host_call_end',
+          args: { req: { callId: 'c-456', ok: true } },
+        },
+      ],
     });
     const client = new HostClient({ backend });
     await client.callEnd({ callId: 'c-456', ok: true });
@@ -515,10 +549,7 @@ describe('契约 6：Backend 抽象', () => {
     });
     await backend.invoke('host_a');
     await backend.invoke('host_b', { x: 1 });
-    expect(backend.invocations).toEqual([
-      { cmd: 'host_a' },
-      { cmd: 'host_b', args: { x: 1 } },
-    ]);
+    expect(backend.invocations).toEqual([{ cmd: 'host_a' }, { cmd: 'host_b', args: { x: 1 } }]);
   });
 
   it('MockBackend 参数子集匹配', async () => {
@@ -542,11 +573,13 @@ describe('契约 7：事件协议', () => {
   it('topic 格式：plugin:<id>.<event>', () => {
     const backend = new MockBackend({
       capabilities: ['host_events_publish'],
-      cases: [{
-        cmd: 'host_events_publish',
-        args: { evt: { topic: 'plugin:p.audio.ready', payload: {} } },
-        result: { delivered: 1, dropped: false },
-      }],
+      cases: [
+        {
+          cmd: 'host_events_publish',
+          args: { evt: { topic: 'plugin:p.audio.ready', payload: {} } },
+          result: { delivered: 1, dropped: false },
+        },
+      ],
     });
     const client = new HostClient({ backend });
     client.eventsPublish({ topic: 'plugin:p.audio.ready', payload: {} });
@@ -559,22 +592,20 @@ describe('契约 7：事件协议', () => {
   it('订阅选择器只含 topic；回执含 token 与 selectors', async () => {
     const backend = new MockBackend({
       capabilities: ['host_events_subscribe'],
-      cases: [{
-        cmd: 'host_events_subscribe',
-        args: { sub: [{ topic: 'plugin:p.audio.ready' }] },
-        result: { token: 't1', selectors: [{ topic: 'plugin:p.audio.ready' }] },
-      }],
+      cases: [
+        {
+          cmd: 'host_events_subscribe',
+          args: { sub: [{ topic: 'plugin:p.audio.ready' }] },
+          result: { token: 't1', selectors: [{ topic: 'plugin:p.audio.ready' }] },
+        },
+      ],
     });
     const client = new HostClient({ backend });
-    const result = await client.eventsSubscribe([
-      { topic: 'plugin:p.audio.ready' },
-    ]);
+    const result = await client.eventsSubscribe([{ topic: 'plugin:p.audio.ready' }]);
     expect(result.token).toBe('t1');
     expect(result.selectors[0]?.topic).toBe('plugin:p.audio.ready');
     // 选择器原样透传给宿主命令（事件总线是唯一通道）。
-    expect(backend.invocations[0]?.args?.['sub']).toEqual([
-      { topic: 'plugin:p.audio.ready' },
-    ]);
+    expect(backend.invocations[0]?.args?.['sub']).toEqual([{ topic: 'plugin:p.audio.ready' }]);
   });
 });
 

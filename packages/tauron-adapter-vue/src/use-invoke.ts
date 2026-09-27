@@ -32,11 +32,21 @@ export function useInvoke<T = unknown>(pluginId: string): UseInvokeReturn<T> {
     lastArgs: null,
   });
 
-  const invoke = async (method: string, payload?: unknown, options?: InvokeOptions): Promise<T | null> => {
+  const invoke = async (
+    method: string,
+    payload?: unknown,
+    options?: InvokeOptions,
+  ): Promise<T | null> => {
     state.value = { ...state.value, loading: true, error: null, lastArgs: payload ?? null };
 
     try {
-      const response: PluginInvokeResponse = await invokePlugin(backend, pluginId, method, payload, options);
+      const response: PluginInvokeResponse = await invokePlugin(
+        backend,
+        pluginId,
+        method,
+        payload,
+        options,
+      );
 
       if (response.ok) {
         const data = response.result as T;

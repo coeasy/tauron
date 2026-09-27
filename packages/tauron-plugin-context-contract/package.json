@@ -1,10 +1,32 @@
 {
   "name": "@tauron/plugin-context-contract",
   "version": "0.1.0",
-  "private": true,
   "description": "tauron 插件上下文共享契约：PluginContext 及其窄接口（仅类型，零运行时依赖；两代插件 SDK 共用的唯一事实源）",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coeasy/tauron.git",
+    "directory": "packages/tauron-plugin-context-contract"
+  },
+  "homepage": "https://github.com/coeasy/tauron",
+  "bugs": {
+    "url": "https://github.com/coeasy/tauron/issues"
+  },
+  "keywords": [
+    "tauron",
+    "tauri",
+    "plugin",
+    "contract",
+    "types"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
-  "main": "./dist/index.cjs",
+  "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

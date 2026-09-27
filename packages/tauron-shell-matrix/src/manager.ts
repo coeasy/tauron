@@ -74,19 +74,28 @@ async function startLocalShell(config: LocalShellConfig, instance: ShellInstance
   instance.status = 'ready';
 }
 
-async function startLocalServerShell(config: LocalServerShellConfig, instance: ShellInstance): Promise<void> {
+async function startLocalServerShell(
+  config: LocalServerShellConfig,
+  instance: ShellInstance,
+): Promise<void> {
   // Simulate starting local server
   await new Promise((resolve) => setTimeout(resolve, 10));
   instance.status = 'ready';
 }
 
-async function startRemoteUrlShell(config: RemoteUrlShellConfig, instance: ShellInstance): Promise<void> {
+async function startRemoteUrlShell(
+  config: RemoteUrlShellConfig,
+  instance: ShellInstance,
+): Promise<void> {
   // Simulate loading remote URL
   await new Promise((resolve) => setTimeout(resolve, 10));
   instance.status = 'ready';
 }
 
-async function startSubWebviewShell(config: SubWebviewShellConfig, instance: ShellInstance): Promise<void> {
+async function startSubWebviewShell(
+  config: SubWebviewShellConfig,
+  instance: ShellInstance,
+): Promise<void> {
   // Simulate creating sub-webview
   await new Promise((resolve) => setTimeout(resolve, 10));
   instance.status = 'ready';

@@ -94,8 +94,18 @@ describe('Registry', () => {
 
   it('searches plugins by ID', () => {
     const registry = createRegistry();
-    registry.register('test-plugin', '1.0.0', { ...mockManifest, id: 'test-plugin', name: 'Alpha Plugin', description: 'Alpha plugin' }, mockPackage);
-    registry.register('other-plugin', '1.0.0', { ...mockManifest, id: 'other-plugin', name: 'Beta Plugin', description: 'Beta plugin' }, mockPackage);
+    registry.register(
+      'test-plugin',
+      '1.0.0',
+      { ...mockManifest, id: 'test-plugin', name: 'Alpha Plugin', description: 'Alpha plugin' },
+      mockPackage,
+    );
+    registry.register(
+      'other-plugin',
+      '1.0.0',
+      { ...mockManifest, id: 'other-plugin', name: 'Beta Plugin', description: 'Beta plugin' },
+      mockPackage,
+    );
     const results = registry.search('test');
     expect(results.length).toBe(1);
     expect(results[0]?.id).toBe('test-plugin');

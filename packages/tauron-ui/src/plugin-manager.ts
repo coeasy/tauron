@@ -51,8 +51,7 @@ export interface PluginSummary {
 
 /** 插件操作结果。 */
 export type PluginActionResult =
-  | { ok: true }
-  | { ok: false; code: NormalizedErrorCode; message: string };
+  { ok: true } | { ok: false; code: NormalizedErrorCode; message: string };
 
 /** 插件管理器配置。 */
 export interface PluginManagerConfig {

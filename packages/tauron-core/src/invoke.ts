@@ -7,12 +7,10 @@
 import {
   buildRequest,
   buildErrorResponse,
-  generateCallId,
   DEFAULT_TIMEOUT_MS,
   PluginErrorCode,
   type PluginInvokeRequest,
   type PluginInvokeResponse,
-  type ProgressEvent,
 } from '@tauron/types';
 import type { TauronBackend, ProgressCallback } from './backend.js';
 

@@ -10,9 +10,9 @@
 
 | 形态 | 用法 | 命令面 | 插件名 |
 | --- | --- | --- | --- |
-| root 注册（全量） | `state_init()` + `tauri::generate_context` 外的 `tauron_generate_handler![]`（= `tauron_plugin_handler![]`） | 60 条（底座 39 + 插件运行时 21）；`plugin-install` 2 条**已进默认特性** → 默认 62 条 | 无（裸命令） |
-| **底座-only root 注册** | 自己 `manage(SubstrateState)` + `tauron_substrate_handler![]` | 39 条（不含插件运行时 21 条） | 无（裸命令） |
-| 插件注册（需 capability/ACL） | `init()` / `init_with_adapter_config(cfg)` | 同上；60 / 62 条取决于 `plugin-install`（默认开） | `tauron` |
+| root 注册（全量） | `state_init()` + `tauri::generate_context` 外的 `tauron_generate_handler![]`（= `tauron_plugin_handler![]`） | 78 条（底座 57 + 插件运行时 21）；`plugin-install` 2 条**已进默认特性** → 默认 80 条 | 无（裸命令） |
+| **底座-only root 注册** | 自己 `manage(SubstrateState)` + `tauron_substrate_handler![]` | 57 条（不含插件运行时 21 条） | 无（裸命令） |
+| 插件注册（需 capability/ACL） | `init()` / `init_with_adapter_config(cfg)` | 同上；78 / 80 条取决于 `plugin-install`（默认开） | `tauron` |
 
 > ⚠️ **三种形态都不是"零配置"**（轮 12 改判，此前本表把 root 形态写成"零配置"是错的）：
 > Tauri v2 的规则是**不匹配任何 capability 的 webview 完全没有 IPC 访问**（原文见

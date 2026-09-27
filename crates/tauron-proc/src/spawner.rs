@@ -199,29 +199,20 @@ impl SinkTable {
         if self.closed.contains_key(&pid) {
             return false;
         }
-        self.live.insert(
-            pid,
-            LiveSink {
-                gen: self.current_generation(pid),
-                sink,
-            },
-        );
+        self.live.insert(pid, LiveSink { gen: self.current_generation(pid), sink });
         true
     }
 
     /// 取本读线程那一代的 sink（每帧调用；clone 出 `Arc` 后即可释放锁）。
     /// 代次不符 = pid 已复用，旧读线程的帧不得再投给新进程。
     fn get(&self, pid: u32, gen: u64) -> Option<Arc<dyn ProcessFrameSink>> {
-        self.live
-            .get(&pid)
-            .filter(|l| l.gen == gen)
-            .map(|l| l.sink.clone())
+        self.live.get(&pid).filter(|l| l.gen == gen).map(|l| l.sink.clone())
     }
 
     /// 标记关闭并摘除 sink（同一把锁内完成）。代次不符时视为遗骸：
     /// 不写 `closed`（否则会把新进程的登记口焊死）。
     fn close(&mut self, pid: u32, gen: u64) -> CloseOutcome {
-        let is_current = self.generation.get(&pid).map_or(true, |g| *g == gen);
+        let is_current = self.generation.get(&pid).is_none_or(|g| *g == gen);
         if is_current {
             self.closed.insert(pid, gen);
         }
@@ -306,15 +297,8 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 /// 去掉行帧首尾的 ASCII 空白（含 `\n` / `\r`），返回子切片。
 fn trim_ascii(bytes: &[u8]) -> &[u8] {
-    let start = bytes
-        .iter()
-        .position(|b| !b.is_ascii_whitespace())
-        .unwrap_or(bytes.len());
-    let end = bytes
-        .iter()
-        .rposition(|b| !b.is_ascii_whitespace())
-        .map(|i| i + 1)
-        .unwrap_or(start);
+    let start = bytes.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(bytes.len());
+    let end = bytes.iter().rposition(|b| !b.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(start);
     &bytes[start..end]
 }
 
@@ -394,9 +378,7 @@ impl ProcSpawner for CommandSpawner {
             stale.on_eof(pid);
         }
 
-        self.stdin_writers
-            .lock()
-            .insert(pid, Arc::new(Mutex::new(stdin)));
+        self.stdin_writers.lock().insert(pid, Arc::new(Mutex::new(stdin)));
 
         // 读线程：持续排空 sidecar 的 stdout，逐行交给该 pid 注册的 sink。
         // 读到 EOF（进程退出 / 关闭 stdout）即退出线程、清理登记、并**主动回收**
@@ -694,20 +676,14 @@ mod tests {
 
         // 读线程 EOF：标记关闭 + 摘除 sink（同一把锁内完成）。
         let removed = table.close(7, gen);
-        assert!(
-            removed.sink.is_some(),
-            "close 必须把 sink 交还给调用方以便触发 on_eof"
-        );
+        assert!(removed.sink.is_some(), "close 必须把 sink 交还给调用方以便触发 on_eof");
         assert!(removed.is_current, "同一代次的 EOF 必须判为当前代次");
         assert!(table.live.is_empty(), "关闭后 live 必须为空");
         assert!(table.closed.contains_key(&7));
 
         // 迟到登记：必须被拒，否则该条目永远不会被回收（无界累积）。
         assert!(!table.register(7, Arc::new(RecordingSink::default())));
-        assert!(
-            table.live.is_empty(),
-            "迟到登记被拒后不得留下任何条目（这正是 P0-7① 的泄漏形态）"
-        );
+        assert!(table.live.is_empty(), "迟到登记被拒后不得留下任何条目（这正是 P0-7① 的泄漏形态）");
     }
 
     /// 关闭时交还的 sink 必须能被调用 `on_eof`——该钩子此前在生产路径上零调用
@@ -718,10 +694,7 @@ mod tests {
         let (gen, _) = table.begin(11);
         let sink = Arc::new(RecordingSink::default());
         assert!(table.register(11, sink.clone()));
-        let handed_back = table
-            .close(11, gen)
-            .sink
-            .expect("close 应返回被摘除的 sink");
+        let handed_back = table.close(11, gen).sink.expect("close 应返回被摘除的 sink");
         handed_back.on_eof(11);
         assert_eq!(sink.eof.lock().as_slice(), &[11]);
     }
@@ -749,10 +722,7 @@ mod tests {
         let outcome = table.close(77, gen_a);
         assert!(!outcome.is_current, "旧代次 EOF 不得判为当前代次");
         assert!(outcome.sink.is_none(), "旧代次不得摘走新代次的 sink");
-        assert!(
-            !table.closed.contains_key(&77),
-            "旧代次不得写 closed，否则新进程的回帧口被焊死"
-        );
+        assert!(!table.closed.contains_key(&77), "旧代次不得写 closed，否则新进程的回帧口被焊死");
         assert!(
             table.register(77, Arc::new(RecordingSink::default())),
             "旧代次 EOF 之后新进程仍应能登记"
@@ -785,22 +755,14 @@ mod tests {
     fn eof_reap_must_not_hold_children_lock_inside_if_let() {
         let src = include_str!("spawner.rs");
         // needle 用片段拼出来，避免「门禁自身的字面量」被自己匹配到。
-        let needle = [
-            "if let Some(mut child) = ",
-            "children",
-            ".lock().remove(&pid)",
-        ]
-        .concat();
+        let needle = ["if let Some(mut child) = ", "children", ".lock().remove(&pid)"].concat();
         assert!(
             !src.contains(&needle),
             "禁止在 if let 里直接持有 children.lock() 的临时 guard（edition 2021 \
              会把它持到块尾，体内同锁再入即永久自死锁）——必须先 let 绑定释放"
         );
         let fixed = ["let reclaimed = ", "children", ".lock().remove(&pid);"].concat();
-        assert!(
-            src.contains(&fixed),
-            "回收路径必须以「先 let 绑定、语句结束即释放」的形状存在"
-        );
+        assert!(src.contains(&fixed), "回收路径必须以「先 let 绑定、语句结束即释放」的形状存在");
     }
 
     /// `closed` / `generation` 不得无界增长：每次 `spawn` 按跟踪表裁剪。
@@ -824,9 +786,7 @@ mod tests {
     #[test]
     fn write_frame_to_unknown_pid_reports_not_found() {
         let spawner = CommandSpawner::new();
-        let err = spawner
-            .write_frame(4242, b"{\"id\":1}")
-            .expect_err("未登记的 pid 必须报错");
+        let err = spawner.write_frame(4242, b"{\"id\":1}").expect_err("未登记的 pid 必须报错");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 
@@ -841,11 +801,11 @@ mod tests {
 
     /// 单帧上限必须是**有界**的常量（防 sidecar 用无换行超长行把宿主 OOM）。
     #[test]
+    // clippy 建议把下面的断言改成 `const { assert!(..) }`——那会把断言提前到编译期、
+    // 令测试体变空，语义改变，故保留运行时断言并在此显式放行。
+    #[allow(clippy::assertions_on_constants)]
     fn max_frame_bytes_is_bounded() {
         assert!(MAX_FRAME_BYTES > 0);
-        assert!(
-            MAX_FRAME_BYTES <= 16 * 1024 * 1024,
-            "单帧上限过大等于没有上限"
-        );
+        assert!(MAX_FRAME_BYTES <= 16 * 1024 * 1024, "单帧上限过大等于没有上限");
     }
 }

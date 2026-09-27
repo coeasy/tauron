@@ -30,7 +30,7 @@ export type ImplementedTemplate = (typeof IMPLEMENTED_TEMPLATES)[number];
 /**
  * 创建应用骨架。
  */
-export function createApp(config: AppConfig, options: CliOptions): AppScaffoldResult {
+export function createApp(config: AppConfig, _options: CliOptions): AppScaffoldResult {
   const files: Record<string, string> = {};
   const name = config.name;
   const isReact = config.template === 'react';

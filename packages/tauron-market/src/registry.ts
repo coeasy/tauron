@@ -23,7 +23,12 @@ export function createRegistry(): Registry {
   };
 
   return {
-    register(pluginId: string, version: string, manifest: PluginManifest, packageInfo: PluginPackage): IndexEntry {
+    register(
+      pluginId: string,
+      version: string,
+      manifest: PluginManifest,
+      packageInfo: PluginPackage,
+    ): IndexEntry {
       const entry: IndexEntry = {
         id: pluginId,
         version,
@@ -67,10 +72,11 @@ export function createRegistry(): Registry {
 
     search(query: string): IndexEntry[] {
       const q = query.toLowerCase();
-      return Array.from(internal.plugins.values()).filter((entry) =>
-        entry.id.toLowerCase().includes(q) ||
-        entry.manifest.name.toLowerCase().includes(q) ||
-        (entry.manifest.description && entry.manifest.description.toLowerCase().includes(q)),
+      return Array.from(internal.plugins.values()).filter(
+        (entry) =>
+          entry.id.toLowerCase().includes(q) ||
+          entry.manifest.name.toLowerCase().includes(q) ||
+          (entry.manifest.description && entry.manifest.description.toLowerCase().includes(q)),
       );
     },
 
@@ -85,7 +91,12 @@ export function createRegistry(): Registry {
 }
 
 export interface Registry {
-  register(pluginId: string, version: string, manifest: PluginManifest, packageInfo: PluginPackage): IndexEntry;
+  register(
+    pluginId: string,
+    version: string,
+    manifest: PluginManifest,
+    packageInfo: PluginPackage,
+  ): IndexEntry;
   get(pluginId: string): IndexEntry | undefined;
   getAll(): IndexEntry[];
   remove(pluginId: string): boolean;

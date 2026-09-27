@@ -107,7 +107,8 @@ export function builtinDarkTheme(): ThemeDefinition {
 // ── 验证 ──
 
 /** CSS 颜色正则（简化版：hex、rgb、rgba、hsl、hsla、命名颜色）。 */
-const COLOR_RE = /^(#[0-9a-fA-F]{3,8}|rgba?\(\s*\d+%?\s*,\s*\d+%?\s*,\s*\d+%?\s*(,\s*[\d.]+\s*)?\)|hsla?\(\s*[\d.]+deg?\s*,\s*\d+%?\s*,\s*\d+%?\s*(,\s*[\d.]+\s*)?\)|[a-zA-Z]+)$/;
+const COLOR_RE =
+  /^(#[0-9a-fA-F]{3,8}|rgba?\(\s*\d+%?\s*,\s*\d+%?\s*,\s*\d+%?\s*(,\s*[\d.]+\s*)?\)|hsla?\(\s*[\d.]+deg?\s*,\s*\d+%?\s*,\s*\d+%?\s*(,\s*[\d.]+\s*)?\)|[a-zA-Z]+)$/;
 
 /**
  * 验证单个主题定义。
@@ -185,20 +186,22 @@ export function validateThemes(themes: ThemeDefinition[]): ThemeValidationResult
  * 生成主题 JSON 文件内容。
  */
 export function generateThemeJson(themes: ThemeDefinition[]): string {
-  return JSON.stringify(
-    {
-      schemaVersion: 1,
-      activeId: themes[0]?.id ?? 'light',
-      themes: themes.map((t) => ({
-        id: t.id,
-        name: t.name,
-        isDark: t.isDark,
-        variables: t.variables,
-      })),
-    },
-    null,
-    2,
-  ) + '\n';
+  return (
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        activeId: themes[0]?.id ?? 'light',
+        themes: themes.map((t) => ({
+          id: t.id,
+          name: t.name,
+          isDark: t.isDark,
+          variables: t.variables,
+        })),
+      },
+      null,
+      2,
+    ) + '\n'
+  );
 }
 
 /**
@@ -206,9 +209,7 @@ export function generateThemeJson(themes: ThemeDefinition[]): string {
  */
 export function generateThemeCss(themes: ThemeDefinition[]): string {
   const parts = themes.map((theme) => {
-    const selector = theme.id === 'light'
-      ? ':root'
-      : `:root[data-theme="${theme.id}"]`;
+    const selector = theme.id === 'light' ? ':root' : `:root[data-theme="${theme.id}"]`;
     const vars = Object.entries(theme.variables)
       .map(([k, v]) => `  ${k}: ${v};`)
       .join('\n');

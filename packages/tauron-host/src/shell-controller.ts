@@ -97,8 +97,7 @@ export class ShellController {
     this.client = new ShellClient({ backend: options.backend });
     this.admin = new AdminClient({ backend: options.backend });
     this._onError =
-      options.onError ??
-      ((err, context) => console.warn(`ShellController: ${context} 失败`, err));
+      options.onError ?? ((err, context) => console.warn(`ShellController: ${context} 失败`, err));
     this._commandBudget = options.commandResultBudget ?? { attempts: 50, intervalMs: 100 };
     this._onRegistryChange = options.onRegistryChange;
   }
@@ -128,9 +127,15 @@ export class ShellController {
    */
   start(elements: EventTarget[] = [document.body]): void {
     // 标题栏事件
-    this._listen(elements, SHELL_EVENTS.minimize, () => this.client.windowMinimize().catch(this._fail('window.minimize')));
-    this._listen(elements, SHELL_EVENTS.maximize, () => this.client.windowMaximize().catch(this._fail('window.maximize')));
-    this._listen(elements, SHELL_EVENTS.close, () => this.client.windowClose().catch(this._fail('window.close')));
+    this._listen(elements, SHELL_EVENTS.minimize, () =>
+      this.client.windowMinimize().catch(this._fail('window.minimize')),
+    );
+    this._listen(elements, SHELL_EVENTS.maximize, () =>
+      this.client.windowMaximize().catch(this._fail('window.maximize')),
+    );
+    this._listen(elements, SHELL_EVENTS.close, () =>
+      this.client.windowClose().catch(this._fail('window.close')),
+    );
 
     // 更新对话框事件：检查更新 → marketCheck；开始更新 = 下载 + 安装
     // （宿主侧当前为 simulated 桩，`marketCheck`/`marketDownload` 的返回里
@@ -144,7 +149,9 @@ export class ShellController {
     // 跳过对账。降级路径（宿主没有重启原语 → `relaunchRequested === false`）
     // **不回退到 quit**：那会变成"点了重启却直接退出且不再起来"，比不动更糟；
     // 只如实把 reason 打到控制台。
-    this._listen(elements, SHELL_EVENTS.updaterCheck, () => this.client.marketCheck().catch(this._fail('market.check')));
+    this._listen(elements, SHELL_EVENTS.updaterCheck, () =>
+      this.client.marketCheck().catch(this._fail('market.check')),
+    );
     this._listen(elements, SHELL_EVENTS.updateStart, () => {
       void this.client
         .marketDownload()
@@ -157,10 +164,7 @@ export class ShellController {
         .then((outcome) => {
           if (!outcome.relaunchRequested) {
             // 降级不是异常，但用户点了"重启"却没重启，必须让接入方知道。
-            this._onError(
-              new Error(outcome.reason ?? '宿主没有重启原语'),
-              'window.relaunch',
-            );
+            this._onError(new Error(outcome.reason ?? '宿主没有重启原语'), 'window.relaunch');
           }
         })
         .catch(this._fail('window.relaunch'));
@@ -221,9 +225,7 @@ export class ShellController {
       const entry = entries.find((c) => c.id === commandId);
       if (entry === undefined) {
         this._onError(
-          new Error(
-            `命令 \`${commandId}\` 不是任何插件的贡献命令（宿主内建命令的执行属接入方域）`,
-          ),
+          new Error(`命令 \`${commandId}\` 不是任何插件的贡献命令（宿主内建命令的执行属接入方域）`),
           'command.select',
         );
         return;
@@ -242,7 +244,10 @@ export class ShellController {
         return;
       }
       if (settled.errorCode !== undefined) {
-        this._onError(new Error(`命令 \`${commandId}\` 执行失败：${settled.errorCode}`), 'command.select');
+        this._onError(
+          new Error(`命令 \`${commandId}\` 执行失败：${settled.errorCode}`),
+          'command.select',
+        );
       }
     } catch (err) {
       this._fail('command.select')(err);
@@ -308,7 +313,9 @@ export class ShellController {
       const preview = await this.admin.registryInstallPreview(packagePath);
       const approved: string[] = [];
       for (const permission of preview.permissions) {
-        const allow = window.confirm(`${preview.pluginName} (${preview.version})\n\n${permission.permission}\n${permission.risk}: ${permission.description}\n\n是否授予此权限？`);
+        const allow = window.confirm(
+          `${preview.pluginName} (${preview.version})\n\n${permission.permission}\n${permission.risk}: ${permission.description}\n\n是否授予此权限？`,
+        );
         if (!allow) return;
         approved.push(permission.permission);
       }

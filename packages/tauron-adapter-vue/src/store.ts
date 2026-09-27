@@ -18,7 +18,8 @@ export function createStore<T extends object>(initialState: T): Store<T> {
   return {
     state,
     setState: (value) => {
-      const nextValue = typeof value === 'function' ? (value as (prev: T) => Partial<T>)(state as T) : value;
+      const nextValue =
+        typeof value === 'function' ? (value as (prev: T) => Partial<T>)(state as T) : value;
       Object.assign(state, nextValue);
     },
     subscribe: (callback, options = {}) => {

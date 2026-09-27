@@ -185,11 +185,21 @@ describe('已知向量：CLI 签名 == @tauron/market 直接调用（逐字节�
 describe('辨别力：改一位输入 → 签名必须变', () => {
   it('仅翻转第一个文件哈希的末位，签名不同且验签失败', async () => {
     const base = await pluginSign(
-      { dir: '/project/plugin', algorithm: 'ed25519', kid: 'kid-rfc8032', privateKey: RFC8032_PKCS8_HEX },
+      {
+        dir: '/project/plugin',
+        algorithm: 'ed25519',
+        kid: 'kid-rfc8032',
+        privateKey: RFC8032_PKCS8_HEX,
+      },
       FIXED_FILES,
     );
     const tampered = await pluginSign(
-      { dir: '/project/plugin', algorithm: 'ed25519', kid: 'kid-rfc8032', privateKey: RFC8032_PKCS8_HEX },
+      {
+        dir: '/project/plugin',
+        algorithm: 'ed25519',
+        kid: 'kid-rfc8032',
+        privateKey: RFC8032_PKCS8_HEX,
+      },
       TAMPERED_FILES,
     );
 

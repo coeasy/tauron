@@ -71,10 +71,7 @@ export interface PermissionMeta {
 /**
  * 检查插件是否拥有指定权限
  */
-export function hasPermission(
-  grant: PluginPermissionGrant,
-  permission: string,
-): boolean {
+export function hasPermission(grant: PluginPermissionGrant, permission: string): boolean {
   return grant.permissions.includes(permission);
 }
 

@@ -78,28 +78,53 @@ export class OcSkeleton extends LitElement {
 
   /** 骨架形状 */
   private _shape: SkeletonShape = 'rect';
-  get shape(): SkeletonShape { return this._shape; }
-  set shape(v: SkeletonShape) { this._shape = v; this.requestUpdate(); }
+  get shape(): SkeletonShape {
+    return this._shape;
+  }
+  set shape(v: SkeletonShape) {
+    this._shape = v;
+    this.requestUpdate();
+  }
 
   /** 宽度（px） */
   private _width: number = 200;
-  get width(): number { return this._width; }
-  set width(v: number) { this._width = v; this.requestUpdate(); }
+  get width(): number {
+    return this._width;
+  }
+  set width(v: number) {
+    this._width = v;
+    this.requestUpdate();
+  }
 
   /** 高度（px） */
   private _height: number = 20;
-  get height(): number { return this._height; }
-  set height(v: number) { this._height = v; this.requestUpdate(); }
+  get height(): number {
+    return this._height;
+  }
+  set height(v: number) {
+    this._height = v;
+    this.requestUpdate();
+  }
 
   /** 文本行数（shape='text' 时） */
   private _lines: number = 1;
-  get lines(): number { return this._lines; }
-  set lines(v: number) { this._lines = v; this.requestUpdate(); }
+  get lines(): number {
+    return this._lines;
+  }
+  set lines(v: number) {
+    this._lines = v;
+    this.requestUpdate();
+  }
 
   /** 是否启用 shimmer 动画 */
   private _animated: boolean = true;
-  get animated(): boolean { return this._animated; }
-  set animated(v: boolean) { this._animated = v; this.requestUpdate(); }
+  get animated(): boolean {
+    return this._animated;
+  }
+  set animated(v: boolean) {
+    this._animated = v;
+    this.requestUpdate();
+  }
 
   /**
    * 渲染骨架屏。
@@ -109,8 +134,18 @@ export class OcSkeleton extends LitElement {
       return html`
         ${Array.from({ length: this._lines }, (_, i) =>
           i === this._lines - 1
-            ? html`<div class="skeleton-line" style="width: 80%; height: 16px; margin: 8px 0; border-radius: 4px; background: var(--oc-skeleton-bg, #f0f0f0); position: relative; overflow: hidden;">${this._renderShimmer()}</div>`
-            : html`<div class="skeleton-line" style="width: 100%; height: 16px; margin: 8px 0; border-radius: 4px; background: var(--oc-skeleton-bg, #f0f0f0); position: relative; overflow: hidden;">${this._renderShimmer()}</div>`,
+            ? html`<div
+                class="skeleton-line"
+                style="width: 80%; height: 16px; margin: 8px 0; border-radius: 4px; background: var(--oc-skeleton-bg, #f0f0f0); position: relative; overflow: hidden;"
+              >
+                ${this._renderShimmer()}
+              </div>`
+            : html`<div
+                class="skeleton-line"
+                style="width: 100%; height: 16px; margin: 8px 0; border-radius: 4px; background: var(--oc-skeleton-bg, #f0f0f0); position: relative; overflow: hidden;"
+              >
+                ${this._renderShimmer()}
+              </div>`,
         )}
       `;
     }
@@ -123,7 +158,9 @@ export class OcSkeleton extends LitElement {
       styleParts.push(`border-radius: 50%`);
     }
 
-    return html`<div class="skeleton-content" style="${styleParts.join(';')}">${this._renderShimmer()}</div>`;
+    return html`<div class="skeleton-content" style="${styleParts.join(';')}">
+      ${this._renderShimmer()}
+    </div>`;
   }
 
   /**

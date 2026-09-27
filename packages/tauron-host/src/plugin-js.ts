@@ -21,10 +21,10 @@
 
 /** 身份单元状态。 */
 export type IdentityState =
-  | 'idle'      // 已创建，未挂载视图
-  | 'active'    // 已挂载视图，正在运行
-  | 'evicting'  // 正在驱逐（保留状态快照）
-  | 'evicted';  // 已驱逐，状态快照已保存
+  | 'idle' // 已创建，未挂载视图
+  | 'active' // 已挂载视图，正在运行
+  | 'evicting' // 正在驱逐（保留状态快照）
+  | 'evicted'; // 已驱逐，状态快照已保存
 
 /** 视图 iframe 配置。 */
 export interface ViewConfig {
@@ -85,9 +85,7 @@ export interface PluginJsConfig {
 }
 
 /** 身份单元操作结果。 */
-export type IdentityActionResult =
-  | { ok: true }
-  | { ok: false; code: string; message: string };
+export type IdentityActionResult = { ok: true } | { ok: false; code: string; message: string };
 
 // ──────────────────────────────────────────────────────────────────────────
 // PluginJsRuntime

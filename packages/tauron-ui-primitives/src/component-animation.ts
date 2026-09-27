@@ -17,7 +17,8 @@
 // ──────────────────────────────────────────────────────────────────────────
 
 /** 动画类型 */
-export type AnimationType = 'fade' | 'slide-up' | 'slide-down' | 'slide-left' | 'slide-right' | 'scale' | 'none';
+export type AnimationType =
+  'fade' | 'slide-up' | 'slide-down' | 'slide-left' | 'slide-right' | 'scale' | 'none';
 
 /** 动画配置 */
 export interface AnimationConfig {
@@ -163,9 +164,7 @@ export async function staggerIn(
   config: Partial<StaggerConfig> = {},
 ): Promise<void> {
   const { stagger = 50, ...rest } = config;
-  const promises = elements.map((el, i) =>
-    animateEnter(el, { ...rest, delay: i * stagger }),
-  );
+  const promises = elements.map((el, i) => animateEnter(el, { ...rest, delay: i * stagger }));
   await Promise.all(promises);
 }
 
@@ -177,9 +176,7 @@ export async function staggerOut(
   config: Partial<StaggerConfig> = {},
 ): Promise<void> {
   const { stagger = 50, ...rest } = config;
-  const promises = elements.map((el, i) =>
-    animateLeave(el, { ...rest, delay: i * stagger }),
-  );
+  const promises = elements.map((el, i) => animateLeave(el, { ...rest, delay: i * stagger }));
   await Promise.all(promises);
 }
 

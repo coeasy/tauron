@@ -250,7 +250,7 @@ pub async fn plugin_invoke(...) -> Result<InvokeResponse, String> {
     cmd_plugin_invoke(...).map_err(|e| e.to_string())
 }
 
-// generate_handler!() 宏一次性注册全部命令（实测 60 条）
+// generate_handler!() 宏一次性注册全部命令（实测 80 条 = 底座 57 + 插件运行时 21 + install 2）
 generate_handler! {
     plugin_invoke, plugin_cancel, plugin_list, plugin_info, ...
 }
@@ -539,7 +539,7 @@ RJSF 兼容 Schema + uiSchema
 | 层级 | 测试数量（2026-09-27 实测） | 工具 |
 |------|---------|------|
 | Rust 单元测试 | **1264 tests**（`cargo test --workspace --lib --tests` 聚合，15 个 suite 全部 0 failed；源码 `#[test]` **声明数** 1299 是另一个口径，见 §四脚注） | `cargo test --workspace` |
-| TypeScript 单元测试 | **1701 tests**（101 个测试文件，2026-09-27 更新；轮 11 时 1571） | `vitest`（`pnpm -r test`） |
+| TypeScript 单元测试 | **1729 tests**（101 个测试文件，2026-09-27 更新；轮 11 时 1571） | `vitest`（`pnpm -r test`） |
 | 契约测试 | TS↔Rust 跨语言，wire-gate **126 条门禁**（本包合计 147 条） | `@tauron/contract-tests` + `@tauron/contract-kit` |
 | 属性测试 | — | `proptest` |
 | 性能基准 | — | `criterion` |
@@ -608,7 +608,7 @@ tauri::Builder::default().plugin(tauron_adapter::tauri::state_init())
 10. 🟡 **RFC 8785 规范化签名验证** — 商城插件签名验证（`crates/tauron-market/src/lib.rs:53` 的 `canonical_json` + 64 个测试〔默认特性；`--all-features` 下 74〕；适配层 `host_market_*` 是桩，见第 11 条）。签名算法为 **Ed25519**（非对称：私钥签发、公钥验证）
 11. 🟡 **安全解压四重防护** — 路径清洗、条目≤2000、解压≤200MB、压缩比≤100×（`crates/tauron-market` 的 `validate_zip_constants` 有正反测试；**只做校验、不做解压**——crate 自述"zip 解包由适配层提供"，`crates/tauron-market/src/lib.rs:11`，而适配层没有解压实现）
 12. 🟡 **链式 hash 审计日志** — 商城操作不可篡改（`crates/tauron-market` 的 `AuditLog::verify_chain` 有篡改检测测试；未接线）
-13. ✅ **generate_handler!() 宏** — 一次性注册全部 Tauri 命令，零样板。⚠️ 原文写的 **17 条已过时**：实测为 **60 条**（`tauron_plugin_handler!` = 底座 39 + 插件运行时 21；`plugin-install` feature 另注册 2 条），底座-only 宿主用 `tauron_substrate_handler!` 只注册 **39 条**（`crates/tauron-adapter/src/tauri.rs` 的两个宏定义，计数逐条数过；分域清单见 `docs/integration/incremental-adoption.md` §0.1/§0.2）
+13. ✅ **generate_handler!() 宏** — 一次性注册全部 Tauri 命令，零样板。⚠️ 原文写的 **17 条已过时**：实测为 **78 条**（`tauron_plugin_handler!` = 底座 57 + 插件运行时 21；`plugin-install` feature 另注册 2 条且**已进默认特性，启用后共 80 条**），底座-only 宿主用 `tauron_substrate_handler!` 只注册 **57 条**（`crates/tauron-adapter/src/tauri.rs` 的两个宏定义，计数逐条数过；分域清单见 `docs/integration/incremental-adoption.md` §0.1/§0.2）
 14. 🟡 **Shell 矩阵 4 形态** — local / local-server / remote-url / sub-webview 覆盖主流场景（`packages/tauron-shell-matrix/src/manager.ts:71-93` 四条分支均为 `Simulate ...` 注释下的模拟返回，自带测试但未接真实 webview/本地服务）
 15. ✅ **双层 ACL** — 外层 Tauri 静态（capability/permission，由接入方在 `capabilities/` 声明）+ 内层框架动态（三档授权 + origin 允许清单，`origin_gate` 是唯一分发咽喉点，`crates/tauron-adapter/src/tauri.rs:1944`）
 16. ✅ **per-plugin 崩溃重启限制** — 进程插件 3 次 / 5 分钟，防止雪崩（`tauron-proc::CrashTracker`，在 `cmd_runtime_spawn` 的预算门里真被调用，`crates/tauron-adapter/src/lib.rs`）。⚠️ **无进程组 / 作业对象、无 kill 树**（孙进程不随父进程一起死），空闲超时 kill 未实现（`crates/tauron-proc/src/spawner.rs:93`）
@@ -687,7 +687,7 @@ tauri::Builder::default().plugin(tauron_adapter::tauri::state_init())
 > | §三 CLI 工具链 | `plugin sign` 仍是 `hash*31` 假签名、谎报 `ed25519` | **已修（轮 11）**：真 SHA-256 摘要 + `algorithm:'sha256-digest'` + `simulated:true`，`.sig` 真写出（`plugin-lifecycle.ts:157`） |
 > | §六 第 2 条 | `resolve_principal` 在 `tauron-adapter/src/tauri.rs:684,716,723` | **文件就写错了**：实际在 `crates/tauron-host/src/authz.rs:409` |
 > | §六 第 3 条 | `lifecycle.rs:528` | `lifecycle.rs:558` |
-> | §六 第 13 条 | 50 条（底座 35 + 插件运行时 15） | **60 条（底座 39 + 插件运行时 21）** |
+> | §六 第 13 条 | 50 条（底座 35 + 插件运行时 15） | **78 条（底座 57 + 插件运行时 21）**；`plugin-install` 默认开 → **80 条** |
 > | §六 第 14 条 | `manager.ts:70-88` | `manager.ts:71-93` |
 > | §六 第 15 条 | `tauri.rs:1243` | `tauri.rs:1944` |
 >

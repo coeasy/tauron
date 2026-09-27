@@ -78,9 +78,7 @@ export function callPluginMethod<T = unknown>(
 
     if (timeoutMs > 0) {
       timer = setTimeout(() => {
-        finish(() =>
-          reject(new Error(`Plugin method timed out after ${timeoutMs}ms: ${method}`)),
-        );
+        finish(() => reject(new Error(`Plugin method timed out after ${timeoutMs}ms: ${method}`)));
       }, timeoutMs);
     }
 

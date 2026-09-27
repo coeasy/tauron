@@ -60,16 +60,7 @@ export {
 } from './registry.js';
 
 // ---- 事件总线（§2.3/§4.5）----
-export {
-  EventBus,
-  EventBusError,
-  type EventBusConfig,
-  type EventSubscriber,
-} from './event-bus.js';
+export { EventBus, EventBusError, type EventBusConfig, type EventSubscriber } from './event-bus.js';
 
 // ---- 配置管理（§4.6）----
-export {
-  ConfigManager,
-  type ConfigLayer,
-  type ConfigChangeListener,
-} from './config.js';
+export { ConfigManager, type ConfigLayer, type ConfigChangeListener } from './config.js';

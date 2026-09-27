@@ -16,7 +16,7 @@
  * ```
  */
 
-import { createContext, useContext, type ReactNode, type MutableRefObject } from 'react';
+import { createContext, useContext, type ReactNode } from 'react';
 import type { TauronBackend } from '@tauron/core';
 
 /** tauron 上下文值 */
@@ -40,11 +40,7 @@ export interface TauronProviderProps {
  * TauronProvider — 提供 tauron 上下文
  */
 export function TauronProvider({ backend, children }: TauronProviderProps) {
-  return (
-    <TauronContext.Provider value={{ backend }}>
-      {children}
-    </TauronContext.Provider>
-  );
+  return <TauronContext.Provider value={{ backend }}>{children}</TauronContext.Provider>;
 }
 
 /**

@@ -68,14 +68,16 @@ describe('PluginContext', () => {
   describe('readHandshakeTokenFromUrl', () => {
     it('解析标准片段', () => {
       expect(
-        readHandshakeTokenFromUrl(`https://app/plugins/p1/index.html#${PLUGIN_TOKEN_FRAGMENT_KEY}=abc-123`),
+        readHandshakeTokenFromUrl(
+          `https://app/plugins/p1/index.html#${PLUGIN_TOKEN_FRAGMENT_KEY}=abc-123`,
+        ),
       ).toBe('abc-123');
     });
 
     it('多参数片段中定位目标键并 URL 解码', () => {
-      expect(
-        readHandshakeTokenFromUrl('https://app/p.html#other=1&tauron-token=a%2Fb%3Dc'),
-      ).toBe('a/b=c');
+      expect(readHandshakeTokenFromUrl('https://app/p.html#other=1&tauron-token=a%2Fb%3Dc')).toBe(
+        'a/b=c',
+      );
     });
 
     it('缺失时返回空串', () => {

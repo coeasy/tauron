@@ -23,6 +23,9 @@ pub mod tauri;
 /// 进程插件投递实现（0.4-A1：Process 形态的 `CallDelivery` + sidecar 回帧接收器）。
 pub mod process_delivery;
 
+/// WASM 插件投递实现（任务二：`PluginType::Wasm` 经 `tauron-wasm` 校验层）。
+pub mod wasm_delivery;
+
 /// 启动恢复的持久化与崩溃检测（平台无关，纯 std）。
 mod recovery;
 
@@ -35,7 +38,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use tauron_host::{
-    call_delivery::{CallDelivery, CallOutcome, DeliveryKind, JsCallDelivery, select_delivery},
+    call_delivery::{select_delivery, CallDelivery, CallOutcome, DeliveryKind, JsCallDelivery},
     eventbus::{ChannelKind, EventBus, Frame, PublishResult, SubscribeOutcome},
     guard,
     lifecycle::{Event, State as LifecycleStateName, TransitionOutcome},
@@ -69,6 +72,7 @@ use tauron_recovery::{
 use tauron_settings::{Migration, SettingsError, SettingsStore};
 
 use crate::process_delivery::ProcessCallDelivery;
+use crate::wasm_delivery::WasmCallDelivery;
 
 /// 贡献注册条目（命令/菜单/面板/设置Tab）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -171,6 +175,9 @@ impl AdapterConfig {
             recovery_data_dir,
             required_plugins: HashSet::new(),
             origin_allowlist: Vec::new(),
+            // `ClientConfig` 没有 fs 根目录字段（它管注册表/数据目录）：由宿主用
+            // [`AdapterConfig::with_fs_roots`] 显式配置；缺省 = 该域不可用（如实）。
+            fs_allowed_roots: Vec::new(),
             #[cfg(feature = "plugin-install")]
             plugin_install_dir: None,
             #[cfg(feature = "plugin-install")]
@@ -191,6 +198,15 @@ impl AdapterConfig {
         self.plugin_install_dir = Some(root);
         self.plugin_signing_keys = signing_keys;
         self.acl_signing_key = Some(acl_signing_key);
+        self
+    }
+
+    /// 配置 `host_fs_*` 域的允许根目录（空 = 该域不可用）。
+    ///
+    /// 装配期会逐个 `canonicalize`；不存在的根被忽略（见
+    /// [`AdapterConfig::fs_allowed_roots`] 的语义说明）。
+    pub fn with_fs_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.fs_allowed_roots = roots;
         self
     }
 }
@@ -223,6 +239,18 @@ pub struct AdapterConfig {
     /// 比较前会去掉首尾空白与尾随 `/`。这是多宿主/混淆代理场景的防线：把非官方
     /// origin 的窗口挡在特权命令之外。
     pub origin_allowlist: Vec<String>,
+    /// **宿主文件系统允许根目录（`host_fs_*` 域）**。
+    ///
+    /// 语义（与 `origin_allowlist` 的 fail-closed 同精神，但更严）：
+    /// - **空 = 该域整体不可用**——每条 `host_fs_*` 命令返回
+    ///   [`UnsupportedBody`]（`supported:false`），**不是**"放行任意路径"；
+    /// - 非空 = 只允许访问这些根目录**之内**的路径：调用方给的路径先 `canonicalize`
+    ///   （解析符号链接、消除 `..`），再校验 `starts_with` 命中某个根。任一根目录
+    ///   本身 canonicalize 失败（不存在）时该根被**忽略**（不因为配错一个不存在的
+    ///   根而放开全盘，也不整体拒绝启动）。
+    ///
+    /// 装配方（生产宿主）应传宿主自己的数据/导出目录；测试传 tempdir。
+    pub fs_allowed_roots: Vec<PathBuf>,
     /// Package installation root. Installation remains unavailable when unset.
     #[cfg(feature = "plugin-install")]
     pub plugin_install_dir: Option<PathBuf>,
@@ -385,6 +413,20 @@ pub struct CapabilitiesBody {
 }
 
 /// 返回当前装配形态能力快照。能力列表与 handler 宏由 wire-gate 锁定一致。
+///
+/// # `families` 与 `unsupported` 由运行期事实**推导**，且两列**互斥**
+///
+/// - `families` = 命令面已装配**且**运行期提供者可用（或该域无 provider 依赖）的域；
+/// - `unsupported` = 命令面已装配但提供者**未接线**的域。
+///
+/// 判定依据是各域 sink 的 `native_supported()` / 等价运行期事实（`fs` 看允许根是否
+/// 非空，`brand` 看来源环境变量是否设置），**不是静态清单**（这条对应已知问题 P2-4：
+/// 此前两列都是硬编码，且同一域会同时出现在两侧——既声称已装配又声称未实现，是
+/// 自相矛盾的过度声明）。
+///
+/// **诚实语义**：缺省装配（无 `tauri` feature）下 menu / tray / http / updater 确实
+/// 不可用，故落在 `unsupported`；注入对应 sink 后自动移入 `families`。同一进程内结果
+/// 会随装配与环境变化——这是**快照**，不是常量。
 pub fn cmd_host_capabilities(state: &SubstrateState) -> HostResult<CapabilitiesBody> {
     guard("host_capabilities", || {
         let plugin_runtime = state.plugin_flags.get().is_some();
@@ -394,34 +436,87 @@ pub fn cmd_host_capabilities(state: &SubstrateState) -> HostResult<CapabilitiesB
             #[cfg(feature = "plugin-install")]
             commands.extend_from_slice(PLUGIN_INSTALL_COMMANDS);
         }
-        Ok(CapabilitiesBody {
-            families: vec![
-                "shell".into(),
-                "ipc".into(),
-                "settings".into(),
-                "i18n".into(),
-                "notify".into(),
-                "recovery".into(),
-            ],
-            commands: commands.into_iter().map(str::to_string).collect(),
-            unsupported: [
-                "dialog",
-                "clipboard",
-                "deep-link-os",
-                "brand",
-                "market-update",
-                "fs",
-                "http",
+
+        // 无 provider 依赖的域：命令面装配即可用。
+        let mut families: Vec<String> =
+            ["shell", "ipc", "settings", "i18n", "notify", "recovery", "theme"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+
+        // 有 provider 语义的域：可用 → families，不可用 → unsupported（**二选一**）。
+        // (域名, 是否可用, 不可用原因)
+        let probes: [(&str, bool, &str); 8] = [
+            (
                 "menu",
+                state.menu_sink.native_supported(),
+                "菜单提供者未注入：缺省为进程内留痕实现，不建任何菜单",
+            ),
+            (
                 "tray",
+                state.tray_sink.native_supported(),
+                "托盘提供者未注入：缺省为进程内留痕实现，不建任何托盘图标",
+            ),
+            (
+                "fs",
+                !state.fs_allowed_roots.is_empty(),
+                "fs 提供者未配置：允许根目录为空（经 AdapterConfig::with_fs_roots 配置）",
+            ),
+            (
+                "http",
+                state.http_sink.native_supported(),
+                "未装配 HTTP 提供者：reqwest 的 TLS 后端不在离线依赖闭包内",
+            ),
+            (
                 "updater",
-            ]
-            .into_iter()
-            .map(|domain| UnsupportedDomain {
-                domain: domain.into(),
-                reason: format!("{domain} provider is not configured"),
-            })
-            .collect(),
+                state.updater_sink.native_supported(),
+                "更新端点未注入：缺省无 EndpointClient（用 DistributeUpdaterSink::with_endpoint 注入）",
+            ),
+            (
+                "brand",
+                brand_configured(),
+                "品牌来源未配置：设置 TAURON_BRAND_CONFIG_JSON 或 TAURON_BRAND_CONFIG",
+            ),
+            (
+                "dialog",
+                state.dialog_sink.native_supported(),
+                "对话框提供者未接入：缺省为不显示任何 UI 的降级实现",
+            ),
+            (
+                "deep-link-os",
+                state.deep_link_sink.native_supported(),
+                "无 OS 级深链接注册：tauri-plugin-deep-link 不在依赖闭包内",
+            ),
+        ];
+
+        let mut unsupported: Vec<UnsupportedDomain> = Vec::new();
+        for (domain, available, reason) in probes {
+            if available {
+                families.push(domain.to_string());
+            } else {
+                unsupported.push(UnsupportedDomain {
+                    domain: domain.to_string(),
+                    reason: reason.to_string(),
+                });
+            }
+        }
+
+        // 无 provider 抽象、当前明确未实现的两个域：恒列 unsupported。
+        for (domain, reason) in [
+            ("clipboard", "无 OS 级剪贴板：当前为进程内缓冲区（真实但非系统剪贴板）"),
+            (
+                "market-update",
+                "未接入更新源：host_market_* 返回 simulated 结果，不做真实可用性探测",
+            ),
+        ] {
+            unsupported
+                .push(UnsupportedDomain { domain: domain.to_string(), reason: reason.to_string() });
+        }
+
+        Ok(CapabilitiesBody {
+            families,
+            commands: commands.into_iter().map(str::to_string).collect(),
+            unsupported,
             plugin_runtime,
         })
     })?
@@ -467,6 +562,26 @@ pub const SUBSTRATE_COMMANDS: &[&str] = &[
     "host_recover_boot",
     "host_recover_report",
     "host_brand_info",
+    // R9：五个宿主能力域（menu / tray / fs / http / updater）+ 品牌/主题孤儿 crate 接通。
+    // 全部为**主窗专属**（代码层 `require_main_window`），不进 authz 档位表。
+    "host_menu_set",
+    "host_menu_popup",
+    "host_menu_reset",
+    "host_tray_create",
+    "host_tray_set_menu",
+    "host_tray_remove",
+    "host_fs_read",
+    "host_fs_write",
+    "host_fs_list",
+    "host_fs_stat",
+    "host_fs_mkdir",
+    "host_fs_remove",
+    "host_http_request",
+    "host_updater_check",
+    "host_updater_status",
+    "host_theme_list",
+    "host_theme_get",
+    "host_theme_set",
     "host_capabilities",
 ];
 
@@ -814,6 +929,660 @@ impl DeepLinkSink for NoopDeepLinkSink {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// R9：五个宿主能力域（menu / tray / fs / http / updater）的 Sink 抽象
+//
+// 与 R8 的窗口/对话框/深链接**同一套模式**：平台无关 trait 在 `lib.rs`，
+// 平台实现（`TauriMenuSink` / `TauriTraySink`）在 feature-gated `tauri.rs`，
+// 通过 [`SubstrateState`] 的 `pub Arc<dyn …>` 字段注入；缺省值是**如实降级**的
+// 进程内实现（`Memory*` / `Noop*` / `Unavailable*`），绝不伪造平台行为。
+//
+// **每域的真实性口径（本轮实测结论，不美化）**：
+// - `menu`：`tauri::menu`（core，无需额外依赖）→ **真实现**；
+// - `tray`：`tauri` 的 `tray-icon` feature（离线缓存有 `tray-icon 0.24.2`）
+//   → **真实现**（本轮只在 Windows 验证编译）；
+// - `fs`：`std::fs` → **真实现**（无平台依赖，故缺省即真实现；"不可用"体现为
+//   [`AdapterConfig::fs_allowed_roots`] 为空时的 `UnsupportedBody`）；
+// - `http`：**诚实降级**——`reqwest 0.13.4` 虽在离线缓存，但其 TLS 后端
+//   `hyper-tls`（native-tls）与 `hyper-rustls`（rustls）**都不在离线缓存中**，
+//   离线解析失败（实测报 `no matching package named hyper-tls/hyper-rustls`）。
+//   故本域只留可注入的 `HttpSink`，缺省 [`UnavailableHttpSink`] 返回
+//   `UnsupportedBody("未装配 HTTP 提供者")`；**不引入任何新依赖**（硬约束）；
+// - `updater`：接 `tauron-distribute`（`check_for_update` / 灰度 / 崩溃门禁）
+//   → **真实现**，但 `EndpointClient` 需宿主注入；缺省无端点故 `native_supported()
+//   = false`（如实降级）。
+// ──────────────────────────────────────────────────────────────────────────
+
+/// 一个菜单项（线形：camelCase；`MenuSpec` 的成员）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MenuItemSpec {
+    /// 稳定 id（`host_menu_*` 返回的点击事件里带上它）。
+    pub id: String,
+    /// 显示文本。
+    pub label: String,
+    /// 点击时要发布到事件总线的 topic；`None` = 只记录不发布。
+    #[serde(default)]
+    pub event: Option<String>,
+    /// 是否可点（缺省 true）。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 菜单规格（线形）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MenuSpec {
+    /// 顶层菜单项（按序）。
+    #[serde(default)]
+    pub items: Vec<MenuItemSpec>,
+}
+
+/// 菜单操作结果（线形）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MenuOutcome {
+    /// 平台是否真的应用了该菜单（降级实现恒 `false`）。
+    pub applied: bool,
+    /// 菜单项数量（诊断用）。
+    pub item_count: usize,
+    /// `applied == false` 时说明原因；成功时为 `None`。
+    pub reason: Option<String>,
+}
+
+/// **菜单能力**（平台部分）。
+///
+/// 菜单点击的回传**不新造传输**：`TauriMenuSink` 用既有事件总线
+/// （`SubstrateState::bus`）发布 `MenuItemSpec::event` 指定的 topic，
+/// 与其余事件帧走同一条通路（`EventBus` → `host_events_drain`）。
+pub trait MenuSink: Send + Sync {
+    /// 菜单能力是否真实可用；默认缺省实现不支持。
+    fn native_supported(&self) -> bool {
+        false
+    }
+    /// 设置应用菜单（`tauri::menu` 的 `MenuBuilder`）。
+    fn set_menu(&self, spec: &MenuSpec) -> HostResult<bool>;
+    /// 弹出上下文菜单（`Menu::popup`）。
+    fn popup(&self, spec: &MenuSpec) -> HostResult<bool>;
+    /// 移除应用菜单。
+    fn reset(&self) -> HostResult<bool>;
+}
+
+/// 进程内菜单 sink（**降级缺省**）：只留痕，**不建任何菜单**。
+///
+/// ⚠️ 它不是菜单实现的替代品：要真实菜单必须注入 `tauri.rs` 的 `TauriMenuSink`。
+/// `native_supported()` 恒 `false`，命令层据此返回 `UnsupportedBody`。
+#[derive(Debug, Default)]
+pub struct MemoryMenuSink {
+    ops: Mutex<Vec<&'static str>>,
+}
+
+/// 菜单/托盘 sink 的留痕上限（环形：超限丢最旧）。
+pub const MAX_MENU_OPS: usize = 256;
+
+impl MemoryMenuSink {
+    /// 空记录器。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn record(&self, op: &'static str) {
+        let mut ops = self.ops.lock();
+        if ops.len() >= MAX_MENU_OPS {
+            ops.remove(0);
+        }
+        ops.push(op);
+    }
+
+    /// 是否记录过某操作。
+    pub fn recorded(&self, op: &str) -> bool {
+        self.ops.lock().contains(&op)
+    }
+}
+
+impl MenuSink for MemoryMenuSink {
+    fn set_menu(&self, _spec: &MenuSpec) -> HostResult<bool> {
+        self.record("set_menu");
+        Ok(false)
+    }
+
+    fn popup(&self, _spec: &MenuSpec) -> HostResult<bool> {
+        self.record("popup");
+        Ok(false)
+    }
+
+    fn reset(&self) -> HostResult<bool> {
+        self.record("reset");
+        Ok(false)
+    }
+}
+
+/// 托盘规格（线形）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TraySpec {
+    /// 悬浮提示文本。
+    #[serde(default)]
+    pub tooltip: Option<String>,
+    /// 托盘右键菜单。
+    #[serde(default)]
+    pub menu: Option<MenuSpec>,
+}
+
+/// 托盘操作结果（线形）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TrayOutcome {
+    /// 平台是否真的应用了该操作（降级实现恒 `false`）。
+    pub applied: bool,
+    /// `applied == false` 时说明原因；成功时为 `None`。
+    pub reason: Option<String>,
+}
+
+/// **系统托盘能力**（平台部分）。
+///
+/// 真实现需 `tauri` 的 `tray-icon` feature（本轮仅在 Windows 验证编译；
+/// Linux 还需额外系统依赖，**未在本机验证**）。
+pub trait TraySink: Send + Sync {
+    /// 托盘能力是否真实可用；默认缺省实现不支持。
+    fn native_supported(&self) -> bool {
+        false
+    }
+    /// 创建/更新托盘图标。
+    fn create(&self, spec: &TraySpec) -> HostResult<bool>;
+    /// 设置托盘菜单。
+    fn set_menu(&self, spec: &MenuSpec) -> HostResult<bool>;
+    /// 移除托盘。
+    fn remove(&self) -> HostResult<bool>;
+}
+
+/// 进程内托盘 sink（**降级缺省**）：只留痕，**不建任何托盘图标**。
+#[derive(Debug, Default)]
+pub struct MemoryTraySink {
+    ops: Mutex<Vec<&'static str>>,
+}
+
+impl MemoryTraySink {
+    /// 空记录器。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn record(&self, op: &'static str) {
+        let mut ops = self.ops.lock();
+        if ops.len() >= MAX_MENU_OPS {
+            ops.remove(0);
+        }
+        ops.push(op);
+    }
+
+    /// 是否记录过某操作。
+    pub fn recorded(&self, op: &str) -> bool {
+        self.ops.lock().contains(&op)
+    }
+}
+
+impl TraySink for MemoryTraySink {
+    fn create(&self, _spec: &TraySpec) -> HostResult<bool> {
+        self.record("create");
+        Ok(false)
+    }
+
+    fn set_menu(&self, _spec: &MenuSpec) -> HostResult<bool> {
+        self.record("set_menu");
+        Ok(false)
+    }
+
+    fn remove(&self) -> HostResult<bool> {
+        self.record("remove");
+        Ok(false)
+    }
+}
+
+/// 目录项（`host_fs_list` 的行）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FsEntry {
+    /// 文件名（不含父路径）。
+    pub name: String,
+    /// 绝对路径。
+    pub path: String,
+    /// 是否目录。
+    pub is_dir: bool,
+    /// 文件字节数（目录为 0）。
+    pub size: u64,
+}
+
+/// `host_fs_stat` 的结果。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FsStat {
+    /// 绝对路径。
+    pub path: String,
+    /// 是否目录。
+    pub is_dir: bool,
+    /// 是否普通文件。
+    pub is_file: bool,
+    /// 字节数。
+    pub size: u64,
+    /// 宿主视角是否只读（`permissions().readonly()`）。
+    pub readonly: bool,
+}
+
+/// `host_fs_read` 的结果（**文本**；超限时 `truncated: true`）。
+///
+/// 不引入 base64（硬约束）：二进制文件按 UTF-8 有损解码，`truncated` 如实标注。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FsReadResult {
+    /// 绝对路径。
+    pub path: String,
+    /// 文本内容（UTF-8 有损）。
+    pub text: String,
+    /// 实际读取的字节数。
+    pub bytes: u64,
+    /// 是否因超过上限而被截断。
+    pub truncated: bool,
+}
+
+/// `host_fs_write` 的结果。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FsWriteResult {
+    /// 绝对路径。
+    pub path: String,
+    /// 写入的字节数。
+    pub bytes: u64,
+}
+
+/// **文件系统能力**（宿主允许根目录内的 I/O）。
+///
+/// 本 trait 只做**裸 I/O**；路径归属校验（canonicalize + `starts_with`）在命令层
+/// 完成——那是安全关键点，必须与 [`AdapterConfig::fs_allowed_roots`] 同源。
+///
+/// 缺省实现是 [`StdFsSink`]（`std::fs`，**真实现**，无平台依赖）。本域因此
+/// **没有"进程内降级实现"**：`std::fs` 就是真实行为；"不可用"体现为允许根为空时
+/// 命令层的 `UnsupportedBody`（如实，不伪造）。可注入假实现用于单测。
+pub trait FsSink: Send + Sync {
+    /// 读取文件（至多 `max_bytes`）。
+    fn read(&self, path: &std::path::Path, max_bytes: u64) -> HostResult<(Vec<u8>, bool)>;
+    /// 写入文件（覆盖）。
+    fn write(&self, path: &std::path::Path, bytes: &[u8]) -> HostResult<u64>;
+    /// 列目录。
+    fn list(&self, path: &std::path::Path) -> HostResult<Vec<FsEntry>>;
+    /// 取元数据。
+    fn stat(&self, path: &std::path::Path) -> HostResult<FsStat>;
+    /// 建目录。
+    fn mkdir(&self, path: &std::path::Path, recursive: bool) -> HostResult<()>;
+    /// 删除文件或（空）目录。
+    fn remove(&self, path: &std::path::Path) -> HostResult<()>;
+}
+
+/// `std::fs` 的真实实现（**缺省**）。
+#[derive(Debug, Default)]
+pub struct StdFsSink;
+
+impl StdFsSink {
+    /// 新建。
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+fn fs_io_error(op: &str, path: &std::path::Path, e: std::io::Error) -> HostError {
+    HostError::new(
+        ErrorCode::E_STATE_INVALID_TRANSITION,
+        format!("文件系统操作 `{op}` 失败（{}）：{e}", path.display()),
+    )
+}
+
+impl FsSink for StdFsSink {
+    fn read(&self, path: &std::path::Path, max_bytes: u64) -> HostResult<(Vec<u8>, bool)> {
+        use std::io::Read;
+        let file = std::fs::File::open(path).map_err(|e| fs_io_error("read", path, e))?;
+        let mut buf = Vec::new();
+        // 多读 1 字节用于判定"是否被截断"。
+        let mut limited = file.take(max_bytes.saturating_add(1));
+        limited.read_to_end(&mut buf).map_err(|e| fs_io_error("read", path, e))?;
+        let truncated = buf.len() as u64 > max_bytes;
+        if truncated {
+            buf.truncate(max_bytes as usize);
+        }
+        Ok((buf, truncated))
+    }
+
+    fn write(&self, path: &std::path::Path, bytes: &[u8]) -> HostResult<u64> {
+        std::fs::write(path, bytes).map_err(|e| fs_io_error("write", path, e))?;
+        Ok(bytes.len() as u64)
+    }
+
+    fn list(&self, path: &std::path::Path) -> HostResult<Vec<FsEntry>> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(path).map_err(|e| fs_io_error("list", path, e))? {
+            let entry = entry.map_err(|e| fs_io_error("list", path, e))?;
+            let meta = entry.metadata().map_err(|e| fs_io_error("list", path, e))?;
+            out.push(FsEntry {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                path: entry.path().to_string_lossy().into_owned(),
+                is_dir: meta.is_dir(),
+                size: if meta.is_file() { meta.len() } else { 0 },
+            });
+        }
+        // 稳定序（便于测试与前端 diff）：按名字排序。
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    fn stat(&self, path: &std::path::Path) -> HostResult<FsStat> {
+        let meta = std::fs::metadata(path).map_err(|e| fs_io_error("stat", path, e))?;
+        Ok(FsStat {
+            path: path.to_string_lossy().into_owned(),
+            is_dir: meta.is_dir(),
+            is_file: meta.is_file(),
+            size: if meta.is_file() { meta.len() } else { 0 },
+            readonly: meta.permissions().readonly(),
+        })
+    }
+
+    fn mkdir(&self, path: &std::path::Path, recursive: bool) -> HostResult<()> {
+        let result =
+            if recursive { std::fs::create_dir_all(path) } else { std::fs::create_dir(path) };
+        result.map_err(|e| fs_io_error("mkdir", path, e))
+    }
+
+    fn remove(&self, path: &std::path::Path) -> HostResult<()> {
+        let meta = std::fs::symlink_metadata(path).map_err(|e| fs_io_error("remove", path, e))?;
+        let result = if meta.is_dir() {
+            // **只删空目录**：递归删除是高危动作，本域不提供（调用方须自底向上删）。
+            std::fs::remove_dir(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        result.map_err(|e| fs_io_error("remove", path, e))
+    }
+}
+
+/// HTTP 请求规格（线形）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HttpRequestSpec {
+    /// 方法（仅 `GET` / `POST`）。
+    #[serde(default = "default_http_method")]
+    pub method: String,
+    /// 目标 URL（**仅** `http` / `https`）。
+    pub url: String,
+    /// 请求头。
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// 请求体（`POST`）。
+    #[serde(default)]
+    pub body: Option<String>,
+    /// 超时（毫秒，缺省 30000）。
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// 响应体字节上限（缺省 1 MiB）。
+    #[serde(default)]
+    pub max_bytes: Option<u64>,
+}
+
+fn default_http_method() -> String {
+    "GET".to_string()
+}
+
+/// HTTP 响应（线形）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HttpResponseSpec {
+    /// 状态码。
+    pub status: u16,
+    /// 响应头（小写键）。
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// 响应体（UTF-8 有损）。
+    pub body: String,
+    /// 是否因超过上限而被截断。
+    pub truncated: bool,
+}
+
+/// **HTTP 能力**（平台/网络部分）。
+///
+/// 本仓**没有装配真实 HTTP 提供者**：如实降级（见下方 `UnavailableHttpSink` 与
+/// 本域块的说明）。接入方注入自己的实现即可启用。
+pub trait HttpSink: Send + Sync {
+    /// HTTP 能力是否真实可用；默认缺省实现不支持。
+    fn native_supported(&self) -> bool {
+        false
+    }
+    /// 发起一次请求。
+    fn request(&self, spec: &HttpRequestSpec) -> HostResult<ProviderResult<HttpResponseSpec>>;
+}
+
+/// HTTP sink 的**降级**实现（缺省）：恒返回 `UnsupportedBody`。
+///
+/// 真原因（实测）：`reqwest 0.13.4` 的两种 TLS 后端 `hyper-tls` 与 `hyper-rustls`
+/// 都不在离线缓存中，`cargo check --offline` 报 `no matching package named
+/// hyper-tls/hyper-rustls`；硬约束又不许新增依赖，故不接入 HTTP 客户端。
+#[derive(Debug, Default)]
+pub struct UnavailableHttpSink;
+
+impl HttpSink for UnavailableHttpSink {
+    fn request(&self, _spec: &HttpRequestSpec) -> HostResult<ProviderResult<HttpResponseSpec>> {
+        Ok(ProviderResult::Unsupported(unsupported_body(
+            "未装配 HTTP 提供者（reqwest 的 TLS 后端 hyper-tls/hyper-rustls 不在离线缓存中）",
+            Some("注入自定义 HttpSink 实现"),
+        )))
+    }
+}
+
+/// `host_updater_check` 的结果（线形）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdaterCheckOutcome {
+    /// 是否有可用更新。
+    pub available: bool,
+    /// 可用版本号；无则 `null`。
+    pub version: Option<String>,
+    /// 下载 URL；无则 `null`。
+    pub url: Option<String>,
+    /// 发布日期；无则 `null`。
+    pub released_at: Option<String>,
+    /// 是否走了**降级/不可用**路径（端点不可达、签名非法、响应体非法等）。
+    pub degraded: bool,
+    /// 说明（降级原因 / 灰度未覆盖 / 已是最新等）；无则 `null`。
+    pub reason: Option<String>,
+}
+
+/// `host_updater_status` 的结果（线形）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdaterStatus {
+    /// 更新提供者是否已装配（`EndpointClient` 已注入）。
+    pub available: bool,
+    /// 进程内更新状态机（来自 [`ShellExtState::update_state`]）。
+    pub state: Option<String>,
+    /// 当前灰度批次百分比。
+    pub grayscale_percent: u32,
+    /// 崩溃门禁是否已停发。
+    pub crash_gate_stopped: bool,
+    /// `available == false` 时说明原因；否则 `None`。
+    pub reason: Option<String>,
+}
+
+/// **更新通道能力**（接 `tauron-distribute`）。
+///
+/// 真实现 [`DistributeUpdaterSink`] 会真的跑 `check_for_update`（灰度 + 签名 +
+/// 清单校验）；但 `EndpointClient` 必须由宿主注入——缺省无端点故
+/// `native_supported() == false`。
+pub trait UpdaterSink: Send + Sync {
+    /// 更新通道是否真实可用（端点已注入）；默认缺省实现不支持。
+    fn native_supported(&self) -> bool {
+        false
+    }
+    /// 检查更新。
+    fn check(&self, current_version: &str) -> HostResult<ProviderResult<UpdaterCheckOutcome>>;
+    /// 当前更新通道状态（灰度批次 / 崩溃门禁 / 提供者可用性）。
+    fn status(&self) -> UpdaterStatus;
+}
+
+/// 未配置端点时的 `EndpointClient`：如实报"未配置"，**不假装**"已是最新"。
+///
+/// （`Ok(None)` 在 `tauron-distribute::check_for_update` 里被解释为 `UpToDate`——
+/// 那是"端点说已最新"的语义，与"没有端点"是两件事，不能混用。）
+struct UnconfiguredEndpointClient;
+
+impl tauron_distribute::EndpointClient for UnconfiguredEndpointClient {
+    fn fetch_manifest(
+        &self,
+        _current_version: &str,
+    ) -> tauron_distribute::DistributeResult<Option<tauron_distribute::UpdateManifest>> {
+        Err(tauron_distribute::DistributeError::EndpointError(
+            "未配置更新端点（EndpointClient 未注入）".into(),
+        ))
+    }
+}
+
+/// `tauron-distribute` 支撑的更新 sink（**真实现**）。
+///
+/// 持有 `EndpointClient`（可注入）+ 灰度策略 + 崩溃门禁；`check` 直接调
+/// `tauron_distribute::check_for_update`。装配方用 [`Self::with_endpoint`] 注入
+/// 真实/模拟端点，用 [`Self::unconfigured`]（缺省）表示"无端点"。
+pub struct DistributeUpdaterSink {
+    client: Arc<dyn tauron_distribute::EndpointClient>,
+    grayscale: Mutex<tauron_distribute::GrayscalePolicy>,
+    crash_gate: Mutex<tauron_distribute::CrashGate>,
+    configured: bool,
+}
+
+impl DistributeUpdaterSink {
+    /// **缺省**：无端点（`native_supported() == false`，命令层如实降级）。
+    pub fn unconfigured() -> Self {
+        Self {
+            client: Arc::new(UnconfiguredEndpointClient),
+            grayscale: Mutex::new(tauron_distribute::GrayscalePolicy::default()),
+            crash_gate: Mutex::new(tauron_distribute::CrashGate::default()),
+            configured: false,
+        }
+    }
+
+    /// 注入端点（全量灰度：装配方按需推进/回退）。
+    pub fn with_endpoint(client: Arc<dyn tauron_distribute::EndpointClient>) -> Self {
+        Self {
+            client,
+            grayscale: Mutex::new(tauron_distribute::GrayscalePolicy {
+                current: tauron_distribute::GrayscaleBatch::Batch100,
+                ..Default::default()
+            }),
+            crash_gate: Mutex::new(tauron_distribute::CrashGate::default()),
+            configured: true,
+        }
+    }
+
+    /// 推进灰度批次（达停留时间才成功）。
+    pub fn advance_grayscale(&self, now: u64) -> tauron_distribute::DistributeResult<()> {
+        self.grayscale.lock().advance(now).map(|_| ())
+    }
+
+    /// 更新崩溃门禁（返回是否触发停发）。
+    pub fn update_crash_gate(&self, crashes: u32, total: u32) -> bool {
+        self.crash_gate.lock().update(crashes, total)
+    }
+}
+
+impl UpdaterSink for DistributeUpdaterSink {
+    fn native_supported(&self) -> bool {
+        self.configured
+    }
+
+    fn check(&self, current_version: &str) -> HostResult<ProviderResult<UpdaterCheckOutcome>> {
+        use tauron_distribute::UpdateCheckResult as R;
+        let policy = self.grayscale.lock().clone();
+        let result = tauron_distribute::check_for_update(
+            self.client.as_ref(),
+            current_version,
+            &policy,
+            // 灰度分桶用户标识：本轮无宿主级稳定 hash，固定 0（1% 批次下必命中）。
+            // 如实登记：真实实现应传宿主持久化的安装 id hash。
+            0,
+        );
+        let outcome = match result {
+            Ok(R::UpdateAvailable(m)) => UpdaterCheckOutcome {
+                available: true,
+                version: Some(m.version),
+                url: Some(m.url),
+                released_at: Some(m.release_date),
+                degraded: false,
+                reason: None,
+            },
+            Ok(R::UpToDate) => UpdaterCheckOutcome {
+                available: false,
+                version: None,
+                url: None,
+                released_at: None,
+                degraded: false,
+                reason: Some("已是最新版本".into()),
+            },
+            Ok(R::NotInGrayscale) => UpdaterCheckOutcome {
+                available: false,
+                version: None,
+                url: None,
+                released_at: None,
+                degraded: false,
+                reason: Some("灰度批次未覆盖该用户".into()),
+            },
+            Ok(R::EndpointUnavailable(s)) => UpdaterCheckOutcome {
+                available: false,
+                version: None,
+                url: None,
+                released_at: None,
+                degraded: true,
+                reason: Some(format!("更新端点不可用：{s}")),
+            },
+            Ok(R::SignatureInvalid) => UpdaterCheckOutcome {
+                available: false,
+                version: None,
+                url: None,
+                released_at: None,
+                degraded: true,
+                reason: Some("更新清单签名非法（已拒绝）".into()),
+            },
+            Ok(R::InvalidBody(s)) => UpdaterCheckOutcome {
+                available: false,
+                version: None,
+                url: None,
+                released_at: None,
+                degraded: true,
+                reason: Some(format!("更新清单格式非法：{s}")),
+            },
+            Err(e) => UpdaterCheckOutcome {
+                available: false,
+                version: None,
+                url: None,
+                released_at: None,
+                degraded: true,
+                reason: Some(format!("更新检查失败：{e}")),
+            },
+        };
+        Ok(ProviderResult::Value(outcome))
+    }
+
+    fn status(&self) -> UpdaterStatus {
+        UpdaterStatus {
+            available: self.configured,
+            state: None,
+            grayscale_percent: self.grayscale.lock().current_percentage(),
+            crash_gate_stopped: self.crash_gate.lock().is_stopped(),
+            reason: if self.configured {
+                None
+            } else {
+                Some("未配置更新端点（EndpointClient 未注入）".into())
+            },
+        }
+    }
+}
+
 /// `host_window_create` 的**核心规格**（平台无关；由核心按注册表解析后交给 sink）。
 ///
 /// 字段来源**全部是宿主侧**：`plugin_id` 来自入参但必须先在注册表里存在，
@@ -970,6 +1739,25 @@ pub struct SubstrateState {
     pub dialog_sink: Arc<dyn DialogSink>,
     /// **深链接能力**（R8 §1）：缺省 = [`NoopDeepLinkSink`]（无 OS 级注册）。
     pub deep_link_sink: Arc<dyn DeepLinkSink>,
+    /// **菜单能力**（R9）：缺省 = [`MemoryMenuSink`]（降级：不建菜单）。
+    pub menu_sink: Arc<dyn MenuSink>,
+    /// **系统托盘能力**（R9）：缺省 = [`MemoryTraySink`]（降级：不建托盘）。
+    pub tray_sink: Arc<dyn TraySink>,
+    /// **文件系统能力**（R9）：缺省 = [`StdFsSink`]（`std::fs` 真实现）。
+    pub fs_sink: Arc<dyn FsSink>,
+    /// 文件系统允许根目录（canonicalize 后的**权威副本**，与
+    /// [`AdapterConfig::fs_allowed_roots`] 同源；空 = 该域不可用）。
+    pub fs_allowed_roots: Arc<Vec<PathBuf>>,
+    /// **HTTP 能力**（R9）：缺省 = [`UnavailableHttpSink`]（诚实降级）。
+    pub http_sink: Arc<dyn HttpSink>,
+    /// **更新通道能力**（R9）：缺省 = [`DistributeUpdaterSink::unconfigured`]。
+    pub updater_sink: Arc<dyn UpdaterSink>,
+    /// **主题注册表**（任务二：接通孤儿 crate `tauron-theme`）。
+    ///
+    /// 与既有 settings 的 `theme` 键**不是同一事实源**：`settings` 存的是"用户选了
+    /// 哪个 id"，这里存的是"有哪些主题可用 + 当前激活项"。两者互补而非重复。
+    /// 缺省 = [`tauron_theme::ThemeRegistry::default`]（含内置 light/dark）。
+    pub themes: Arc<Mutex<tauron_theme::ThemeRegistry>>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1278,9 +2066,7 @@ pub struct GroupSubscription {
 ///   只在 `#[cfg(test)]` 里存在的摆设。
 fn authz_table_selfcheck() -> &'static Result<(), String> {
     static CHECK: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
-    CHECK.get_or_init(|| {
-        tauron_host::authz::validate_command_registry().map_err(|e| e.message)
-    })
+    CHECK.get_or_init(|| tauron_host::authz::validate_command_registry().map_err(|e| e.message))
 }
 
 impl SubstrateState {
@@ -1360,6 +2146,18 @@ impl SubstrateState {
             window_sink: Arc::new(MemoryWindowSink::new()),
             dialog_sink: Arc::new(NoopDialogSink),
             deep_link_sink: Arc::new(NoopDeepLinkSink),
+            // R9：五域的降级/真实现缺省（见本域块的"真实性口径"）。
+            menu_sink: Arc::new(MemoryMenuSink::new()),
+            tray_sink: Arc::new(MemoryTraySink::new()),
+            fs_sink: Arc::new(StdFsSink::new()),
+            // 允许根目录先 canonicalize：不存在/不可解析的根被**忽略**（不整体
+            // 拒绝启动，也不放开全盘）。留存的都是可用于 `starts_with` 的绝对路径。
+            fs_allowed_roots: Arc::new(
+                cfg.fs_allowed_roots.iter().filter_map(|p| p.canonicalize().ok()).collect(),
+            ),
+            http_sink: Arc::new(UnavailableHttpSink),
+            updater_sink: Arc::new(DistributeUpdaterSink::unconfigured()),
+            themes: Arc::new(Mutex::new(tauron_theme::ThemeRegistry::default())),
         }
     }
 }
@@ -1457,7 +2255,10 @@ impl PluginRuntimeState {
     /// - `Js`：复用事件总线 request 通道（`JsCallDelivery`）。
     /// - `Process`：经 sidecar stdin/stdout 帧回路（`ProcessCallDelivery`）；sidecar
     ///   必须在 `cmd_runtime_spawn` 后处于运行中，`live_pid_of` 才能解析出 pid。
-    /// - `Rust` / `Wasm`：A4 之前无执行器，保持 unwired（落 `UnwiredDelivery`，
+    /// - `Wasm`：`WasmCallDelivery`——投递路径**真的经过** `tauron-wasm` 的配置 /
+    ///   ABI / 崩溃预算校验层（任务二接线），但执行层无运行时，仍诚实返回
+    ///   `delivered: false`（上层转 `E_PLUGIN_TYPE_NO_RUNTIME`）。
+    /// - `Rust`（Native）：A4 之前无执行器，保持 unwired（落 `UnwiredDelivery`，
     ///   诚实返回 `Unsupported`，不假装能调起）。
     pub fn default_deliveries(
         substrate: &Arc<SubstrateState>,
@@ -1473,6 +2274,10 @@ impl PluginRuntimeState {
             DeliveryKind::Process,
             Box::new(ProcessCallDelivery::new(proc_runtime.clone(), registry.clone())),
         );
+        // 任务二（接通 tauron-wasm）：Wasm 形态不再落 `UnwiredDelivery`——
+        // 投递路径现在**真的经过** `tauron-wasm` 的配置/ABI/崩溃预算校验层，
+        // 但执行层无运行时，仍诚实返回 `delivered: false`（详见模块头）。
+        map.insert(DeliveryKind::Wasm, Box::new(WasmCallDelivery::new(registry.clone())));
         map
     }
 
@@ -1614,11 +2419,7 @@ mod substrate_only_tests {
         // 构造一次底座即触发自检（panic 就不会走到这里）。
         let _ = SubstrateState::with_adapter_config(&AdapterConfig::default());
         let checked = authz_table_selfcheck();
-        assert!(
-            checked.is_ok(),
-            "内置授权档位表必须自洽（§8-17）：{:?}",
-            checked.as_ref().err()
-        );
+        assert!(checked.is_ok(), "内置授权档位表必须自洽（§8-17）：{:?}", checked.as_ref().err());
         // 自检对象确实是 canonical 的命令面（不是空表通过）。
         assert!(tauron_host::authz::COMMANDS.len() >= 15);
         assert!(!tauron_host::authz::ADMIN_COMMANDS.is_empty());
@@ -2581,10 +3382,9 @@ pub fn cmd_plugin_call(
         // 返回诚实的 `E_PLUGIN_TYPE_NO_RUNTIME` 而非假装成功。
         match state.deliver_call(&call)? {
             ProviderResult::Value(_) => Ok(call),
-            ProviderResult::Unsupported(b) => Err(HostError::new(
-                ErrorCode::E_PLUGIN_TYPE_NO_RUNTIME,
-                b.reason,
-            )),
+            ProviderResult::Unsupported(b) => {
+                Err(HostError::new(ErrorCode::E_PLUGIN_TYPE_NO_RUNTIME, b.reason))
+            }
         }
     })?
 }
@@ -2602,9 +3402,7 @@ pub fn cmd_call_plugin(
     args: serde_json::Value,
 ) -> HostResult<ProviderResult<PendingCall>> {
     guard("call_plugin", || {
-        let call = state
-            .registry
-            .call_begin_cross(caller, target, caller, cmd, args)?;
+        let call = state.registry.call_begin_cross(caller, target, caller, cmd, args)?;
         state.deliver_call(&call)
     })?
 }
@@ -2634,11 +3432,7 @@ pub fn cmd_call_result(
                 ),
             ));
         }
-        state.settle_call_for(
-            &target,
-            call_id,
-            CallOutcome { ok, result, error_code },
-        )
+        state.settle_call_for(&target, call_id, CallOutcome { ok, result, error_code })
     })?
 }
 
@@ -2972,10 +3766,12 @@ pub fn cmd_runtime_spawn(
             // 此时 stdin 登记同样已被清掉，后续 `write_frame` 会以 `NotFound`
             // 如实失败——无需在此造错误，死亡探测路径会回收租约。立即退出的
             // sidecar 走这条竞态属正常，不视为错误。
-            let registered = state
-                .proc_runtime
-                .spawner()
-                .register_frame_sink(handle.pid, Arc::new(crate::process_delivery::ProcessFrameSinkImpl::new(state.registry.clone())));
+            let registered = state.proc_runtime.spawner().register_frame_sink(
+                handle.pid,
+                Arc::new(crate::process_delivery::ProcessFrameSinkImpl::new(
+                    state.registry.clone(),
+                )),
+            );
             let _ = registered; // 迟到 EOF：死亡探测兜底，见上注释
         }
         Ok(handle)
@@ -4092,7 +4888,9 @@ pub struct ContributesReconcileReport {
 /// **shortcut 的 id 用 `command`**：快捷键没有天然 id（与 `createPlugin` 同口径），
 /// 因此「同一条命令绑两个加速键」在声明侧只算一条——这不是缺陷，是两侧共同的有损
 /// 映射；用 `BTreeSet` 去重后两侧口径一致。
-pub fn declared_contribute_keys(contributes: &tauron_host::manifest::Contributes) -> std::collections::BTreeSet<String> {
+pub fn declared_contribute_keys(
+    contributes: &tauron_host::manifest::Contributes,
+) -> std::collections::BTreeSet<String> {
     let mut keys = std::collections::BTreeSet::new();
     for c in &contributes.commands {
         keys.insert(format!("command:{}", c.id));
@@ -4571,12 +5369,730 @@ pub fn cmd_recover_trial_enable_as(
     cmd_recover_trial_enable(state, plugin_id)
 }
 
-/// `host_brand_info`：品牌信息。
+// ──────────────────────────────────────────────────────────────────────────
+// 品牌（任务二：接通孤儿 crate `tauron-brand`）
+// ──────────────────────────────────────────────────────────────────────────
+
+/// `host_brand_info` 的线形返回（camelCase）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrandInfo {
+    /// 应用标识符（如 `com.tauron.standard`）。
+    pub identifier: String,
+    /// 自定义协议名。
+    pub protocol_scheme: String,
+    /// 自启项名称。
+    pub autostart_name: String,
+    /// 数据目录名。
+    pub data_dir: String,
+    /// 快捷键绑定（键名 → 按键序列）。
+    pub shortcuts: std::collections::BTreeMap<String, String>,
+    /// 图标路径（平台字符串 → 相对路径）。
+    pub icons: std::collections::BTreeMap<String, String>,
+}
+
+/// 品牌配置**内联 JSON**环境变量（优先）。
+pub const BRAND_CONFIG_JSON_ENV: &str = "TAURON_BRAND_CONFIG_JSON";
+/// 品牌配置**文件路径**（JSON）环境变量。
+pub const BRAND_CONFIG_ENV: &str = "TAURON_BRAND_CONFIG";
+
+fn brand_err(e: tauron_brand::BrandError) -> HostError {
+    HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("品牌配置非法：{e}"))
+}
+
+/// 投影线形（`Platform` 取其 `as_str`，与 TS 侧字符串约定一致）。
+fn brand_info_from_raw(cfg: &tauron_brand::BrandConfig) -> HostResult<BrandInfo> {
+    cfg.validate_required().map_err(brand_err)?;
+    cfg.validate_shortcuts().map_err(brand_err)?;
+    Ok(BrandInfo {
+        identifier: cfg.identifier.clone(),
+        protocol_scheme: cfg.protocol_scheme.clone(),
+        autostart_name: cfg.autostart_name.clone(),
+        data_dir: cfg.data_dir.clone(),
+        shortcuts: cfg.shortcuts.clone(),
+        icons: cfg.icons.iter().map(|(p, v)| (p.as_str().to_string(), v.clone())).collect(),
+    })
+}
+
+/// 从环境变量装载品牌配置（真实实现，接 `tauron-brand`）。
+///
+/// 来源二选一（内联优先）：[`BRAND_CONFIG_JSON_ENV`] / [`BRAND_CONFIG_ENV`]。
+/// 都未设置 = **未配置品牌** → `None`，命令层如实返回 `UnsupportedBody`
+/// （不伪造一个默认品牌）。
+fn load_brand_config_from_env() -> HostResult<Option<tauron_brand::BrandConfig>> {
+    let raw = match std::env::var(BRAND_CONFIG_JSON_ENV) {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => match std::env::var(BRAND_CONFIG_ENV) {
+            Ok(path) if !path.trim().is_empty() => std::fs::read_to_string(&path).map_err(|e| {
+                HostError::new(
+                    ErrorCode::E_INVALID_MANIFEST,
+                    format!("读取品牌配置文件 `{path}` 失败：{e}"),
+                )
+            })?,
+            _ => return Ok(None),
+        },
+    };
+    let cfg = serde_json::from_str::<tauron_brand::BrandConfig>(&raw).map_err(|e| {
+        HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("品牌配置 JSON 解析失败：{e}"))
+    })?;
+    Ok(Some(cfg))
+}
+
+/// 品牌来源是否已配置（供 [`cmd_host_capabilities`] 推导 `brand` 域可用性）。
+///
+/// 与 [`cmd_brand_info`] **同源**：只看那两个环境变量是否非空。JSON 非法也算
+/// "已配置"——域本身可用，内容问题由 `host_brand_info` 的返回如实报告。
+fn brand_configured() -> bool {
+    let non_empty = |key: &str| std::env::var(key).map(|v| !v.trim().is_empty()).unwrap_or(false);
+    non_empty(BRAND_CONFIG_JSON_ENV) || non_empty(BRAND_CONFIG_ENV)
+}
+
+/// `host_brand_info`：品牌信息（**真实实现**，接孤儿 crate `tauron-brand`）。
+///
+/// 此前是恒 `UnsupportedBody` 的桩；现在未配置来源时仍如实降级，配置了则走
+/// `tauron-brand` 的校验（必填字段 / 快捷键唯一性）——**不返回裸桩**。
 ///
 /// （`host_market_check` 的实现在"壳扩展"一节，与 download/install 放在一起——
 /// R8 把三条商城命令的线形统一成有类型的结构，三个定义不该分散在两处。）
-pub fn cmd_brand_info(_state: &SubstrateState) -> HostResult<UnsupportedBody> {
-    Ok(unsupported_body("brand provider is not configured", None))
+pub fn cmd_brand_info(_state: &SubstrateState) -> HostResult<ProviderResult<BrandInfo>> {
+    guard("brand_info", || match load_brand_config_from_env()? {
+        None => Ok(ProviderResult::Unsupported(unsupported_body(
+            "brand provider is not configured",
+            Some("设置环境变量 TAURON_BRAND_CONFIG_JSON 或 TAURON_BRAND_CONFIG"),
+        ))),
+        Some(cfg) => Ok(ProviderResult::Value(brand_info_from_raw(&cfg)?)),
+    })?
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// R9 命令面：menu / tray / fs / http / updater / theme
+//
+// **全部为「主窗专属」**（`require_main_window`）：它们是宿主 UI 的编排原语，
+// 不属于插件可触达命令面，因此**不进** `tauron_host::authz` 档位表、也不进
+// `capabilities.ts`（见 authz.rs 的"不收录但有代码层判定"清单）。
+// ──────────────────────────────────────────────────────────────────────────
+
+/// 菜单规格的闭集校验（非空、id 唯一、id/label 非空）。
+fn validate_menu_spec(spec: &MenuSpec) -> HostResult<()> {
+    if spec.items.is_empty() {
+        return Err(HostError::new(
+            ErrorCode::E_INVALID_MANIFEST,
+            "菜单规格不能为空（至少一个菜单项）".to_string(),
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for item in &spec.items {
+        if item.id.trim().is_empty() {
+            return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "菜单项 id 不能为空"));
+        }
+        if item.label.trim().is_empty() {
+            return Err(HostError::new(
+                ErrorCode::E_INVALID_MANIFEST,
+                format!("菜单项 `{}` 的 label 不能为空", item.id),
+            ));
+        }
+        if !seen.insert(item.id.clone()) {
+            return Err(HostError::new(
+                ErrorCode::E_INVALID_MANIFEST,
+                format!("菜单项 id `{}` 重复", item.id),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn menu_unavailable() -> ProviderResult<MenuOutcome> {
+    ProviderResult::Unsupported(unsupported_body(
+        "native menu provider is not configured",
+        Some("注入 MenuSink 实现（生产：tauri.rs 的 TauriMenuSink）"),
+    ))
+}
+
+/// `host_menu_set`：设置应用菜单（主窗专属）。
+pub fn cmd_menu_set(
+    state: &SubstrateState,
+    spec: &MenuSpec,
+) -> HostResult<ProviderResult<MenuOutcome>> {
+    guard("menu_set", || {
+        validate_menu_spec(spec)?;
+        if !state.menu_sink.native_supported() {
+            return Ok(menu_unavailable());
+        }
+        let applied = state.menu_sink.set_menu(spec)?;
+        Ok(ProviderResult::Value(MenuOutcome {
+            applied,
+            item_count: spec.items.len(),
+            reason: if applied {
+                None
+            } else {
+                Some("菜单 sink 未应用该菜单（降级）".into())
+            },
+        }))
+    })?
+}
+
+/// `host_menu_set` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_menu_set_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    spec: &MenuSpec,
+) -> HostResult<ProviderResult<MenuOutcome>> {
+    require_main_window(caller, "host_menu_set")?;
+    cmd_menu_set(state, spec)
+}
+
+/// `host_menu_popup`：弹出上下文菜单（主窗专属）。
+pub fn cmd_menu_popup(
+    state: &SubstrateState,
+    spec: &MenuSpec,
+) -> HostResult<ProviderResult<MenuOutcome>> {
+    guard("menu_popup", || {
+        validate_menu_spec(spec)?;
+        if !state.menu_sink.native_supported() {
+            return Ok(menu_unavailable());
+        }
+        let applied = state.menu_sink.popup(spec)?;
+        Ok(ProviderResult::Value(MenuOutcome {
+            applied,
+            item_count: spec.items.len(),
+            reason: if applied {
+                None
+            } else {
+                Some("菜单 sink 未能弹出（缺少目标窗口句柄，宿主需在窗口级接线）".into())
+            },
+        }))
+    })?
+}
+
+/// `host_menu_popup` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_menu_popup_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    spec: &MenuSpec,
+) -> HostResult<ProviderResult<MenuOutcome>> {
+    require_main_window(caller, "host_menu_popup")?;
+    cmd_menu_popup(state, spec)
+}
+
+/// `host_menu_reset`：移除应用菜单（主窗专属）。
+pub fn cmd_menu_reset(state: &SubstrateState) -> HostResult<ProviderResult<MenuOutcome>> {
+    guard("menu_reset", || {
+        if !state.menu_sink.native_supported() {
+            return Ok(menu_unavailable());
+        }
+        let applied = state.menu_sink.reset()?;
+        Ok(ProviderResult::Value(MenuOutcome {
+            applied,
+            item_count: 0,
+            reason: if applied {
+                None
+            } else {
+                Some("菜单 sink 未移除菜单（降级）".into())
+            },
+        }))
+    })?
+}
+
+/// `host_menu_reset` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_menu_reset_as(
+    caller: &Caller,
+    state: &SubstrateState,
+) -> HostResult<ProviderResult<MenuOutcome>> {
+    require_main_window(caller, "host_menu_reset")?;
+    cmd_menu_reset(state)
+}
+
+fn tray_unavailable() -> ProviderResult<TrayOutcome> {
+    ProviderResult::Unsupported(unsupported_body(
+        "native tray provider is not configured",
+        Some("注入 TraySink 实现（生产：tauri.rs 的 TauriTraySink）"),
+    ))
+}
+
+fn validate_tray_spec(spec: &TraySpec) -> HostResult<()> {
+    if let Some(menu) = &spec.menu {
+        validate_menu_spec(menu)?;
+    }
+    Ok(())
+}
+
+/// `host_tray_create`：创建/更新系统托盘（主窗专属）。
+pub fn cmd_tray_create(
+    state: &SubstrateState,
+    spec: &TraySpec,
+) -> HostResult<ProviderResult<TrayOutcome>> {
+    guard("tray_create", || {
+        validate_tray_spec(spec)?;
+        if !state.tray_sink.native_supported() {
+            return Ok(tray_unavailable());
+        }
+        let applied = state.tray_sink.create(spec)?;
+        Ok(ProviderResult::Value(TrayOutcome {
+            applied,
+            reason: if applied {
+                None
+            } else {
+                Some("托盘 sink 未创建托盘（降级）".into())
+            },
+        }))
+    })?
+}
+
+/// `host_tray_create` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_tray_create_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    spec: &TraySpec,
+) -> HostResult<ProviderResult<TrayOutcome>> {
+    require_main_window(caller, "host_tray_create")?;
+    cmd_tray_create(state, spec)
+}
+
+/// `host_tray_set_menu`：设置托盘菜单（主窗专属）。
+pub fn cmd_tray_set_menu(
+    state: &SubstrateState,
+    spec: &MenuSpec,
+) -> HostResult<ProviderResult<TrayOutcome>> {
+    guard("tray_set_menu", || {
+        validate_menu_spec(spec)?;
+        if !state.tray_sink.native_supported() {
+            return Ok(tray_unavailable());
+        }
+        let applied = state.tray_sink.set_menu(spec)?;
+        Ok(ProviderResult::Value(TrayOutcome {
+            applied,
+            reason: if applied {
+                None
+            } else {
+                Some("托盘 sink 未更新菜单（降级）".into())
+            },
+        }))
+    })?
+}
+
+/// `host_tray_set_menu` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_tray_set_menu_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    spec: &MenuSpec,
+) -> HostResult<ProviderResult<TrayOutcome>> {
+    require_main_window(caller, "host_tray_set_menu")?;
+    cmd_tray_set_menu(state, spec)
+}
+
+/// `host_tray_remove`：移除系统托盘（主窗专属）。
+pub fn cmd_tray_remove(state: &SubstrateState) -> HostResult<ProviderResult<TrayOutcome>> {
+    guard("tray_remove", || {
+        if !state.tray_sink.native_supported() {
+            return Ok(tray_unavailable());
+        }
+        let applied = state.tray_sink.remove()?;
+        Ok(ProviderResult::Value(TrayOutcome {
+            applied,
+            reason: if applied {
+                None
+            } else {
+                Some("托盘 sink 未移除托盘（降级）".into())
+            },
+        }))
+    })?
+}
+
+/// `host_tray_remove` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_tray_remove_as(
+    caller: &Caller,
+    state: &SubstrateState,
+) -> HostResult<ProviderResult<TrayOutcome>> {
+    require_main_window(caller, "host_tray_remove")?;
+    cmd_tray_remove(state)
+}
+
+/// 单次 `host_fs_read` 的字节上限（4 MiB）。
+pub const FS_MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
+
+fn fs_unavailable() -> UnsupportedBody {
+    unsupported_body(
+        "fs provider is not configured",
+        Some("在 AdapterConfig.fs_allowed_roots 中配置允许根目录（空 = 不可用）"),
+    )
+}
+
+/// **路径归属校验**：canonicalize 后必须落在某个允许根目录之内。
+///
+/// 防路径穿越（`..`）与符号链接逃逸：目标不存在时 canonicalize 其父目录再拼文件名。
+/// 拒绝时返回 [`ErrorCode::E_AUTH_DENIED`]。
+fn resolve_within_roots(roots: &[PathBuf], raw: &str) -> HostResult<PathBuf> {
+    if raw.trim().is_empty() {
+        return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "fs 路径不能为空".to_string()));
+    }
+    let candidate = PathBuf::from(raw);
+    let canonical = if candidate.exists() {
+        candidate.canonicalize().map_err(|e| fs_io_error("canonicalize", &candidate, e))?
+    } else {
+        let parent = candidate.parent().filter(|p| !p.as_os_str().is_empty()).ok_or_else(|| {
+            HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("fs 路径 `{raw}` 没有父目录"))
+        })?;
+        let file_name = candidate.file_name().ok_or_else(|| {
+            HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("fs 路径 `{raw}` 没有文件名"))
+        })?;
+        parent.canonicalize().map_err(|e| fs_io_error("canonicalize", parent, e))?.join(file_name)
+    };
+    if roots.iter().any(|r| canonical.starts_with(r)) {
+        Ok(canonical)
+    } else {
+        Err(HostError::new(
+            ErrorCode::E_AUTH_DENIED,
+            format!("fs 路径 `{raw}` 不在宿主允许根目录内（拒绝路径穿越）"),
+        ))
+    }
+}
+
+/// `host_fs_read`：读取文本文件（允许根目录内；超限截断并如实标注）。
+pub fn cmd_fs_read(
+    state: &SubstrateState,
+    path: &str,
+    max_bytes: Option<u64>,
+) -> HostResult<ProviderResult<FsReadResult>> {
+    guard("fs_read", || {
+        let roots: &[PathBuf] = state.fs_allowed_roots.as_ref();
+        if roots.is_empty() {
+            return Ok(ProviderResult::Unsupported(fs_unavailable()));
+        }
+        let resolved = resolve_within_roots(roots, path)?;
+        let limit = max_bytes.unwrap_or(FS_MAX_READ_BYTES).min(FS_MAX_READ_BYTES);
+        let (bytes, truncated) = state.fs_sink.read(&resolved, limit)?;
+        Ok(ProviderResult::Value(FsReadResult {
+            path: resolved.to_string_lossy().into_owned(),
+            text: String::from_utf8_lossy(&bytes).into_owned(),
+            bytes: bytes.len() as u64,
+            truncated,
+        }))
+    })?
+}
+
+/// `host_fs_read` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_fs_read_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    path: &str,
+    max_bytes: Option<u64>,
+) -> HostResult<ProviderResult<FsReadResult>> {
+    require_main_window(caller, "host_fs_read")?;
+    cmd_fs_read(state, path, max_bytes)
+}
+
+/// `host_fs_write`：写入文本文件（覆盖；允许根目录内）。
+pub fn cmd_fs_write(
+    state: &SubstrateState,
+    path: &str,
+    text: &str,
+) -> HostResult<ProviderResult<FsWriteResult>> {
+    guard("fs_write", || {
+        let roots: &[PathBuf] = state.fs_allowed_roots.as_ref();
+        if roots.is_empty() {
+            return Ok(ProviderResult::Unsupported(fs_unavailable()));
+        }
+        let resolved = resolve_within_roots(roots, path)?;
+        let bytes = state.fs_sink.write(&resolved, text.as_bytes())?;
+        Ok(ProviderResult::Value(FsWriteResult {
+            path: resolved.to_string_lossy().into_owned(),
+            bytes,
+        }))
+    })?
+}
+
+/// `host_fs_write` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_fs_write_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    path: &str,
+    text: &str,
+) -> HostResult<ProviderResult<FsWriteResult>> {
+    require_main_window(caller, "host_fs_write")?;
+    cmd_fs_write(state, path, text)
+}
+
+/// `host_fs_list`：列目录（允许根目录内）。
+pub fn cmd_fs_list(state: &SubstrateState, path: &str) -> HostResult<ProviderResult<Vec<FsEntry>>> {
+    guard("fs_list", || {
+        let roots: &[PathBuf] = state.fs_allowed_roots.as_ref();
+        if roots.is_empty() {
+            return Ok(ProviderResult::Unsupported(fs_unavailable()));
+        }
+        let resolved = resolve_within_roots(roots, path)?;
+        state.fs_sink.list(&resolved).map(ProviderResult::Value)
+    })?
+}
+
+/// `host_fs_list` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_fs_list_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    path: &str,
+) -> HostResult<ProviderResult<Vec<FsEntry>>> {
+    require_main_window(caller, "host_fs_list")?;
+    cmd_fs_list(state, path)
+}
+
+/// `host_fs_stat`：取元数据（允许根目录内）。
+pub fn cmd_fs_stat(state: &SubstrateState, path: &str) -> HostResult<ProviderResult<FsStat>> {
+    guard("fs_stat", || {
+        let roots: &[PathBuf] = state.fs_allowed_roots.as_ref();
+        if roots.is_empty() {
+            return Ok(ProviderResult::Unsupported(fs_unavailable()));
+        }
+        let resolved = resolve_within_roots(roots, path)?;
+        state.fs_sink.stat(&resolved).map(ProviderResult::Value)
+    })?
+}
+
+/// `host_fs_stat` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_fs_stat_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    path: &str,
+) -> HostResult<ProviderResult<FsStat>> {
+    require_main_window(caller, "host_fs_stat")?;
+    cmd_fs_stat(state, path)
+}
+
+/// `host_fs_mkdir`：建目录（允许根目录内）。
+pub fn cmd_fs_mkdir(
+    state: &SubstrateState,
+    path: &str,
+    recursive: bool,
+) -> HostResult<ProviderResult<()>> {
+    guard("fs_mkdir", || {
+        let roots: &[PathBuf] = state.fs_allowed_roots.as_ref();
+        if roots.is_empty() {
+            return Ok(ProviderResult::Unsupported(fs_unavailable()));
+        }
+        let resolved = resolve_within_roots(roots, path)?;
+        state.fs_sink.mkdir(&resolved, recursive)?;
+        Ok(ProviderResult::Value(()))
+    })?
+}
+
+/// `host_fs_mkdir` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_fs_mkdir_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    path: &str,
+    recursive: bool,
+) -> HostResult<ProviderResult<()>> {
+    require_main_window(caller, "host_fs_mkdir")?;
+    cmd_fs_mkdir(state, path, recursive)
+}
+
+/// `host_fs_remove`：删除文件或空目录（允许根目录内；**不递归**）。
+pub fn cmd_fs_remove(state: &SubstrateState, path: &str) -> HostResult<ProviderResult<()>> {
+    guard("fs_remove", || {
+        let roots: &[PathBuf] = state.fs_allowed_roots.as_ref();
+        if roots.is_empty() {
+            return Ok(ProviderResult::Unsupported(fs_unavailable()));
+        }
+        let resolved = resolve_within_roots(roots, path)?;
+        state.fs_sink.remove(&resolved)?;
+        Ok(ProviderResult::Value(()))
+    })?
+}
+
+/// `host_fs_remove` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_fs_remove_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    path: &str,
+) -> HostResult<ProviderResult<()>> {
+    require_main_window(caller, "host_fs_remove")?;
+    cmd_fs_remove(state, path)
+}
+
+/// HTTP method 的闭集校验（`GET` / `POST`，大小写不敏感）。
+fn validated_http_method(method: &str) -> HostResult<String> {
+    let m = method.trim().to_ascii_uppercase();
+    match m.as_str() {
+        "GET" | "POST" => Ok(m),
+        other => Err(HostError::new(
+            ErrorCode::E_INVALID_MANIFEST,
+            format!("HTTP method `{other}` 非法：只接受 GET / POST"),
+        )),
+    }
+}
+
+/// URL scheme 白名单（仅 `http` / `https`）。
+fn validated_http_url(url: &str) -> HostResult<()> {
+    let u = url.trim();
+    if u.is_empty() {
+        return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "HTTP url 不能为空".to_string()));
+    }
+    let lower = u.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        Ok(())
+    } else {
+        Err(HostError::new(
+            ErrorCode::E_INVALID_MANIFEST,
+            format!("HTTP url `{url}` 非法：只接受 http/https scheme"),
+        ))
+    }
+}
+
+/// `host_http_request`：发起一次 HTTP 请求（主窗专属）。
+///
+/// 命令层只做**参数校验**，能力可用性由 sink 决定：缺省
+/// [`UnavailableHttpSink`] 恒返回 `UnsupportedBody`（诚实降级，见其文档）。
+pub fn cmd_http_request(
+    state: &SubstrateState,
+    spec: &HttpRequestSpec,
+) -> HostResult<ProviderResult<HttpResponseSpec>> {
+    guard("http_request", || {
+        validated_http_method(&spec.method)?;
+        validated_http_url(&spec.url)?;
+        state.http_sink.request(spec)
+    })?
+}
+
+/// `host_http_request` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_http_request_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    spec: &HttpRequestSpec,
+) -> HostResult<ProviderResult<HttpResponseSpec>> {
+    require_main_window(caller, "host_http_request")?;
+    cmd_http_request(state, spec)
+}
+
+fn updater_unavailable() -> ProviderResult<UpdaterCheckOutcome> {
+    ProviderResult::Unsupported(unsupported_body(
+        "updater provider is not configured",
+        Some("注入 EndpointClient（DistributeUpdaterSink::with_endpoint）"),
+    ))
+}
+
+/// `host_updater_check`：检查更新（主窗专属；真跑 `tauron-distribute`）。
+pub fn cmd_updater_check(
+    state: &SubstrateState,
+    current_version: &str,
+) -> HostResult<ProviderResult<UpdaterCheckOutcome>> {
+    guard("updater_check", || {
+        if current_version.trim().is_empty() {
+            return Err(HostError::new(
+                ErrorCode::E_INVALID_MANIFEST,
+                "current_version 不能为空".to_string(),
+            ));
+        }
+        if !state.updater_sink.native_supported() {
+            return Ok(updater_unavailable());
+        }
+        state.updater_sink.check(current_version)
+    })?
+}
+
+/// `host_updater_check` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_updater_check_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    current_version: &str,
+) -> HostResult<ProviderResult<UpdaterCheckOutcome>> {
+    require_main_window(caller, "host_updater_check")?;
+    cmd_updater_check(state, current_version)
+}
+
+/// `host_updater_status`：更新通道状态（主窗专属）。
+///
+/// 这是 [`ShellExtState::update_state`] 的**真实生产读取方**：把进程内更新状态机
+/// （`None → downloaded → installed`）并入返回的 `state` 字段。此前该字段无读取方
+/// （见其接入状态注释），本轮补上这条链路。
+pub fn cmd_updater_status(state: &SubstrateState) -> HostResult<UpdaterStatus> {
+    guard("updater_status", || {
+        let mut status = state.updater_sink.status();
+        status.state = state.shell_ext.lock().update_state.clone();
+        Ok(status)
+    })?
+}
+
+/// `host_updater_status` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_updater_status_as(caller: &Caller, state: &SubstrateState) -> HostResult<UpdaterStatus> {
+    require_main_window(caller, "host_updater_status")?;
+    cmd_updater_status(state)
+}
+
+/// `host_theme_list`：列出可用主题（主窗专属；接孤儿 crate `tauron-theme`）。
+pub fn cmd_theme_list(state: &SubstrateState) -> HostResult<Vec<tauron_theme::ThemeContribute>> {
+    guard("theme_list", || Ok(state.themes.lock().to_contributes()))?
+}
+
+/// `host_theme_list` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_theme_list_as(
+    caller: &Caller,
+    state: &SubstrateState,
+) -> HostResult<Vec<tauron_theme::ThemeContribute>> {
+    require_main_window(caller, "host_theme_list")?;
+    cmd_theme_list(state)
+}
+
+/// `host_theme_get`：读取单个主题（主窗专属）。
+pub fn cmd_theme_get(
+    state: &SubstrateState,
+    id: &str,
+) -> HostResult<ProviderResult<serde_json::Value>> {
+    guard("theme_get", || {
+        let reg = state.themes.lock();
+        match reg.get(id) {
+            Some(theme) => Ok(ProviderResult::Value(serde_json::json!({
+                "id": theme.id,
+                "name": theme.name,
+                "isDark": theme.is_dark,
+                "variables": theme.variables,
+            }))),
+            None => Ok(ProviderResult::Unsupported(unsupported_body(
+                &format!("主题 `{id}` 不存在"),
+                Some("先调用 host_theme_list 查看可用主题"),
+            ))),
+        }
+    })?
+}
+
+/// `host_theme_get` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_theme_get_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    id: &str,
+) -> HostResult<ProviderResult<serde_json::Value>> {
+    require_main_window(caller, "host_theme_get")?;
+    cmd_theme_get(state, id)
+}
+
+/// `host_theme_set`：切换激活主题（主窗专属）。
+pub fn cmd_theme_set(
+    state: &SubstrateState,
+    id: &str,
+) -> HostResult<ProviderResult<serde_json::Value>> {
+    guard("theme_set", || {
+        let mut reg = state.themes.lock();
+        if reg.get(id).is_none() {
+            return Ok(ProviderResult::Unsupported(unsupported_body(
+                &format!("主题 `{id}` 不存在，无法激活"),
+                Some("先调用 host_theme_list 查看可用主题"),
+            )));
+        }
+        reg.set_active(id).map_err(|e| {
+            HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("切换主题 `{id}` 失败：{e}"))
+        })?;
+        Ok(ProviderResult::Value(serde_json::json!({
+            "activeId": reg.active_id(),
+            "dataTheme": reg.data_theme_attribute(),
+        })))
+    })?
+}
+
+/// `host_theme_set` 的**带身份判定**版本（仅主窗）。
+pub fn cmd_theme_set_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    id: &str,
+) -> HostResult<ProviderResult<serde_json::Value>> {
+    require_main_window(caller, "host_theme_set")?;
+    cmd_theme_set(state, id)
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -5027,9 +6543,10 @@ pub struct ShellExtState {
     pub deep_link_protocol: Option<String>,
     /// 更新状态机：None → downloaded → installed。
     ///
-    /// ⚠️ **接入状态：今天没有任何生产读取方**（只有单测读它）。前端的更新状态
-    /// 机是 `auto-update-client.ts` 自持的 `UpdateStatus`，不消费本字段；
-    /// 路线图 M-8（`docs/architecture/multi-plugin-substrate-roadmap.md`）登记为待接线桩。
+    /// **接入状态（R9 更正）**：已有生产读取方——`host_updater_status` 把本字段
+    /// 并入返回的 `state` 字段（见 [`cmd_updater_status`]）。写入方仍是
+    /// `cmd_market_download` / `cmd_market_install`。前端的 `auto-update-client.ts`
+    /// 自持 `UpdateStatus`，与本字段并存；本字段是**宿主侧**的进程内账本。
     pub update_state: Option<String>,
     /// **origin 允许清单（R4-D2）**：由 [`AdapterConfig::origin_allowlist`] 装配，
     /// 由 `tauri::origin_gate` 在命令分发入口读取。空 = 不启用。
@@ -5498,7 +7015,7 @@ mod tests {
         ErrorCode,
     };
     // P0-2 测试用具：fake 启动面只实现 trait，不碰真进程。
-    use tauron_proc::{ProcessFrameSink, ProcResult, SpawnedProc};
+    use tauron_proc::{ProcResult, ProcessFrameSink, SpawnedProc};
 
     /// R4-D2 装配链路：`AdapterConfig.origin_allowlist` 必须流到 origin 门读取的
     /// `shell_ext` 上；默认装配 = 不启用（兼容既有宿主）。
@@ -5523,18 +7040,19 @@ mod tests {
         let substrate = SubstrateState::with_adapter_config(&AdapterConfig::default());
         let base = cmd_host_capabilities(&substrate).unwrap();
         assert!(!base.plugin_runtime);
-        assert_eq!(base.commands.len(), 39);
+        // 57 = 原 39 + R9 五域 15（menu 3 / tray 3 / fs 6 / http 1 / updater 2）
+        //      + 品牌/主题接通 3（host_theme_list / get / set；brand 原已存在）。
+        assert_eq!(base.commands.len(), 57);
         assert!(base.commands.contains(&"host_capabilities".to_string()));
 
         let plugin_runtime = CommandState::new();
         let full = cmd_host_capabilities(&plugin_runtime).unwrap();
         assert!(full.plugin_runtime);
         #[cfg(feature = "plugin-install")]
-        let expected = 60 + PLUGIN_INSTALL_COMMANDS.len();
+        let expected = 78 + PLUGIN_INSTALL_COMMANDS.len();
         #[cfg(not(feature = "plugin-install"))]
-        // 60 = 56（0.4-A1 之前）+ host_call_plugin / host_call_result / host_call_take
-        //      + host_contributes_reconcile（0.4-W3）。
-        let expected = 60;
+        // 78 = 60（0.4-A1 之前）+ R9 五域 15 + 品牌/主题接通 3。
+        let expected = 78;
         assert_eq!(full.commands.len(), expected);
         assert_eq!(full.commands.iter().collect::<std::collections::HashSet<_>>().len(), expected);
         for domain in
@@ -5543,6 +7061,24 @@ mod tests {
             assert!(
                 full.unsupported.iter().any(|u| u.domain == domain),
                 "missing unsupported domain {domain}"
+            );
+        }
+
+        // P2-4 修正：两列必须**互斥**——同一域既不能同时声称"已装配"又声称"未实现"。
+        for family in &base.families {
+            assert!(
+                !base.unsupported.iter().any(|u| &u.domain == family),
+                "域 `{family}` 同时出现在 families 与 unsupported（自相矛盾的过度声明）"
+            );
+        }
+        // 无 provider 依赖的域恒在 families；缺省装配（无 tauri）下 provider 域恒在 unsupported。
+        for family in ["shell", "ipc", "settings", "i18n", "notify", "recovery", "theme"] {
+            assert!(base.families.contains(&family.to_string()), "缺 families 域 {family}");
+        }
+        for domain in ["menu", "tray", "fs", "http", "updater", "brand"] {
+            assert!(
+                base.unsupported.iter().any(|u| u.domain == domain),
+                "缺省装配下 `{domain}` 必须如实落在 unsupported，而不是冒充 families"
             );
         }
     }
@@ -5645,10 +7181,7 @@ mod tests {
         let files = vec![
             ("manifest.json".to_string(), serde_json::to_vec(&manifest).unwrap()),
             ("src/index.js".to_string(), b"export const activate = () => true;".to_vec()),
-            (
-                "index.html".to_string(),
-                b"<!doctype html><html><body>plugin</body></html>".to_vec(),
-            ),
+            ("index.html".to_string(), b"<!doctype html><html><body>plugin</body></html>".to_vec()),
         ];
         signed_tpkg(dir, id, &files)
     }
@@ -5701,13 +7234,9 @@ mod tests {
         let (package, verifying_key) = signed_tpkg(dir.path(), "com.install.bomb", &files);
         let state = install_state(install_root.clone(), &verifying_key);
 
-        let err = cmd_registry_install_as(
-            &Caller::MainWindow,
-            &state,
-            package.to_str().unwrap(),
-            &[],
-        )
-        .unwrap_err();
+        let err =
+            cmd_registry_install_as(&Caller::MainWindow, &state, package.to_str().unwrap(), &[])
+                .unwrap_err();
         assert_eq!(err.code, ErrorCode::E_INSTALL_FAILED, "{}", err.message);
         assert!(!install_root.join("com.install.bomb").exists(), "拒绝后不得留下安装目录");
         assert!(state.registry.find(&PluginId::new("com.install.bomb").unwrap()).is_none());
@@ -5746,13 +7275,9 @@ mod tests {
         let (package, verifying_key) = signed_tpkg(dir.path(), "com.install.traverse", &files);
         let state = install_state(install_root.clone(), &verifying_key);
 
-        let err = cmd_registry_install_as(
-            &Caller::MainWindow,
-            &state,
-            package.to_str().unwrap(),
-            &[],
-        )
-        .unwrap_err();
+        let err =
+            cmd_registry_install_as(&Caller::MainWindow, &state, package.to_str().unwrap(), &[])
+                .unwrap_err();
         assert_eq!(err.code, ErrorCode::E_INSTALL_FAILED, "{}", err.message);
         assert!(err.message.contains("恶意路径"), "错误消息应点名恶意路径：{}", err.message);
         assert!(!install_root.join("com.install.traverse").exists());
@@ -7456,7 +8981,10 @@ mod tests {
             .expect("ipc 域：发布必须可用");
 
         // ⑦ brand provider 未接入时必须明确报告 unsupported。
-        assert!(!cmd_brand_info(&state).unwrap().supported);
+        match cmd_brand_info(&state).unwrap() {
+            ProviderResult::Unsupported(body) => assert!(!body.supported),
+            ProviderResult::Value(_) => panic!("未配置品牌来源时必须如实报告 unsupported"),
+        }
     }
 
     #[test]
@@ -7784,11 +9312,35 @@ mod tests {
     #[test]
     fn cmd_brand_info_reports_missing_provider() {
         let state = CommandState::new();
-        let result = cmd_brand_info(&state);
-        assert!(result.is_ok());
-        let result = result.unwrap();
-        assert!(!result.supported);
-        assert!(result.reason.contains("brand provider"));
+        // 未设置 TAURON_BRAND_CONFIG(_JSON) 时必须如实降级（不伪造默认品牌）。
+        let result = cmd_brand_info(&state).unwrap();
+        match result {
+            ProviderResult::Unsupported(body) => {
+                assert!(!body.supported);
+                assert!(body.reason.contains("brand provider"));
+            }
+            ProviderResult::Value(_) => panic!("未配置品牌来源时必须返回 UnsupportedBody"),
+        }
+    }
+
+    #[test]
+    fn cmd_brand_info_projects_and_validates_a_configured_brand() {
+        // 直接走投影函数（不碰环境变量，避免进程级竞态），验证 tauron-brand 真校验。
+        let cfg = tauron_brand::BrandConfig {
+            identifier: "com.example.app".into(),
+            protocol_scheme: "example".into(),
+            autostart_name: "example-autostart".into(),
+            data_dir: "example".into(),
+            ..Default::default()
+        };
+        let info = brand_info_from_raw(&cfg).unwrap();
+        assert_eq!(info.identifier, "com.example.app");
+        assert_eq!(info.protocol_scheme, "example");
+
+        // 必填字段为空 → 走 tauron-brand 校验并返回 E_INVALID_MANIFEST。
+        let bad = tauron_brand::BrandConfig::default();
+        let err = brand_info_from_raw(&bad).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST);
     }
 
     fn find_summary(state: &PluginRuntimeState, plugin_id: &str) -> Option<PluginSummary> {
@@ -8353,7 +9905,10 @@ mod tests {
     // ── 0.4-W3：贡献对账（声明 vs 注册）───────────────────────────
 
     /// 造一个「声明了 N 条贡献」的 manifest（`kind:id` 与 `createPlugin` 同口径）。
-    fn manifest_with_contributes(id: &str, contributes: tauron_host::manifest::Contributes) -> PluginManifest {
+    fn manifest_with_contributes(
+        id: &str,
+        contributes: tauron_host::manifest::Contributes,
+    ) -> PluginManifest {
         let mut m = test_manifest(id);
         m.contributes = contributes;
         m
@@ -8403,7 +9958,13 @@ mod tests {
         // shortcut 的 id 用 command（与 createPlugin 同口径）。
         assert_eq!(
             keys.into_iter().collect::<Vec<_>>(),
-            vec!["command:a.cmd", "menu:a.menu", "panel:a.panel", "settings:a.tab", "shortcut:a.cmd"]
+            vec![
+                "command:a.cmd",
+                "menu:a.menu",
+                "panel:a.panel",
+                "settings:a.tab",
+                "shortcut:a.cmd"
+            ]
         );
     }
 
@@ -8412,7 +9973,10 @@ mod tests {
         let state = CommandState::new();
         state
             .registry
-            .install(&empty_index(), manifest_with_contributes("p.ok", declared_commands(&["a.cmd"])))
+            .install(
+                &empty_index(),
+                manifest_with_contributes("p.ok", declared_commands(&["a.cmd"])),
+            )
             .unwrap();
         cmd_contributes_register(
             &state,
@@ -9775,10 +11339,9 @@ mod tests {
             .code,
             ErrorCode::E_ABI_MISMATCH
         );
-        for e in [
-            ProcError::SpawnFailed("x".to_string()),
-            ProcError::ProcessTerminated("x".to_string()),
-        ] {
+        for e in
+            [ProcError::SpawnFailed("x".to_string()), ProcError::ProcessTerminated("x".to_string())]
+        {
             let mapped = proc_error_to_host(e);
             assert_ne!(
                 mapped.code,
@@ -10799,6 +12362,318 @@ mod tests {
                 cmd_dialog_confirm(&degraded, "t", "m").unwrap(),
                 ProviderResult::Unsupported(_)
             ));
+        }
+
+        // ── R9：五域 + 品牌/主题 的「换 sink 即换结果」与诚实降级证据 ──
+
+        /// 记录型菜单假实现（`native_supported = true`）。
+        #[derive(Default)]
+        struct RecordingMenuSink {
+            ops: Mutex<Vec<&'static str>>,
+        }
+
+        impl MenuSink for RecordingMenuSink {
+            fn native_supported(&self) -> bool {
+                true
+            }
+            fn set_menu(&self, _spec: &MenuSpec) -> HostResult<bool> {
+                self.ops.lock().push("set_menu");
+                Ok(true)
+            }
+            fn popup(&self, _spec: &MenuSpec) -> HostResult<bool> {
+                self.ops.lock().push("popup");
+                Ok(true)
+            }
+            fn reset(&self) -> HostResult<bool> {
+                self.ops.lock().push("reset");
+                Ok(true)
+            }
+        }
+
+        fn two_item_menu() -> MenuSpec {
+            MenuSpec {
+                items: vec![
+                    MenuItemSpec {
+                        id: "file.open".into(),
+                        label: "打开".into(),
+                        event: Some("app.menu.open".into()),
+                        enabled: true,
+                    },
+                    MenuItemSpec {
+                        id: "file.exit".into(),
+                        label: "退出".into(),
+                        event: None,
+                        enabled: true,
+                    },
+                ],
+            }
+        }
+
+        #[test]
+        fn swapping_the_menu_sink_changes_the_command_result() {
+            let sink = Arc::new(RecordingMenuSink::default());
+            let mut substrate = SubstrateState::with_adapter_config(&AdapterConfig::default());
+            substrate.menu_sink = sink.clone();
+            let state =
+                PluginRuntimeState::with_substrate(Arc::new(substrate), AdapterConfig::default());
+
+            let spec = two_item_menu();
+            match cmd_menu_set(&state, &spec).unwrap() {
+                ProviderResult::Value(o) => {
+                    assert!(o.applied);
+                    assert_eq!(o.item_count, 2);
+                }
+                ProviderResult::Unsupported(_) => panic!("recording menu sink reports supported"),
+            }
+            cmd_menu_popup(&state, &spec).unwrap();
+            cmd_menu_reset(&state).unwrap();
+            assert_eq!(*sink.ops.lock(), vec!["set_menu", "popup", "reset"]);
+
+            // 反向对照：缺省 MemoryMenuSink 恒不支持 → Unsupported。
+            let degraded = CommandState::new();
+            assert!(matches!(
+                cmd_menu_set(&degraded, &spec).unwrap(),
+                ProviderResult::Unsupported(_)
+            ));
+            // 空菜单 / 重复 id 被闭集校验拒绝（参数错用参数错码）。
+            let empty = MenuSpec { items: vec![] };
+            assert_eq!(
+                cmd_menu_set(&degraded, &empty).unwrap_err().code,
+                ErrorCode::E_INVALID_MANIFEST
+            );
+            let dup = MenuSpec {
+                items: vec![
+                    MenuItemSpec { id: "a".into(), label: "A".into(), event: None, enabled: true },
+                    MenuItemSpec { id: "a".into(), label: "B".into(), event: None, enabled: true },
+                ],
+            };
+            assert_eq!(
+                cmd_menu_set(&degraded, &dup).unwrap_err().code,
+                ErrorCode::E_INVALID_MANIFEST
+            );
+            // 主窗专属：插件主体被代码层拒绝。
+            assert_eq!(
+                cmd_menu_set_as(&Caller::Plugin("com.p".into()), &degraded, &spec)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::E_AUTH_DENIED
+            );
+            assert_eq!(
+                cmd_tray_remove_as(&Caller::Plugin("com.p".into()), &degraded).unwrap_err().code,
+                ErrorCode::E_AUTH_DENIED
+            );
+        }
+
+        /// P2-4 修正的**正向证据**：`host_capabilities` 的两列由 sink 实际可用性推导——
+        /// 注入可用 sink 后，同一域必须**从 unsupported 移入 families**（换装配即换结论）。
+        #[test]
+        fn host_capabilities_derives_domains_from_injected_sinks() {
+            // 缺省：menu 在 unsupported（MemoryMenuSink 不建菜单）。
+            let degraded = CommandState::new();
+            let before = cmd_host_capabilities(&degraded).unwrap();
+            assert!(before.unsupported.iter().any(|u| u.domain == "menu"));
+            assert!(!before.families.contains(&"menu".to_string()));
+
+            // 注入可用菜单 sink + 配置 fs 允许根 → 两域都移入 families。
+            let dir = tempfile::tempdir().unwrap();
+            let mut substrate = SubstrateState::with_adapter_config(
+                &AdapterConfig::default().with_fs_roots(vec![dir.path().to_path_buf()]),
+            );
+            substrate.menu_sink = Arc::new(RecordingMenuSink::default());
+            let state =
+                PluginRuntimeState::with_substrate(Arc::new(substrate), AdapterConfig::default());
+
+            let after = cmd_host_capabilities(&state).unwrap();
+            for domain in ["menu", "fs"] {
+                assert!(
+                    after.families.contains(&domain.to_string()),
+                    "注入可用 sink 后 `{domain}` 必须移入 families"
+                );
+                assert!(
+                    !after.unsupported.iter().any(|u| u.domain == domain),
+                    "`{domain}` 已可用，不得再留在 unsupported"
+                );
+            }
+        }
+
+        #[test]
+        fn fs_commands_are_confined_to_allowed_roots() {
+            let t = tempfile::tempdir().unwrap();
+            let root = t.path().to_path_buf();
+            let cfg = AdapterConfig::default().with_fs_roots(vec![root.clone()]);
+            let state = CommandState::with_adapter_config(cfg);
+
+            let file = root.join("hello.txt");
+            match cmd_fs_write(&state, file.to_str().unwrap(), "你好").unwrap() {
+                ProviderResult::Value(o) => assert_eq!(o.bytes, 6),
+                ProviderResult::Unsupported(_) => panic!("fs 真实现（std::fs）必须可用"),
+            }
+            match cmd_fs_read(&state, file.to_str().unwrap(), None).unwrap() {
+                ProviderResult::Value(o) => {
+                    assert_eq!(o.text, "你好");
+                    assert!(!o.truncated);
+                }
+                ProviderResult::Unsupported(_) => panic!("fs 真实现必须可用"),
+            }
+            match cmd_fs_list(&state, root.to_str().unwrap()).unwrap() {
+                ProviderResult::Value(o) => assert!(o.iter().any(|e| e.name == "hello.txt")),
+                ProviderResult::Unsupported(_) => panic!("fs 真实现必须可用"),
+            }
+            match cmd_fs_stat(&state, file.to_str().unwrap()).unwrap() {
+                ProviderResult::Value(o) => {
+                    assert!(o.is_file);
+                    assert_eq!(o.size, 6);
+                }
+                ProviderResult::Unsupported(_) => panic!("fs 真实现必须可用"),
+            }
+
+            // 路径穿越：`../evil.txt` 逃出根目录 → E_AUTH_DENIED（不落盘）。
+            let escape = root.join("..").join("evil.txt");
+            assert_eq!(
+                cmd_fs_write(&state, escape.to_str().unwrap(), "x").unwrap_err().code,
+                ErrorCode::E_AUTH_DENIED
+            );
+            assert!(!t.path().parent().unwrap().join("evil.txt").exists(), "穿越写入不得发生");
+
+            // 空允许根 = 该域不可用 → 如实 Unsupported（不伪造成功）。
+            let disabled = CommandState::new();
+            assert!(matches!(
+                cmd_fs_read(&disabled, file.to_str().unwrap(), None).unwrap(),
+                ProviderResult::Unsupported(_)
+            ));
+        }
+
+        #[test]
+        fn http_request_validates_then_degrades_honestly() {
+            let state = CommandState::new();
+            let ok = HttpRequestSpec {
+                method: "get".into(),
+                url: "https://example.com".into(),
+                headers: Default::default(),
+                body: None,
+                timeout_ms: None,
+                max_bytes: None,
+            };
+            // 参数合法 → 缺省 UnavailableHttpSink 如实 Unsupported（不伪造响应）。
+            assert!(matches!(
+                cmd_http_request(&state, &ok).unwrap(),
+                ProviderResult::Unsupported(_)
+            ));
+            let bad_method = HttpRequestSpec { method: "DELETE".into(), ..ok.clone() };
+            assert_eq!(
+                cmd_http_request(&state, &bad_method).unwrap_err().code,
+                ErrorCode::E_INVALID_MANIFEST
+            );
+            let bad_url = HttpRequestSpec { url: "file:///etc/passwd".into(), ..ok.clone() };
+            assert_eq!(
+                cmd_http_request(&state, &bad_url).unwrap_err().code,
+                ErrorCode::E_INVALID_MANIFEST
+            );
+        }
+
+        /// 假更新端点：直接返回给定清单（不起网络）。
+        struct FakeEndpoint {
+            manifest: Option<tauron_distribute::UpdateManifest>,
+        }
+
+        impl tauron_distribute::EndpointClient for FakeEndpoint {
+            fn fetch_manifest(
+                &self,
+                _current_version: &str,
+            ) -> tauron_distribute::DistributeResult<Option<tauron_distribute::UpdateManifest>>
+            {
+                Ok(self.manifest.clone())
+            }
+        }
+
+        #[test]
+        fn updater_check_runs_tauron_distribute_and_status_reads_the_ledger() {
+            // 未注入端点 → 如实 Unsupported；`update_state` 仍可读（真实读取方）。
+            let degraded = CommandState::new();
+            degraded.shell_ext.lock().update_state = Some("downloaded:2.0.0".to_string());
+            assert!(matches!(
+                cmd_updater_check(&degraded, "1.0.0").unwrap(),
+                ProviderResult::Unsupported(_)
+            ));
+            let s = cmd_updater_status(&degraded).unwrap();
+            assert!(!s.available);
+            assert_eq!(s.state.as_deref(), Some("downloaded:2.0.0"));
+            assert!(s.reason.is_some(), "未配置必须带原因");
+            assert_eq!(
+                cmd_updater_check(&degraded, "  ").unwrap_err().code,
+                ErrorCode::E_INVALID_MANIFEST
+            );
+
+            // 注入端点 → 真跑 `tauron-distribute::check_for_update`。
+            let mut substrate = SubstrateState::with_adapter_config(&AdapterConfig::default());
+            substrate.updater_sink =
+                Arc::new(DistributeUpdaterSink::with_endpoint(Arc::new(FakeEndpoint {
+                    manifest: Some(tauron_distribute::UpdateManifest {
+                        version: "2.0.0".into(),
+                        url: "https://example.com/app.zip".into(),
+                        signature: "abc123def456".into(),
+                        release_date: "2026-09-27T00:00:00Z".into(),
+                        platform_notes: Default::default(),
+                    }),
+                })));
+            let state =
+                PluginRuntimeState::with_substrate(Arc::new(substrate), AdapterConfig::default());
+            match cmd_updater_check(&state, "1.0.0").unwrap() {
+                ProviderResult::Value(o) => {
+                    assert!(o.available);
+                    assert_eq!(o.version.as_deref(), Some("2.0.0"));
+                    assert!(!o.degraded);
+                }
+                ProviderResult::Unsupported(_) => panic!("注入端点后必须可用"),
+            }
+            assert!(cmd_updater_status(&state).unwrap().available);
+            // 端点清单签名为空 → 如实 `degraded`（SignatureInvalid），不谎报有更新。
+            let mut substrate2 = SubstrateState::with_adapter_config(&AdapterConfig::default());
+            substrate2.updater_sink =
+                Arc::new(DistributeUpdaterSink::with_endpoint(Arc::new(FakeEndpoint {
+                    manifest: Some(tauron_distribute::UpdateManifest {
+                        version: "2.0.0".into(),
+                        url: "https://example.com/app.zip".into(),
+                        signature: String::new(),
+                        release_date: "2026-09-27T00:00:00Z".into(),
+                        platform_notes: Default::default(),
+                    }),
+                })));
+            let state2 =
+                PluginRuntimeState::with_substrate(Arc::new(substrate2), AdapterConfig::default());
+            match cmd_updater_check(&state2, "1.0.0").unwrap() {
+                ProviderResult::Value(o) => {
+                    assert!(!o.available);
+                    assert!(o.degraded);
+                }
+                ProviderResult::Unsupported(_) => panic!("注入端点后必须可用"),
+            }
+        }
+
+        #[test]
+        fn theme_commands_use_the_theme_registry() {
+            let state = CommandState::new();
+            let themes = cmd_theme_list(&state).unwrap();
+            assert!(themes.len() >= 2, "内置 light/dark 必须可见：{themes:?}");
+            assert!(matches!(cmd_theme_get(&state, "dark").unwrap(), ProviderResult::Value(_)));
+            match cmd_theme_set(&state, "dark").unwrap() {
+                ProviderResult::Value(v) => assert_eq!(v["activeId"], "dark"),
+                ProviderResult::Unsupported(_) => panic!("内置主题必须可激活"),
+            }
+            // 未知主题 → Unsupported（不是静默成功）。
+            assert!(matches!(
+                cmd_theme_get(&state, "nope").unwrap(),
+                ProviderResult::Unsupported(_)
+            ));
+            assert!(matches!(
+                cmd_theme_set(&state, "nope").unwrap(),
+                ProviderResult::Unsupported(_)
+            ));
+            // 主窗专属。
+            assert_eq!(
+                cmd_theme_list_as(&Caller::Plugin("com.p".into()), &state).unwrap_err().code,
+                ErrorCode::E_AUTH_DENIED
+            );
         }
 
         /// **顺序不变量**：`host_window_relaunch` 必须先对账、后重启。

@@ -39,6 +39,18 @@ export interface ExitAnimationConfig {
 export type ExitPhase = 'idle' | 'beforeExit' | 'playing' | 'done' | 'cancelled';
 
 /**
+ * 阶段是否为「已取消」。
+ *
+ * 走独立函数而不是就地写 `this.phase === 'cancelled'`：`play()` 里前后各有一次
+ * 取消检查，TS 会把第一次检查之后的 `this.phase` 窄化为「已排除 cancelled」，
+ * 于是第二次比较报 TS2367。但 `cancel()` 可以在 `await`（钩子 / 动画）期间把
+ * 阶段改成 `cancelled`，那次的窄化并不成立。
+ */
+function isCancelled(phase: ExitPhase): boolean {
+  return phase === 'cancelled';
+}
+
+/**
  * ExitAnimation — 退出动画管理器。
  *
  * 生命周期：
@@ -108,7 +120,7 @@ export class ExitAnimation {
     }
 
     // 检查是否被取消
-    if ((this as any)._phase === 'cancelled') return;
+    if (isCancelled(this.phase)) return;
 
     // 2. 播放退出动画
     if (this._config.animation !== 'none') {
@@ -116,8 +128,8 @@ export class ExitAnimation {
       await this._playAnimation();
     }
 
-    // 检查是否被取消
-    if ((this as any)._phase === 'cancelled') return;
+    // 检查是否被取消（`cancel()` 可能在钩子 / 动画期间被调用）
+    if (isCancelled(this.phase)) return;
 
     // 3. 完成
     this._setPhase('done');

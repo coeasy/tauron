@@ -44,17 +44,16 @@ type _MinimalHostIsPluginHost = Assignable<
 const _minimalHost: _MinimalHostIsPluginHost = true;
 
 /** 上下文成员齐全性断言：契约的六个成员一个都不能少。 */
-type _RequiredContextMembers =
-  PluginContext extends {
-    readonly pluginId: string;
-    readonly host: PluginHost;
-    readonly commands: CommandRegistry;
-    readonly events: EventSink;
-    readonly settings: SettingsTabRegistry;
-    readonly log: PluginLog;
-  }
-    ? true
-    : never;
+type _RequiredContextMembers = PluginContext extends {
+  readonly pluginId: string;
+  readonly host: PluginHost;
+  readonly commands: CommandRegistry;
+  readonly events: EventSink;
+  readonly settings: SettingsTabRegistry;
+  readonly log: PluginLog;
+}
+  ? true
+  : never;
 const _contextMembers: _RequiredContextMembers = true;
 
 /**
@@ -77,12 +76,12 @@ describe('@tauron/plugin-context-contract 编译期断言', () => {
   it('编译期断言常量成立（运行时占位，真正的判定在 tsc）', () => {
     // 这些断言在 `pnpm --filter @tauron/plugin-context-contract typecheck`
     // 里被求值：任一为 `never` 时上面的赋值会编译失败。
-    expect([
-      _minimalHost,
-      _contextMembers,
-      _handlerVariance,
-      _unsubscribeShape,
-    ]).toEqual([true, true, true, true]);
+    expect([_minimalHost, _contextMembers, _handlerVariance, _unsubscribeShape]).toEqual([
+      true,
+      true,
+      true,
+      true,
+    ]);
   });
 });
 
@@ -224,8 +223,9 @@ describe('@tauron/plugin-context-contract 结构满足性', () => {
     const { host } = makeMinimalHost({});
     const ctx = makeContractContext('com.example.contract', host);
 
-    expect(ctx.commands.register('add', (args: { a: number; b: number }) => ({ sum: args.a + args.b })))
-      .toEqual({ ok: true });
+    expect(
+      ctx.commands.register('add', (args: { a: number; b: number }) => ({ sum: args.a + args.b })),
+    ).toEqual({ ok: true });
     const dup = ctx.commands.register('add', () => ({ sum: -1 }));
     expect(dup.ok).toBe(false);
     expect(dup.error).toContain('已存在');

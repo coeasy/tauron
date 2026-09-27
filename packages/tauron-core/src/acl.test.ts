@@ -83,14 +83,21 @@ describe('ACL', () => {
     });
 
     it('returns all permissions when plugin is not registered', () => {
-      const missing = getMissingPermissions(grants, 'com.unknown.test', ['store:read', 'http:fetch']);
+      const missing = getMissingPermissions(grants, 'com.unknown.test', [
+        'store:read',
+        'http:fetch',
+      ]);
       expect(missing).toEqual(['store:read', 'http:fetch']);
     });
 
     it('returns only missing permissions', () => {
       grantPermissions(grants, 'com.example.test', ['store:read'], 'install');
 
-      const missing = getMissingPermissions(grants, 'com.example.test', ['store:read', 'http:fetch', 'clipboard:read']);
+      const missing = getMissingPermissions(grants, 'com.example.test', [
+        'store:read',
+        'http:fetch',
+        'clipboard:read',
+      ]);
       expect(missing).toEqual(['http:fetch', 'clipboard:read']);
     });
   });

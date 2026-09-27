@@ -18,6 +18,47 @@
 
 ### Added
 
+**集成就绪收口（R9，2026-09-27）** —— 目标是把「一键/快速被第三方集成」从「路径已通」
+推进到「核心能力不缺、发布门禁是硬的、孤儿全部接通」。每项都以可复现命令为判据，
+不是「代码里看起来有了」。
+
+- **孤儿 crate 全部接通（原「已知债务」第 9 条，本轮结清）**：
+  `crates/tauron-adapter/Cargo.toml` 新增四个依赖——`tauron-brand`（`host_brand_info`
+  的真实实现）、`tauron-theme`（`host_theme_*` 主题定义表）、`tauron-distribute`
+  （`host_updater_*` 更新通道：灰度 / 崩溃门禁 / 清单校验）、`tauron-wasm`（WASM
+  插件形态的**状态层**校验：配置 / ABI / 崩溃预算；执行层仍无运行时，继续**诚实失败**）。
+  `tauron-shell` 保持孤儿是**有意为之**（框架层门面，供外部宿主直接依赖），
+  已在债务条目里登记为「有意」，不再算待激活。
+- **五域宿主能力命令（原「已知债务」第 8 条，本轮结清）**：新增 menu（3）/ tray（3）/
+  fs（6）/ http（1）/ updater（2）五域共 **15** 条，另加主题域 theme（3）共 **18** 条，
+  **全部主窗专属**（代码层 `require_main_window`）。命令面因此变为：底座
+  `tauron_substrate_handler!` **39 → 57**，全量 `tauron_plugin_handler!` **60 → 78**，
+  默认特性（含 `plugin-install` 2 条）**80 条**。口径不靠人眼——wire-gate 断言
+  底座集合 ⊂ 全量集合、且与 `SUBSTRATE_COMMANDS` 逐条一致。
+- **`host_http_request` 诚实降级**：本仓库离线依赖闭包内**无** hyper-tls / hyper-rustls，
+  故 HTTP 域不引入 TLS 栈，改为**可注入 `HttpSink`**——缺省 `UnavailableHttpSink`
+  恒返回 `UnsupportedBody`（如实说不可用，不伪报发起过请求）；接入方注入自己的
+  `HttpSink` 即真跑。
+- **能力表 `families` / `unsupported` 改运行期推导（P2-4 已修）**：`cmd_host_capabilities`
+  此前**硬编码**两列，注入的 sink 变化后与实际脱节；现改为按已注入的 sink **推导**
+  且两列互斥，新增 `brand_configured()` 辅助与单测
+  `host_capabilities_derives_domains_from_injected_sinks`。
+- **发布就绪脚本与 CI 门禁（原「已知债务」第 5 / 6 条，本轮结清主体）**：19 个
+  `packages/*` 去 `private` 并补发布元数据（仅 `@tauron/contract-tests` 是内部测试包，
+  保留 `private`）；新增 `scripts/publish-npm.mjs`（逐包 `pnpm pack` + **解包**校验：
+  含 `dist/`、入口齐全、无 `workspace:` 残留——**必须用 pnpm**，`npm pack` 会把
+  `workspace:*` 原样写进 tarball 导致 registry 侧 `EUNSUPPORTEDPROTOCOL`）与
+  `scripts/publish-crates.mjs`（按依赖拓扑排定的 `cargo publish` 序列）。两者默认
+  **只校验**（`--check`），真发布需显式 `--publish` + token；CI 新增 `publish:npm --check`
+  与 `cargo package --workspace` 两道发布就绪门禁。
+- **代码卫生转硬门禁（原「已知债务」第 1 条，本轮结清）**：一次性 `cargo fmt --all`
+  落地并验证编译 / 测试；`cargo clippy --workspace --all-targets --locked -- -D warnings`
+  **零告警**（真修 5 处 + 2 处带中文原因的 `#[allow]`，无 crate 级放行）。
+  `ci.yml` 的 `fmt` / `clippy` 两个 job 删除 `continue-on-error` 转硬门禁；
+  `rustfmt.toml` / `clippy.toml` 的「尚未规范化」段落同步改写。
+- **ESLint 转硬门禁（原「已知债务」第 3 条，本轮结清）**：81 条 warning 清零，
+  `pnpm lint`（`eslint . --max-warnings 0`）**0 error / 0 warning**，已是硬门禁。
+
 **框架层**
 
 - 单命令信封协议：`plugin_invoke` / `plugin_cancel` / `plugin_emit`
@@ -293,8 +334,82 @@
 - `docs/architecture/README.md` 文档地图补 `installation.md` 一行（标注为「落地
   入口——第一次接触先读这份」）；示例工程 README 补「安装包获取与运行」一节
 
+**一键集成路径（第三方易用性）**
+
+此前「一键集成」是**半成品**：`@tauron/app-cli` 的脚手架生成的工程**完全没有 tauron
+装配**，`init` 写入的是今天解析不了的 registry 坐标与语义错误的 capability。本轮把它
+修成**真能出可编译工程**的路径（判据是实机 `cargo check`，不是「代码里看起来有了」）：
+
+- **`tauron-app new` / `create`**（新命令，`create-tauron-app <dir>` 走同一个实现）：
+  生成 `src-tauri/{Cargo.toml,src/main.rs,build.rs,capabilities/default.json,tauri.conf.json}`
+  与前端骨架。`src-tauri` 与 `examples/minimal-app` **同形态**——`state_init_with_adapter_config`
+  + `tauron_generate_handler![]`（默认 62 条）+ 窗口销毁回收 `cleanup_closed_window`，
+  capability 覆盖 `main` 与 `plugin-*` 窗；`--features substrate-only` 走 39 条底座
+- **依赖坐标诚实化**：tauron 的 20 个包 / 15 个 crate 都未发布，脚手架不再写
+  `workspace:*` / `tauron-adapter = "0.1"` / `extends: '@tauron/base-tsconfig'` 这类
+  **今天解析不了**的坐标，改为按检出根生成 `path` / `file:` 依赖（检出根默认从 CLI
+  自身位置上溯探测，可用 `--tauron-path` 覆盖；含 Windows 跨盘符回落）
+- **`tauron-app init` 修复三处缺陷**：① 依赖由 registry 坐标改为 `path` / `file:`；
+  ② capability 语义错误（伪权限 `core:<cmd>`——Tauri v2 无 tauron 命名空间，写入会导致
+  校验失败）改为 `core:default`；③ 注入形态由 `.plugin(tauron_adapter::tauri::init())`
+  （走 `plugin:tauron|*` 路由但 crate 无 `permissions/` 定义）改为 root 注册
+  （`tauron_generate_handler![]`）。**`invoke_handler` 覆盖语义**：目标项目已有
+  `.invoke_handler(..)` 时**不改源码**，只把需手工合并的那一行打印出来
+- 补 `@tauri-apps/cli` devDep（`tauri dev` 的执行体必须来自 devDependencies）与
+  `indexmap` 依赖行（与 minimal-app 同源）
+- **前端链路补齐（一键到 `npm run tauri dev`）**：生成 `vite.config.ts`
+  （`server.port` 与 `devUrl` 一致 + `strictPort`、`build.outDir` 与 `frontendDist`
+  一致、`server.watch.ignored` 排除 `src-tauri/`、`base: './'`）、`tauri.conf.json`
+  补 `beforeDevCommand` / `beforeBuildCommand`（拉起 vite）、HTML 入口由 `src/index.html`
+  移到**工程根**（vite 的 root 约定，放 `src/` 下 rollup 报 "Could not resolve entry"）。
+  `package.json` 脚本改为 Tauri 官方模板规范形状（`dev: vite` / `build: vite build` /
+  `tauri: tauri`），并补 `vite` 及各框架 plugin 的 devDeps
+  （svelte 编译进产物、不进运行时依赖，故只在 devDependencies）
+- **占位图标生成**：新增 `icon-assets.ts`，纯代码构造二进制（PNG 用 deflate stored 块、
+  ICO 32bpp BGRA + AND 掩码、ICNS `ic07` 装 128×128 PNG），产出 6 个文件
+  `32x32.png` / `128x128.png` / `128x128@2x.png` / `icon.png` / `icon.ico` / `icon.icns`，
+  写入 `src-tauri/icons/`。之所以是必需项而非美观项：**Windows 上 `tauri-build` 生成
+  资源文件要求 `src-tauri/icons/icon.ico`，因此连 `cargo check` 都需要它**（原先只写
+  「`tauri build` 打包依赖它」，低估了这道前置）。产出是**纯色占位图**，CLI 落盘后显式
+  提示发布前替换成品牌图标
+- **`tauron-app plugin new` 坐标修复（原「已知债务」第 13 条，本轮修完）**：① 生成的
+  `tsconfig.json` 不再 `extends: '@tauron/base-tsconfig'`（该包在本仓不存在，`tsc` 必报错），
+  改为自包含编译选项；② `package.json` 的 `workspace:*` 依赖改为按检出根生成 `file:`
+  坐标（CLI 探测不到检出根时**如实报错退出**，不再退回只有同一 workspace 才解析的写法）
+- **`tauron-app init` 的 CLI 接线缺陷（文档与实际不符，已修）**：① 文档一直写的
+  `init --dir <你的项目>` **此前根本没接线**——`cli.ts` 只读 `--config`，`--dir` 被静默
+  忽略，结果是在**当前目录**上动刀（最危险的一类不一致）；现已把 `--dir` 与
+  `--tauron-path` 透传给 `initProject`。② `--tauron-path` 为本轮新增，并在指向非检出根时
+  当场失败（判据 `crates/tauron-adapter/Cargo.toml` 不存在），不写指向空目录的依赖。
+  ③ 失败分支此前只 `printError` 而**不设退出码**，脚本 / CI 会把「没接上」当成功；现设
+  `process.exitCode = 1`。④ 本 CLI README 不再为 `init` 宣称 `--force`（它不支持）
+- README / installation.md §3.2 / incremental-adoption.md / 本 CLI README 同步补一键路径
+  说明与**诚实边界表**（bundler 配置与图标已由 ❌「需自行补齐」改为 ✅ / ⚠️「占位待替换」）
+- **实测证据（2026-09-27）**：`tauron-app new` 落盘 18 个文件（12 文本 + 6 二进制图标）后，
+  **不补任何东西**即默认形态（62 条）与 `--features substrate-only`（39 条）两档
+  `cargo check` 均通过（`Finished dev profile`）
+- **口径声明**：上面这条**只覆盖 Rust 侧**。`npm install` / `npm run tauri dev` **未在本机
+  验证**——它们要从 registry 取 `vite` / `@tauri-apps/cli`，沙箱无网络。另有两条前置：
+  ① `file:` 依赖是**软链**，`@tauron/host` 解析自身 `workspace:*` 依赖走的是检出根自己的
+  `node_modules`，所以检出必须已 `pnpm install`；② `packages/*/dist` 必须已构建。
+  这四条边界同步写入 README / installation.md §3.2 / 本 CLI README，避免把「编译过」
+  说成「跑起来了」
+
 ### Changed
 
+- **内部 crate 互引用补齐 `version = "0.1.0"`**（原「已知债务」第 5 条的坐标部分）。
+  此前 11 条内部依赖只有 `path`，`cargo package` 会因
+  `all dependencies must have a version requirement specified when packaging` 直接失败；
+  现全部补上（根 `Cargo.toml` 4 条 + `tauron-adapter` 4 条 + `tauron-acl` / `tauron-market` /
+  `tauron-settings` 各 1 条）。验证：`cargo metadata --format-version 1 --locked` 退出码 0，
+  15 个 `tauron-*` 全为 `0.1.0`；并做受控对照（临时移除 `version` 可稳定复现原报错）。
+  根 `Cargo.toml` 与 `tauron-adapter/Cargo.toml` 里已过时的注释同步更正——发布仍须
+  **按依赖顺序逐个 `cargo publish`**（剥离 `path` 后要去 crates.io 解析内部依赖）
+- **TS 用例数口径刷新为实测值 `1729`**（`pnpm -r test`，20 个包 / 101 个测试文件 / 0 failed，
+  退出码 0）。此前 `README.md`（徽章 + 测试表）、`competitive-analysis.md` §四、
+  `multi-plugin-substrate-roadmap.md` 的口径注写的是 **1701**——已落后于实际（本轮新增
+  17 条，另有 11 条是上一轮未同步的漂移）。基线表（标着「轮 12 快照、不随后续改动刷新」）
+  保持原值不动
 - **15 个 crate 的 `[package]` 元数据统一为 workspace 继承**。此前 9 个 crate 硬编码
   `version = "0.1.0"` / `edition = "2021"`，另有 14 个缺 `repository` —— 升版时这些
   crate 会静默掉队，且 crates.io 元数据不完整。现在全部继承
@@ -550,28 +665,27 @@
 
 ### 已知债务
 
-以下问题**已知且未解决**，发布时不应被描述为已完成。
+以下为**仍未解决**的已知问题。已结清的条目**就地标注并保留原因**（便于回溯），
+不再计入未解决债务。发布时不要把未解决项描述为已完成。
 
-**1. Rust 格式化与 lint 从未跑过 → CI 中为 advisory**
+**1. Rust 格式化与 lint —— 已结清（1.0，2026-09-27）**
 
-```
-cargo fmt --all -- --check     # 691 hunk / 59 文件（61 个 .rs 中）
-cargo clippy --workspace --all-targets -- -D warnings   # 从未运行
-```
+`cargo fmt --all` 已一次性落地并验证编译 / 测试；`cargo clippy --workspace
+--all-targets --locked -- -D warnings` **零告警**（真修 5 处 + 2 处带中文原因的
+`#[allow]`，无 crate 级放行）。`ci.yml` 的 `fmt` / `clippy` 两个 job 已删除
+`continue-on-error` 转**硬门禁**——再出现差异或告警就是**新引入**的问题。
+（原值：`cargo fmt --all -- --check` 691 hunk / 59 文件、clippy 从未运行。）
 
-代码库是按人工风格写的（对齐注释块、长解释性注释），从未做过 rustfmt 规范化。
-`rustfmt.toml` 取的是实测差异最小的一档（`max_width = 100` + `use_small_heuristics = "Max"`）。
-**转正条件**：一次性 `cargo fmt --all` + clippy 清理，并验证编译与测试后，
-删掉 `ci.yml` 里对应 job 的 `continue-on-error`。
+**2. Prettier —— 已结清（1.0，2026-09-27）**
 
-**2. Prettier 从未跑过**
+全仓已一次性 `pnpm format` 规范化（`.prettierignore` 有意排除 Markdown——docs/ 下
+是人工排版的中文长文，重排无收益且破坏可读性）。`pnpm format:check` 现零差异，
+并已作为**硬门禁**接入 CI 的 TypeScript 作业。
 
-`pnpm format:check` 当前会失败。CI 里没有 format 门禁，避免永久红。
+**3. ESLint 的 81 条 warning —— 已结清（1.0，2026-09-27）**
 
-**3. ESLint 有 81 条 warning（0 error）**
-
-`pnpm lint` 退出码为 0，因此已作为**硬门禁**接入 CI。81 条 warning 绝大多数是
-测试文件里的未用导入。**不要**加 `--max-warnings 0`，那会让仓库直接变红。
+`pnpm lint`（`eslint . --max-warnings 0`）现为 **0 error / 0 warning**，已是硬门禁。
+（原 81 条 warning 绝大多数是测试文件里的未用导入。）
 
 **4. Rust 测试未在有网络的环境执行过**
 
@@ -579,14 +693,26 @@ cargo clippy --workspace --all-targets -- -D warnings   # 从未运行
 是源码 `#[test]` 声明数（静态计数），**不是**执行结果 —— feature 门控
 （`tauron-adapter` / `tauron-shell` 的 `tauri` feature）另计，两者不同口径。
 
-**5. `crates.io` 发布未就绪**
+**5. `crates.io` 发布：拓扑序列已脚本化，但未在真实 registry 上验证**
 
-内部互引用写的是 `{ path = "crates/xxx" }`，cargo 要求 path 依赖同时给出
-`version` 才能打包。在补齐 `version` 之前不要执行 `cargo publish`。
+内部互引用的 `version` 已全部补齐（15 个 crate 全部 `0.1.0`）。此前 `cargo package`
+会因 `all dependencies must have a version requirement specified when packaging`
+直接失败，现已不再触发——`cargo metadata --format-version 1 --locked` 退出码 0，
+且做受控对照（临时移除某个 `version`）可稳定复现原报错。
 
-**6. npm 包全部 `private: true`**
+`cargo publish` 会在剥离 `path` 之后去 crates.io 解析内部依赖，因此**必须先把
+被依赖的 crate 发出去、再发依赖方**。该拓扑序列现由 `scripts/publish-crates.mjs`
+排定并脚本化（默认只校验，真发布需显式 `--publish` + token）；CI 侧由
+`cargo package --workspace --no-verify --allow-dirty` 守住产物 manifest。
+**仍未在真实 registry 上验证过**——发布公告里不要写成「已可发布」。
 
-20 个 `packages/*/package.json` 均为 `private`，无法 `npm publish`。
+**6. npm 包全部 `private: true` —— 已结清（1.0，2026-09-27）**
+
+19 个 `packages/*/package.json` 已去 `private` 并补发布元数据（仅
+`@tauron/contract-tests` 是内部测试包，保留 `private`）；新增
+`scripts/publish-npm.mjs` 逐包 `pnpm pack` 并**解包**校验（含 `dist/`、入口齐全、
+无 `workspace:` 残留）。**仍未在真实 registry 上发布过**——序列与产物已就绪，
+不等于「已发布」。
 
 **7. 示例工程打包图标：配置已补齐，但仅 Windows 实测过**
 
@@ -603,16 +729,20 @@ cargo clippy --workspace --all-targets -- -D warnings   # 从未运行
 `deb` / `AppImage` / `.app` / `.dmg` 没有在任何 Linux / macOS 机器上跑过。
 图标与配置现在是「就绪」，不等于「验证过」——发布公告里不要写成跨平台已验证。
 
-**8. 命令面缺口**
+**8. 命令面缺口 —— 已结清（1.0，2026-09-27）**
 
-host 命令面缺 menu / tray / fs / http / updater 五域（`grep host_menu_|host_tray_|
-host_fs_|host_http_|host_updater crates/tauron-adapter/src/tauri.rs` → 空）。
+menu / tray / fs / http / updater 五域共 **15** 条 + 主题域 **3** 条已补齐，
+全部主窗专属；底座命令面 **39 → 57**，全量 **60 → 78**，默认特性（含
+`plugin-install` 2 条）**80 条**。**诚实边界**：`host_http_request` 因离线依赖闭包内
+无 TLS 栈，缺省 `UnavailableHttpSink` 如实降级（可注入 `HttpSink` 真跑），
+不是「开箱即用能发 HTTP」。
 
-**9. 孤儿 crate**
+**9. 孤儿 crate —— 已结清（1.0，2026-09-27）**
 
-未被任何其他 crate 依赖：`tauron-brand` / `tauron-theme` / `tauron-distribute` /
-`tauron-wasm` / `tauron-shell`（`tauron-shell` 是框架层门面，属有意为之；
-`tauron-distribute` 属 CI 侧运维组件，可接受但要登记；其余为待激活）。
+`tauron-brand` / `tauron-theme` / `tauron-distribute` / `tauron-wasm` 已进
+`crates/tauron-adapter/Cargo.toml` 依赖表，分别承接 `host_brand_info` /
+`host_theme_*` / `host_updater_*` / WASM 形态状态层校验。`tauron-shell` 保持孤儿是
+**有意为之**（框架层门面，供外部宿主直接依赖），不再算待激活。
 
 > **口径更正（1.0，2026-09-27）**：本条此前把 `tauron-acl` / `tauron-market`
 > 也列为孤儿——**已过期**。两者现已在 `crates/tauron-adapter/Cargo.toml` 依赖表内
@@ -649,6 +779,11 @@ RPC 握手时自报指纹（**尚未实现**：0.4-A1 已把 `tauron-proc` 的 R
 已把零产生点的 `ProcError::SignatureInvalid` / `HashMismatch` 变体删除，未来实现
 真实验签时按需新增。这两条**不构成安全边界**，发布公告里不要写成
 「已实现进程插件验签 / ABI 校验」。
+
+> **已结清（1.0，2026-09-27）**：原第 13 条「`tauron-app plugin new` 的产出仍有不可解析
+> 坐标」**本轮已修完**——`tsconfig.json` 不再 `extends: '@tauron/base-tsconfig'`（改为自包含
+> 编译选项），`package.json` 的 `workspace:*` 依赖改为按检出根生成 `file:` 坐标（CLI 探测不到
+> 检出根时如实报错退出）。详见「Added · 一键集成路径」，此处不再列为未解决债务。
 
 ---
 

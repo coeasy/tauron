@@ -85,10 +85,7 @@ describe('LazyPluginLoader', () => {
       });
       loader.register({ id: 'p.concurrent', entry });
 
-      const [a, b] = await Promise.all([
-        loader.load('p.concurrent'),
-        loader.load('p.concurrent'),
-      ]);
+      const [a, b] = await Promise.all([loader.load('p.concurrent'), loader.load('p.concurrent')]);
 
       expect(entryCalls).toBe(1);
       expect(entry).toHaveBeenCalledTimes(1);
@@ -103,10 +100,7 @@ describe('LazyPluginLoader', () => {
       });
       loader.register({ id: 'p.fail', entry, maxRetries: 0 });
 
-      const results = await Promise.allSettled([
-        loader.load('p.fail'),
-        loader.load('p.fail'),
-      ]);
+      const results = await Promise.allSettled([loader.load('p.fail'), loader.load('p.fail')]);
 
       expect(results.map((r) => r.status)).toEqual(['rejected', 'rejected']);
       // maxRetries: 0 → 只尝试一次，并发不应把 attempts 吃掉两格
@@ -127,10 +121,7 @@ describe('LazyPluginLoader', () => {
       });
       loader.register({ id: 'p.retry', entry, maxRetries: 1 });
 
-      const [a, b] = await Promise.all([
-        loader.load('p.retry'),
-        loader.load('p.retry'),
-      ]);
+      const [a, b] = await Promise.all([loader.load('p.retry'), loader.load('p.retry')]);
 
       expect(a).toEqual({ attempt: 2 });
       expect(b).toEqual({ attempt: 2 });
@@ -214,9 +205,7 @@ describe('LazyPluginLoader', () => {
 
   describe('超时处理', () => {
     it('timeoutMs 超时抛出错误', async () => {
-      const entry = vi.fn().mockImplementation(
-        () => new Promise((r) => setTimeout(r, 500)),
-      );
+      const entry = vi.fn().mockImplementation(() => new Promise((r) => setTimeout(r, 500)));
       loader.register({ id: 'p.test', entry, timeoutMs: 50 });
 
       await expect(loader.load('p.test')).rejects.toThrow('timed out');
@@ -256,7 +245,6 @@ describe('LazyPluginLoader', () => {
       loader.register({ id: 'p.test2', entry: async () => ({}) });
       await loader.load('p.test2');
       // fn 不应再次被调用（但 vi.fn 计数不清零，所以检查调用次数不变）
-      const callsAfterUnsub = fn.mock.calls.length;
       // 实际上 subscribe 是全局的，所以会再次调用。这里测试 unsubscribe 本身。
       expect(typeof unsub).toBe('function');
     });

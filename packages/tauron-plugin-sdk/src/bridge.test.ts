@@ -42,7 +42,9 @@ describe('PluginBridge', () => {
 
   /** 模拟来自本桥 iframe 的消息（带正确的 event.source）。 */
   const deliver = (msg: PluginToBridgeMessage): void => {
-    (bridge as unknown as { handleMessage: (e: { data: unknown; source: unknown }) => void }).handleMessage({
+    (
+      bridge as unknown as { handleMessage: (e: { data: unknown; source: unknown }) => void }
+    ).handleMessage({
       data: msg,
       source: mockIframe.contentWindow,
     });
@@ -50,7 +52,9 @@ describe('PluginBridge', () => {
 
   /** 模拟来自陌生窗口的消息（伪造信封）。 */
   const deliverFromForeignWindow = (msg: PluginToBridgeMessage): void => {
-    (bridge as unknown as { handleMessage: (e: { data: unknown; source: unknown }) => void }).handleMessage({
+    (
+      bridge as unknown as { handleMessage: (e: { data: unknown; source: unknown }) => void }
+    ).handleMessage({
       data: msg,
       source: { postMessage: vi.fn() },
     });
@@ -176,7 +180,13 @@ describe('PluginBridge', () => {
     });
 
     it('invokeHandler 抛错时回发结构化错误', async () => {
-      const failing = new PluginBridge([], async () => { throw new Error('boom'); }, async () => {});
+      const failing = new PluginBridge(
+        [],
+        async () => {
+          throw new Error('boom');
+        },
+        async () => {},
+      );
       (failing as unknown as { iframe: unknown }).iframe = mockIframe;
       (failing as unknown as { ready: boolean }).ready = true;
 
@@ -197,7 +207,9 @@ describe('PluginBridge', () => {
 
       const resultMsg = sentMessages().find((m) => m.action === 'invoke-result');
       expect(resultMsg).toBeDefined();
-      const result = (resultMsg!.payload as { result: { ok: boolean; error: { code: string; message: string } } }).result;
+      const result = (
+        resultMsg!.payload as { result: { ok: boolean; error: { code: string; message: string } } }
+      ).result;
       expect(result.ok).toBe(false);
       expect(result.error.code).toBe('SC-9001');
       expect(result.error.message).toBe('boom');
@@ -230,7 +242,8 @@ describe('PluginBridge', () => {
 
       const resultMsg = sentMessages().find((m) => m.action === 'invoke-result');
       expect(resultMsg).toBeDefined();
-      const result = (resultMsg!.payload as { result: { ok: boolean; error: { code: string } } }).result;
+      const result = (resultMsg!.payload as { result: { ok: boolean; error: { code: string } } })
+        .result;
       expect(result.ok).toBe(false);
       expect(result.error.code).toBe('SC-1002');
     });
@@ -242,15 +255,18 @@ describe('PluginBridge', () => {
       let resolveInvoke!: (v: unknown) => void;
       const deferred = new PluginBridge(
         [],
-        () => new Promise((resolve) => { resolveInvoke = resolve; }),
+        () =>
+          new Promise((resolve) => {
+            resolveInvoke = resolve;
+          }),
         cancelHandler,
       );
       (deferred as unknown as { iframe: unknown }).iframe = mockIframe;
       (deferred as unknown as { ready: boolean }).ready = true;
-      const deliverTo = (
-        msg: PluginToBridgeMessage,
-      ): void => {
-        (deferred as unknown as { handleMessage: (e: { data: unknown; source: unknown }) => void }).handleMessage({
+      const deliverTo = (msg: PluginToBridgeMessage): void => {
+        (
+          deferred as unknown as { handleMessage: (e: { data: unknown; source: unknown }) => void }
+        ).handleMessage({
           data: msg,
           source: mockIframe.contentWindow,
         });
@@ -302,7 +318,10 @@ describe('PluginBridge', () => {
 
       const eventMsg = sentMessages().find((m) => m.action === 'event');
       expect(eventMsg).toBeDefined();
-      expect(eventMsg!.payload).toEqual({ eventName: 'config-changed', payload: { theme: 'dark' } });
+      expect(eventMsg!.payload).toEqual({
+        eventName: 'config-changed',
+        payload: { theme: 'dark' },
+      });
     });
   });
 
@@ -317,7 +336,10 @@ describe('PluginBridge', () => {
       let resolveInvoke!: (v: unknown) => void;
       const deferred = new PluginBridge(
         [],
-        () => new Promise((resolve) => { resolveInvoke = resolve; }),
+        () =>
+          new Promise((resolve) => {
+            resolveInvoke = resolve;
+          }),
         async () => {},
       );
       (deferred as unknown as { iframe: unknown }).iframe = mockIframe;

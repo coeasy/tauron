@@ -9,8 +9,6 @@ import {
 } from './runtime.js';
 
 describe('runtime', () => {
-  const originalWindow = globalThis.window;
-
   beforeEach(() => {
     vi.restoreAllMocks();
   });

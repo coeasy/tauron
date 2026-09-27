@@ -1,7 +1,6 @@
 // @tauron/app-plugin-sdk — 类型定义。
 
-import type { HostClient, PluginCallRequest } from '@tauron/host';
-import type { ContributesEntry, IdentityUnit, ViewConfig } from '@tauron/host';
+import type { HostClient } from '@tauron/host';
 import type {
   CommandRegisterResult,
   PluginCommandHandler,
@@ -103,10 +102,7 @@ export interface PluginContext extends SharedPluginContext {
     unregister(id: string): boolean;
     has(id: string): boolean;
     list(): string[];
-    execute<TArgs = unknown, TResult = unknown>(
-      id: string,
-      args?: TArgs,
-    ): Promise<TResult>;
+    execute<TArgs = unknown, TResult = unknown>(id: string, args?: TArgs): Promise<TResult>;
   };
 
   /** 设置 Tab 注册。 */
@@ -135,8 +131,9 @@ export interface PluginContext extends SharedPluginContext {
  * 这是**接口漂移的报警器**（方案 R2 的硬要求）：签名一旦漂移，这里立刻编译
  * 失败，而不是等到某个插件在两个 SDK 下行为分叉时才被发现。
  */
-export type AppPluginContextIsAssignableToContract =
-  PluginContext extends SharedPluginContext ? true : never;
+export type AppPluginContextIsAssignableToContract = PluginContext extends SharedPluginContext
+  ? true
+  : never;
 
 /**
  * 「双向类型相等」构造（**R2 的严格档**）。
@@ -178,24 +175,25 @@ type ContractEqual<A, B> = StrictEqual<AsFunctionParameter<A>, AsFunctionParamet
  * `createContractContext`）必须真的写出契约要求的参数类型，以及互操作测试的
  * 运行期对照。
  */
-export type AppPluginContextMembersMatchContract = ContractEqual<
-  {
-    pluginId: PluginContext['pluginId'];
-    commands: PluginContext['commands'];
-    events: PluginContext['events'];
-    settings: PluginContext['settings'];
-    log: PluginContext['log'];
-  },
-  {
-    pluginId: SharedPluginContext['pluginId'];
-    commands: SharedPluginContext['commands'];
-    events: SharedPluginContext['events'];
-    settings: SharedPluginContext['settings'];
-    log: SharedPluginContext['log'];
-  }
-> extends true
-  ? true
-  : never;
+export type AppPluginContextMembersMatchContract =
+  ContractEqual<
+    {
+      pluginId: PluginContext['pluginId'];
+      commands: PluginContext['commands'];
+      events: PluginContext['events'];
+      settings: PluginContext['settings'];
+      log: PluginContext['log'];
+    },
+    {
+      pluginId: SharedPluginContext['pluginId'];
+      commands: SharedPluginContext['commands'];
+      events: SharedPluginContext['events'];
+      settings: SharedPluginContext['settings'];
+      log: SharedPluginContext['log'];
+    }
+  > extends true
+    ? true
+    : never;
 
 /**
  * `HostClient` 必须满足契约的宿主窄面。
@@ -231,7 +229,10 @@ export interface PluginHooks {
    */
   onEvent?: (topic: string, payload: unknown, ctx: PluginContext) => void;
   /** 插件设置变化时调用。 */
-  onSettingsChanged?: (settings: Record<string, unknown>, ctx: PluginContext) => Promise<void> | void;
+  onSettingsChanged?: (
+    settings: Record<string, unknown>,
+    ctx: PluginContext,
+  ) => Promise<void> | void;
 }
 
 /** 插件定义（声明式）。 */

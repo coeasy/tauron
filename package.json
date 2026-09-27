@@ -12,13 +12,15 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 0",
     "lint:rust": "cargo clippy --workspace --all-targets --locked -- -D warnings",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "fmt:rust": "cargo fmt --all",
     "fmt:rust:check": "cargo fmt --all -- --check",
-    "verify": "pnpm -r build && pnpm -r --no-bail typecheck && pnpm -r --no-bail test"
+    "verify": "pnpm -r build && pnpm -r --no-bail typecheck && pnpm -r --no-bail test",
+    "publish:npm": "node scripts/publish-npm.mjs",
+    "publish:crates": "node scripts/publish-crates.mjs"
   },
   "devDependencies": {
     "@tauri-apps/api": "2.11.1",

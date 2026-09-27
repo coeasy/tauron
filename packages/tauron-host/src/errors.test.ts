@@ -43,7 +43,7 @@ describe('HOST_ERROR_CODES', () => {
   it('可重试集合恰好 3 个，且都在线名全集内', () => {
     expect(RETRYABLE_HOST_ERROR_CODES).toHaveLength(3);
     for (const c of RETRYABLE_HOST_ERROR_CODES) {
-      expect((HOST_ERROR_CODES as readonly string[])).toContain(c);
+      expect(HOST_ERROR_CODES as readonly string[]).toContain(c);
     }
   });
 
@@ -182,7 +182,11 @@ describe('HostException', () => {
 
 describe('未识别错误码的原串保留（版本偏斜下的遥测定位）', () => {
   it('新宿主发来表外码：收窄为 E_UNKNOWN，但原串保留在 rawCode', () => {
-    const shape = normalizeError({ code: 'E_QUOTA_EXCEEDED', message: '配额用尽', retryable: true });
+    const shape = normalizeError({
+      code: 'E_QUOTA_EXCEEDED',
+      message: '配额用尽',
+      retryable: true,
+    });
     expect(shape.code).toBe('E_UNKNOWN');
     expect(shape.rawCode).toBe('E_QUOTA_EXCEEDED');
     // 宿主显式给了 retryable 就尊重宿主（它比本端的旧码表更懂新码）。
@@ -228,7 +232,10 @@ describe('未识别错误码的原串保留（版本偏斜下的遥测定位）'
 // ──────────────────────────────────────────────────────────────────────────
 describe('translate_at_boundary（R2-c）', () => {
   it('webview→host 边界：宿主码原样穿过，标记未翻译', () => {
-    const r = translate_at_boundary({ code: 'E_AUTH_DENIED', message: 'no perm' }, 'plugin-webview→host');
+    const r = translate_at_boundary(
+      { code: 'E_AUTH_DENIED', message: 'no perm' },
+      'plugin-webview→host',
+    );
     expect(r.error).toBeInstanceOf(HostException);
     expect(r.error.code).toBe('E_AUTH_DENIED');
     expect(r.boundary).toBe('plugin-webview→host');
@@ -256,7 +263,10 @@ describe('translate_at_boundary（R2-c）', () => {
   });
 
   it('host→plugin-webview 边界：宿主码不被二次翻译', () => {
-    const r = translate_at_boundary({ code: 'E_CALL_TIMEOUT', message: 't' }, 'host→plugin-webview');
+    const r = translate_at_boundary(
+      { code: 'E_CALL_TIMEOUT', message: 't' },
+      'host→plugin-webview',
+    );
     expect(r.error.code).toBe('E_CALL_TIMEOUT');
     expect(r.error.retryable).toBe(true);
     expect(r.translated).toBe(false);
@@ -279,6 +289,10 @@ describe('translate_at_boundary（R2-c）', () => {
 
   it('翻译结果自带边界元信息，调用方可观测地知道"翻译发生过"', () => {
     const r = translate_at_boundary({ code: 'E_FUTURE_CODE', message: 'm' }, 'plugin-webview→host');
-    expect(r).toMatchObject({ boundary: 'plugin-webview→host', translated: true, rawCode: 'E_FUTURE_CODE' });
+    expect(r).toMatchObject({
+      boundary: 'plugin-webview→host',
+      translated: true,
+      rawCode: 'E_FUTURE_CODE',
+    });
   });
 });

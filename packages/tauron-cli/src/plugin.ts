@@ -81,7 +81,7 @@ export function derivePluginId(name: string): string {
 /**
  * 创建新插件。
  */
-export function pluginNew(config: PluginConfig, options: CliOptions): PluginCreateResult {
+export function pluginNew(config: PluginConfig, _options: CliOptions): PluginCreateResult {
   const files: Record<string, string> = {};
   const permissions = [...(config.permissions ?? DEFAULT_MANIFEST_PERMISSIONS)];
   const manifest = generatePluginManifest(config, permissions);
@@ -357,14 +357,14 @@ ${
 `
     : ''
 }${
-  config.type === 'process'
-    ? `
+    config.type === 'process'
+      ? `
 ## 进程插件说明
 
 入口是 \`main.js\`（sidecar）。宿主按 \`entry.sidecar\` 拉起并连接其自报端口。
 `
-    : ''
-}
+      : ''
+  }
 ## 本地依赖
 
 \`@tauron/*\` 包**尚未发布到 npm**，本地开发请把 \`devDependencies\` 改成

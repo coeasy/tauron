@@ -58,9 +58,7 @@ describe('<oc-theme-picker>', () => {
   it('setActive 更新激活状态并 dispatch 事件', async () => {
     const el = document.createElement('oc-theme-picker');
     document.body.appendChild(el);
-    el.setThemes([
-      { id: 'dark', name: '暗色', isDark: true, colors: ['#111827'] },
-    ]);
+    el.setThemes([{ id: 'dark', name: '暗色', isDark: true, colors: ['#111827'] }]);
     await el.updateComplete;
 
     const details: ThemeChangeEventDetail[] = [];

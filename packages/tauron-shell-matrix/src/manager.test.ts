@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { createShellManager } from './manager.js';
-import type { LocalShellConfig, LocalServerShellConfig, RemoteUrlShellConfig, SubWebviewShellConfig } from './types.js';
+import type {
+  LocalShellConfig,
+  LocalServerShellConfig,
+  RemoteUrlShellConfig,
+  SubWebviewShellConfig,
+} from './types.js';
 import type { PluginManifest } from '@tauron/types';
 
 describe('Shell Manager', () => {

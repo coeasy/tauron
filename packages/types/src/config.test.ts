@@ -27,7 +27,13 @@ describe('config validation', () => {
     motion: {
       preset: 'standard',
       durations: { fast: 150, normal: 300, slow: 500 },
-      easings: { standard: { name: 'standard', cubicBezier: [0.4, 0.0, 0.2, 1.0] as [number, number, number, number], value: 'cubic-bezier(0.4, 0.0, 0.2, 1.0)' } },
+      easings: {
+        standard: {
+          name: 'standard',
+          cubicBezier: [0.4, 0.0, 0.2, 1.0] as [number, number, number, number],
+          value: 'cubic-bezier(0.4, 0.0, 0.2, 1.0)',
+        },
+      },
       splash: {
         enabled: true,
         minDuration: 1500,

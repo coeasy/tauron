@@ -74,34 +74,88 @@ export class OcToast extends LitElement {
       animation: slide-in 0.3s ease-out;
     }
     @keyframes slide-in {
-      from { transform: translateX(100%); opacity: 0; }
-      to { transform: translateX(0); opacity: 1; }
+      from {
+        transform: translateX(100%);
+        opacity: 0;
+      }
+      to {
+        transform: translateX(0);
+        opacity: 1;
+      }
     }
-    .toast.info     { background: var(--oc-toast-info-bg, #e7f5ff); border: 1px solid var(--oc-toast-info-border, #74c0fc); }
-    .toast.success  { background: var(--oc-toast-success-bg, #ebfbee); border: 1px solid var(--oc-toast-success-border, #69db7c); }
-    .toast.warning  { background: var(--oc-toast-warning-bg, #fff9db); border: 1px solid var(--oc-toast-warning-border, #ffe066); }
-    .toast.error    { background: var(--oc-toast-error-bg, #fff5f5); border: 1px solid var(--oc-toast-error-border, #ffa8a8); }
-    .toast-content { flex: 1; min-width: 0; }
-    .toast-title { font-weight: 600; font-size: 14px; margin: 0 0 4px; }
-    .toast-message { font-size: 13px; color: var(--oc-text-secondary, #495057); margin: 0; word-wrap: break-word; }
-    .toast-actions { display: flex; gap: 8px; margin-top: 8px; }
+    .toast.info {
+      background: var(--oc-toast-info-bg, #e7f5ff);
+      border: 1px solid var(--oc-toast-info-border, #74c0fc);
+    }
+    .toast.success {
+      background: var(--oc-toast-success-bg, #ebfbee);
+      border: 1px solid var(--oc-toast-success-border, #69db7c);
+    }
+    .toast.warning {
+      background: var(--oc-toast-warning-bg, #fff9db);
+      border: 1px solid var(--oc-toast-warning-border, #ffe066);
+    }
+    .toast.error {
+      background: var(--oc-toast-error-bg, #fff5f5);
+      border: 1px solid var(--oc-toast-error-border, #ffa8a8);
+    }
+    .toast-content {
+      flex: 1;
+      min-width: 0;
+    }
+    .toast-title {
+      font-weight: 600;
+      font-size: 14px;
+      margin: 0 0 4px;
+    }
+    .toast-message {
+      font-size: 13px;
+      color: var(--oc-text-secondary, #495057);
+      margin: 0;
+      word-wrap: break-word;
+    }
+    .toast-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
     .toast-action {
-      background: none; border: 1px solid currentColor; border-radius: 4px;
-      padding: 4px 12px; font-size: 12px; cursor: pointer;
+      background: none;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 4px 12px;
+      font-size: 12px;
+      cursor: pointer;
     }
-    .toast-action:hover { background: rgba(0,0,0,0.05); }
+    .toast-action:hover {
+      background: rgba(0, 0, 0, 0.05);
+    }
     .toast-close {
-      background: none; border: none; cursor: pointer;
-      font-size: 18px; line-height: 1; padding: 0 4px;
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 18px;
+      line-height: 1;
+      padding: 0 4px;
       color: var(--oc-text-secondary, #868e96);
     }
-    .toast-close:hover { color: var(--oc-text-primary, #212529); }
+    .toast-close:hover {
+      color: var(--oc-text-primary, #212529);
+    }
     .badge {
-      position: absolute; top: -4px; right: -4px;
-      background: var(--oc-danger, #e03131); color: white;
-      border-radius: 50%; min-width: 18px; height: 18px;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 11px; font-weight: 600;
+      position: absolute;
+      top: -4px;
+      right: -4px;
+      background: var(--oc-danger, #e03131);
+      color: white;
+      border-radius: 50%;
+      min-width: 18px;
+      height: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 600;
     }
   `;
 
@@ -168,26 +222,36 @@ export class OcToast extends LitElement {
         <div class="toast-content">
           <p class="toast-title">${item.title}</p>
           <p class="toast-message">${item.message}</p>
-          ${item.actions.length > 0
-            ? html`<div class="toast-actions">
-                ${item.actions.map(
-                  (a) => html`<button
-                    class="toast-action"
-                    @click=${() => this.dispatchEvent(new CustomEvent(SHELL_EVENTS.toastAction, {
-                      detail: { toastId: item.id, actionId: a.id, label: a.label } satisfies ToastActionEventDetail,
-                      bubbles: true,
-                      composed: true,
-                    }))}
-                  >${a.label}</button>`,
-                )}
-              </div>`
-            : null}
+          ${
+            item.actions.length > 0
+              ? html`<div class="toast-actions">
+                  ${item.actions.map(
+                    (a) =>
+                      html`<button
+                        class="toast-action"
+                        @click=${() =>
+                          this.dispatchEvent(
+                            new CustomEvent(SHELL_EVENTS.toastAction, {
+                              detail: {
+                                toastId: item.id,
+                                actionId: a.id,
+                                label: a.label,
+                              } satisfies ToastActionEventDetail,
+                              bubbles: true,
+                              composed: true,
+                            }),
+                          )}
+                      >
+                        ${a.label}
+                      </button>`,
+                  )}
+                </div>`
+              : null
+          }
         </div>
-        <button
-          class="toast-close"
-          aria-label="关闭"
-          @click=${() => this.dismiss(item.id)}
-        >×</button>
+        <button class="toast-close" aria-label="关闭" @click=${() => this.dismiss(item.id)}>
+          ×
+        </button>
       </div>
     `;
   }

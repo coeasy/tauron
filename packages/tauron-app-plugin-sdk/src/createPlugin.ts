@@ -1,12 +1,6 @@
 // @tauron/app-plugin-sdk — createPlugin 工厂函数。
 
-import type { HostClient } from '@tauron/host';
-import type {
-  CommandHandler,
-  PluginContext,
-  PluginDefinition,
-  PluginInstance,
-} from './types.js';
+import type { PluginContext, PluginDefinition, PluginInstance } from './types.js';
 
 /**
  * 创建插件实例。

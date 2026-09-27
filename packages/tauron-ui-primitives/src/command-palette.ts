@@ -65,8 +65,7 @@ export interface CommandPaletteSnapshot {
 
 /** 命令面板操作结果。 */
 export type CommandPaletteActionResult =
-  | { ok: true }
-  | { ok: false; code: string; message: string };
+  { ok: true } | { ok: false; code: string; message: string };
 
 // ──────────────────────────────────────────────────────────────────────────
 // CommandPaletteStore

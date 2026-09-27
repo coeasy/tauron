@@ -1,8 +1,30 @@
 {
   "name": "@tauron/plugin-sdk",
   "version": "0.1.0",
-  "private": true,
   "description": "tauron 插件 SDK（设计文档 §2.4/§4.2B）：PluginBridge postMessage 沙箱通信、插件宿主侧代理",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coeasy/tauron.git",
+    "directory": "packages/tauron-plugin-sdk"
+  },
+  "homepage": "https://github.com/coeasy/tauron",
+  "bugs": {
+    "url": "https://github.com/coeasy/tauron/issues"
+  },
+  "keywords": [
+    "tauron",
+    "tauri",
+    "plugin",
+    "sdk",
+    "sandbox"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,7 +38,10 @@
       "default": "./dist/testing.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "sideEffects": false,
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

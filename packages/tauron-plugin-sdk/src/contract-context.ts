@@ -139,17 +139,23 @@ export function createContractContext(
    * `invoke` 转发。返回 rejected Promise 由调用方 catch（与 app 侧一致：只告警、
    * 不推翻本地注册）。
    */
-  const reportContribution = (entry: { kind: string; id: string; label: string }): Promise<void> => {
+  const reportContribution = (entry: {
+    kind: string;
+    id: string;
+    label: string;
+  }): Promise<void> => {
     const selfRegister = (
-      legacy as { contributesRegister?: (e: { kind: string; id: string; label: string }) => Promise<void> }
+      legacy as {
+        contributesRegister?: (e: { kind: string; id: string; label: string }) => Promise<void>;
+      }
     ).contributesRegister;
     if (typeof selfRegister === 'function') {
       return Promise.resolve(selfRegister.call(legacy, entry));
     }
     // legacy 的 invoke 结果形状未知（宿主决定）：本适配层原样返回，不二次解释。
-    return Promise.resolve(
-      legacy.invoke(hostCommands.contributesRegister, { entry }),
-    ).then(() => undefined);
+    return Promise.resolve(legacy.invoke(hostCommands.contributesRegister, { entry })).then(
+      () => undefined,
+    );
   };
 
   const ctx: SharedPluginContext = {

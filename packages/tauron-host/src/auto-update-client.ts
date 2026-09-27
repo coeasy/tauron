@@ -24,7 +24,15 @@ import type { Backend } from './backend.js';
 import type { WindowRelaunchOutcome } from './shell-client.js';
 
 /** 更新状态 */
-export type UpdateStatus = 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'ready' | 'error';
+export type UpdateStatus =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'downloaded'
+  | 'installing'
+  | 'ready'
+  | 'error';
 
 /** 更新信息 */
 export interface UpdateInfo {
@@ -311,6 +319,9 @@ export class AutoUpdateClient {
  *
  * 便捷工厂函数。
  */
-export function createAutoUpdateClient(options: { backend: Backend; config?: AutoUpdateConfig }): AutoUpdateClient {
+export function createAutoUpdateClient(options: {
+  backend: Backend;
+  config?: AutoUpdateConfig;
+}): AutoUpdateClient {
   return new AutoUpdateClient(options);
 }

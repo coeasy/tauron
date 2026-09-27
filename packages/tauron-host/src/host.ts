@@ -20,7 +20,7 @@ import type {
   TopicDescriptor,
 } from './events.js';
 import type { StreamFrame, StreamHandle, StreamKind, StreamWriteInput } from './stream.js';
-import type { LifecycleEvent, PluginReportableEvent } from './lifecycle.js';
+import type { PluginReportableEvent } from './lifecycle.js';
 
 /** 插件 → 自己 C/D 后端的调用请求。 */
 export interface PluginCallRequest {
@@ -102,13 +102,11 @@ export class HostClient {
   }
 
   private call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-    return this.backend
-      .invoke<T>(cmd, args)
-      .catch((err: unknown) => {
-        // R2-c：宿主拒绝是**边界事件**，必须经显式翻译（而不是就地 new）。
-        // 直接 new 会把「哪个边界、原始码是谁的词表」全部丢掉。
-        throw translate_at_boundary(err, 'plugin-webview→host').error;
-      });
+    return this.backend.invoke<T>(cmd, args).catch((err: unknown) => {
+      // R2-c：宿主拒绝是**边界事件**，必须经显式翻译（而不是就地 new）。
+      // 直接 new 会把「哪个边界、原始码是谁的词表」全部丢掉。
+      throw translate_at_boundary(err, 'plugin-webview→host').error;
+    });
   }
 
   // ── C/D 调用面（self 档，D2 定稿）───────────────────────────────
@@ -405,9 +403,10 @@ export class HostClient {
   // ── 事件总线（self 档，D1 定稿）────────────────────────────────
 
   /** 发布跨插件事件。唯一入口——不得绕过本方法直调官方 `emit`。 */
-  async eventsPublish(
-    evt: { topic: string; payload: JsonValue },
-  ): Promise<{ delivered: number; dropped: boolean }> {
+  async eventsPublish(evt: {
+    topic: string;
+    payload: JsonValue;
+  }): Promise<{ delivered: number; dropped: boolean }> {
     return this.call('host_events_publish', {
       evt: { topic: evt.topic, payload: evt.payload },
     });
@@ -491,36 +490,60 @@ export class AdminClient {
   }
 
   async registryAdmin(op: RegistryAdminOp): Promise<void> {
-    await this.backend
-      .invoke('host_registry_admin', { op })
-      .catch((err: unknown) => {
-        // R2-c：管理面同属插件 webview → 宿主的边界，走同一条显式翻译。
-        throw translate_at_boundary(err, 'plugin-webview→host').error;
-      });
+    await this.backend.invoke('host_registry_admin', { op }).catch((err: unknown) => {
+      // R2-c：管理面同属插件 webview → 宿主的边界，走同一条显式翻译。
+      throw translate_at_boundary(err, 'plugin-webview→host').error;
+    });
   }
 
   /** Install a verified local package after the host UI has shown and collected approval. */
-  async registryInstall(packagePath: string, approvedPermissions: string[]): Promise<{
-    pluginId: string; version: string; installPath: string; approvedPermissions: string[];
+  async registryInstall(
+    packagePath: string,
+    approvedPermissions: string[],
+  ): Promise<{
+    pluginId: string;
+    version: string;
+    installPath: string;
+    approvedPermissions: string[];
   }> {
-    return this.backend.invoke<{
-      pluginId: string; version: string; installPath: string; approvedPermissions: string[];
-    }>('host_registry_install', { packagePath, approvedPermissions })
+    return this.backend
+      .invoke<{
+        pluginId: string;
+        version: string;
+        installPath: string;
+        approvedPermissions: string[];
+      }>('host_registry_install', { packagePath, approvedPermissions })
       .catch((err: unknown) => {
         throw translate_at_boundary(err, 'plugin-webview→host').error;
       });
   }
 
   async registryInstallPreview(packagePath: string): Promise<{
-    pluginId: string; pluginName: string; version: string;
-    permissions: Array<{ permission: string; risk: string; description: string; defaultChecked: boolean }>;
+    pluginId: string;
+    pluginName: string;
+    version: string;
+    permissions: Array<{
+      permission: string;
+      risk: string;
+      description: string;
+      defaultChecked: boolean;
+    }>;
   }> {
-    return this.backend.invoke<{
-      pluginId: string; pluginName: string; version: string;
-      permissions: Array<{ permission: string; risk: string; description: string; defaultChecked: boolean }>;
-    }>('host_registry_install_preview', { packagePath }).catch((err: unknown) => {
-      throw translate_at_boundary(err, 'plugin-webview→host').error;
-    });
+    return this.backend
+      .invoke<{
+        pluginId: string;
+        pluginName: string;
+        version: string;
+        permissions: Array<{
+          permission: string;
+          risk: string;
+          description: string;
+          defaultChecked: boolean;
+        }>;
+      }>('host_registry_install_preview', { packagePath })
+      .catch((err: unknown) => {
+        throw translate_at_boundary(err, 'plugin-webview→host').error;
+      });
   }
 }
 
@@ -539,10 +562,7 @@ export class FrameSink {
   private readonly onFrame: ((frame: StreamFrame) => void) | undefined;
   private readonly backend: Backend;
 
-  constructor(
-    onFrame: ((frame: StreamFrame) => void) | undefined,
-    backend: Backend,
-  ) {
+  constructor(onFrame: ((frame: StreamFrame) => void) | undefined, backend: Backend) {
     this.onFrame = onFrame;
     this.backend = backend;
     this.port = backend.channel<StreamFrame>();

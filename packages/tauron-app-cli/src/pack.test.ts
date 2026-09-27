@@ -131,11 +131,15 @@ describe('validateFiles', () => {
   });
 
   it('拒绝包含 .. 的路径', () => {
-    expect(() => validateFiles([{ path: '../file.js', size: 1024, hash: 'a'.repeat(64) }])).toThrow();
+    expect(() =>
+      validateFiles([{ path: '../file.js', size: 1024, hash: 'a'.repeat(64) }]),
+    ).toThrow();
   });
 
   it('拒绝绝对路径', () => {
-    expect(() => validateFiles([{ path: '/usr/local/file.js', size: 1024, hash: 'a'.repeat(64) }])).toThrow();
+    expect(() =>
+      validateFiles([{ path: '/usr/local/file.js', size: 1024, hash: 'a'.repeat(64) }]),
+    ).toThrow();
   });
 
   it('拒绝负数大小', () => {
@@ -143,7 +147,9 @@ describe('validateFiles', () => {
   });
 
   it('拒绝超过文件大小上限', () => {
-    expect(() => validateFiles([{ path: 'file.js', size: MAX_FILE_SIZE + 1, hash: 'a'.repeat(64) }])).toThrow();
+    expect(() =>
+      validateFiles([{ path: 'file.js', size: MAX_FILE_SIZE + 1, hash: 'a'.repeat(64) }]),
+    ).toThrow();
   });
 
   it('拒绝格式错误的哈希', () => {
@@ -239,26 +245,32 @@ describe('validatePackConfig', () => {
   });
 
   it('拒绝空目录', () => {
-    expect(() => validatePackConfig({
-      dir: '',
-      files: makeFiles(),
-      pluginConfig: makePluginConfig(),
-    })).toThrow();
+    expect(() =>
+      validatePackConfig({
+        dir: '',
+        files: makeFiles(),
+        pluginConfig: makePluginConfig(),
+      }),
+    ).toThrow();
   });
 
   it('拒绝空文件列表', () => {
-    expect(() => validatePackConfig({
-      dir: '/project/plugin',
-      files: [],
-      pluginConfig: makePluginConfig(),
-    })).toThrow();
+    expect(() =>
+      validatePackConfig({
+        dir: '/project/plugin',
+        files: [],
+        pluginConfig: makePluginConfig(),
+      }),
+    ).toThrow();
   });
 
   it('拒绝空插件配置', () => {
-    expect(() => validatePackConfig({
-      dir: '/project/plugin',
-      files: makeFiles(),
-    })).toThrow();
+    expect(() =>
+      validatePackConfig({
+        dir: '/project/plugin',
+        files: makeFiles(),
+      }),
+    ).toThrow();
   });
 });
 
@@ -296,39 +308,47 @@ describe('validateSignConfig', () => {
   });
 
   it('拒绝空目录', () => {
-    expect(() => validateSignConfig({
-      dir: '',
-      algorithm: 'ed25519',
-      kid: 'kid-123',
-      privateKey: 'key',
-    })).toThrow();
+    expect(() =>
+      validateSignConfig({
+        dir: '',
+        algorithm: 'ed25519',
+        kid: 'kid-123',
+        privateKey: 'key',
+      }),
+    ).toThrow();
   });
 
   it('拒绝空算法', () => {
-    expect(() => validateSignConfig({
-      dir: '/project/plugin',
-      algorithm: '',
-      kid: 'kid-123',
-      privateKey: 'key',
-    })).toThrow();
+    expect(() =>
+      validateSignConfig({
+        dir: '/project/plugin',
+        algorithm: '',
+        kid: 'kid-123',
+        privateKey: 'key',
+      }),
+    ).toThrow();
   });
 
   it('拒绝空 kid', () => {
-    expect(() => validateSignConfig({
-      dir: '/project/plugin',
-      algorithm: 'ed25519',
-      kid: '',
-      privateKey: 'key',
-    })).toThrow();
+    expect(() =>
+      validateSignConfig({
+        dir: '/project/plugin',
+        algorithm: 'ed25519',
+        kid: '',
+        privateKey: 'key',
+      }),
+    ).toThrow();
   });
 
   it('拒绝空私钥', () => {
-    expect(() => validateSignConfig({
-      dir: '/project/plugin',
-      algorithm: 'ed25519',
-      kid: 'kid-123',
-      privateKey: '',
-    })).toThrow();
+    expect(() =>
+      validateSignConfig({
+        dir: '/project/plugin',
+        algorithm: 'ed25519',
+        kid: 'kid-123',
+        privateKey: '',
+      }),
+    ).toThrow();
   });
 });
 
@@ -363,35 +383,43 @@ describe('validatePublishConfig', () => {
   });
 
   it('拒绝空目录', () => {
-    expect(() => validatePublishConfig({
-      dir: '',
-      targetUrl: 'https://registry.example.com',
-      token: 'token-123',
-    })).toThrow();
+    expect(() =>
+      validatePublishConfig({
+        dir: '',
+        targetUrl: 'https://registry.example.com',
+        token: 'token-123',
+      }),
+    ).toThrow();
   });
 
   it('拒绝空 URL', () => {
-    expect(() => validatePublishConfig({
-      dir: '/project/plugin',
-      targetUrl: '',
-      token: 'token-123',
-    })).toThrow();
+    expect(() =>
+      validatePublishConfig({
+        dir: '/project/plugin',
+        targetUrl: '',
+        token: 'token-123',
+      }),
+    ).toThrow();
   });
 
   it('拒绝非 HTTPS URL', () => {
-    expect(() => validatePublishConfig({
-      dir: '/project/plugin',
-      targetUrl: 'http://registry.example.com',
-      token: 'token-123',
-    })).toThrow();
+    expect(() =>
+      validatePublishConfig({
+        dir: '/project/plugin',
+        targetUrl: 'http://registry.example.com',
+        token: 'token-123',
+      }),
+    ).toThrow();
   });
 
   it('拒绝空 token', () => {
-    expect(() => validatePublishConfig({
-      dir: '/project/plugin',
-      targetUrl: 'https://registry.example.com',
-      token: '',
-    })).toThrow();
+    expect(() =>
+      validatePublishConfig({
+        dir: '/project/plugin',
+        targetUrl: 'https://registry.example.com',
+        token: '',
+      }),
+    ).toThrow();
   });
 });
 
@@ -445,17 +473,30 @@ describe('createPluginArchive', () => {
         compress: true,
         files: [file],
         pluginConfig: makePluginConfig(),
-        pluginManifest: { id: 'com.example.plugin', name: 'My Plugin', version: '1.0.0', type: 'js', framework: '^0.1.0', entry: { js: 'manifest.json' } },
+        pluginManifest: {
+          id: 'com.example.plugin',
+          name: 'My Plugin',
+          version: '1.0.0',
+          type: 'js',
+          framework: '^0.1.0',
+          entry: { js: 'manifest.json' },
+        },
       });
       expect(archive.readUInt32LE(0)).toBe(0x04034b50);
       const nameLength = archive.readUInt16LE(26);
       const compressedSize = archive.readUInt32LE(18);
-      const data = inflateRawSync(archive.subarray(30 + nameLength, 30 + nameLength + compressedSize));
+      const data = inflateRawSync(
+        archive.subarray(30 + nameLength, 30 + nameLength + compressedSize),
+      );
       expect(archive.toString('utf8', 30, 30 + nameLength)).toBe('manifest.json');
-      expect(JSON.parse(data.toString('utf8'))).toMatchObject({ id: 'com.example.plugin', type: 'js' });
+      expect(JSON.parse(data.toString('utf8'))).toMatchObject({
+        id: 'com.example.plugin',
+        type: 'js',
+      });
       expect(readPluginArchive(archive)).toHaveLength(1);
-      expect(readPluginArchive(archive).find((item) => item.path === 'manifest.json')?.hash)
-        .toBe(createHash('sha256').update(data).digest('hex'));
+      expect(readPluginArchive(archive).find((item) => item.path === 'manifest.json')?.hash).toBe(
+        createHash('sha256').update(data).digest('hex'),
+      );
       const tampered = Buffer.from(archive);
       const centralOffset = 30 + nameLength + compressedSize;
       tampered.writeUInt32LE(0, centralOffset + 16);
@@ -464,18 +505,21 @@ describe('createPluginArchive', () => {
       fs.writeFileSync(path.join(dir, 'payload.txt'), 'original');
       const payload = Buffer.from('original');
       const payloadFile = {
-        path: 'payload.txt', size: payload.length,
+        path: 'payload.txt',
+        size: payload.length,
         hash: createHash('sha256').update(payload).digest('hex'),
       };
       fs.writeFileSync(path.join(dir, 'payload.txt'), 'changed');
-      expect(() => createPluginArchive({
-        dir,
-        outputPath: path.join(dir, 'plugin.tpkg'),
-        includeSource: false,
-        compress: true,
-        files: [payloadFile],
-        pluginConfig: makePluginConfig(),
-      })).toThrow('文件在扫描后发生变化');
+      expect(() =>
+        createPluginArchive({
+          dir,
+          outputPath: path.join(dir, 'plugin.tpkg'),
+          includeSource: false,
+          compress: true,
+          files: [payloadFile],
+          pluginConfig: makePluginConfig(),
+        }),
+      ).toThrow('文件在扫描后发生变化');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -489,14 +533,17 @@ describe('createPluginArchive', () => {
 describe('pluginSign', () => {
   it('成功签名', async () => {
     const keys = makeTestKeys();
-    const result = await pluginSign({
-      dir: '/project/plugin',
-      algorithm: 'ed25519',
-      kid: 'kid-123',
-      privateKey: keys.privateKey,
-      includeSource: true,
-      frameworkRange: '>=0.1.0',
-    }, makeFiles(3));
+    const result = await pluginSign(
+      {
+        dir: '/project/plugin',
+        algorithm: 'ed25519',
+        kid: 'kid-123',
+        privateKey: keys.privateKey,
+        includeSource: true,
+        frameworkRange: '>=0.1.0',
+      },
+      makeFiles(3),
+    );
     expect(result.ok).toBe(true);
     const signature = result.signature;
     expect(signature).toBeDefined();
@@ -513,12 +560,15 @@ describe('pluginSign', () => {
   it('签名与声明算法一致：公钥可独立验证（回路）', async () => {
     const keys = makeTestKeys();
     const files = makeFiles(3);
-    const result = await pluginSign({
-      dir: '/project/plugin',
-      algorithm: 'ed25519',
-      kid: 'kid-123',
-      privateKey: keys.privateKey,
-    }, files);
+    const result = await pluginSign(
+      {
+        dir: '/project/plugin',
+        algorithm: 'ed25519',
+        kid: 'kid-123',
+        privateKey: keys.privateKey,
+      },
+      files,
+    );
     expect(result.ok).toBe(true);
     const signature = result.signature!;
     expect(await verifySignatureCrypto(signature, keys.publicKey)).toBe(true);
@@ -527,19 +577,20 @@ describe('pluginSign', () => {
   it('篡改文件列表后密码学验证失败', async () => {
     const keys = makeTestKeys();
     const files = makeFiles(3);
-    const result = await pluginSign({
-      dir: '/project/plugin',
-      algorithm: 'ed25519',
-      kid: 'kid-123',
-      privateKey: keys.privateKey,
-    }, files);
+    const result = await pluginSign(
+      {
+        dir: '/project/plugin',
+        algorithm: 'ed25519',
+        kid: 'kid-123',
+        privateKey: keys.privateKey,
+      },
+      files,
+    );
     const signature = result.signature!;
     // 注意：makeFiles 的 hash 全部相同，必须改变 hash 内容本身才是真篡改
     const tampered: PluginSignature = {
       ...signature,
-      files: signature.files.map((f, i) =>
-        i === 0 ? { ...f, hash: 'b'.repeat(64) } : f,
-      ),
+      files: signature.files.map((f, i) => (i === 0 ? { ...f, hash: 'b'.repeat(64) } : f)),
     };
     expect(await verifySignatureCrypto(tampered, keys.publicKey)).toBe(false);
     // 原签名对原始载荷仍然有效（防误伤）
@@ -547,38 +598,47 @@ describe('pluginSign', () => {
   });
 
   it('无效私钥格式被拒绝', async () => {
-    const result = await pluginSign({
-      dir: '/project/plugin',
-      algorithm: 'ed25519',
-      kid: 'kid-123',
-      privateKey: 'not-a-real-key',
-    }, makeFiles(2));
+    const result = await pluginSign(
+      {
+        dir: '/project/plugin',
+        algorithm: 'ed25519',
+        kid: 'kid-123',
+        privateKey: 'not-a-real-key',
+      },
+      makeFiles(2),
+    );
     expect(result.ok).toBe(false);
     expect(result.error).toContain('私钥格式无效');
   });
 
   it('rsa-* 显式拒绝：@tauron/market 只实现 ed25519（不静默降级）', async () => {
     const keys = makeTestKeys();
-    const result = await pluginSign({
-      dir: '/project/plugin',
-      algorithm: 'rsa-2048',
-      kid: 'kid-123',
-      privateKey: keys.privateKey,
-    }, makeFiles(2));
+    const result = await pluginSign(
+      {
+        dir: '/project/plugin',
+        algorithm: 'rsa-2048',
+        kid: 'kid-123',
+        privateKey: keys.privateKey,
+      },
+      makeFiles(2),
+    );
     expect(result.ok).toBe(false);
     expect(result.error).toContain('@tauron/market 仅实现 ed25519');
   });
 
   it('失败时返回错误', async () => {
     const keys = makeTestKeys();
-    const result = await pluginSign({
-      dir: '',
-      algorithm: 'ed25519',
-      kid: 'kid-123',
-      privateKey: keys.privateKey,
-      includeSource: true,
-      frameworkRange: '>=0.1.0',
-    }, makeFiles(3));
+    const result = await pluginSign(
+      {
+        dir: '',
+        algorithm: 'ed25519',
+        kid: 'kid-123',
+        privateKey: keys.privateKey,
+        includeSource: true,
+        frameworkRange: '>=0.1.0',
+      },
+      makeFiles(3),
+    );
     expect(result.ok).toBe(false);
     expect(result.error).toBeDefined();
   });
@@ -760,14 +820,17 @@ describe('端到端：plugin pack/sign/publish', () => {
 
     // 2. 签名
     const keys = makeTestKeys();
-    const signResult = await pluginSign({
-      dir: '/project/plugin',
-      algorithm: 'ed25519',
-      kid: 'kid-123',
-      privateKey: keys.privateKey,
-      includeSource: true,
-      frameworkRange: '>=0.1.0',
-    }, packFiles);
+    const signResult = await pluginSign(
+      {
+        dir: '/project/plugin',
+        algorithm: 'ed25519',
+        kid: 'kid-123',
+        privateKey: keys.privateKey,
+        includeSource: true,
+        frameworkRange: '>=0.1.0',
+      },
+      packFiles,
+    );
     expect(signResult.ok).toBe(true);
     const signature = signResult.signature;
     expect(signature).toBeDefined();

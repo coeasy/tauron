@@ -140,7 +140,16 @@ describe('CommandPaletteStore', () => {
     it('执行命令', () => {
       let executed = false;
       const commands = [
-        { id: 'cmd-1', name: '测试', description: '', group: '', enabled: true, execute: () => { executed = true; } },
+        {
+          id: 'cmd-1',
+          name: '测试',
+          description: '',
+          group: '',
+          enabled: true,
+          execute: () => {
+            executed = true;
+          },
+        },
       ];
       const store = new CommandPaletteStore({ commands });
       store.open();

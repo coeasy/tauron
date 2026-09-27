@@ -4,11 +4,7 @@
  * 抽象 IPC 层，允许在不同环境（Tauri/Web/Electron）中切换。
  */
 
-import type {
-  PluginInvokeRequest,
-  PluginInvokeResponse,
-  ProgressEvent,
-} from '@tauron/types';
+import type { PluginInvokeRequest, PluginInvokeResponse, ProgressEvent } from '@tauron/types';
 
 /** 进度事件回调 */
 export type ProgressCallback = (event: ProgressEvent) => void;
@@ -34,10 +30,7 @@ export interface TauronBackend {
   cancel(callId: string): Promise<void>;
 
   /** 订阅事件 */
-  listen(
-    topic: string,
-    handler: (payload: unknown) => void,
-  ): Promise<() => void>;
+  listen(topic: string, handler: (payload: unknown) => void): Promise<() => void>;
 
   /** 发布事件 */
   emit(topic: string, payload: unknown): Promise<void>;

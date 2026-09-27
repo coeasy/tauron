@@ -5,18 +5,7 @@
  * Rust 侧注册表在 tauron-shell crate 中实现。
  */
 
-import {
-  type PluginState,
-  type PluginType,
-  TRANSITIONS,
-  isValidTransition,
-  TERMINAL_STATES,
-  ACTIVE_STATES,
-  PluginErrorCode,
-  type PluginInvokeResponse,
-  buildOkResponse,
-  buildErrorResponse,
-} from '@tauron/types';
+import { type PluginState, type PluginType, isValidTransition, ACTIVE_STATES } from '@tauron/types';
 
 /** 插件注册表条目 */
 export interface RegistryEntry {
@@ -37,11 +26,7 @@ export interface RegistryConfig {
 }
 
 /** 插件状态变更回调 */
-export type StateChangeListener = (
-  pluginId: string,
-  from: PluginState,
-  to: PluginState,
-) => void;
+export type StateChangeListener = (pluginId: string, from: PluginState, to: PluginState) => void;
 
 /**
  * 插件注册表
@@ -58,11 +43,7 @@ export class PluginRegistry {
   /**
    * 注册插件
    */
-  register(
-    pluginId: string,
-    type: PluginType,
-    manifest: unknown,
-  ): boolean {
+  register(pluginId: string, type: PluginType, manifest: unknown): boolean {
     // Check capacity
     const max = this.config.maxPlugins ?? Infinity;
     if (this.entries.size >= max) {

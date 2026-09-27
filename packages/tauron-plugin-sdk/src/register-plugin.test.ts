@@ -55,10 +55,7 @@ describe('registerPlugin：生命周期钩子', () => {
     deliver(listeners, buildInitMessage('tok-1', []));
     expect(onDisable).not.toHaveBeenCalled();
 
-    deliver(
-      listeners,
-      buildEventMessage('tok-1', TAURON_DISABLE_EVENT, { reason: 'uninstalled' }),
-    );
+    deliver(listeners, buildEventMessage('tok-1', TAURON_DISABLE_EVENT, { reason: 'uninstalled' }));
     expect(onDisable).toHaveBeenCalledTimes(1);
   });
 

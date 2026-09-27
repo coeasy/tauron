@@ -42,7 +42,10 @@ export function createPluginContext(
   host: HostClient,
 ): PluginContext & PluginEventSink {
   const commands = new Map<string, CommandHandler>();
-  const settingsTabs = new Map<string, { id: string; title: string; schema?: Record<string, unknown> }>();
+  const settingsTabs = new Map<
+    string,
+    { id: string; title: string; schema?: Record<string, unknown> }
+  >();
 
   /** 本地订阅者（按 topic 分组）。 */
   const eventListeners = new Map<string, Set<EventListener>>();
@@ -267,7 +270,12 @@ export function createPluginContext(
        * 卸载时由宿主按插件 id 统一回收（没有单条注销命令，`unregisterTab`
        * 只影响本 webview）。
        */
-      registerTab(config: { id: string; title: string; schema?: Record<string, unknown>; component?: string }): { ok: boolean; error?: string } {
+      registerTab(config: {
+        id: string;
+        title: string;
+        schema?: Record<string, unknown>;
+        component?: string;
+      }): { ok: boolean; error?: string } {
         if (settingsTabs.has(config.id)) {
           return { ok: false, error: `设置 Tab "${config.id}" 已存在` };
         }

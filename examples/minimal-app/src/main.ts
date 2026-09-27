@@ -1,7 +1,7 @@
 // tauron 应用层贯通示例 —— 宿主主窗入口。
 //
-// 演示七条核心链路（全部走 tauron-adapter 的 60 条默认 host_* 命令面；
-// 本示例默认特性开 `plugin-install`，故实际注册 62 条）：
+// 演示七条核心链路（全部走 tauron-adapter 的 78 条默认 host_* 命令面；
+// 本示例默认特性开 `plugin-install`，故实际注册 80 条）：
 // 1. iframe 沙箱插件：PluginBridge 握手（token 经 URL hash 注入）+ callPluginMethod
 // 2. 窗口控制：ShellClient → Tauri 真实窗口操作
 // 3. 系统能力：DialogClient（剪贴板）+ AutoUpdateClient（检查更新）
@@ -125,7 +125,10 @@ el<HTMLButtonElement>('btn-clipboard').addEventListener('click', () => {
   dialog
     .clipboardReadDetailed()
     .then((result) =>
-      log('host-out', `${result.reason}；进程内回退值：${result.value === '' ? '（空）' : JSON.stringify(result.value)}`),
+      log(
+        'host-out',
+        `${result.reason}；进程内回退值：${result.value === '' ? '（空）' : JSON.stringify(result.value)}`,
+      ),
     )
     .catch((err: Error) => log('host-out', err.message));
 });
@@ -139,9 +142,9 @@ el<HTMLButtonElement>('btn-update').addEventListener('click', () => {
         info.simulated
           ? `更新检查未实际执行：${info.reason ?? '宿主更新源尚未接入'}`
           : info.available
-            // `currentVersion` 是可选字段：`host_market_check` 今天不返回它，
-            // 直接插值会打印 "undefined"。
-            ? `发现新版本 ${info.version ?? '?'}（当前 ${info.currentVersion ?? '未知'}）——下载和安装能力需宿主真实接入后使用`
+            ? // `currentVersion` 是可选字段：`host_market_check` 今天不返回它，
+              // 直接插值会打印 "undefined"。
+              `发现新版本 ${info.version ?? '?'}（当前 ${info.currentVersion ?? '未知'}）——下载和安装能力需宿主真实接入后使用`
             : `已是最新版本（${info.currentVersion ?? '未知'}）`,
       ),
     )
@@ -164,17 +167,19 @@ el<HTMLButtonElement>('btn-toast').addEventListener('click', () => {
 // 现在统一交给控制器：重复接线删除，指挥链只有一条（1.0-W3）。
 const pluginManager = document.querySelector('oc-plugin-manager');
 const commandPalette = document.querySelector('oc-command-palette') as
-  | (HTMLElement & { commands: unknown[]; open: boolean })
-  | null;
+  (HTMLElement & { commands: unknown[]; open: boolean }) | null;
 
 /** 重取插件列表喂给 `<oc-plugin-manager>`（哑组件靠属性供数）。 */
 const refreshPlugins = async (): Promise<void> => {
   if (!pluginManager) return;
   const rows = await shell.registryListAll();
   (pluginManager as HTMLElement & { plugins: unknown[] }).plugins = rows.map((row) => ({
-    id: row.id, name: row.name, version: row.version,
+    id: row.id,
+    name: row.name,
+    version: row.version,
     enabled: row.state === 'enabled' || row.state === 'running',
-    type: row.pluginType, description: row.disabledBySafemode ? '安全模式已禁用' : undefined,
+    type: row.pluginType,
+    description: row.disabledBySafemode ? '安全模式已禁用' : undefined,
   }));
 };
 
@@ -195,7 +200,9 @@ const controller = new ShellController({
   onError: (err, context) => setStatus(`${context} 失败：${(err as Error).message}`, false),
   // 控制器改完注册表后需要重取列表与命令（否则开关拨了、列表还是旧的）。
   onRegistryChange: () => {
-    void refreshPlugins().catch((error: Error) => setStatus(`插件列表加载失败：${error.message}`, false));
+    void refreshPlugins().catch((error: Error) =>
+      setStatus(`插件列表加载失败：${error.message}`, false),
+    );
     void refreshCommands().catch(() => {
       /* 贡献命令拉取失败不阻断插件管理（多为宿主未实现 contributes_list） */
     });
@@ -203,7 +210,9 @@ const controller = new ShellController({
 });
 controller.start();
 
-void refreshPlugins().catch((error: Error) => setStatus(`插件列表加载失败：${error.message}`, false));
+void refreshPlugins().catch((error: Error) =>
+  setStatus(`插件列表加载失败：${error.message}`, false),
+);
 void refreshCommands().catch(() => {
   /* 同上：无贡献命令时命令面板显示「无匹配命令」 */
 });
@@ -234,7 +243,10 @@ void shell
   .recoverReport('success')
   .then((r) => {
     if (r.phase === 'normal') {
-      log('host-out', `启动恢复：正常（持久化${r.persistence.enabled ? '已启用' : '未启用'}，加载来源 ${r.loadSource}）`);
+      log(
+        'host-out',
+        `启动恢复：正常（持久化${r.persistence.enabled ? '已启用' : '未启用'}，加载来源 ${r.loadSource}）`,
+      );
     } else {
       const names = r.disabledPlugins.map((p) => p.pluginId).join(', ') || '（无）';
       log('host-out', `启动恢复：${r.phaseName}——被禁用插件：${names}`);
@@ -282,7 +294,15 @@ el<HTMLButtonElement>('btn-cross-call').addEventListener('click', () => {
     throw new Error('取件超时（5s）：执行泵未回帧——检查插件面板窗口是否已打开');
   };
   void run().then(
-    (info) => log('cross-out', JSON.stringify({ state: info.state, result: info.result, errorCode: info.errorCode }, null, 2)),
+    (info) =>
+      log(
+        'cross-out',
+        JSON.stringify(
+          { state: info.state, result: info.result, errorCode: info.errorCode },
+          null,
+          2,
+        ),
+      ),
     (err: Error) => log('cross-out', `跨主体调用失败：${err.message}`),
   );
 });

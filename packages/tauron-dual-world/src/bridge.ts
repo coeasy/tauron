@@ -122,12 +122,19 @@ export function createBridge(config: Partial<BridgeConfig> = {}): Bridge {
       }
 
       // Handle request-response pattern
-      if (message.action === 'invoke' && typeof message.data === 'object' && message.data !== null) {
+      if (
+        message.action === 'invoke' &&
+        typeof message.data === 'object' &&
+        message.data !== null
+      ) {
         const data = message.data as { requestId: string; method: string; args: unknown[] };
         const fn = state.hostFunctions.get(data.method);
 
         if (!fn) {
-          return { ok: false, error: { code: 'NOT_FOUND', message: `Host function '${data.method}' not found` } };
+          return {
+            ok: false,
+            error: { code: 'NOT_FOUND', message: `Host function '${data.method}' not found` },
+          };
         }
         // 白名单/黑名单已在 registerHostFunction 处强制；
         // 未注册的函数不可能进入 hostFunctions，因此这里无需重复校验。

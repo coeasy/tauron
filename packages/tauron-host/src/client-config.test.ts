@@ -71,8 +71,16 @@ describe('validateClientConfig', () => {
       },
     });
     expect(r.length).toBe(4);
-    for (const field of ['max_plugins', 'max_active_identities', 'max_pending_calls', 'pending_ttl_secs']) {
-      expect(r.some((e) => e.includes(field)), `${field} 必须报错`).toBe(true);
+    for (const field of [
+      'max_plugins',
+      'max_active_identities',
+      'max_pending_calls',
+      'pending_ttl_secs',
+    ]) {
+      expect(
+        r.some((e) => e.includes(field)),
+        `${field} 必须报错`,
+      ).toBe(true);
     }
   });
 

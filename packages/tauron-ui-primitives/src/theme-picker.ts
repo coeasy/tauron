@@ -353,10 +353,7 @@ export class OcThemePicker extends LitElement {
   private _renderFilterButton(label: string, value: 'all' | 'light' | 'dark'): unknown {
     const isActive = this._store.filter === value;
     return html`
-      <button
-        class="filter-btn ${isActive ? 'active' : ''}"
-        @click=${() => this.setFilter(value)}
-      >
+      <button class="filter-btn ${isActive ? 'active' : ''}" @click=${() => this.setFilter(value)}>
         ${label}
       </button>
     `;
@@ -373,10 +370,11 @@ export class OcThemePicker extends LitElement {
         tabindex="0"
       >
         <div class="theme-preview">
-          ${theme.colors.slice(0, 4).map((color) => html`<div
-              class="color-swatch"
-              style="background-color: ${color};"
-            ></div>`)}
+          ${theme.colors
+            .slice(0, 4)
+            .map(
+              (color) => html`<div class="color-swatch" style="background-color: ${color};"></div>`,
+            )}
         </div>
         <div class="theme-info">
           <p class="theme-name">
@@ -387,13 +385,13 @@ export class OcThemePicker extends LitElement {
           </p>
         </div>
         <div class="theme-check">
-          ${isActive
-            ? html`<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                <path
-                  d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"
-                />
-              </svg>`
-            : ''}
+          ${
+            isActive
+              ? html`<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
+                </svg>`
+              : ''
+          }
         </div>
       </div>
     `;
@@ -407,8 +405,7 @@ export class OcThemePicker extends LitElement {
       <div class="picker-header">
         <h3 class="picker-title">主题</h3>
         <div class="filter-group">
-          ${this._renderFilterButton('全部', 'all')}
-          ${this._renderFilterButton('亮色', 'light')}
+          ${this._renderFilterButton('全部', 'all')} ${this._renderFilterButton('亮色', 'light')}
           ${this._renderFilterButton('暗色', 'dark')}
         </div>
       </div>

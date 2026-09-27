@@ -23,8 +23,10 @@ import type {
 } from '@tauron/plugin-context-contract';
 
 import { createPluginContext } from './context.js';
-import type { PluginContext as AppPluginContext } from './types.js';
-import { createContractContext, type PluginContext as LegacyPluginContext } from '@tauron/plugin-sdk';
+import {
+  createContractContext,
+  type PluginContext as LegacyPluginContext,
+} from '@tauron/plugin-sdk';
 
 const PLUGIN_ID = 'com.example.interop';
 /** 宿主命令：契约的 host.request 落到这一条（与 @tauron/host 的命令名一致）。 */

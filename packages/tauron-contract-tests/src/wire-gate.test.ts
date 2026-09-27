@@ -323,9 +323,7 @@ describe('门禁：sidecar ABI 契约 TS ↔ Rust 同值', () => {
       /validate_abi\(&current_abi_contract\(\), &cfg\.abi\)\.map_err\(proc_error_to_host\)\?;/,
     );
     // 映射必须独立成码，不得并进 E_INSTALL_FAILED（否则前端分不出"版本不兼容"）。
-    expect(adapterSrc).toMatch(
-      /ProcError::AbiMismatch \{ \.\. \} => ErrorCode::E_ABI_MISMATCH/,
-    );
+    expect(adapterSrc).toMatch(/ProcError::AbiMismatch \{ \.\. \} => ErrorCode::E_ABI_MISMATCH/);
   });
 
   it('E_ABI_MISMATCH 在 TS 码表里（前端能识别）', () => {
@@ -433,14 +431,24 @@ describe('门禁：应用层 host_* 命令族 TS ↔ Rust 一致', () => {
     // 死方法检测：`async xxx(...): Promise<T> { return this.call<T>('host_yyy'`
     // 的方法名与命令名必须一一配对——方法存在而命令缺失（或反之）都是断链。
     const src = read('packages/tauron-host/src/shell-client.ts');
-    const methods = [...src.matchAll(/async (\w+)\([^)]*\): Promise<[^>]+> \{\s*return this\.call<[^>]*>\('host_\w+'/g)]
-      .map((m) => m[1]!);
+    const methods = [
+      ...src.matchAll(
+        /async (\w+)\([^)]*\): Promise<[^>]+> \{\s*return this\.call<[^>]*>\('host_\w+'/g,
+      ),
+    ].map((m) => m[1]!);
     // 正则失配保护：ShellClient 至少有这些真实命令包装方法。
     expect(methods.length, '未解析出 ShellClient 命令方法（正则失配）').toBeGreaterThanOrEqual(10);
 
     const calls = tsShellCommands();
     // 每个命令字面量都应被某个方法用到（孤儿 = 字面量出现但无方法持有，或反之）。
-    for (const cmd of ['host_recover_report', 'host_recover_trial_enable', 'host_i18n_set_locale', 'host_i18n_load', 'host_i18n_stats', 'host_i18n_cleanup_plugin']) {
+    for (const cmd of [
+      'host_recover_report',
+      'host_recover_trial_enable',
+      'host_i18n_set_locale',
+      'host_i18n_load',
+      'host_i18n_stats',
+      'host_i18n_cleanup_plugin',
+    ]) {
       expect(calls, `ShellClient 缺少 ${cmd} 的包装方法`).toContain(cmd);
     }
   });
@@ -727,7 +735,10 @@ function rustCommandParams(): Map<string, RustParam[]> {
     let token = '';
     const push = (): void => {
       // 参数上的属性（`#[allow(unused_variables)]`）不是类型的一部分
-      const t = token.trim().replace(/#\[[^\]]*\]/g, '').trim();
+      const t = token
+        .trim()
+        .replace(/#\[[^\]]*\]/g, '')
+        .trim();
       token = '';
       if (!t) return;
       const idx = t.indexOf(':');
@@ -738,7 +749,9 @@ function rustCommandParams(): Map<string, RustParam[]> {
       // 运行时句柄（CallerSource/WebviewWindow/AppHandle/Window/Webview，可能带 tauri:: 路径）。
       const injected =
         type.includes("'") ||
-        /\b(CallerSource|TauriCallerSource|WebviewWindow|Webview|AppHandle|Window|State)\b/.test(type);
+        /\b(CallerSource|TauriCallerSource|WebviewWindow|Webview|AppHandle|Window|State)\b/.test(
+          type,
+        );
       if (injected) return;
       params.push({
         key: snakeToCamel(name),
@@ -880,8 +893,7 @@ describe('门禁：应用层 host_* 参数形状 TS ↔ Rust 一致', () => {
 // 曾经的断链：TS 把状态名（RUNNING）当事件名上报，宿主反序列化必失败。
 // ──────────────────────────────────────────────────────────────────────────
 
-const SCREAMING = (s: string): string =>
-  s.replaceAll(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase();
+const SCREAMING = (s: string): string => s.replaceAll(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase();
 
 /** 解析 Rust 枚举的全部变体名（按声明顺序）。 */
 function rustEnumVariants(path: string, enumName: string): string[] {
@@ -965,14 +977,18 @@ describe('门禁：生命周期状态机镜像 TS ↔ Rust', () => {
 
     // 交叉校验：TRANSITIONS 里 `Disabled → Enabled` 的出边事件必须全部不可自报。
     const reenable = new Set(
-      [...transitions().matchAll(
-        /rule!\(\s*State::Disabled,\s*Event::(\w+),\s*(?:Guard::\w+,\s*)?State::Enabled/g,
-      )].map((m) => SCREAMING(m[1]!)),
+      [
+        ...transitions().matchAll(
+          /rule!\(\s*State::Disabled,\s*Event::(\w+),\s*(?:Guard::\w+,\s*)?State::Enabled/g,
+        ),
+      ].map((m) => SCREAMING(m[1]!)),
     );
     expect(reenable.size, '未解析到 Disabled→Enabled 出边（门禁定位失败）').toBeGreaterThan(0);
     const selfUnlock = [...reenable].filter((e) => rust.includes(e));
-    expect(selfUnlock, `插件可自行解禁（Disabled→Enabled 出边事件在白名单里）：${selfUnlock.join(', ')}`)
-      .toEqual([]);
+    expect(
+      selfUnlock,
+      `插件可自行解禁（Disabled→Enabled 出边事件在白名单里）：${selfUnlock.join(', ')}`,
+    ).toEqual([]);
   });
 
   it('白名单强制点必须落在 self 档入口（registry.lifecycle_report）', () => {
@@ -1061,7 +1077,10 @@ const TIER_WIRE: Record<string, string> = {
 function rustAuthTable(): Map<string, string> {
   const core = read('crates/tauron-host/src/authz.rs');
   const adapter = read('crates/tauron-adapter/src/lib.rs');
-  const optional = adapter.slice(adapter.indexOf('pub const PLUGIN_INSTALL_AUTH'), adapter.indexOf('/// 命令状态'));
+  const optional = adapter.slice(
+    adapter.indexOf('pub const PLUGIN_INSTALL_AUTH'),
+    adapter.indexOf('/// 命令状态'),
+  );
   const normalizedOptional = optional.replace(/tauron_host::authz::AuthTier::/g, 'AuthTier::');
   const src = `${core}\n${normalizedOptional}`.replace(/\/\/[^\n]*/g, '');
   const out = new Map<string, string>();
@@ -1084,11 +1103,18 @@ describe('门禁：能力表（命令 → 档位）TS ↔ Rust 同构', () => {
     // 18 = 13（0.4-A1 之前）+ 跨主体调用 3 条 + 0.4 审计补登记 host_contributes_list
     // + 0.4-W3 扩展点对账 host_contributes_reconcile。
     expect(pluginFace.length, '插件面（self + scoped-read）命令数').toBe(18);
-    expect(CAPABILITIES.filter((c) => c.consumer === 'plugin').map((c) => c.command).sort()).toEqual(
-      pluginFace.map((c) => c.command).sort(),
-    );
+    expect(
+      CAPABILITIES.filter((c) => c.consumer === 'plugin')
+        .map((c) => c.command)
+        .sort(),
+    ).toEqual(pluginFace.map((c) => c.command).sort());
     // 审计补登记（轮 11）：这 4 条此前**没有任何档位**，但 `HostClient` 已在调用。
-    for (const cmd of ['host_events_drain', 'host_stream_open', 'host_stream_write', 'host_stream_close']) {
+    for (const cmd of [
+      'host_events_drain',
+      'host_stream_open',
+      'host_stream_write',
+      'host_stream_close',
+    ]) {
       expect(ts.get(cmd), `${cmd} 必须有档位`).toBe('self');
       expect(rust.get(cmd), `Rust 侧 ${cmd} 档位`).toBe('self');
     }
@@ -1106,9 +1132,18 @@ describe('门禁：能力表（命令 → 档位）TS ↔ Rust 同构', () => {
       ).toBe('privileged');
     }
     // 特权档命令**不得**出现在插件可见能力里。
-    expect(CAPABILITIES.filter((c) => c.tier === 'privileged').map((c) => c.command).sort()).toEqual(
-      ['host_registry_admin', 'host_registry_install', 'host_registry_install_preview', 'host_resource_stats', 'host_runtime_health', 'host_runtime_spawn'],
-    );
+    expect(
+      CAPABILITIES.filter((c) => c.tier === 'privileged')
+        .map((c) => c.command)
+        .sort(),
+    ).toEqual([
+      'host_registry_admin',
+      'host_registry_install',
+      'host_registry_install_preview',
+      'host_resource_stats',
+      'host_runtime_health',
+      'host_runtime_spawn',
+    ]);
   });
 
   it('每条命令的授权档位一致', () => {
@@ -1140,10 +1175,7 @@ describe('门禁：能力表（命令 → 档位）TS ↔ Rust 同构', () => {
 // ──────────────────────────────────────────────────────────────────────────
 
 /** 解析某 Rust 结构体：字段名集合 + 是否标注 rename_all = "camelCase"。 */
-function rustStruct(
-  rel: string,
-  structName: string,
-): { fields: Set<string>; camelCase: boolean } {
+function rustStruct(rel: string, structName: string): { fields: Set<string>; camelCase: boolean } {
   const src = read(rel).replace(/\/\/[^\n]*/g, '');
   const m = new RegExp(`pub struct ${structName} \\{([\\s\\S]*?)\\n\\}`).exec(src);
   expect(m, `struct ${structName} not found in ${rel}`).not.toBeNull();
@@ -1185,7 +1217,16 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
     expect(ts).toMatch(/result\?\.simulated/);
     expect(ts).toMatch(/info\?\.available/);
     // 品牌 provider 缺失必须返回显式 Unsupported，而非空对象假装已连接。
-    expect(lib).toMatch(/pub fn cmd_brand_info[\s\S]{0,250}HostResult<UnsupportedBody>/);
+    // R9 起 `cmd_brand_info` 接 `tauron-brand` 真实现：返回 `ProviderResult<BrandInfo>`
+    // ——未配置来源时走 `ProviderResult::Unsupported`，配置了则跑品牌配置校验。
+    const brandFn = /pub fn cmd_brand_info\([\s\S]*?\n\}/.exec(lib)?.[0] ?? '';
+    expect(brandFn, 'cmd_brand_info 缺失').not.toBe('');
+    expect(brandFn, '品牌 provider 缺失必须显式 Unsupported').toContain(
+      'ProviderResult::Unsupported',
+    );
+    expect(brandFn, '品牌真实现必须返回 ProviderResult<BrandInfo>').toContain(
+      'HostResult<ProviderResult<BrandInfo>>',
+    );
   });
 
   it('provider 缺失时的底座桩必须用类型化结果诚实披露', () => {
@@ -1209,7 +1250,9 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
     const dialogTs = read('packages/tauron-host/src/dialog-client.ts');
     expect(dialogTs).toContain('clipboardReadDetailed');
     expect(dialogTs).toContain('isUnsupportedBody');
-    expect(read('packages/tauron-host/src/deep-link-client.ts')).toMatch(/Promise<ProviderResult<void>/);
+    expect(read('packages/tauron-host/src/deep-link-client.ts')).toMatch(
+      /Promise<ProviderResult<void>/,
+    );
   });
 
   it('ContributeEntry 必须 camelCase（pluginId 双向：register 反序列化 + list 序列化）', () => {
@@ -1282,7 +1325,9 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
     expect(lib).toMatch(/fn reconcile_recovery_phase/);
     // report 与 trial_enable 两条写路径都必须调用对账。
     expect(lib).toMatch(/fn cmd_recover_report[\s\S]{0,4000}reconcile_recovery_phase\(state\)/);
-    expect(lib).toMatch(/fn cmd_recover_trial_enable[\s\S]{0,4000}reconcile_recovery_phase\(state\)/);
+    expect(lib).toMatch(
+      /fn cmd_recover_trial_enable[\s\S]{0,4000}reconcile_recovery_phase\(state\)/,
+    );
     // trial_enable 走 D28 `TrialEnable`（清标记 + 记独立试验预算 +
     // trialFromSafemode 置位，供插件自报错误时按 D28 回落）。改回
     // SafemodeExit = 注册表不记预算、D28 回落不可达——必须同时让本门变红。
@@ -1347,14 +1392,15 @@ describe('门禁：应用层命令注册完整性（未注册 = 前端 command n
     expect(lists.length, '未解析出 generate_handler! 列表（正则失配）').toBeGreaterThanOrEqual(2);
     const registered = new Set([
       ...lists.flatMap((l) => [...l.matchAll(/tauri::(\w+)/g)].map((m) => m[1]!)),
-      ...[...adapter.matchAll(/\$crate::tauri::(host_registry_install(?:_preview)?),/g)].map((m) => m[1]!),
+      ...[...adapter.matchAll(/\$crate::tauri::(host_registry_install(?:_preview)?),/g)].map(
+        (m) => m[1]!,
+      ),
     ]);
 
     const missing = cmds.filter((c) => !registered.has(c));
-    expect(
-      missing,
-      `以下命令未注册，前端调用会 command not found：${missing.join(', ')}`,
-    ).toEqual([]);
+    expect(missing, `以下命令未注册，前端调用会 command not found：${missing.join(', ')}`).toEqual(
+      [],
+    );
     expect([...registered].filter((r) => !cmds.includes(r))).toEqual([]);
     expect(registered.size).toBe(cmds.length);
   });
@@ -1403,15 +1449,15 @@ describe('门禁：应用层命令注册完整性（未注册 = 前端 command n
 
     const ts = read('packages/tauron-host/src/tauri-backend.ts');
     const tsOptional = [
-      ...(/export const OPTIONAL_FRAMEWORK_COMMANDS = \[([\s\S]*?)\] as const;/.exec(ts)?.[1] ??
-        '').matchAll(/'(host_[a-z0-9_]+)'/g),
+      ...(
+        /export const OPTIONAL_FRAMEWORK_COMMANDS = \[([\s\S]*?)\] as const;/.exec(ts)?.[1] ?? ''
+      ).matchAll(/'(host_[a-z0-9_]+)'/g),
     ].map((m) => m[1]!);
     expect(tsOptional.length, '未解析出 TS 侧可选命令（正则失配）').toBeGreaterThan(0);
     expect(tsOptional.sort()).toEqual(rustOptional.sort());
 
     // 静态全集里不得出现可选命令——出现即回退成"能力表说有、invoke 说没有"。
-    const staticList =
-      /const FRAMEWORK_COMMANDS = \[([\s\S]*?)\] as const;/.exec(ts)?.[1] ?? '';
+    const staticList = /const FRAMEWORK_COMMANDS = \[([\s\S]*?)\] as const;/.exec(ts)?.[1] ?? '';
     const staticCmds = [...staticList.matchAll(/'(host_[a-z0-9_]+)'/g)].map((m) => m[1]!);
     expect(staticCmds.length, '未解析出 TS 静态命令全集（正则失配）').toBeGreaterThan(30);
     const leaked = staticCmds.filter((c) => rustOptional.includes(c));
@@ -1439,7 +1485,8 @@ describe('门禁：启动恢复阶段线值（Rust BootPhase::as_str ↔ TS Reco
     // 正则失配保护：解析不到就"假绿"。
     expect(rustValues.length, '未解析出 BootPhase::as_str 取值（正则失配）').toBe(3);
 
-    const union = /phase: ([^;]+);/.exec(read('packages/tauron-host/src/shell-client.ts'))?.[1] ?? '';
+    const union =
+      /phase: ([^;]+);/.exec(read('packages/tauron-host/src/shell-client.ts'))?.[1] ?? '';
     const tsValues = [...union.matchAll(/'([a-z]+)'/g)].map((m) => m[1]!);
     expect(tsValues.length, '未解析出 TS phase 联合类型（正则失配）').toBe(3);
 
@@ -1450,12 +1497,15 @@ describe('门禁：启动恢复阶段线值（Rust BootPhase::as_str ↔ TS Reco
     // 与 phase 同理：前端按 loadSource 区分「持久化没开 / 首次启动 / 恢复 / 损坏」，
     // 改名会静默失效。
     const body =
-      /impl LoadSource \{([\s\S]*?)\n\}/.exec(read('crates/tauron-adapter/src/recovery.rs'))?.[1] ?? '';
+      /impl LoadSource \{([\s\S]*?)\n\}/.exec(read('crates/tauron-adapter/src/recovery.rs'))?.[1] ??
+      '';
     const rustValues = [...body.matchAll(/LoadSource::\w+ => "([a-z]+)"/g)].map((m) => m[1]!);
     expect(rustValues.length, '未解析出 LoadSource::as_str 取值（正则失配）').toBe(4);
 
     const union =
-      /export type LoadSource = ([^;]+);/.exec(read('packages/tauron-host/src/shell-client.ts'))?.[1] ?? '';
+      /export type LoadSource = ([^;]+);/.exec(
+        read('packages/tauron-host/src/shell-client.ts'),
+      )?.[1] ?? '';
     const tsValues = [...union.matchAll(/'([a-z]+)'/g)].map((m) => m[1]!);
     expect(tsValues.length, '未解析出 TS LoadSource 联合类型（正则失配）').toBe(4);
 
@@ -1508,9 +1558,7 @@ describe('门禁：启动恢复阶段线值（Rust BootPhase::as_str ↔ TS Reco
     // EventBus 三个运行时类；而本包声明 `sideEffects: false`，真实构建里这三个类
     // 根本不存在——一旦被用就会崩。处置按 W9-3 取**删除**（它全仓零生产消费者）。
     const pkg = read('packages/tauron-host/package.json');
-    expect(pkg, '@tauron/host 不得依赖 @tauron/core（P1-1 回归）').not.toMatch(
-      /"@tauron\/core"/,
-    );
+    expect(pkg, '@tauron/host 不得依赖 @tauron/core（P1-1 回归）').not.toMatch(/"@tauron\/core"/);
     // 全包源码（含测试）都不得再 import core 运行时类。
     const offenders: string[] = [];
     for (const file of hostSrcFiles()) {
@@ -1521,9 +1569,7 @@ describe('门禁：启动恢复阶段线值（Rust BootPhase::as_str ↔ TS Reco
     expect(offenders, '@tauron/host 源码仍 import @tauron/core（活线依赖死线）').toEqual([]);
     // 死编排器不得悄悄回来：入口不导出 bootstrap，源文件也不存在。
     expect(read('packages/tauron-host/src/index.ts')).not.toMatch(/\bbootstrap\b\s*,/);
-    expect(hostSrcFiles(), 'bootstrap.ts 是已删除的死导出，不得回归').not.toContain(
-      'bootstrap.ts',
-    );
+    expect(hostSrcFiles(), 'bootstrap.ts 是已删除的死导出，不得回归').not.toContain('bootstrap.ts');
     // 启动上报的真实落点（示例）由下一条门禁钉住；这里只确认它仍在。
     expect(read('examples/minimal-app/src/main.ts')).toMatch(/recoverReport\('success'\)/);
 
@@ -1654,7 +1700,9 @@ describe('门禁：断链回归（贡献身份绑定 / 事件取件泵 / 声明�
     // ① stdin 与 stdout 必须 piped（写帧 + 读帧双通道，各至少一次）。
     const pipedCount = [...code.matchAll(/Stdio::piped\(\)/g)].length;
     expect(pipedCount, 'spawn 必须 piped stdin 与 stdout 双通道').toBeGreaterThanOrEqual(2);
-    expect(code, '不得用 Stdio::null() 丢弃 sidecar 输出（回帧断链）').not.toMatch(/Stdio::null\(\)/);
+    expect(code, '不得用 Stdio::null() 丢弃 sidecar 输出（回帧断链）').not.toMatch(
+      /Stdio::null\(\)/,
+    );
 
     // ② 必须有读线程在持续排水（BufReader 逐行 → on_frame 送 sink）。
     expect(code, '必须有读线程（thread::spawn）持续排水 stdout').toMatch(/thread::spawn/);
@@ -1676,9 +1724,7 @@ describe('门禁：断链回归（贡献身份绑定 / 事件取件泵 / 声明�
     // 主推入口 first.ts 必须真用 SDK 的两个核心面：createPlugin（插件定义）
     // + createPluginContext（接到宿主 RPC 面，含执行泵）。
     const first = read('examples/minimal-app/src/plugin/first.ts');
-    expect(first, '插件页必须用主推 SDK 的 createPlugin').toMatch(
-      /from '@tauron\/app-plugin-sdk'/,
-    );
+    expect(first, '插件页必须用主推 SDK 的 createPlugin').toMatch(/from '@tauron\/app-plugin-sdk'/);
     expect(first, '必须经 createPluginContext 接宿主（含执行泵）').toMatch(/createPluginContext\(/);
     expect(first, '必须注册声明式命令（注册即开执行泵）').toMatch(/commands:\s*\{/);
     // 主推页不得再回头用 legacy iframe SDK（两套模型混写 = 读者不知道哪条是主路）。
@@ -1724,7 +1770,10 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(lib).toMatch(/fn cmd_notifications_list/);
     expect(lib).toMatch(/fn cmd_notifications_read/);
     // 卸载/清除必须回收该插件的通知（未读计数不得被死条目永久膨胀）。
-    const admin = lib.slice(lib.indexOf('pub fn cmd_registry_admin('), lib.indexOf('pub fn cmd_registry_admin_as('));
+    const admin = lib.slice(
+      lib.indexOf('pub fn cmd_registry_admin('),
+      lib.indexOf('pub fn cmd_registry_admin_as('),
+    );
     expect(admin).toMatch(/notify_store[\s\S]{0,200}cleanup_plugin/);
     const ts = read('packages/tauron-host/src/shell-client.ts');
     expect(ts).toMatch(/host_notifications_list/);
@@ -1778,8 +1827,14 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       dependencies?: Record<string, string>;
       peerDependencies?: Record<string, string>;
     };
-    expect(pkg.dependencies?.['@tauron/host'], 'ui-primitives 不得依赖 @tauron/host').toBeUndefined();
-    expect(pkg.peerDependencies?.['@tauron/host'], 'ui-primitives 不得以 peer 依赖 @tauron/host').toBeUndefined();
+    expect(
+      pkg.dependencies?.['@tauron/host'],
+      'ui-primitives 不得依赖 @tauron/host',
+    ).toBeUndefined();
+    expect(
+      pkg.peerDependencies?.['@tauron/host'],
+      'ui-primitives 不得以 peer 依赖 @tauron/host',
+    ).toBeUndefined();
     // 运行时依赖白名单：只有零依赖的契约包。
     expect(Object.keys(pkg.dependencies ?? {})).toEqual(['@tauron/shell-events']);
   });
@@ -1885,7 +1940,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     const shell = stripComments(read('packages/tauron-ui-primitives/src/wc-shell.ts'));
     // 组件里 `SHELL_EVENTS.close` 只允许出现在标题栏 ✕ 那一处。
     const closeUses = [...shell.matchAll(/SHELL_EVENTS\.close/g)].length;
-    expect(closeUses, `wc-shell 里有 ${closeUses} 处 SHELL_EVENTS.close，应只有标题栏 ✕ 一处`).toBe(1);
+    expect(closeUses, `wc-shell 里有 ${closeUses} 处 SHELL_EVENTS.close，应只有标题栏 ✕ 一处`).toBe(
+      1,
+    );
     expect(shell, '「稍后」按钮的点击处理必须是 _dismiss').toMatch(
       /_dismiss\(\)\}\s*>\s*稍后\s*<\/button>/,
     );
@@ -2282,7 +2339,10 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
 
     // ① 三命令成组：只注册一两条会让流无法开/无法终结。
     const STREAM_CMDS = ['host_stream_open', 'host_stream_write', 'host_stream_close'];
-    expect(STREAM_CMDS.filter((c) => !full.includes(c)), '流式命令未成组注册').toEqual([]);
+    expect(
+      STREAM_CMDS.filter((c) => !full.includes(c)),
+      '流式命令未成组注册',
+    ).toEqual([]);
     // 流属插件运行时域（句柄表与 pending-call 同锁域），底座集合不得含。
     expect(
       STREAM_CMDS.filter((c) => substrate.includes(c)),
@@ -2293,9 +2353,7 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(tauri, 'wire 层必须把 sink 登记到调用上').toMatch(
       /stream_bind\(&call\.call_id, &call\.plugin_id, sink\)/,
     );
-    expect(tauri, '登记失败必须撤掉调用条目，不留悬挂').toMatch(
-      /call_cancel\(&call\.call_id\)/,
-    );
+    expect(tauri, '登记失败必须撤掉调用条目，不留悬挂').toMatch(/call_cancel\(&call\.call_id\)/);
     expect(tauri, '平台细节只在这一层：Channel → StreamSink').toMatch(/struct ChannelSink/);
     expect(tauri).toMatch(/impl StreamSink for ChannelSink/);
     expect(tauri, 'channel 线值必须解析成 Channel').toMatch(/JavaScriptChannelId/);
@@ -2321,9 +2379,13 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     const signatures = [...tauri.matchAll(/pub fn (host_\w+)\([\s\S]*?\) -> [^{]+\{/g)];
     expect(signatures.length).toBeGreaterThan(40);
     for (const signature of signatures) {
-      expect(signature[0], `${signature[1]} 不应直接依赖 Tauri 窗口参数`).not.toMatch(/\bWebviewWindow\b/);
+      expect(signature[0], `${signature[1]} 不应直接依赖 Tauri 窗口参数`).not.toMatch(
+        /\bWebviewWindow\b/,
+      );
     }
-    expect(tauri).toMatch(/pub trait CallerSource\s*\{[\s\S]*?fn caller\(&self\) -> HostResult<crate::Caller>/);
+    expect(tauri).toMatch(
+      /pub trait CallerSource\s*\{[\s\S]*?fn caller\(&self\) -> HostResult<crate::Caller>/,
+    );
     expect(tauri).toMatch(/impl CallerSource for TauriCallerSource/);
     expect(tauri).toMatch(/impl<'de> CommandArg<'de, tauri::Wry> for TauriCallerSource/);
   });
@@ -2341,9 +2403,7 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(hostTs).not.toMatch(/^\s*channel,\s*$/m);
     // ② ChannelPort 只声明真实 Tauri Channel 拥有的成员。
     //    先剥注释：旧形状在注释里被解释过，门禁不该被自己的说明文字绊倒。
-    const backendCode = backendTs
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/\/\/[^\n]*/g, '');
+    const backendCode = backendTs.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
     expect(backendCode).toMatch(/onmessage\?:/);
     expect(backendCode).not.toMatch(/message: MessagePort/);
     // ③ 适配层不得再用 as unknown as 掩盖形状不一致。
@@ -2394,7 +2454,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       ['host.ts', hostSrc],
       ['shell-client.ts', shellSrc],
     ] as const) {
-      expect(src, `${name} 仍在就地构造边界异常`).not.toMatch(/new HostException\(normalizeError\(/);
+      expect(src, `${name} 仍在就地构造边界异常`).not.toMatch(
+        /new HostException\(normalizeError\(/,
+      );
       expect(src, `${name} 未经 translate_at_boundary`).toMatch(
         /translate_at_boundary\(err, 'plugin-webview→host'\)/,
       );
@@ -2423,7 +2485,14 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(doc, 'canonical 归属表缺失').toContain('canonical = `tauron-host`');
     const placement = doc.slice(doc.indexOf('## 0.3 crate 归置决策'), doc.indexOf('## 依据'));
     expect(placement, '0.3 孤儿 crate 归置表缺失').toContain('| `tauron-acl` | 迁移中 |');
-    for (const crate of ['tauron-brand', 'tauron-market', 'tauron-wasm', 'tauron-theme', 'tauron-distribute', 'tauron-shell']) {
+    for (const crate of [
+      'tauron-brand',
+      'tauron-market',
+      'tauron-wasm',
+      'tauron-theme',
+      'tauron-distribute',
+      'tauron-shell',
+    ]) {
       expect(placement, `归置表缺少 ${crate}`).toContain(`| \`${crate}\` |`);
     }
     expect(placement.match(/^\| `tauron-[^`]+` \|/gm)?.length).toBe(7);
@@ -2450,8 +2519,7 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // ③ 冻结：legacy 侧方法集**指纹**不得变化。
     //    这是"非 canonical 侧不得继续分叉"的机械保证——想加功能必须改本门禁
     //    并在归属表里说明，不能悄悄长。
-    const methodsOf = (src: string) =>
-      [...src.matchAll(/^\s{4}pub fn (\w+)/gm)].map((m) => m[1]!);
+    const methodsOf = (src: string) => [...src.matchAll(/^\s{4}pub fn (\w+)/gm)].map((m) => m[1]!);
     expect(methodsOf(legacyBus), 'shell EventBus 是 legacy，方法集被冻结').toEqual([
       'namespace',
       'new',
@@ -2508,7 +2576,10 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
 
     // ① 两命令成组：只有 spawn 没有 health 会让租约永远无法对账（进程死了没人知道）。
     const RT = ['host_runtime_spawn', 'host_runtime_health'];
-    expect(RT.filter((c) => !full.includes(c)), '运行时命令未成组注册').toEqual([]);
+    expect(
+      RT.filter((c) => !full.includes(c)),
+      '运行时命令未成组注册',
+    ).toEqual([]);
     expect(
       RT.filter((c) => substrate.includes(c)),
       '底座-only 宿主不得注册进程运行时命令（它需要注册表与运行时状态）',
@@ -2552,7 +2623,8 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     const ts = read('packages/tauron-host/src/shell-client.ts');
 
     const rustFields = (structName: string): string[] => {
-      const m = new RegExp(`pub struct ${structName} \\{([\\s\\S]*?)\\n\\}`).exec(rustHost) ??
+      const m =
+        new RegExp(`pub struct ${structName} \\{([\\s\\S]*?)\\n\\}`).exec(rustHost) ??
         new RegExp(`pub struct ${structName} \\{([\\s\\S]*?)\\n\\}`).exec(rust);
       expect(m, `Rust 侧缺 ${structName}`).not.toBeNull();
       const body = m![1]!.replace(/\/\/[^\n]*/g, '');
@@ -2609,8 +2681,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       }
     }
 
-    const listed = [...errorsTs.matchAll(/UNWIRED_BOUNDARIES[\s\S]*?\];/g)]
-      .flatMap((m) => [...m[0]!.matchAll(/'([\w→-]+)'/g)].map((x) => x[1]!));
+    const listed = [...errorsTs.matchAll(/UNWIRED_BOUNDARIES[\s\S]*?\];/g)].flatMap((m) =>
+      [...m[0]!.matchAll(/'([\w→-]+)'/g)].map((x) => x[1]!),
+    );
     const orphans = union.filter((b) => !wired.has(b) && !listed.includes(b));
     expect(orphans, `既没接线也没登记为未接线的边界值: ${orphans.join(', ')}`).toEqual([]);
 
@@ -2637,14 +2710,18 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       /"lastContext"|lastContext[\s\S]{0,120}to_json/,
     );
     // 读取容错：文件里没有该字段必须是"无上下文"，而不是把整份标记判成损坏。
-    expect(recovery, 'last_context 读取缺容错/默认值').toMatch(/last_context[\s\S]{0,200}unwrap_or/);
+    expect(recovery, 'last_context 读取缺容错/默认值').toMatch(
+      /last_context[\s\S]{0,200}unwrap_or/,
+    );
     // 线形：boot 返回必须带上它。
     const lib = read('crates/tauron-adapter/src/lib.rs');
     expect(lib, 'host_recover_boot 线形未回传 lastContext').toMatch(/"lastContext"/);
     // 引擎侧容量常量必须存在且被测试钉住（N 是设计决定，不能是魔数）。
     const engine = read('crates/tauron-recovery/src/lib.rs');
     expect(engine, '缺少 context 容量常量').toMatch(/CONTEXT_CAPACITY/);
-    expect(engine, 'CONTEXT_CAPACITY 没有测试引用').toMatch(/CONTEXT_CAPACITY[\s\S]{0,400}assert|assert[\s\S]{0,400}CONTEXT_CAPACITY/);
+    expect(engine, 'CONTEXT_CAPACITY 没有测试引用').toMatch(
+      /CONTEXT_CAPACITY[\s\S]{0,400}assert|assert[\s\S]{0,400}CONTEXT_CAPACITY/,
+    );
   });
 
   it('R7：settings 经 SettingsStore（不是裸 HashMap），且迁移有线上入口', () => {
@@ -2653,7 +2730,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(cargo, 'adapter 未依赖 tauron-settings（孤儿 crate 未激活）').toMatch(/tauron-settings/);
     const lib = read('crates/tauron-adapter/src/lib.rs');
     expect(lib, 'settings 未走 SettingsStore').toMatch(/SettingsStore/);
-    expect(lib, 'settings_set 未调用 Store::set').toMatch(/\.set\([\s\S]{0,200}HOST_SETTINGS_NAMESPACE/);
+    expect(lib, 'settings_set 未调用 Store::set').toMatch(
+      /\.set\([\s\S]{0,200}HOST_SETTINGS_NAMESPACE/,
+    );
 
     // 断链回归（本轮实测）：`host_settings_adopt_legacy` / `host_settings_migrate`
     // 曾是**没有注册成命令**的纯函数 → 迁移只有单元测试能碰到。命令名必须出现在
@@ -2682,7 +2761,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     const sendAt = dispatchBody.indexOf('send');
     expect(pushAt, 'dispatch 里没有 push（通知不入缓冲）').toBeGreaterThan(-1);
     expect(sendAt, 'dispatch 里没有 send（没推系统）').toBeGreaterThan(-1);
-    expect(pushAt, '顺序错误：必须先 push 再 send（否则系统通知失败会丢通知）').toBeLessThan(sendAt);
+    expect(pushAt, '顺序错误：必须先 push 再 send（否则系统通知失败会丢通知）').toBeLessThan(
+      sendAt,
+    );
 
     // Tauri 实现必须是真类型实现 trait，不能只是注释里提一句。
     const tauri = read('crates/tauron-adapter/src/tauri.rs');
@@ -2904,10 +2985,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(scope, '命名空间判定必须剥前缀（strip_prefix）').toMatch(/strip_prefix/);
     expect(scope, '剥前缀后必须要求为空或以 . 开头').toMatch(/is_empty\(\)/);
     expect(scope, '剥前缀后必须校验分隔符 `.`').toMatch(/starts_with\('\.'\)/);
-    expect(
-      scope,
-      '命名空间判定不得用裸前缀比较（plugin:p.a 会穿透 plugin:p.ab）',
-    ).not.toMatch(/starts_with\((?:&)?(?:ns|namespace|prefix)\b/);
+    expect(scope, '命名空间判定不得用裸前缀比较（plugin:p.a 会穿透 plugin:p.ab）').not.toMatch(
+      /starts_with\((?:&)?(?:ns|namespace|prefix)\b/,
+    );
     // 拒绝码必须是既有身份/越权码：不得为"身份/越权"这类判定另造新码。
     for (const core of ['require_main_window', 'require_settings_key_scope']) {
       expect(fnBody(lib, core), `${core} 的拒绝码必须是既有的 E_AUTH_DENIED`).toMatch(
@@ -2927,10 +3007,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // 档位表写错（空字段 / 重复命令）要等到有人写测试才暴露。现在底座构造会跑它。
     const lib = read('crates/tauron-adapter/src/lib.rs');
     // ① 生产代码里必须真的调用（`tauron_host::authz::validate_command_registry()`）。
-    expect(
-      lib,
-      'tauron-adapter 未在装配期调用 validate_command_registry（P1-10 回归）',
-    ).toMatch(/tauron_host::authz::validate_command_registry\(\)/);
+    expect(lib, 'tauron-adapter 未在装配期调用 validate_command_registry（P1-10 回归）').toMatch(
+      /tauron_host::authz::validate_command_registry\(\)/,
+    );
     // ② 调用点必须在**非测试**区域（`#[cfg(test)]` 之前），否则等于没接生产。
     const testModule = lib.indexOf('#[cfg(test)]\nmod substrate_only_tests');
     expect(testModule, '找不到 substrate_only_tests 模块（门禁定位失败）').toBeGreaterThan(-1);
@@ -2948,9 +3027,7 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // 曾经**有实现、有包装器、有单测，但没进任何宏**——真实宿主里这两条命令根本不存在，
     // 只有 Rust 单测能碰到。这类"定义了却没注册"的断链，编译器不会报、单测也不会报。
     const tauri = read('crates/tauron-adapter/src/tauri.rs');
-    const defined = new Set(
-      [...tauri.matchAll(/^\s*pub fn (host_\w+)\(/gm)].map((m) => m[1]!),
-    );
+    const defined = new Set([...tauri.matchAll(/^\s*pub fn (host_\w+)\(/gm)].map((m) => m[1]!));
     const subStart = tauri.indexOf('macro_rules! tauron_substrate_handler');
     const plugStart = tauri.indexOf('macro_rules! tauron_plugin_handler');
     expect(subStart, '找不到底座宏').toBeGreaterThan(-1);
@@ -3067,14 +3144,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     }
 
     // ⑧ 反向守卫：Rust 侧不得出现未实现占位（本轮扫描为 0，锁住不让它长回来）。
-    for (const f of [
-      'crates/tauron-adapter/src/lib.rs',
-      'crates/tauron-adapter/src/tauri.rs',
-    ]) {
+    for (const f of ['crates/tauron-adapter/src/lib.rs', 'crates/tauron-adapter/src/tauri.rs']) {
       const src = read(f);
-      expect(src, `${f} 出现 todo!/unimplemented! 占位`).not.toMatch(
-        /todo!\(|unimplemented!\(/,
-      );
+      expect(src, `${f} 出现 todo!/unimplemented! 占位`).not.toMatch(/todo!\(|unimplemented!\(/);
     }
   });
 
@@ -3091,7 +3163,10 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // `pnpm -r --no-bail <step>` 与 `pnpm -r <step>` 都算，故先归一化标志位。
     const normalized = verify.replace(/--no-bail\s+/g, '');
     const order = ['build', 'typecheck', 'test'].map((s) => normalized.indexOf(`pnpm -r ${s}`));
-    expect(order.every((i) => i >= 0), `verify 未覆盖三步: ${verify}`).toBe(true);
+    expect(
+      order.every((i) => i >= 0),
+      `verify 未覆盖三步: ${verify}`,
+    ).toBe(true);
     expect(
       order[0]! < order[1]! && order[1]! < order[2]!,
       `verify 顺序必须是 build → typecheck → test（否则类型断言读旧 dist）: ${verify}`,
@@ -3099,7 +3174,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
 
     // 两个 SDK 的 typecheck 必须同处一条流水线：只跑一侧会漏掉另一侧的漂移。
     for (const name of ['@tauron/app-plugin-sdk', '@tauron/plugin-sdk']) {
-      const p = JSON.parse(read(`packages/${name.replace('@tauron/', 'tauron-')}/package.json`)) as {
+      const p = JSON.parse(
+        read(`packages/${name.replace('@tauron/', 'tauron-')}/package.json`),
+      ) as {
         scripts: Record<string, string>;
       };
       expect(p.scripts.typecheck, `${name} 缺 typecheck`).toBeTruthy();
@@ -3144,9 +3221,7 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       if (idx < 0) throw new Error(`未找到 class ${cls}`);
       const end = idx + 1 < starts.length ? starts[idx + 1]![1] : src.length;
       const body = stripComments(src.slice(starts[idx]![1], end));
-      return [
-        ...new Set([...body.matchAll(/'([a-z0-9_]*host_[a-z0-9_]+)'/g)].map((x) => x[1]!)),
-      ];
+      return [...new Set([...body.matchAll(/'([a-z0-9_]*host_[a-z0-9_]+)'/g)].map((x) => x[1]!))];
     };
 
     const hostTs = read('packages/tauron-host/src/host.ts');
@@ -3194,7 +3269,10 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // 调 `host_lifecycle_report` / `host_events_*` / `host_stream_*` /
     // `host_plugin_call` 要么恒失败，要么等于伪造一个不存在的插件身份。
     const shellCmds = commandsOfClass(shellTs, 'ShellClient');
-    expect(shellCmds.length, 'ShellClient 命令解析为空——授权面门禁对它已失效').toBeGreaterThanOrEqual(8);
+    expect(
+      shellCmds.length,
+      'ShellClient 命令解析为空——授权面门禁对它已失效',
+    ).toBeGreaterThanOrEqual(8);
     for (const cmd of shellCmds) reached.add(cmd);
 
     const SHELL_PLUGIN_FACE_ALLOW = [
@@ -3215,10 +3293,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // 档位表可以养着一条谁都调不到的命令（表里有、代码里没有入口），
     // 而正向检查照样全绿。`reached` 此前只被填充、从未被断言——一并修掉。
     const unreachable = [...tierOf.keys()].filter((c) => !reached.has(c)).sort();
-    expect(
-      unreachable,
-      `能力表登记了没有任何客户端入口的命令: ${unreachable.join(', ')}`,
-    ).toEqual([]);
+    expect(unreachable, `能力表登记了没有任何客户端入口的命令: ${unreachable.join(', ')}`).toEqual(
+      [],
+    );
 
     // 反向：表里的命令必须真在 Rust 宏里注册过（避免表里养着已删除的命令）。
     const rustMacros = new Set(rustHostCommands());
@@ -3234,19 +3311,18 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       const walk = (d: string): void => {
         for (const e of readdirSync(d, { withFileTypes: true })) {
           if (e.isDirectory()) walk(join(d, e.name));
-          else if (e.name.endsWith('.ts') && !e.name.includes('.test.')) files.push(join(d, e.name));
+          else if (e.name.endsWith('.ts') && !e.name.includes('.test.'))
+            files.push(join(d, e.name));
         }
       };
       walk(dir);
       const invoked = new Set<string>();
       for (const f of files) {
-        for (const m of readFileSync(f, 'utf8').matchAll(/'(host_[a-z0-9_]+)'/g)) invoked.add(m[1]!);
+        for (const m of readFileSync(f, 'utf8').matchAll(/'(host_[a-z0-9_]+)'/g))
+          invoked.add(m[1]!);
       }
       const untiered = [...invoked].filter((c) => !tierOf.has(c) && rustMacros.has(c));
-      expect(
-        untiered,
-        `${pkg} 直接调用了无档位的插件面命令: ${untiered.join(', ')}`,
-      ).toEqual([]);
+      expect(untiered, `${pkg} 直接调用了无档位的插件面命令: ${untiered.join(', ')}`).toEqual([]);
     }
   });
 });

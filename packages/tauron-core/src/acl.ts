@@ -5,13 +5,7 @@
  * plugin_invoke 内的权限检查。
  */
 
-import {
-  type PluginPermissionGrant,
-  hasPermission,
-  hasAllPermissions,
-  missingPermissions,
-  PluginErrorCode,
-} from '@tauron/types';
+import { type PluginPermissionGrant, missingPermissions, PluginErrorCode } from '@tauron/types';
 
 /** 权限授予表 */
 export type PermissionGrants = Map<string, PluginPermissionGrant>;

@@ -165,11 +165,11 @@ export const DEFAULT_KEYFRAMES: Record<string, KeyframeDefinition[]> = {
     { offset: '0%', properties: { transform: 'scale(1)', opacity: '1' } },
     { offset: '100%', properties: { transform: 'scale(0.9)', opacity: '0' } },
   ],
-  'shimmer': [
+  shimmer: [
     { offset: '0%', properties: { backgroundPosition: '-200% 0' } },
     { offset: '100%', properties: { backgroundPosition: '200% 0' } },
   ],
-  'pulse': [
+  pulse: [
     { offset: '0%', properties: { transform: 'scale(1)', opacity: '1' } },
     { offset: '50%', properties: { transform: 'scale(1.05)', opacity: '0.85' } },
     { offset: '100%', properties: { transform: 'scale(1)', opacity: '1' } },
@@ -254,7 +254,9 @@ export function resetMotionTheme(): MotionThemeConfig {
 // ──────────────────────────────────────────────────────────────────────────
 
 /** 将当前主题序列化为 CSS 自定义属性。 */
-export function motionToCssVariables(theme: MotionThemeConfig = _activeTheme): Record<string, string> {
+export function motionToCssVariables(
+  theme: MotionThemeConfig = _activeTheme,
+): Record<string, string> {
   const vars: Record<string, string> = {};
 
   // Durations
@@ -288,7 +290,10 @@ export function motionToCssText(theme: MotionThemeConfig = _activeTheme): string
   // 2. @keyframes
   for (const [name, frames] of Object.entries(theme.keyframes)) {
     const frameLines = frames.map(
-      (f) => `  ${f.offset} {\n    ${Object.entries(f.properties).map(([k, v]) => `${camelToKebab(k)}: ${v};`).join('\n    ')}\n  }`,
+      (f) =>
+        `  ${f.offset} {\n    ${Object.entries(f.properties)
+          .map(([k, v]) => `${camelToKebab(k)}: ${v};`)
+          .join('\n    ')}\n  }`,
     );
     parts.push(`@keyframes ${name} {\n${frameLines.join('\n')}\n}`);
   }

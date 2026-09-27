@@ -35,6 +35,15 @@ export interface PluginConfig {
   license?: string;
   /** 是否启用。 */
   enabled: boolean;
+  /**
+   * tauron 源码检出根相对**生成插件工程根**的路径（可选）。
+   *
+   * 给出时 `package.json` 生成 `file:` 依赖——跨目录生成插件也能装上
+   * （tauron 的包都未发布到 npm，registry 坐标今天解析不了）。
+   * 省略时退回 `workspace:*`：那**只在同一个 pnpm workspace 内**可解析，
+   * 所以 CLI 侧总是自动探测并传入（探测失败则如实报错）。
+   */
+  tauronPath?: string;
 }
 
 /**
@@ -54,6 +63,7 @@ export interface PluginConfigInput {
   author?: string;
   license?: string;
   enabled?: boolean;
+  tauronPath?: string;
 }
 
 /** 插件脚手架结果。 */
@@ -162,9 +172,7 @@ export function validateVersion(version: string): string {
  */
 export function validatePluginType(type: string): PluginType {
   if (!SUPPORTED_PLUGIN_TYPES.includes(type as PluginType)) {
-    throw new Error(
-      `不支持的插件类型 "${type}"，可选：${SUPPORTED_PLUGIN_TYPES.join(', ')}`,
-    );
+    throw new Error(`不支持的插件类型 "${type}"，可选：${SUPPORTED_PLUGIN_TYPES.join(', ')}`);
   }
   return type as PluginType;
 }
@@ -219,6 +227,9 @@ export function validatePluginConfig(config: PluginConfigInput): PluginConfig {
     enabled: config.enabled ?? true,
     ...(config.author !== undefined ? { author: config.author } : {}),
     ...(config.license !== undefined ? { license: config.license } : {}),
+    ...(config.tauronPath !== undefined && config.tauronPath.trim() !== ''
+      ? { tauronPath: config.tauronPath.trim() }
+      : {}),
   };
 }
 
@@ -270,6 +281,21 @@ export function generatePluginManifest(config: PluginConfig): string {
  * 生成插件 package.json 内容。
  */
 export function generatePluginPackageJson(config: PluginConfig): string {
+  /**
+   * 解析一条 `@tauron/*` 依赖的坐标。
+   *
+   * - 给了 `tauronPath` → `file:`（**跨目录生成也能装上**，这是 CLI 的常态路径）；
+   * - 没给 → `workspace:*`（**只在同一个 pnpm workspace 内**可解析；写成 registry
+   *   版本号是错的，因为这些包没发布）。
+   *
+   * 两种都不是「随便写一个看起来像版本号的东西」——仓库里曾经那种写法会让
+   * `npm install` 直接失败，而不是「稍后补上」。
+   */
+  const tauronDep = (pkgName: string): string =>
+    config.tauronPath !== undefined
+      ? `file:${config.tauronPath.replace(/[/\\]+$/, '')}/packages/${pkgName.replace('@tauron/', 'tauron-')}`
+      : 'workspace:*';
+
   const pkg = {
     name: config.id,
     version: config.version,
@@ -284,13 +310,13 @@ export function generatePluginPackageJson(config: PluginConfig): string {
       typecheck: 'tsc --noEmit',
     },
     dependencies: {
-      '@tauron/host': `workspace:*`,
-      '@tauron/app-plugin-sdk': `workspace:*`,
+      '@tauron/host': tauronDep('@tauron/host'),
+      '@tauron/app-plugin-sdk': tauronDep('@tauron/app-plugin-sdk'),
     },
     devDependencies: {
       // 插件脚本调用 `tauron plugin dev|pack|publish`，
       // 因此必须显式依赖提供 `tauron` bin 的 CLI，否则脚本会 "command not found"。
-      '@tauron/cli': `workspace:*`,
+      '@tauron/cli': tauronDep('@tauron/cli'),
       typescript: '^5.8.0',
       vitest: '^3.0.0',
     },
@@ -399,11 +425,21 @@ export function deactivate() {
 
 /**
  * 生成插件 tsconfig.json 内容。
+ *
+ * **不自造 `extends`**：`@tauron/base-tsconfig` 这个包在本仓不存在（既没发版也没
+ * 目录），`extends` 一个不存在的包会让 `tsc --noEmit` 直接报错。这里写自包含的
+ * 编译选项，和应用脚手架（{@link generateTsconfig}）同一口径。
  */
 export function generatePluginTsconfig(): string {
   const tsconfig = {
-    extends: '@tauron/base-tsconfig',
     compilerOptions: {
+      target: 'ES2022',
+      lib: ['ES2022', 'DOM', 'DOM.Iterable'],
+      module: 'ESNext',
+      moduleResolution: 'bundler',
+      strict: true,
+      skipLibCheck: true,
+      noEmit: true,
       outDir: 'dist',
       rootDir: 'src',
     },
@@ -517,7 +553,10 @@ function normalizePath(path: string): string {
  *
  * 检查所有配置项是否在安全范围内。
  */
-export function validateDevWatchConfig(config: PluginDevWatchConfig): { ok: boolean; error?: string } {
+export function validateDevWatchConfig(config: PluginDevWatchConfig): {
+  ok: boolean;
+  error?: string;
+} {
   if (!config.dir || config.dir.trim() === '') {
     return { ok: false, error: '目录路径不能为空' };
   }

@@ -85,9 +85,7 @@ export interface UpdaterSnapshot {
 }
 
 /** 更新操作结果。 */
-export type UpdaterActionResult =
-  | { ok: true }
-  | { ok: false; code: string; message: string };
+export type UpdaterActionResult = { ok: true } | { ok: false; code: string; message: string };
 
 // ──────────────────────────────────────────────────────────────────────────
 // UpdaterStore

@@ -21,7 +21,8 @@ export class MemoryTransport implements HostTransport {
     this.principalValue = options.principal ?? { kind: 'main-window', origin: 'memory://host' };
     this.caps = new Set(options.capabilities ?? Object.keys(options.commands ?? {}));
     for (const [command, handler] of Object.entries(options.commands ?? {})) {
-      if (!/^host_[a-z0-9_]+$/.test(command)) throw new TypeError(`Invalid host command: ${command}`);
+      if (!/^host_[a-z0-9_]+$/.test(command))
+        throw new TypeError(`Invalid host command: ${command}`);
       this.commands.set(command, handler);
     }
   }

@@ -17,9 +17,13 @@ export {
   toSlug,
   generatePackageJson,
   generateTauriConfig,
+  generateViteConfig,
+  generateIconFiles,
   generateTsconfig,
   generateAppEntry,
   generateCapabilitiesJson,
+  generateTauriCapabilities,
+  generateTauriBuildRs,
   generateGitignore,
   generateFiles,
   InvalidTargetError,
@@ -61,6 +65,13 @@ export {
   type PluginDevWatchConfig,
   type PluginType,
 } from './plugin.js';
+
+export {
+  placeholderPng,
+  placeholderIco,
+  placeholderIcns,
+  placeholderIconFiles,
+} from './icon-assets.js';
 
 export {
   brandBuild,
@@ -149,6 +160,8 @@ export {
   listFiles,
   copyFile,
   writeScaffoldResult,
+  findTauronRoot,
+  toPosixRelative,
   type WriteResult,
   type BatchWriteResult,
 } from './fs-operations.js';
@@ -167,17 +180,9 @@ export {
   type ThemeValidationResult,
 } from './theme.js';
 
-export {
-  initProject,
-  type InitConfig,
-  type InitResult,
-} from './init.js';
+export { initProject, type InitConfig, type InitResult } from './init.js';
 
-export {
-  doctor,
-  type DoctorCheck,
-  type DoctorResult,
-} from './doctor.js';
+export { doctor, type DoctorCheck, type DoctorResult } from './doctor.js';
 
 export { main as cliMain } from './cli.js';
 

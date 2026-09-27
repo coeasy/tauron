@@ -212,6 +212,9 @@ export class DeepLinkClient {
  *
  * 便捷工厂函数。
  */
-export function createDeepLinkClient(options: { backend: Backend; config: DeepLinkConfig }): DeepLinkClient {
+export function createDeepLinkClient(options: {
+  backend: Backend;
+  config: DeepLinkConfig;
+}): DeepLinkClient {
   return new DeepLinkClient(options);
 }

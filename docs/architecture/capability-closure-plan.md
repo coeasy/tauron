@@ -141,9 +141,9 @@ tauron-acl ──────→ tauron-host
 
 | 集合 | 条数 | 定义 |
 |---|---:|---|
-| 底座 `tauron_substrate_handler!` | **39** | `tauri.rs` 的 `macro_rules! tauron_substrate_handler` |
-| 插件运行时 `tauron_plugin_handler!` | **60**（39 + 21） | `tauri.rs` 的 `macro_rules! tauron_plugin_handler`（行号随重构漂移，以符号名为准） |
-| 安装（feature-gated） | **+2** | 同上宏体内的 `#[cfg(feature="plugin-install")]` 两条，启用后共 **62** 条 |
+| 底座 `tauron_substrate_handler!` | **57** | `tauri.rs` 的 `macro_rules! tauron_substrate_handler`（R9 补 menu/tray/fs/http/updater 五域 18 条后 39→57） |
+| 插件运行时 `tauron_plugin_handler!` | **78**（57 + 21） | `tauri.rs` 的 `macro_rules! tauron_plugin_handler`（行号随重构漂移，以符号名为准） |
+| 安装（feature-gated） | **+2** | 同上宏体内的 `#[cfg(feature="plugin-install")]` 两条，**已进默认特性**，默认构建共 **80** 条 |
 
 `crates/tauron-adapter/Cargo.toml:21` → `default = ["plugin-install"]`（**`plugin-install` 已进默认**，1.0-W6；`tauri` feature 仍不默认）。
 唯一真实装配入口：`examples/minimal-app/src-tauri/src/main.rs:140`。
@@ -187,7 +187,7 @@ tauron-acl ──────→ tauron-host
 | 生命周期闭合 | 75 | **85** | 启停/卸载/崩溃恢复全通，卸载回收 6 类旁路状态 |
 | 事件与流式 | 60 | **85** | 三通道 + 帧由宿主铸 seq + 终帧后失效 |
 | 资源隔离 | 25 | **75** | 4 类 per-plugin 配额真接线；通知环仍全局单实例 |
-| 能力协商 | — | **70** | `host_capabilities` 存在且推导入口，但 `families`/`unsupported` 硬编码（`lib.rs:396-415`） |
+| 能力协商 | — | **90** | `host_capabilities` 存在；`families`/`unsupported` **已改为由各域 sink 运行期可用性推导、两列互斥**（P2-4 已修），配 `host_capabilities_derives_domains_from_injected_sinks` 单测 |
 | 诚实降级 | 50 | **85** | 全部桩命令返回有类型 `UnsupportedBody`，无裸成功 |
 | **插件调用** | 60 | **30** ⬇️ | **只登记不投递**（§5-L8）——0.3 把「有命令」误判为「有链路」 |
 | **插件安装** | 20 → 部分完成 | **30** | 已实现但 feature-gated，`default=[]`；TS `available()` 误报 |
@@ -311,7 +311,7 @@ pub fn cmd_plugin_call(
 | P2-1 | `createContractContext` **缺取件泵 = 订阅即死** | `plugin-sdk/contract-context.ts:210-214`，文件头 `:21-23` 自陈「取件泵不在此实现」 |
 | P2-2 | 通知环仍是**全局单实例**，逐插件只是裁剪而非独立环 | `lib.rs:1260/1299` |
 | P2-3 | 3 个 UI adapter 零消费者 + 同义反复测试 | `use-invoke.test.ts:5-7` 仅 `expect(typeof x).toBe('function')` |
-| P2-4 | `host_capabilities` 的 `families` 与 `unsupported` 域名是**硬编码**，不是推导 | `lib.rs:396-415` |
+| P2-4 | ~~`host_capabilities` 的 `families` 与 `unsupported` 域名是**硬编码**，不是推导~~ → **已修（2026-09-27）**：两列改为按各域 sink 运行期可用性推导且互斥 | `lib.rs` `cmd_host_capabilities` |
 | P2-5 | `dual-world` / `shell-matrix` 是模拟实现（`simulated: true`） | `sandbox.ts:121-142`、`manager.ts:71-93` |
 | P2-6 | `plugin sign` 产出 `algorithm: 'sha256-digest'`（诚实标注但功能未实现） | `cli/plugin-lifecycle.ts:157-209` |
 | P2-7 | 两套 IPC 后端 + 两套命令名表并存 | `core/src/tauri-backend.ts`（208 行，`plugin_*`）vs `host/src/tauri-backend.ts`（198 行，`host_*`） |
@@ -640,7 +640,7 @@ pub struct DeliveryReceipt {
 
 | 文档 | 需同步内容 |
 |---|---|
-| [overview.md](./overview.md) | 三层结构（补充「活线依赖死线」）；接线状态表按 A8-5 归置表更新；命令面 60 条 |
+| [overview.md](./overview.md) | 三层结构（补充「活线依赖死线」）；接线状态表按 A8-5 归置表更新；命令面 78 条（默认 80） |
 | [app-layer-wire.md](./app-layer-wire.md) | 新增 install 的 feature 可达性说明、调用投递的 `DeliveryReceipt` 线形、contributes reconcile |
 | [canonical-owners.md](./canonical-owners.md) | crate 归置表按 A4/A5/A8-5 更新；wasm 从「可选组件」改为「可选组件（已接线）」 |
 | [multi-plugin-substrate-roadmap.md](./multi-plugin-substrate-roadmap.md) | §2 残差表按本次实测重写（M-1/M-2 已实现） |

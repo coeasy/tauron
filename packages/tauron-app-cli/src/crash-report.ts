@@ -131,7 +131,8 @@ export class CrashReporter {
 
   private _loadExistingRecords(): void {
     try {
-      const files = fs.readdirSync(this._reportDir)
+      const files = fs
+        .readdirSync(this._reportDir)
         .filter((f) => f.startsWith('crash-') && f.endsWith('.json'));
 
       for (const file of files.slice(-this._maxRecords)) {
@@ -145,7 +146,8 @@ export class CrashReporter {
 
   private _deleteAllRecords(): void {
     try {
-      const files = fs.readdirSync(this._reportDir)
+      const files = fs
+        .readdirSync(this._reportDir)
         .filter((f) => f.startsWith('crash-') && f.endsWith('.json'));
       for (const file of files) {
         fs.unlinkSync(path.join(this._reportDir, file));

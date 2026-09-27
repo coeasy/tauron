@@ -15,26 +15,13 @@ export {
 } from './context.js';
 
 // ---- Composables ----
-export {
-  useInvoke,
-  type InvokeState,
-  type UseInvokeReturn,
-} from './use-invoke.js';
+export { useInvoke, type InvokeState, type UseInvokeReturn } from './use-invoke.js';
 
-export {
-  useEvent,
-  type UseEventReturn,
-} from './use-event.js';
+export { useEvent, type UseEventReturn } from './use-event.js';
 
-export {
-  useCapabilities,
-  useIsTauri,
-} from './use-capabilities.js';
+export { useCapabilities, useIsTauri } from './use-capabilities.js';
 
 export { usePluginId } from './use-plugin-id.js';
 
 // ---- Store ----
-export {
-  createStore,
-  type Store,
-} from './store.js';
+export { createStore, type Store } from './store.js';

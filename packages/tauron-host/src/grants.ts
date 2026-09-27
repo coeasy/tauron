@@ -110,7 +110,10 @@ export function capabilityOfGrantSet(grantSet: GrantSet): TauriCapability {
  * - 旧集合无 scope、新集合有 → 变宽；
  * - 仅顺序不同或严格子集 → 不变宽。
  */
-export function scopeGrew(oldScope: JsonValue | undefined, newScope: JsonValue | undefined): boolean {
+export function scopeGrew(
+  oldScope: JsonValue | undefined,
+  newScope: JsonValue | undefined,
+): boolean {
   const toList = (v: JsonValue | undefined): string[] | null => {
     if (Array.isArray(v)) return v.map((x) => (typeof x === 'string' ? x : JSON.stringify(x)));
     if (typeof v === 'string') return [v];

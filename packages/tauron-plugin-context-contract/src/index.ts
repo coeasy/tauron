@@ -70,11 +70,7 @@ export interface PluginHost {
    * 为什么可选：并非所有宿主形态都有贡献表；没有该能力的宿主**不得**假装
    * 成功——见 {@link SettingsTabRegistry.registerTab} 的返回值语义。
    */
-  contributesRegister?(entry: {
-    kind: string;
-    id: string;
-    label: string;
-  }): Promise<void>;
+  contributesRegister?(entry: { kind: string; id: string; label: string }): Promise<void>;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -148,10 +144,7 @@ export interface CommandRegistry {
    * 语义要求：命令不存在必须 **reject**（抛错），不得返回 `undefined` 假成功
    * ——「静默成功」会让调用方把「插件没加载」当成「命令返回空」。
    */
-  execute<TArgs = unknown, TResult = unknown>(
-    id: string,
-    args?: TArgs,
-  ): Promise<TResult>;
+  execute<TArgs = unknown, TResult = unknown>(id: string, args?: TArgs): Promise<TResult>;
 }
 
 // ──────────────────────────────────────────────────────────────────────────

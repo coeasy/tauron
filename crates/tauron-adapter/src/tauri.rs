@@ -39,7 +39,9 @@ use tauron_host::runtime::RuntimeHandle;
 // （`$crate::tauri::TauriError` / `$crate::tauri::HostResult`）。私有导入在跨 crate
 // 展开时会解析失败。
 use crate::{ContributeEntry, RuntimeHealth, RuntimeSpawnProfile};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
 pub use tauri::ipc::InvokeError as TauriError;
@@ -47,8 +49,8 @@ use tauri::ipc::{CommandArg, CommandItem, InvokeError};
 use tauri::{Emitter, Manager, State, WebviewWindow};
 pub use tauron_host::{ErrorCode, HostError, HostResult};
 
-use crate::{AdapterConfig, CommandState, PluginRuntimeState, StreamOpened, SubstrateState};
 use crate::ProviderResult;
+use crate::{AdapterConfig, CommandState, PluginRuntimeState, StreamOpened, SubstrateState};
 use tauron_host::stream::{StreamFrame, StreamSink};
 
 /// Transport-provided caller context. Core handlers receive only the validated [`crate::Caller`].
@@ -1275,11 +1277,12 @@ pub fn host_market_check(
     crate::cmd_market_check_as(&caller, &state).map_err(to_tauri_err)
 }
 
-/// `host_brand_info`：品牌信息。
+/// `host_brand_info`：品牌信息（真实实现：接孤儿 crate `tauron-brand`；未配置来源时
+/// 返回 [`crate::ProviderResult::Unsupported`]，线形与其余 provider 型命令一致）。
 #[tauri::command]
 pub fn host_brand_info(
     state: State<'_, SubstrateState>,
-) -> Result<crate::UnsupportedBody, TauriError> {
+) -> Result<crate::ProviderResult<crate::BrandInfo>, TauriError> {
     crate::cmd_brand_info(&state).map_err(to_tauri_err)
 }
 
@@ -1433,8 +1436,8 @@ pub fn host_contributes_reconcile(
     state: State<'_, PluginRuntimeState>,
     window: TauriCallerSource,
 ) -> Result<crate::ContributesReconcileReport, TauriError> {
-    let id = tauron_host::authz::resolve_self_identity(window.label(), None)
-        .map_err(to_tauri_err)?;
+    let id =
+        tauron_host::authz::resolve_self_identity(window.label(), None).map_err(to_tauri_err)?;
     crate::cmd_contributes_reconcile(&state, id.as_str()).map_err(to_tauri_err)
 }
 
@@ -1917,6 +1920,187 @@ impl crate::DeepLinkSink for TauriDeepLinkSink {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// R9：菜单 / 托盘的 Tauri 实现（**真实现**）
+//
+// 与 R8 的窗口/对话框/深链接**同一注入模式**：由
+// [`command_state_with_dir_and_config`] 在 `Arc` 化前替换 `SubstrateState` 的对应字段。
+// **不注入 = `lib.rs` 的进程内降级实现**（[`crate::MemoryMenuSink`] /
+// [`crate::MemoryTraySink`]：只留痕，不建菜单/托盘）。
+//
+// 菜单点击**不新造传输**：`MenuItemSpec.event` 指定的 topic 经 `AppHandle::emit`
+// 发出（与 `TauriDialogSink` 的信令走同一条通路），前端按既有 Tauri 事件监听消费。
+//
+// 本模块要求 `tauri` 依赖启用 `tray-icon` feature（见 `Cargo.toml`）；本轮只在
+// **Windows** 验证编译，Linux 还需额外系统依赖（未在本机验证）。
+// ──────────────────────────────────────────────────────────────────────────
+
+/// 系统托盘的**稳定 id**（宿主只维护一个托盘）。
+pub const TRAY_ICON_ID: &str = "tauron-tray";
+
+/// 菜单/托盘构建失败 → 结构化错误（`E_INVALID_MANIFEST`）。
+fn menu_build_err(e: tauri::Error) -> HostError {
+    HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("菜单/托盘构建失败：{e}"))
+}
+
+/// 按规格构建 `tauri::menu::Menu`（菜单与托盘菜单共用的构建口径）。
+fn build_tauri_menu(
+    app: &tauri::AppHandle<tauri::Wry>,
+    spec: &crate::MenuSpec,
+) -> HostResult<tauri::menu::Menu<tauri::Wry>> {
+    let mut builder = tauri::menu::MenuBuilder::new(app);
+    for item in &spec.items {
+        let mi = tauri::menu::MenuItemBuilder::with_id(item.id.clone(), &item.label)
+            .enabled(item.enabled)
+            .build(app)
+            .map_err(menu_build_err)?;
+        builder = builder.item(&mi);
+    }
+    builder.build().map_err(menu_build_err)
+}
+
+/// **菜单能力**的 Tauri 实现（`tauri::menu` **真实现**）。
+///
+/// - `set_menu` / `reset`：真的调用 `AppHandle::set_menu` / `remove_menu`；
+/// - `popup`：`MenuSpec` 不带窗口句柄，取主窗（label `"main"`）为上下文目标；
+///   没有主窗时如实返回 `Ok(false)`（**不假装**弹出）；
+/// - 菜单点击：`on_menu_event` → 查 `id → topic` 路由 → `emit(topic, ...)`。
+pub struct TauriMenuSink {
+    app: tauri::AppHandle<tauri::Wry>,
+    /// 菜单项 id → 事件 topic（`set_menu`/`popup` 时按规格重建）。
+    routes: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl TauriMenuSink {
+    /// 绑定宿主 `AppHandle` 并注册**一次**全局菜单事件监听。
+    pub fn new(app: tauri::AppHandle<tauri::Wry>) -> Self {
+        let routes: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let routes_for_handler = Arc::clone(&routes);
+        // 全局监听只注册一次（本 sink 唯一）；载荷带 `native: true` 表明是真实点击。
+        app.on_menu_event(move |app, event| {
+            let id = event.id().0.clone();
+            let topic = routes_for_handler.lock().get(&id).cloned();
+            if let Some(topic) = topic {
+                // best-effort：点击回传失败不升级为错误（它不改变菜单的状态语义）。
+                let _ = app.emit(
+                    &topic,
+                    serde_json::json!({ "id": id, "source": "menu", "native": true }),
+                );
+            }
+        });
+        Self { app, routes }
+    }
+
+    /// 构建菜单并登记 `id → topic` 路由。
+    fn build_and_route(&self, spec: &crate::MenuSpec) -> HostResult<tauri::menu::Menu<tauri::Wry>> {
+        let menu = build_tauri_menu(&self.app, spec)?;
+        let mut routes = self.routes.lock();
+        routes.clear();
+        for item in &spec.items {
+            if let Some(topic) = &item.event {
+                routes.insert(item.id.clone(), topic.clone());
+            }
+        }
+        Ok(menu)
+    }
+}
+
+impl crate::MenuSink for TauriMenuSink {
+    fn native_supported(&self) -> bool {
+        true
+    }
+
+    fn set_menu(&self, spec: &crate::MenuSpec) -> HostResult<bool> {
+        let menu = self.build_and_route(spec)?;
+        self.app.set_menu(menu).map_err(menu_build_err)?;
+        Ok(true)
+    }
+
+    fn popup(&self, spec: &crate::MenuSpec) -> HostResult<bool> {
+        let menu = self.build_and_route(spec)?;
+        match self.app.get_webview_window("main") {
+            Some(window) => {
+                window.popup_menu(&menu).map_err(menu_build_err)?;
+                Ok(true)
+            }
+            // 没有主窗：上下文菜单无处可挂——如实返回"未弹出"。
+            None => Ok(false),
+        }
+    }
+
+    fn reset(&self) -> HostResult<bool> {
+        let removed = self.app.remove_menu().map_err(menu_build_err)?;
+        self.routes.lock().clear();
+        Ok(removed.is_some())
+    }
+}
+
+/// **系统托盘能力**的 Tauri 实现（`tauri::tray` **真实现**）。
+///
+/// `TrayIcon` 是引用计数类型，最后一个实例 drop 即从系统托盘消失，故本 sink
+/// **持有**当前图标（[`Self::current`]）。图标资产用宿主窗口图标
+/// （`default_window_icon`）——本仓无 `image` 依赖，不造假图标。
+pub struct TauriTraySink {
+    app: tauri::AppHandle<tauri::Wry>,
+    current: Mutex<Option<tauri::tray::TrayIcon<tauri::Wry>>>,
+}
+
+impl TauriTraySink {
+    /// 绑定宿主 `AppHandle`。
+    pub fn new(app: tauri::AppHandle<tauri::Wry>) -> Self {
+        Self { app, current: Mutex::new(None) }
+    }
+}
+
+impl crate::TraySink for TauriTraySink {
+    fn native_supported(&self) -> bool {
+        true
+    }
+
+    fn create(&self, spec: &crate::TraySpec) -> HostResult<bool> {
+        let mut builder = tauri::tray::TrayIconBuilder::with_id(TRAY_ICON_ID);
+        if let Some(tooltip) = &spec.tooltip {
+            builder = builder.tooltip(tooltip);
+        }
+        let menu = match &spec.menu {
+            Some(m) => Some(build_tauri_menu(&self.app, m)?),
+            None => None,
+        };
+        if let Some(menu) = &menu {
+            builder = builder.menu(menu);
+        }
+        if let Some(icon) = self.app.default_window_icon().cloned() {
+            builder = builder.icon(icon);
+        }
+        let tray = builder.build(&self.app).map_err(|e| {
+            HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("托盘创建失败：{e}"))
+        })?;
+        // 覆盖旧图标：旧实例 drop 即从系统托盘消失。
+        *self.current.lock() = Some(tray);
+        Ok(true)
+    }
+
+    fn set_menu(&self, spec: &crate::MenuSpec) -> HostResult<bool> {
+        let menu = build_tauri_menu(&self.app, spec)?;
+        let current = self.current.lock();
+        match current.as_ref() {
+            Some(tray) => {
+                tray.set_menu(Some(menu)).map_err(|e| {
+                    HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("托盘菜单设置失败：{e}"))
+                })?;
+                Ok(true)
+            }
+            // 还没有托盘：如实返回"未应用"（调用方应先 create）。
+            None => Ok(false),
+        }
+    }
+
+    fn remove(&self) -> HostResult<bool> {
+        let mut slot = self.current.lock();
+        Ok(slot.take().is_some())
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // 窗口管理命令（P1-1；R8 §1：包装器只做「取真实 label + 转调 sink」）
 //
 // **R8 之前**：`crate::cmd_window_*` 是 `Ok(())` 桩，真实窗口操作（`window.minimize()`
@@ -2163,6 +2347,211 @@ pub fn host_dialog_confirm(
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// R9：menu / tray / fs / http / updater / theme 命令（**全部主窗专属**）
+//
+// 每个包装器都取真实 label 派生 caller，再转调对应的 `cmd_*_as`（身份判定在核心层，
+// 本层不做比对）。这些命令是宿主 UI 的编排原语，不进 `authz` 档位表、不进
+// `capabilities.ts`（见 `tauron_host::authz` 的"不收录但有代码层判定"清单）。
+// ──────────────────────────────────────────────────────────────────────────
+
+/// `host_menu_set`：设置应用菜单（仅主窗）。
+#[tauri::command]
+pub fn host_menu_set(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    spec: crate::MenuSpec,
+) -> Result<crate::ProviderResult<crate::MenuOutcome>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_menu_set_as(&caller, &state, &spec).map_err(to_tauri_err)
+}
+
+/// `host_menu_popup`：弹出上下文菜单（仅主窗）。
+#[tauri::command]
+pub fn host_menu_popup(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    spec: crate::MenuSpec,
+) -> Result<crate::ProviderResult<crate::MenuOutcome>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_menu_popup_as(&caller, &state, &spec).map_err(to_tauri_err)
+}
+
+/// `host_menu_reset`：移除应用菜单（仅主窗）。
+#[tauri::command]
+pub fn host_menu_reset(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+) -> Result<crate::ProviderResult<crate::MenuOutcome>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_menu_reset_as(&caller, &state).map_err(to_tauri_err)
+}
+
+/// `host_tray_create`：创建/更新系统托盘（仅主窗）。
+#[tauri::command]
+pub fn host_tray_create(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    spec: crate::TraySpec,
+) -> Result<crate::ProviderResult<crate::TrayOutcome>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_tray_create_as(&caller, &state, &spec).map_err(to_tauri_err)
+}
+
+/// `host_tray_set_menu`：设置托盘菜单（仅主窗）。
+#[tauri::command]
+pub fn host_tray_set_menu(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    spec: crate::MenuSpec,
+) -> Result<crate::ProviderResult<crate::TrayOutcome>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_tray_set_menu_as(&caller, &state, &spec).map_err(to_tauri_err)
+}
+
+/// `host_tray_remove`：移除系统托盘（仅主窗）。
+#[tauri::command]
+pub fn host_tray_remove(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+) -> Result<crate::ProviderResult<crate::TrayOutcome>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_tray_remove_as(&caller, &state).map_err(to_tauri_err)
+}
+
+/// `host_fs_read`：读取文本文件（仅主窗；限定宿主允许根目录内）。
+#[tauri::command]
+pub fn host_fs_read(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    path: String,
+    max_bytes: Option<u64>,
+) -> Result<crate::ProviderResult<crate::FsReadResult>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_fs_read_as(&caller, &state, &path, max_bytes).map_err(to_tauri_err)
+}
+
+/// `host_fs_write`：写入文本文件（仅主窗；覆盖）。
+#[tauri::command]
+pub fn host_fs_write(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    path: String,
+    text: String,
+) -> Result<crate::ProviderResult<crate::FsWriteResult>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_fs_write_as(&caller, &state, &path, &text).map_err(to_tauri_err)
+}
+
+/// `host_fs_list`：列目录（仅主窗）。
+#[tauri::command]
+pub fn host_fs_list(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    path: String,
+) -> Result<crate::ProviderResult<Vec<crate::FsEntry>>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_fs_list_as(&caller, &state, &path).map_err(to_tauri_err)
+}
+
+/// `host_fs_stat`：取元数据（仅主窗）。
+#[tauri::command]
+pub fn host_fs_stat(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    path: String,
+) -> Result<crate::ProviderResult<crate::FsStat>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_fs_stat_as(&caller, &state, &path).map_err(to_tauri_err)
+}
+
+/// `host_fs_mkdir`：建目录（仅主窗）。
+#[tauri::command]
+pub fn host_fs_mkdir(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    path: String,
+    recursive: bool,
+) -> Result<crate::ProviderResult<()>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_fs_mkdir_as(&caller, &state, &path, recursive).map_err(to_tauri_err)
+}
+
+/// `host_fs_remove`：删除文件或空目录（仅主窗；**不递归**）。
+#[tauri::command]
+pub fn host_fs_remove(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    path: String,
+) -> Result<crate::ProviderResult<()>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_fs_remove_as(&caller, &state, &path).map_err(to_tauri_err)
+}
+
+/// `host_http_request`：发起一次 HTTP 请求（仅主窗；缺省诚实降级）。
+#[tauri::command]
+pub fn host_http_request(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    spec: crate::HttpRequestSpec,
+) -> Result<crate::ProviderResult<crate::HttpResponseSpec>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_http_request_as(&caller, &state, &spec).map_err(to_tauri_err)
+}
+
+/// `host_updater_check`：检查更新（仅主窗；真跑 `tauron-distribute`）。
+#[tauri::command]
+pub fn host_updater_check(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    current_version: String,
+) -> Result<crate::ProviderResult<crate::UpdaterCheckOutcome>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_updater_check_as(&caller, &state, &current_version).map_err(to_tauri_err)
+}
+
+/// `host_updater_status`：更新通道状态（仅主窗）。
+#[tauri::command]
+pub fn host_updater_status(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+) -> Result<crate::UpdaterStatus, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_updater_status_as(&caller, &state).map_err(to_tauri_err)
+}
+
+/// `host_theme_list`：列出可用主题（仅主窗；接孤儿 crate `tauron-theme`）。
+#[tauri::command]
+pub fn host_theme_list(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+) -> Result<Vec<tauron_theme::ThemeContribute>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_theme_list_as(&caller, &state).map_err(to_tauri_err)
+}
+
+/// `host_theme_get`：读取单个主题（仅主窗）。
+#[tauri::command]
+pub fn host_theme_get(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    id: String,
+) -> Result<crate::ProviderResult<serde_json::Value>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_theme_get_as(&caller, &state, &id).map_err(to_tauri_err)
+}
+
+/// `host_theme_set`：切换激活主题（仅主窗）。
+#[tauri::command]
+pub fn host_theme_set(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    id: String,
+) -> Result<crate::ProviderResult<serde_json::Value>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_theme_set_as(&caller, &state, &id).map_err(to_tauri_err)
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // R8 §2：第三方插件命令的**宿主形态装配器**
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -2351,9 +2740,9 @@ where
 // macro，输入按**字面 path 列表**解析——实测传入 `family!()` 会得到
 // `error: expected ','`，族的展开结果无法拼进同一个 handler。因此族以**两组编译期
 // 可选集合**表达：宿主在**编译期**二选一，而不是运行时过滤。
-//   · [`tauron_substrate_handler!`] 底座-only（39 条）
-//   · [`tauron_plugin_handler!`] 全量（60 条 = 底座 39 + 插件运行时 21；
-//     另 2 条安装命令为 `plugin-install` feature-gated，启用后共 62 条）
+//   · [`tauron_substrate_handler!`] 底座-only（57 条）
+//   · [`tauron_plugin_handler!`] 全量（78 条 = 底座 57 + 插件运行时 21；
+//     另 2 条安装命令为 `plugin-install` feature-gated，启用后共 80 条）
 //
 // 两组集合的一致性**不靠人眼**：wire-gate 断言
 //   ① 全量集合 == tauri.rs 中全部 `#[tauri::command] pub fn host_*` 定义；
@@ -2421,18 +2810,39 @@ macro_rules! tauron_substrate_handler {
             // 插件的当前状态并补发 `TrialEnable`（R1b 实测发现），属插件运行时域。
             // 品牌 / 诊断域
             $crate::tauri::host_brand_info,
+            // R9：五个宿主能力域（menu / tray / fs / http / updater）+ 主题域。
+            // **全部主窗专属**（代码层 `require_main_window`），与 `SUBSTRATE_COMMANDS`
+            // 逐条一致（wire-gate 门禁锁死）。
+            $crate::tauri::host_menu_set,
+            $crate::tauri::host_menu_popup,
+            $crate::tauri::host_menu_reset,
+            $crate::tauri::host_tray_create,
+            $crate::tauri::host_tray_set_menu,
+            $crate::tauri::host_tray_remove,
+            $crate::tauri::host_fs_read,
+            $crate::tauri::host_fs_write,
+            $crate::tauri::host_fs_list,
+            $crate::tauri::host_fs_stat,
+            $crate::tauri::host_fs_mkdir,
+            $crate::tauri::host_fs_remove,
+            $crate::tauri::host_http_request,
+            $crate::tauri::host_updater_check,
+            $crate::tauri::host_updater_status,
+            $crate::tauri::host_theme_list,
+            $crate::tauri::host_theme_get,
+            $crate::tauri::host_theme_set,
             $crate::tauri::host_capabilities,
         ])
     };
 }
 
-/// **全量**命令集：底座 39 条 + 插件运行时 21 条（多插件宿主；另 2 条安装命令
-/// 受 `plugin-install` feature 门控，启用后共 62 条）。
+/// **全量**命令集：底座 57 条 + 插件运行时 21 条（多插件宿主；另 2 条安装命令
+/// 受 `plugin-install` feature 门控，启用后共 80 条）。
 #[macro_export]
 macro_rules! tauron_plugin_handler {
     () => {
         $crate::tauri::origin_gated_handler(tauri::generate_handler![
-            // ── 底座（与 [`tauron_substrate_handler!`] 的 39 条逐条一致）──
+            // ── 底座（与 [`tauron_substrate_handler!`] 的 57 条逐条一致）──
             $crate::tauri::host_window_minimize,
             $crate::tauri::host_window_maximize,
             $crate::tauri::host_window_restore,
@@ -2472,6 +2882,25 @@ macro_rules! tauron_plugin_handler {
             $crate::tauri::host_recover_boot,
             $crate::tauri::host_recover_report,
             $crate::tauri::host_brand_info,
+            // R9：五个宿主能力域 + 主题域（与底座集合的 18 条逐条一致）。
+            $crate::tauri::host_menu_set,
+            $crate::tauri::host_menu_popup,
+            $crate::tauri::host_menu_reset,
+            $crate::tauri::host_tray_create,
+            $crate::tauri::host_tray_set_menu,
+            $crate::tauri::host_tray_remove,
+            $crate::tauri::host_fs_read,
+            $crate::tauri::host_fs_write,
+            $crate::tauri::host_fs_list,
+            $crate::tauri::host_fs_stat,
+            $crate::tauri::host_fs_mkdir,
+            $crate::tauri::host_fs_remove,
+            $crate::tauri::host_http_request,
+            $crate::tauri::host_updater_check,
+            $crate::tauri::host_updater_status,
+            $crate::tauri::host_theme_list,
+            $crate::tauri::host_theme_get,
+            $crate::tauri::host_theme_set,
             $crate::tauri::host_capabilities,
             // ── 插件运行时（21 条；底座-only 宿主不得注册）──
             // 其中**插件面可触达**的那些（`host_lifecycle_report` / `host_plugin_call` /
@@ -2639,6 +3068,11 @@ fn command_state_with_dir_and_config(
     substrate.window_sink = std::sync::Arc::new(TauriWindowSink::new(app.clone()));
     substrate.dialog_sink = std::sync::Arc::new(TauriDialogSink::new(app.clone()));
     substrate.deep_link_sink = std::sync::Arc::new(TauriDeepLinkSink::new(app.clone()));
+    // R9：注入菜单 / 托盘两个**真实现**。其余三域（fs / http / updater）不需要
+    // Tauri 侧实现：fs 的 `std::fs` 与 updater 的 `tauron-distribute` 都在 `lib.rs`，
+    // http 因离线缺少 TLS 后端**诚实降级**（缺省即降级，无需注入）。
+    substrate.menu_sink = std::sync::Arc::new(TauriMenuSink::new(app.clone()));
+    substrate.tray_sink = std::sync::Arc::new(TauriTraySink::new(app.clone()));
     PluginRuntimeState::with_substrate(std::sync::Arc::new(substrate), cfg)
 }
 

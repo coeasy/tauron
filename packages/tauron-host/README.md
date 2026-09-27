@@ -59,8 +59,8 @@ import { MockBackend } from '@tauron/host/testing';
 挂 `plugin-install`——**该特性现已进 `tauron-adapter` 的默认特性**，
 见 `crates/tauron-adapter/Cargo.toml:21`；只想取底座用 `default-features = false`）。
 
-> 「22 条」是**需登记档位**的命令；Tauri 实际注册的命令面是另一个口径：**60 条**
-> （`tauron_plugin_handler!` = 底座 39 + 插件运行时 21），默认特性下 62 条。
+> 「22 条」是**需登记档位**的命令；Tauri 实际注册的命令面是另一个口径：**78 条**
+> （`tauron_plugin_handler!` = 底座 57 + 插件运行时 21），默认特性下 80 条。
 > 两侧一致性由 `src/gates.test.ts` 逐名比对，不靠本文维护。
 
 | 命令 | 档位 | 消费方 |
@@ -97,8 +97,8 @@ import { MockBackend } from '@tauron/host/testing';
 以下客户端面向**主窗**，通过 `host_window_*` / `host_dialog_*` / `host_clipboard_*` /
 `host_market_*` / `host_deep_link_*` / `host_capabilities` 等主窗命令族工作（完整命令面见
 `crates/tauron-adapter/src/tauri.rs` 的 `tauron_substrate_handler!` / `tauron_plugin_handler!`
-宏：底座 **39** + 插件运行时 **21** = **60** 条；`plugin-install` 2 条**已进默认特性**，
-默认装配共 **62** 条）：
+宏：底座 **57** + 插件运行时 **21** = **78** 条；`plugin-install` 2 条**已进默认特性**，
+默认装配共 **80** 条）：
 
 - `ShellClient` / `ShellController` — 标题栏动作、主题、更新事件路由（已接线）
 - `AutoUpdateClient` — 检查/下载/安装/重启状态机 + 定时自动检查

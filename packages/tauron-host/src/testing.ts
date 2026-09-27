@@ -13,5 +13,10 @@ export { CAPABILITIES, capabilityOf, isAvailable, capabilityMatrix } from './cap
 export { HostClient, AdminClient, FrameSink } from './host.js';
 export type { HostClientOptions, PluginCallRequest } from './host.js';
 
-export { HOST_ERROR_CODES, RETRYABLE_HOST_ERROR_CODES, normalizeError, HostException } from './errors.js';
+export {
+  HOST_ERROR_CODES,
+  RETRYABLE_HOST_ERROR_CODES,
+  normalizeError,
+  HostException,
+} from './errors.js';
 export type { HostErrorCode, HostErrorShape } from './errors.js';

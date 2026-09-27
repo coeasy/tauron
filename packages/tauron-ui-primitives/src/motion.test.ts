@@ -1,6 +1,6 @@
 // motion.ts 测试（P1-7 动效基础设施）
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
   DEFAULT_DURATIONS,
   DEFAULT_EASINGS,
@@ -20,7 +20,6 @@ import {
   prefersReducedMotion,
   shouldAnimate,
   resetMotionTheme,
-  type MotionConfig,
 } from './motion.js';
 
 describe('motion', () => {
@@ -106,7 +105,7 @@ describe('motion', () => {
     });
 
     it('每个 keyframe 有正确的 offset', () => {
-      for (const [name, frames] of Object.entries(DEFAULT_KEYFRAMES)) {
+      for (const frames of Object.values(DEFAULT_KEYFRAMES)) {
         expect(frames.length).toBeGreaterThanOrEqual(2);
         expect(frames[0]!.offset).toBe('0%');
         expect(frames[frames.length - 1]!.offset).toBe('100%');

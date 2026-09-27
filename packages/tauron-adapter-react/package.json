@@ -1,8 +1,30 @@
 {
   "name": "@tauron/adapter-react",
   "version": "0.1.0",
-  "private": true,
   "description": "tauron React 适配器（设计文档 §4.2）：useInvoke/useEvent/useCapabilities/usePluginId 钩子、ReactiveStore",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coeasy/tauron.git",
+    "directory": "packages/tauron-adapter-react"
+  },
+  "homepage": "https://github.com/coeasy/tauron",
+  "bugs": {
+    "url": "https://github.com/coeasy/tauron/issues"
+  },
+  "keywords": [
+    "tauron",
+    "tauri",
+    "react",
+    "hooks",
+    "frontend"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

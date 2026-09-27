@@ -31,7 +31,11 @@ export function createInvokeStore<T = unknown>(pluginId: string): InvokeStore<T>
     lastArgs: null,
   });
 
-  const invoke = async (method: string, payload?: unknown, options?: InvokeOptions): Promise<T | null> => {
+  const invoke = async (
+    method: string,
+    payload?: unknown,
+    options?: InvokeOptions,
+  ): Promise<T | null> => {
     update((state) => ({
       ...state,
       loading: true,
@@ -40,7 +44,13 @@ export function createInvokeStore<T = unknown>(pluginId: string): InvokeStore<T>
     }));
 
     try {
-      const response: PluginInvokeResponse = await invokePlugin(backend, pluginId, method, payload, options);
+      const response: PluginInvokeResponse = await invokePlugin(
+        backend,
+        pluginId,
+        method,
+        payload,
+        options,
+      );
 
       if (response.ok) {
         update((state) => ({

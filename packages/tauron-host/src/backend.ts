@@ -118,10 +118,7 @@ export interface HostTransport extends Backend {}
  * 把它当作「能力集保持静态」而不是失败；静默 `{@code void}` 会让"刷新没生效"
  * 与"刷新成功但宿主确实没开 feature"混成一个值。
  */
-export function adoptRuntimeCapabilities(
-  backend: Backend,
-  commands: Iterable<string>,
-): boolean {
+export function adoptRuntimeCapabilities(backend: Backend, commands: Iterable<string>): boolean {
   const target = backend as Backend & {
     adoptCapabilities?: (cmds: Iterable<string>) => void;
   };
@@ -179,10 +176,7 @@ export class MockBackend implements Backend {
         : { kind: 'main-window', origin: null });
   }
 
-  async invoke<T = unknown>(
-    cmd: string,
-    args?: Record<string, unknown>,
-  ): Promise<T> {
+  async invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     this.invocations.push(args === undefined ? { cmd } : { cmd, args });
     // 与真实 Tauri 行为一致：命令未注册 → "command not found"。
     if (!this.caps.has(cmd)) {
@@ -270,7 +264,9 @@ export class MockBackend implements Backend {
     }
     const kind = cmd === 'host_stream_close' ? parseStreamKind(req.kind) : 'data';
     if (cmd === 'host_stream_close' && (kind === null || kind === 'data')) {
-      throw new Error(`E_INVALID_MANIFEST: 关流只接受终帧种类（end/error），收到 \`${String(req.kind)}\``);
+      throw new Error(
+        `E_INVALID_MANIFEST: 关流只接受终帧种类（end/error），收到 \`${String(req.kind)}\``,
+      );
     }
     const frame: StreamFrame = {
       seq: ++state.seq,
@@ -285,10 +281,7 @@ export class MockBackend implements Backend {
     return { value: frame };
   }
 
-  async listen(
-    event: string,
-    handler: (payload: unknown) => void,
-  ): Promise<Unlisten> {
+  async listen(event: string, handler: (payload: unknown) => void): Promise<Unlisten> {
     let set = this.subscriptions.get(event);
     if (!set) {
       set = new Set();

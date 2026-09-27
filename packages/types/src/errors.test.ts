@@ -3,7 +3,6 @@ import {
   PluginErrorCode,
   RETRYABLE_ERROR_CODES,
   ERROR_CATEGORIES,
-  ERROR_MESSAGES,
   isRetryable,
   errorCategory,
   errorMessage,
@@ -92,7 +91,9 @@ describe('errors', () => {
 
   describe('errorMessage', () => {
     it('returns human-readable messages', () => {
-      expect(errorMessage(PluginErrorCode.PLUGIN_NOT_FOUND)).toBe('Plugin not found or not registered');
+      expect(errorMessage(PluginErrorCode.PLUGIN_NOT_FOUND)).toBe(
+        'Plugin not found or not registered',
+      );
       expect(errorMessage(PluginErrorCode.TIMEOUT)).toBe('Call timed out');
     });
 

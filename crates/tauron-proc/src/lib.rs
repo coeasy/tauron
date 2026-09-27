@@ -26,7 +26,7 @@ pub mod error;
 pub mod spawner;
 
 pub use error::{ProcError, ProcResult};
-pub use spawner::{CommandSpawner, KillOutcome, ProcessFrameSink, ProcSpawner, SpawnedProc};
+pub use spawner::{CommandSpawner, KillOutcome, ProcSpawner, ProcessFrameSink, SpawnedProc};
 
 // ──────────────────────────────────────────────────────────────────────────
 // 配置类型

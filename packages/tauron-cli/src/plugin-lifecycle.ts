@@ -6,7 +6,7 @@
 
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from 'fs';
 import { createHash } from 'crypto';
-import { join, resolve } from 'path';
+import { join } from 'path';
 import type { CliOptions } from './types.js';
 
 /**
@@ -22,14 +22,15 @@ import type { CliOptions } from './types.js';
  *
  * `port` 这种字段尤其危险：它是**看起来最像真的**的那种编造。
  */
-export function pluginDev(options: CliOptions): CliResult {
+export function pluginDev(_options: CliOptions): CliResult {
   const cwd = process.cwd();
   const manifestPath = join(cwd, 'tauron.plugin.json');
 
   if (!existsSync(manifestPath)) {
     return {
       success: false,
-      message: 'Plugin dev: no tauron.plugin.json found. Run "tauron plugin new" to create a plugin first.',
+      message:
+        'Plugin dev: no tauron.plugin.json found. Run "tauron plugin new" to create a plugin first.',
       data: { ready: false, simulated: true, reason: '未找到插件清单，且本 CLI 没有 dev server' },
     };
   }
@@ -64,7 +65,7 @@ export function pluginDev(options: CliOptions): CliResult {
  * 现在：如实报 `executed: false`，并**不给出** `passed`/`failed` 字段——
  * 不存在的执行结果不该有字段可填。
  */
-export function pluginTest(options: CliOptions): CliResult {
+export function pluginTest(_options: CliOptions): CliResult {
   const cwd = process.cwd();
   const testDir = join(cwd, 'test');
 
@@ -72,11 +73,19 @@ export function pluginTest(options: CliOptions): CliResult {
     return {
       success: false,
       message: 'Plugin test: no test directory found. Run "tauron plugin new" to create tests.',
-      data: { testFiles: [], testDir, executed: false, simulated: true, reason: '没有测试目录，且本 CLI 没有测试运行器' },
+      data: {
+        testFiles: [],
+        testDir,
+        executed: false,
+        simulated: true,
+        reason: '没有测试目录，且本 CLI 没有测试运行器',
+      },
     };
   }
 
-  const testFiles = readdirSync(testDir).filter((f) => f.endsWith('.test.ts') || f.endsWith('.test.js'));
+  const testFiles = readdirSync(testDir).filter(
+    (f) => f.endsWith('.test.ts') || f.endsWith('.test.js'),
+  );
 
   return {
     success: false,
@@ -107,14 +116,15 @@ export function pluginTest(options: CliOptions): CliResult {
  * （无需新依赖），但要处理好 >100 字节路径的 `prefix` 字段与长名回退——
  * 半成品归档比"未实现"更坏（它会带着错误的字节流被签名、被分发）。
  */
-export function pluginPack(options: CliOptions): CliResult {
+export function pluginPack(_options: CliOptions): CliResult {
   const cwd = process.cwd();
   const manifestPath = join(cwd, 'tauron.plugin.json');
 
   if (!existsSync(manifestPath)) {
     return {
       success: false,
-      message: 'Plugin pack: no tauron.plugin.json found. Run "tauron plugin new" to create a plugin first.',
+      message:
+        'Plugin pack: no tauron.plugin.json found. Run "tauron plugin new" to create a plugin first.',
       data: { package: null, files: [], size: 0, simulated: true },
     };
   }
@@ -154,14 +164,15 @@ export function pluginPack(options: CliOptions): CliResult {
  * 非对称签名（Ed25519）不在本包内实现——需要真签名请用
  * `tauron-app plugin sign`（走 `@tauron/market` 的 Ed25519，同生态消费）。
  */
-export function pluginSign(options: CliOptions): CliResult {
+export function pluginSign(_options: CliOptions): CliResult {
   const cwd = process.cwd();
   const manifestPath = join(cwd, 'tauron.plugin.json');
 
   if (!existsSync(manifestPath)) {
     return {
       success: false,
-      message: 'Plugin sign: no tauron.plugin.json found. Run "tauron plugin new" to create a plugin first.',
+      message:
+        'Plugin sign: no tauron.plugin.json found. Run "tauron plugin new" to create a plugin first.',
       data: { package: null, signature: null, simulated: true },
     };
   }
@@ -223,14 +234,15 @@ export function pluginSign(options: CliOptions): CliResult {
  * 真发布路径：由 `@tauron/market` 的客户端能力 + 宿主 `host_market_*` 命令承担
  * （当前适配层那三条也是 simulated 桩，见 `docs/architecture/app-layer-wire.md` §3）。
  */
-export function pluginPublish(options: CliOptions): CliResult {
+export function pluginPublish(_options: CliOptions): CliResult {
   const cwd = process.cwd();
   const manifestPath = join(cwd, 'tauron.plugin.json');
 
   if (!existsSync(manifestPath)) {
     return {
       success: true,
-      message: 'Plugin publish: no tauron.plugin.json found. Run "tauron plugin new" to create a plugin first.',
+      message:
+        'Plugin publish: no tauron.plugin.json found. Run "tauron plugin new" to create a plugin first.',
       data: { registryUrl: null, entry: null },
     };
   }
@@ -275,16 +287,32 @@ export function pluginPublish(options: CliOptions): CliResult {
 }
 
 /**
+ * `tauron.plugin.json` 的**宽松**读取形状。
+ *
+ * 本文件只做「列出要打包的文件」与「求和大小」，不做线形校验（校验归宿主
+ * `PluginManifest::validate`），因此各字段都可选、`entry` 允许任意键。
+ */
+interface PluginManifestJson {
+  id?: string;
+  name?: string;
+  version?: string;
+  author?: string;
+  permissions?: string[];
+  entry?: Record<string, string>;
+  includes?: string[];
+}
+
+/**
  * Helper: collect files for packaging
  */
-function collectFilesForPack(cwd: string, manifest: any): string[] {
+function collectFilesForPack(cwd: string, manifest: PluginManifestJson): string[] {
   const files: string[] = ['tauron.plugin.json'];
 
   // Add entry file
   if (manifest.entry?.main) {
     files.push(manifest.entry.main);
   } else if (manifest.entry) {
-    files.push(...Object.values(manifest.entry).map((v: any) => v as string));
+    files.push(...Object.values(manifest.entry));
   }
 
   // Add files from includes
@@ -337,9 +365,7 @@ function globMatch(cwd: string, pattern: string): string[] {
     }
   } else {
     // Simple glob support for *.ext patterns
-    const dir = pattern.includes('/')
-      ? join(cwd, pattern.split('/').slice(0, -1).join('/'))
-      : cwd;
+    const dir = pattern.includes('/') ? join(cwd, pattern.split('/').slice(0, -1).join('/')) : cwd;
     if (existsSync(dir)) {
       const ext = pattern.split('.').pop() || '';
       const files = readdirSync(dir).filter((f) => f.endsWith(`.${ext}`));

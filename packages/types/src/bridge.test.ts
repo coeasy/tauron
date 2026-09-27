@@ -55,7 +55,9 @@ describe('postMessage bridge protocol', () => {
 
   describe('buildInvokeResultMessage', () => {
     it('creates host-to-plugin invoke-result message', () => {
-      const msg = buildInvokeResultMessage('token-123', 'call-123', { formatted: 'let x: number = 1;' });
+      const msg = buildInvokeResultMessage('token-123', 'call-123', {
+        formatted: 'let x: number = 1;',
+      });
       expect(msg.type).toBe('tauron:bridge');
       expect(msg.direction).toBe('host-to-plugin');
       expect(msg.token).toBe('token-123');

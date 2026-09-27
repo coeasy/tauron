@@ -7,14 +7,7 @@ export type ShellSource = 'local' | 'local-server' | 'remote-url' | 'sub-webview
 
 /** 能力组 */
 export type CapabilityGroup =
-  | 'base'
-  | 'updater'
-  | 'store'
-  | 'shortcut'
-  | 'data'
-  | 'network'
-  | 'security'
-  | 'mobile';
+  'base' | 'updater' | 'store' | 'shortcut' | 'data' | 'network' | 'security' | 'mobile';
 
 /** 插件配置 */
 export interface TauronPluginsConfig {
@@ -343,7 +336,8 @@ export function validateConfig(config: unknown): string[] {
   } else {
     if (!cfg.plugins.local) errors.push('plugins.local is required');
     if (!cfg.plugins.registry) errors.push('plugins.registry is required');
-    if (typeof cfg.plugins.autoUpdate !== 'boolean') errors.push('plugins.autoUpdate must be boolean');
+    if (typeof cfg.plugins.autoUpdate !== 'boolean')
+      errors.push('plugins.autoUpdate must be boolean');
   }
 
   // shell

@@ -1,8 +1,8 @@
 # Prettier 不处理的路径。
 #
-# 说明：本仓库的 TypeScript 代码从未跑过 Prettier，`pnpm format` 会产生
-# 全量重排。CI 里没有 format 门禁（只有 advisory 的 eslint），这里列出的
-# 是**永远**不该被 Prettier 动的部分。
+# 说明：全仓已一次性 `pnpm format` 规范化为 Prettier 风格（原「已知债务」第 2 条），
+# CI 里的 `pnpm format:check` 是**硬门禁**。这里列出的是**永远**不该被
+# Prettier 动的部分。
 
 node_modules/
 **/dist/

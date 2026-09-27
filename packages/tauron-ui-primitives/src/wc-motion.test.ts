@@ -2,12 +2,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import {
-  SplashStore,
-  DEFAULT_SPLASH_CONFIG,
-  type SplashPhase,
-  type SplashConfig,
-} from './wc-motion.js';
+import { SplashStore, DEFAULT_SPLASH_CONFIG } from './wc-motion.js';
 import './wc-motion.js';
 import type { OcSplash } from './wc-motion.js';
 
@@ -165,7 +160,9 @@ describe('SplashStore', () => {
 
     it('订阅者异常不影响其他订阅者', () => {
       let okCount = 0;
-      store.subscribe(() => { throw new Error('test'); });
+      store.subscribe(() => {
+        throw new Error('test');
+      });
       const unsub = store.subscribe(() => okCount++);
       unsub();
       expect(okCount).toBe(1);

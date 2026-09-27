@@ -22,7 +22,7 @@ describe('ACL', () => {
     });
 
     it('every permission has a description', () => {
-      for (const [perm, desc] of Object.entries(PERMISSION_GRANULARITY)) {
+      for (const desc of Object.values(PERMISSION_GRANULARITY)) {
         expect(desc).toBeTruthy();
       }
     });

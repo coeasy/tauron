@@ -25,12 +25,12 @@
 | Rust 测试 | **1221 / 0 failed**（15 crate） | 轮 12 收口 |
 | TS 测试 | **1571 / 0 failed**（97 文件，21 包） | 轮 12 收口 |
 | 跨语言门禁 wire-gate | **125 / 125**（当轮计数口径，见下方口径注） | `packages/tauron-contract-tests/src/wire-gate.test.ts` |
-| 命令面（本方案新增 `host_capabilities` 后） | **60 = 底座 39 + 插件运行时 21**（0.4 实测复核，含 0.4-A1 三命令与 0.4-W3 对账命令；`plugin-install` feature 另注册 2 条） | `tauron_substrate_handler!` / `tauron_plugin_handler!` |
+| 命令面（本方案新增 `host_capabilities` 后） | **78 = 底座 57 + 插件运行时 21**（0.4-A1 三命令、0.4-W3 对账命令，以及 R9 五域 menu/tray/fs/http/updater 与品牌/主题接通；`plugin-install` feature 另注册 2 条且默认开启 → 80 条） | `tauron_substrate_handler!` / `tauron_plugin_handler!` |
 | 能力表 | 16（13 插件面 + 3 特权） | `authz::COMMANDS` / `capabilities.ts` |
 | 底座独立装配 | ✅ 有编译证据 + 功能证据 | `substrate-only` feature + `substrate_only_host_is_functionally_complete` |
 
 > **数字口径**：上表是**轮 12 收口时**的快照，作为本方案的比较基准，不随后续改动刷新。
-> 当前实测（2026-09-27，发布收口三轮审计之后）：TS **1701**（`pnpm -r test` 实跑，101 文件）；
+> 当前实测（2026-09-27，发布收口三轮审计之后）：TS **1729**（`pnpm -r test` 实跑，101 文件）；
 > Rust 执行结果 **1264 passed / 0 failed**（`cargo test --workspace --locked --lib --tests`，
 > 15 suite），源码 `#[test]` 声明数 **1299**——**声明数不是执行结果**，feature 门控
 > （`tauron-adapter` / `tauron-shell` 的 `tauri` feature）另计，真实执行结果以 CI 为准；
@@ -121,13 +121,13 @@
 > |---|---|---|
 > | M-1 无 install 入口 | 🔴 | **已实现**：`host_registry_install` / `_preview` 存在（`tauri.rs` 的 `#[cfg(feature = "plugin-install")]` 块，注册点 `:2506-2508`），且该 feature **已进 `tauron-adapter` 默认特性**（`Cargo.toml:21`，1.0-W6）→ 默认构建**可达**；`plugin_install_dir` 未配置时仍如实不可用（`lib.rs:226-228`）。TS 侧能力表曾无条件列出（误报为已注册），已由 0.4-A2 修 |
 > | M-2 无任何 per-plugin 配额 | 🔴 | **已接线 4 类**：pending 100/插件（`registry.rs:33`）、stream 32/插件（`stream.rs:113`）、订阅 256/插件（`eventbus.rs:52`）、通知 64/插件（`tauron-notify/src/lib.rs:161`） |
-> | S-6 无能力协商 | 🟠 | **已实现** `host_capabilities`（`lib.rs:382`），但 `families` / `unsupported` 域名仍硬编码（`lib.rs:396-415`） |
+> | S-6 无能力协商 | 🟠 | **已实现且已推导**：`host_capabilities` 在，`families` / `unsupported` 已改为**由各域 sink 运行期可用性推导**、两列互斥（不再是硬编码清单），配 `host_capabilities_derives_domains_from_injected_sinks` 单测 |
 > | S-3 桩命令谎报 | 🔴 | **已修**：dialog / clipboard / brand / market 全部返回有类型的 `UnsupportedBody` / `simulated`，无裸成功 |
 > | S-4 剪贴板 | 🟠 | 保持（进程内回退，已诚实标注 `fallback: in-process-buffer`） |
 > | S-1 传输层 | 🔴 | `MemoryTransport` 已有但**不完整**（无流式内核、无取件泵）→ S1 验收条件实际未达成 |
-> | S-2 命令面缺 5 域 | 🔴 | **未变**：menu / tray / fs / http / updater 仍全仓 0 命中 |
+> | S-2 命令面缺 5 域 | 🔴 | **已补**：menu（3）/ tray（3）/ fs（6）/ http（1）/ updater（2）共 18 条命令已进底座命令面；menu/tray 在 `tauri` feature 下真实现，fs 是 `std::fs`（允许根内），updater 接 `tauron-distribute`，http 诚实降级为可注入 `HttpSink` |
 > | S-5 `tauron-acl` 孤儿 | 🟠 | **部分变化（2026-09-27 复核）**：`tauron-acl` **已在** `crates/tauron-adapter/Cargo.toml` 依赖表内，仅 `plugin-install` feature 下被调；但 `EventBus::approve` 仍**无任何线上入口**（调用点全在单测），授予/审批链仍未闭环 |
-> | S-8 7 个孤儿 crate | 🟡 | **变化（2026-09-27 复核）**：`tauron-acl` / `tauron-market` **已非孤儿**（在 `tauron-adapter` 依赖表内）；真孤儿为 `brand` / `theme` / `wasm` / `distribute` / `shell`（`tauron-shell` 属有意保留的框架层门面） |
+> | S-8 7 个孤儿 crate | 🟡 | **已接通（2026-09-27 复核）**：`brand`（`host_brand_info` 真实现，读环境变量来源）/ `theme`（`SubstrateState.themes` + `host_theme_*`）/ `distribute`（updater 域）/ `wasm`（`wasm_delivery.rs` 真跑校验与崩溃预算）/ `shell`（编译期证据 + 示例真实依赖边）全部不再是孤儿；另有 `acl` / `market` 早已在 `tauron-adapter` 依赖表内 |
 > | S-7 / S-9 / M-3~M-10 | — | **未变**（S-9 的 `relaunch` 已由轮 11 修正，见 `auto-update-client.ts` 单测） |
 >
 > **新发现的断链不在本节**（调用投递不存在、框架层链路死、进程插件不能通信等），
@@ -209,7 +209,7 @@ Rust 侧配套：把 `ChannelSink` 的 `tauri::Wry` 换成 `trait FrameSink`（`
 - 「`tauri::Wry` 只允许出现在 `ChannelSink` 实现块内」
 - 「非 Tauri 传输必须存在一个可编译的替代实现」（新增 `MemoryTransport` 参考实现 + 编译期断言）
 
-**验证**：用 `MemoryTransport`（进程内直通，无 Tauri）跑通档 1 底座 39 条命令的等价路径；
+**验证**：用 `MemoryTransport`（进程内直通，无 Tauri）跑通档 1 底座 57 条命令的等价路径；
 `HostClient` 在 Tauri 与 Memory 两种传输下行为逐项相等。
 
 **影响**：Electron / 纯 Web / 移动 WebView / Node CLI 宿主只需实现 6 个方法即可接入整个底座，
@@ -366,8 +366,10 @@ TS 侧 `Backend.capabilities()` 已有字段，改为**启动时拉取一次并�
 
 **门禁**：「`host_capabilities` 的 `commands` 集合 == 两个 handler 宏的并集（按当前装配形态）」。
 
-**验证**：档 1 装配返回 39 条且 `pluginRuntime: false`；档 3 返回 60 条且 `true`；
-注入/不注入 provider 时 `unsupported` 相应变化。
+**验证**：档 1 装配返回 57 条且 `pluginRuntime: false`；档 3 返回 78 条且 `true`；
+`families` / `unsupported` 由各域 sink 的运行期可用性**推导**（两列互斥），
+注入/不注入 provider 时同一域在两列之间迁移——由单测
+`host_capabilities_derives_domains_from_injected_sinks` 锁死。
 
 **影响**：底座宿主第一次能"自述能力"，UI 可按底座形态自适应。**量级：小（0.5 轮）**。
 

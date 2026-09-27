@@ -15,7 +15,13 @@
 import { runDoctor, formatDoctorReport } from './doctor.js';
 import { createApp, IMPLEMENTED_TEMPLATES } from './scaffold.js';
 import { pluginNew } from './plugin.js';
-import { pluginDev, pluginTest, pluginPack, pluginSign, pluginPublish } from './plugin-lifecycle.js';
+import {
+  pluginDev,
+  pluginTest,
+  pluginPack,
+  pluginSign,
+  pluginPublish,
+} from './plugin-lifecycle.js';
 import { writeGeneratedFiles } from './scaffold-writer.js';
 import type { AppConfig, PluginConfig, CliOptions, PluginType } from './types.js';
 
@@ -63,7 +69,10 @@ function parseTemplate(args: string[]): { template: AppConfig['template'] } | { 
 /**
  * 执行 CLI 命令
  */
-export async function runCli(args: string[], options: CliOptions = { verbose: false, dryRun: false, force: false }): Promise<CliResult> {
+export async function runCli(
+  args: string[],
+  options: CliOptions = { verbose: false, dryRun: false, force: false },
+): Promise<CliResult> {
   if (args.length === 0) {
     return { success: false, message: 'No command specified. Use "tauron --help" for usage.' };
   }
@@ -86,14 +95,17 @@ export async function runCli(args: string[], options: CliOptions = { verbose: fa
     case '-v':
       return { success: true, message: 'tauron v0.1.0' };
     default:
-      return { success: false, message: `Unknown command: ${command}. Use "tauron --help" for usage.` };
+      return {
+        success: false,
+        message: `Unknown command: ${command}. Use "tauron --help" for usage.`,
+      };
   }
 }
 
 /**
  * doctor 命令
  */
-function runDoctorCommand(options: CliOptions): CliResult {
+function runDoctorCommand(_options: CliOptions): CliResult {
   const report = runDoctor();
   return { success: true, message: formatDoctorReport(report), data: report };
 }
@@ -104,7 +116,10 @@ function runDoctorCommand(options: CliOptions): CliResult {
 function createCommand(args: string[], options: CliOptions): CliResult {
   const name = args[0];
   if (!name || name.startsWith('-')) {
-    return { success: false, message: 'Usage: tauron create <app-name> [--template vanilla|react]' };
+    return {
+      success: false,
+      message: 'Usage: tauron create <app-name> [--template vanilla|react]',
+    };
   }
 
   const parsed = parseTemplate(args);
@@ -167,7 +182,11 @@ function finalizeScaffold(
 /**
  * plugin 命令
  */
-function pluginCommand(subcommand: string | undefined, args: string[], options: CliOptions): CliResult {
+function pluginCommand(
+  subcommand: string | undefined,
+  args: string[],
+  options: CliOptions,
+): CliResult {
   if (!subcommand) {
     return { success: false, message: 'Usage: tauron plugin <new|dev|test|pack|sign|publish>' };
   }
@@ -217,7 +236,10 @@ function parsePluginType(args: string[]): { type: PluginType } | { error: string
 function pluginNewCommand(args: string[], options: CliOptions): CliResult {
   const name = args[0];
   if (!name) {
-    return { success: false, message: 'Usage: tauron plugin new <plugin-name> [--type js|process|wasm]' };
+    return {
+      success: false,
+      message: 'Usage: tauron plugin new <plugin-name> [--type js|process|wasm]',
+    };
   }
 
   const parsed = parsePluginType(args);

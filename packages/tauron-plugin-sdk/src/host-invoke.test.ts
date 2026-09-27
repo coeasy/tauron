@@ -30,7 +30,7 @@ function createFakeBridge() {
   const deliver = (eventName: string, data: unknown): void => {
     for (const h of handlers.get(eventName) ?? []) h(data);
   };
-  const handlerCount = (eventName: string): number => (handlers.get(eventName)?.size ?? 0);
+  const handlerCount = (eventName: string): number => handlers.get(eventName)?.size ?? 0;
   return { bridge: bridge as unknown as PluginBridge, sent, deliver, handlerCount };
 }
 
@@ -43,7 +43,9 @@ describe('callPluginMethod', () => {
   it('发送 __invoke:<method> 事件，payload 含 callId 与 args', () => {
     const { bridge, sent } = createFakeBridge();
     // 不等待响应：显式吞掉超时 reject，避免 unhandled rejection 干扰测试
-    void callPluginMethod(bridge, 'format', { code: 'a  b' }, { timeoutMs: 1000 }).catch(() => undefined);
+    void callPluginMethod(bridge, 'format', { code: 'a  b' }, { timeoutMs: 1000 }).catch(
+      () => undefined,
+    );
 
     expect(sent).toHaveLength(1);
     expect(sent[0]!.eventName).toBe('__invoke:format');
@@ -67,7 +69,10 @@ describe('callPluginMethod', () => {
     const p = callPluginMethod(bridge, 'fail', null);
     const callId = (sent[0]!.payload as { callId: string }).callId;
 
-    deliver(`__result:${callId}`, { ok: false, error: { code: 'E_METHOD_ERROR', message: 'boom' } });
+    deliver(`__result:${callId}`, {
+      ok: false,
+      error: { code: 'E_METHOD_ERROR', message: 'boom' },
+    });
     await expect(p).rejects.toThrow('E_METHOD_ERROR: boom');
   });
 
@@ -163,7 +168,12 @@ describe('callPluginMethod', () => {
       for (const h of pluginMessageHandlers) h({ data: msg });
     };
 
-    const result = await callPluginMethod<string>(bridge, 'greet', { who: 'world' }, { timeoutMs: 2000 });
+    const result = await callPluginMethod<string>(
+      bridge,
+      'greet',
+      { who: 'world' },
+      { timeoutMs: 2000 },
+    );
     expect(result).toBe('hello world');
     expect(sent[0]!.eventName).toBe('__invoke:greet');
 

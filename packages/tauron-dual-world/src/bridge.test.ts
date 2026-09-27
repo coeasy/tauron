@@ -139,9 +139,7 @@ describe('createBridge', () => {
   it('allowedHostFunctions 白名单非空时拒绝未列出的函数', () => {
     const bridge = createBridge({ allowedHostFunctions: ['fs.read'] });
 
-    expect(() => bridge.registerHostFunction('shell.exec', async () => {})).toThrow(
-      /allowlist/,
-    );
+    expect(() => bridge.registerHostFunction('shell.exec', async () => {})).toThrow(/allowlist/);
     expect(() => bridge.registerHostFunction('fs.read', async () => {})).not.toThrow();
   });
 

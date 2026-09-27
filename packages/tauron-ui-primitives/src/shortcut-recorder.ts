@@ -60,8 +60,7 @@ export interface ShortcutRecorderSnapshot {
 
 /** 快捷键录入操作结果。 */
 export type ShortcutRecorderActionResult =
-  | { ok: true; shortcut?: string }
-  | { ok: false; code: string; message: string };
+  { ok: true; shortcut?: string } | { ok: false; code: string; message: string };
 
 // ──────────────────────────────────────────────────────────────────────────
 // ShortcutRecorderStore
@@ -236,7 +235,11 @@ export class ShortcutRecorderStore {
         current: this._config.current,
         error: `至少需要 ${this._config.minKeys} 个键的组合`,
       });
-      return { ok: false, code: 'E_TOO_FEW_KEYS', message: `至少需要 ${this._config.minKeys} 个键` };
+      return {
+        ok: false,
+        code: 'E_TOO_FEW_KEYS',
+        message: `至少需要 ${this._config.minKeys} 个键`,
+      };
     }
 
     // 检查最大按键数
@@ -364,15 +367,15 @@ export class ShortcutRecorderStore {
     // 特殊键名映射
     const specialKeys: Record<string, string> = {
       ' ': 'Space',
-      'Enter': 'Enter',
-      'Escape': 'Esc',
-      'Backspace': 'Backspace',
-      'Tab': 'Tab',
-      'Delete': 'Delete',
-      'ArrowUp': 'Up',
-      'ArrowDown': 'Down',
-      'ArrowLeft': 'Left',
-      'ArrowRight': 'Right',
+      Enter: 'Enter',
+      Escape: 'Esc',
+      Backspace: 'Backspace',
+      Tab: 'Tab',
+      Delete: 'Delete',
+      ArrowUp: 'Up',
+      ArrowDown: 'Down',
+      ArrowLeft: 'Left',
+      ArrowRight: 'Right',
     };
     if (specialKeys[key]) {
       return specialKeys[key];

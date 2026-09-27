@@ -17,12 +17,7 @@ export {
   translate_at_boundary,
   UNWIRED_BOUNDARIES,
 } from './errors.js';
-export type {
-  BoundaryTranslation,
-  HostBoundary,
-  HostErrorCode,
-  HostErrorShape,
-} from './errors.js';
+export type { BoundaryTranslation, HostBoundary, HostErrorCode, HostErrorShape } from './errors.js';
 
 export type { Backend, ChannelPort, Principal, Unlisten } from './backend.js';
 export { MockBackend } from './backend.js';
@@ -84,6 +79,20 @@ export type {
   RuntimeHealth,
   ResourceStats,
   ReapStats,
+  MenuItemSpec,
+  MenuSpec,
+  MenuOutcome,
+  TraySpec,
+  TrayOutcome,
+  FsEntry,
+  FsStat,
+  FsReadResult,
+  FsWriteResult,
+  HttpRequestSpec,
+  HttpResponseSpec,
+  UpdaterCheckOutcome,
+  UpdaterStatus,
+  ThemeContribute,
 } from './shell-client.js';
 
 export { ShellController } from './shell-controller.js';
@@ -115,12 +124,26 @@ export { WindowState, createWindowState } from './window-state.js';
 export type { WindowStateConfig, WindowStateData } from './window-state.js';
 
 export { LazyPluginLoader, createLazyPluginLoader } from './lazy-plugin-loader.js';
-export type { LazyPluginDescriptor, PluginLoadStatus, PluginCacheEntry } from './lazy-plugin-loader.js';
+export type {
+  LazyPluginDescriptor,
+  PluginLoadStatus,
+  PluginCacheEntry,
+} from './lazy-plugin-loader.js';
 
 export { AutoUpdateClient, createAutoUpdateClient } from './auto-update-client.js';
-export type { AutoUpdateConfig, UpdateInfo, UpdateStatus, DownloadProgress } from './auto-update-client.js';
+export type {
+  AutoUpdateConfig,
+  UpdateInfo,
+  UpdateStatus,
+  DownloadProgress,
+} from './auto-update-client.js';
 
-export { DialogClient, createDialogClient, isUnsupportedBody, isDegradedValue } from './dialog-client.js';
+export {
+  DialogClient,
+  createDialogClient,
+  isUnsupportedBody,
+  isDegradedValue,
+} from './dialog-client.js';
 export type {
   FileFilter,
   OpenFileOptions,
@@ -135,11 +158,7 @@ export type {
 export { DeepLinkClient, createDeepLinkClient } from './deep-link-client.js';
 export type { DeepLinkConfig, DeepLinkEvent } from './deep-link-client.js';
 
-export {
-  CHANNEL_KINDS,
-  MAX_QUEUE,
-  OVERFLOW_STREAK_LIMIT,
-} from './channels.js';
+export { CHANNEL_KINDS, MAX_QUEUE, OVERFLOW_STREAK_LIMIT } from './channels.js';
 export type {
   BusFrame,
   BusPublishResult,
@@ -170,9 +189,7 @@ export type {
   SignedGrantSet,
 } from './grants.js';
 
-export {
-  TOPIC_MAX_LENGTH,
-} from './events.js';
+export { TOPIC_MAX_LENGTH } from './events.js';
 export type {
   EventFrame,
   EventSelector,
@@ -188,12 +205,7 @@ export type {
 
 // R5：流式帧（唯一词表，与 Rust `tauron_host::stream::StreamFrame` 同构）。
 export { STREAM_KINDS, isStreamFrame, isTerminalKind, parseStreamKind } from './stream.js';
-export type {
-  StreamFrame,
-  StreamHandle,
-  StreamKind,
-  StreamWriteInput,
-} from './stream.js';
+export type { StreamFrame, StreamHandle, StreamKind, StreamWriteInput } from './stream.js';
 
 // R5：传输无关的宿主 RPC 面。
 export { toHostRpc } from './rpc.js';
@@ -223,4 +235,9 @@ export {
   minimalConfig,
   templateConfig,
 } from './client-config.js';
-export type { ClientConfig, PluginFilter, RegistryConfigOverride, LogLevel } from './client-config.js';
+export type {
+  ClientConfig,
+  PluginFilter,
+  RegistryConfigOverride,
+  LogLevel,
+} from './client-config.js';

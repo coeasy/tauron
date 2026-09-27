@@ -108,14 +108,10 @@ impl CallDelivery for JsCallDelivery {
             bus.deliver_inbound(&call.target, &topic, payload)?
         };
         if delivered > 0 {
-            Ok(DeliveryReceipt {
-                delivered: true,
-                reason: None,
-            })
+            Ok(DeliveryReceipt { delivered: true, reason: None })
         } else {
             Ok(DeliveryReceipt {
-                delivered: false,
-                reason: Some(format!("无法投递到 `{topic}`")),
+                delivered: false, reason: Some(format!("无法投递到 `{topic}`"))
             })
         }
     }
@@ -142,10 +138,7 @@ impl CallDelivery for UnwiredDelivery {
     }
 
     fn settle(&self, _call_id: &str, _outcome: CallOutcome) -> HostResult<PendingCall> {
-        Err(HostError::new(
-            ErrorCode::E_CALL_NOT_FOUND,
-            "unwired 投递实现无法结算调用",
-        ))
+        Err(HostError::new(ErrorCode::E_CALL_NOT_FOUND, "unwired 投递实现无法结算调用"))
     }
 }
 
@@ -154,10 +147,7 @@ pub fn select_delivery(
     kind: DeliveryKind,
     deliveries: &std::collections::HashMap<DeliveryKind, Box<dyn CallDelivery>>,
 ) -> &dyn CallDelivery {
-    deliveries
-        .get(&kind)
-        .map(|b| b.as_ref())
-        .unwrap_or(&UNWIRED)
+    deliveries.get(&kind).map(|b| b.as_ref()).unwrap_or(&UNWIRED)
 }
 
 /// 全局共享的未装配投递实现（无任何通路时返回 `Unsupported`）。
@@ -168,8 +158,8 @@ mod tests {
     use super::*;
     use crate::eventbus::ChannelKind;
     use crate::manifest::{
-        Contributes, EntrySpec, EventDecl, EventsDecl, Permission, PermissionEntry, PermissionIndex,
-        PluginId, PluginManifest, PluginType, Risk,
+        Contributes, EntrySpec, EventDecl, EventsDecl, Permission, PermissionEntry,
+        PermissionIndex, PluginId, PluginManifest, PluginType, Risk,
     };
 
     fn index() -> PermissionIndex {
@@ -224,7 +214,13 @@ mod tests {
 
         // 宿主（caller="main"）→ Js 插件：登记 + 投递。
         let call = registry
-            .call_begin_cross("main", "com.example.b", "main", "doThing", serde_json::json!({"x":1}))
+            .call_begin_cross(
+                "main",
+                "com.example.b",
+                "main",
+                "doThing",
+                serde_json::json!({"x":1}),
+            )
             .expect("目标可用，登记应成功");
         let receipt = delivery.deliver(&call).expect("投递不应出错");
         assert!(receipt.delivered, "Js 投递应有通路：{:?}", receipt.reason);
@@ -242,18 +238,18 @@ mod tests {
 
         // 执行方回填 → 结算；重复回填被拒（E_CALL_ALREADY_SETTLED）。
         let settled = delivery
-            .settle(&call.call_id, CallOutcome {
-                ok: true,
-                result: Some(serde_json::json!({"done": true})),
-                error_code: None,
-            })
+            .settle(
+                &call.call_id,
+                CallOutcome {
+                    ok: true,
+                    result: Some(serde_json::json!({"done": true})),
+                    error_code: None,
+                },
+            )
             .expect("结算应成功");
         assert_eq!(settled.state, crate::registry::CallState::Settled);
-        let err = delivery.settle(&call.call_id, CallOutcome {
-            ok: true,
-            result: None,
-            error_code: None,
-        });
+        let err = delivery
+            .settle(&call.call_id, CallOutcome { ok: true, result: None, error_code: None });
         assert_eq!(err.unwrap_err().code, crate::error::ErrorCode::E_CALL_ALREADY_SETTLED);
     }
 
@@ -280,6 +276,8 @@ mod tests {
         let receipt = delivery.deliver(&call).unwrap();
         assert!(!receipt.delivered);
         assert!(receipt.reason.is_some(), "未投递时 reason 必非空");
-        assert!(delivery.settle("c1", CallOutcome { ok: true, result: None, error_code: None }).is_err());
+        assert!(delivery
+            .settle("c1", CallOutcome { ok: true, result: None, error_code: None })
+            .is_err());
     }
 }

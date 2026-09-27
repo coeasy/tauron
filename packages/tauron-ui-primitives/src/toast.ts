@@ -71,9 +71,7 @@ export interface ToastSnapshot {
 }
 
 /** Toast 操作结果。 */
-export type ToastActionResult =
-  | { ok: true }
-  | { ok: false; code: string; message: string };
+export type ToastActionResult = { ok: true } | { ok: false; code: string; message: string };
 
 // ──────────────────────────────────────────────────────────────────────────
 // ToastStore
@@ -176,7 +174,7 @@ export class ToastStore {
       unread: false,
       createdAt: Date.now(),
       dismissed: false,
-      autoDismiss: item.autoDismiss ?? (item.level !== 'error'),
+      autoDismiss: item.autoDismiss ?? item.level !== 'error',
       timeout: item.timeout ?? this._config.defaultTimeout,
       ...(item.pluginId !== undefined ? { pluginId: item.pluginId } : {}),
     };

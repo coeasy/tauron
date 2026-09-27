@@ -92,9 +92,15 @@ export interface NativePluginManifest {
 export function createNativePluginManifest(config: PluginConfig): NativePluginManifest {
   const entry: NativePluginManifest['entry'] = {};
   switch (config.pluginType) {
-    case 'js': entry.js = 'src/index.js'; break;
-    case 'process': entry.sidecar = `bin/${config.id.replace(/[^a-zA-Z0-9]/g, '_')}.exe`; break;
-    case 'wasm': entry.wasm = 'dist/plugin.wasm'; break;
+    case 'js':
+      entry.js = 'src/index.js';
+      break;
+    case 'process':
+      entry.sidecar = `bin/${config.id.replace(/[^a-zA-Z0-9]/g, '_')}.exe`;
+      break;
+    case 'wasm':
+      entry.wasm = 'dist/plugin.wasm';
+      break;
   }
   return {
     id: config.id,
@@ -172,7 +178,11 @@ export interface PublishResult {
 
 // ── 常量 ──
 
-export const SUPPORTED_SIGN_ALGORITHMS: readonly SignAlgorithm[] = ['ed25519', 'rsa-2048', 'rsa-4096'];
+export const SUPPORTED_SIGN_ALGORITHMS: readonly SignAlgorithm[] = [
+  'ed25519',
+  'rsa-2048',
+  'rsa-4096',
+];
 export const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 export const MAX_FILE_COUNT = 2000;
 export const MAX_TOTAL_SIZE = 512 * 1024 * 1024; // 512MB unpacked per package
@@ -218,13 +228,23 @@ export function validateFiles(files: PluginFileInfo[]): PluginFileInfo[] {
       throw new Error('文件路径不能为空');
     }
     if (
-      file.path.includes('\\') || file.path.includes('\0') || file.path.includes(':') ||
-      file.path.startsWith('/') || /^[a-zA-Z]:/.test(file.path) ||
+      file.path.includes('\\') ||
+      file.path.includes('\0') ||
+      file.path.includes(':') ||
+      file.path.startsWith('/') ||
+      /^[a-zA-Z]:/.test(file.path) ||
       path.posix.normalize(file.path) !== file.path ||
-      file.path.split('/').some((part) =>
-        part === '..' || part === '.' || part === '' || /[<>"|?*\x00-\x1f]/.test(part) ||
-        /[ .]$/.test(part) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)
-      )
+      file.path
+        .split('/')
+        .some(
+          (part) =>
+            part === '..' ||
+            part === '.' ||
+            part === '' ||
+            /[<>"|?*\x00-\x1f]/.test(part) ||
+            /[ .]$/.test(part) ||
+            /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part),
+        )
     ) {
       throw new Error(`文件路径不是安全的相对路径：${file.path}`);
     }
@@ -269,11 +289,21 @@ export function frameworkMatchesRange(version: string, range: string): boolean {
     const [vMajor = 0, vMinor = 0, vPatch = 0] = version.split('.').map((n) => parseInt(n, 10));
     const cmp = compareVersions([vMajor, vMinor, vPatch], [rMajor, rMinor, rPatch]);
     switch (op) {
-      case '>=': if (cmp < 0) return false; break;
-      case '<=': if (cmp > 0) return false; break;
-      case '>': if (cmp <= 0) return false; break;
-      case '<': if (cmp >= 0) return false; break;
-      case '=': if (cmp !== 0) return false; break;
+      case '>=':
+        if (cmp < 0) return false;
+        break;
+      case '<=':
+        if (cmp > 0) return false;
+        break;
+      case '>':
+        if (cmp <= 0) return false;
+        break;
+      case '<':
+        if (cmp >= 0) return false;
+        break;
+      case '=':
+        if (cmp !== 0) return false;
+        break;
       case '^': // caret: >=version, <next major
         if (cmp < 0) return false;
         if (vMajor > rMajor) return false;
@@ -400,7 +430,12 @@ export function collectPluginFiles(dir: string, excludePaths: string[] = []): Pl
         if (!SKIPPED_DIRS.includes(entry.name)) walk(abs);
         continue;
       }
-      if (!entry.isFile() || excluded.has(path.resolve(abs)) || /\.tpkg(?:\.sig)?$/i.test(entry.name)) continue;
+      if (
+        !entry.isFile() ||
+        excluded.has(path.resolve(abs)) ||
+        /\.tpkg(?:\.sig)?$/i.test(entry.name)
+      )
+        continue;
       const content = fs.readFileSync(abs);
       files.push({
         path: path.relative(root, abs).split(path.sep).join('/'),
@@ -440,7 +475,7 @@ const crcTable = (() => {
   const table = new Uint32Array(256);
   for (let n = 0; n < 256; n++) {
     let c = n;
-    for (let k = 0; k < 8; k++) c = (c & 1) ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
     table[n] = c >>> 0;
   }
   return table;
@@ -457,14 +492,21 @@ export function createPluginArchive(config: ResolvedPackConfig): Buffer {
   const sourceFiles = config.files.filter((file) => file.path !== 'manifest.json');
   const files = sourceFiles.length === 0 ? [] : validateFiles(sourceFiles);
   const sourceManifest = config.pluginManifest ?? createNativePluginManifest(config.pluginConfig);
-  const manifestBytes = Buffer.from(`${JSON.stringify({
-    ...sourceManifest,
-    id: config.pluginConfig.id,
-    name: config.pluginConfig.name,
-    version: config.pluginConfig.version,
-    type: config.pluginConfig.pluginType,
-    permissions: [...config.pluginConfig.permissions],
-  }, null, 2)}\n`, 'utf8');
+  const manifestBytes = Buffer.from(
+    `${JSON.stringify(
+      {
+        ...sourceManifest,
+        id: config.pluginConfig.id,
+        name: config.pluginConfig.name,
+        version: config.pluginConfig.version,
+        type: config.pluginConfig.pluginType,
+        permissions: [...config.pluginConfig.permissions],
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  );
   files.unshift({
     path: 'manifest.json',
     size: manifestBytes.byteLength,
@@ -481,7 +523,10 @@ export function createPluginArchive(config: ResolvedPackConfig): Buffer {
     const root = path.resolve(config.dir) + path.sep;
     if (!abs.startsWith(root)) throw new Error(`文件路径越出插件目录：${file.path}`);
     const data = fs.readFileSync(abs);
-    if (data.byteLength !== file.size || crypto.createHash('sha256').update(data).digest('hex') !== file.hash) {
+    if (
+      data.byteLength !== file.size ||
+      crypto.createHash('sha256').update(data).digest('hex') !== file.hash
+    ) {
       throw new Error(`文件在扫描后发生变化：${file.path}`);
     }
     const name = Buffer.from(file.path, 'utf8');
@@ -536,7 +581,10 @@ export function readPluginArchive(archive: Buffer): PluginFileInfo[] {
   const minEnd = Math.max(0, archive.length - 22 - 0xffff);
   let endOffset = -1;
   for (let i = archive.length - 22; i >= minEnd; i--) {
-    if (archive.readUInt32LE(i) === 0x06054b50) { endOffset = i; break; }
+    if (archive.readUInt32LE(i) === 0x06054b50) {
+      endOffset = i;
+      break;
+    }
   }
   if (endOffset < 0) throw new Error('安装包 ZIP 目录损坏');
   if (archive.readUInt16LE(endOffset + 4) !== 0 || archive.readUInt16LE(endOffset + 6) !== 0) {
@@ -550,13 +598,15 @@ export function readPluginArchive(archive: Buffer): PluginFileInfo[] {
   let cursor = centralOffset;
   const centralEnd = cursor + centralSize;
   const commentLength = archive.readUInt16LE(endOffset + 20);
-  if (endOffset + 22 + commentLength !== archive.length || centralEnd !== endOffset) throw new Error('安装包 ZIP 目录边界错误');
+  if (endOffset + 22 + commentLength !== archive.length || centralEnd !== endOffset)
+    throw new Error('安装包 ZIP 目录边界错误');
   const files: PluginFileInfo[] = [];
   const names = new Set<string>();
   const ranges: Array<[number, number]> = [];
   let totalSize = 0;
   for (let i = 0; i < count; i++) {
-    if (cursor + 46 > centralEnd || archive.readUInt32LE(cursor) !== 0x02014b50) throw new Error('安装包中央目录损坏');
+    if (cursor + 46 > centralEnd || archive.readUInt32LE(cursor) !== 0x02014b50)
+      throw new Error('安装包中央目录损坏');
     const flags = archive.readUInt16LE(cursor + 8);
     const method = archive.readUInt16LE(cursor + 10);
     const expectedCrc = archive.readUInt32LE(cursor + 16);
@@ -569,22 +619,27 @@ export function readPluginArchive(archive: Buffer): PluginFileInfo[] {
     if (archive.readUInt16LE(cursor + 34) !== 0) throw new Error('不支持多卷 ZIP 安装包');
     const rawName = archive.subarray(cursor + 46, cursor + 46 + nameLength);
     let name: string;
-    try { name = new TextDecoder('utf-8', { fatal: true }).decode(rawName); }
-    catch { throw new Error('安装包包含无效 UTF-8 路径'); }
+    try {
+      name = new TextDecoder('utf-8', { fatal: true }).decode(rawName);
+    } catch {
+      throw new Error('安装包包含无效 UTF-8 路径');
+    }
     validateFiles([{ path: name, size, hash: '0'.repeat(64) }]);
     const collisionKey = name.toLowerCase();
     if (names.has(collisionKey)) throw new Error(`安装包包含重复或大小写冲突路径：${name}`);
     names.add(collisionKey);
-    if ((flags & ~0x0800) !== 0 || (method !== 0 && method !== 8)) throw new Error(`安装包使用不支持的 ZIP 标志或压缩方式：${name}`);
+    if ((flags & ~0x0800) !== 0 || (method !== 0 && method !== 8))
+      throw new Error(`安装包使用不支持的 ZIP 标志或压缩方式：${name}`);
     const madeBy = archive.readUInt16LE(cursor + 4);
     const externalAttributes = archive.readUInt32LE(cursor + 38);
-    if ((madeBy >>> 8) === 3) {
+    if (madeBy >>> 8 === 3) {
       const fileType = (externalAttributes >>> 16) & 0xf000;
       if (fileType !== 0 && fileType !== 0x8000) throw new Error(`安装包包含非普通文件：${name}`);
     }
     totalSize += size;
     if (totalSize > MAX_TOTAL_SIZE) throw new Error(`解包总大小超过上限 ${MAX_TOTAL_SIZE}`);
-    if (localOffset + 30 > centralOffset || archive.readUInt32LE(localOffset) !== 0x04034b50) throw new Error(`安装包本地条目损坏：${name}`);
+    if (localOffset + 30 > centralOffset || archive.readUInt32LE(localOffset) !== 0x04034b50)
+      throw new Error(`安装包本地条目损坏：${name}`);
     const localFlags = archive.readUInt16LE(localOffset + 6);
     const localMethod = archive.readUInt16LE(localOffset + 8);
     const localCrc = archive.readUInt32LE(localOffset + 14);
@@ -593,24 +648,33 @@ export function readPluginArchive(archive: Buffer): PluginFileInfo[] {
     const localNameLength = archive.readUInt16LE(localOffset + 26);
     const localExtraLength = archive.readUInt16LE(localOffset + 28);
     if (
-      localFlags !== flags || localMethod !== method || localCrc !== expectedCrc ||
-      localCompressed !== compressedSize || localSize !== size ||
+      localFlags !== flags ||
+      localMethod !== method ||
+      localCrc !== expectedCrc ||
+      localCompressed !== compressedSize ||
+      localSize !== size ||
       !archive.subarray(localOffset + 30, localOffset + 30 + localNameLength).equals(rawName)
-    ) throw new Error(`安装包条目头不匹配：${name}`);
+    )
+      throw new Error(`安装包条目头不匹配：${name}`);
     const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
     const dataEnd = dataOffset + compressedSize;
     if (dataEnd > centralOffset) throw new Error(`安装包条目越界：${name}`);
     ranges.push([localOffset, dataEnd]);
     const compressed = archive.subarray(dataOffset, dataEnd);
-    const data = method === 8 ? inflateRawSync(compressed, { maxOutputLength: MAX_TOTAL_SIZE }) : Buffer.from(compressed);
-    if (data.length !== size || crc32(data) !== expectedCrc) throw new Error(`安装包条目校验失败：${name}`);
+    const data =
+      method === 8
+        ? inflateRawSync(compressed, { maxOutputLength: MAX_TOTAL_SIZE })
+        : Buffer.from(compressed);
+    if (data.length !== size || crc32(data) !== expectedCrc)
+      throw new Error(`安装包条目校验失败：${name}`);
     files.push({ path: name, size, hash: crypto.createHash('sha256').update(data).digest('hex') });
     cursor += 46 + nameLength + extraLength + commentLength;
   }
   if (cursor !== centralEnd) throw new Error('安装包中央目录长度不匹配');
   ranges.sort((left, right) => left[0] - right[0]);
   for (let i = 1; i < ranges.length; i++) {
-    if ((ranges[i]?.[0] ?? 0) < (ranges[i - 1]?.[1] ?? 0)) throw new Error('安装包 ZIP 条目范围重叠');
+    if ((ranges[i]?.[0] ?? 0) < (ranges[i - 1]?.[1] ?? 0))
+      throw new Error('安装包 ZIP 条目范围重叠');
   }
   return validateFiles(files);
 }
@@ -715,9 +779,7 @@ export async function pluginSign(config: SignConfig, files: PluginFileInfo[]): P
   try {
     const validated = validateSignConfig(config);
     if (validated.algorithm !== 'ed25519') {
-      throw new Error(
-        `签名算法 ${validated.algorithm} 未接线：@tauron/market 仅实现 ed25519`,
-      );
+      throw new Error(`签名算法 ${validated.algorithm} 未接线：@tauron/market 仅实现 ed25519`);
     }
     // **先定时间戳，再签名**（1.0-W6）：`issuedAt` 现在**进签名**，因此载荷里的
     // 时间必须与写进 sidecar 的时间**完全一致**。此前依赖 `marketSign` 返回值里的

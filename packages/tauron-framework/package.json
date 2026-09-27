@@ -1,10 +1,32 @@
 {
   "name": "@tauron/framework",
   "version": "0.1.0",
-  "private": true,
   "description": "tauron 框架薄封装：细粒度 signals 响应式内核 + 框架无关 bindings（useInvoke/useEvent/useCapabilities）",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coeasy/tauron.git",
+    "directory": "packages/tauron-framework"
+  },
+  "homepage": "https://github.com/coeasy/tauron",
+  "bugs": {
+    "url": "https://github.com/coeasy/tauron/issues"
+  },
+  "keywords": [
+    "tauron",
+    "tauri",
+    "signals",
+    "reactivity",
+    "frontend"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
-  "main": "./dist/index.cjs",
+  "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

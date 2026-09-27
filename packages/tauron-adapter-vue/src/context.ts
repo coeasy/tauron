@@ -20,7 +20,9 @@ export function provideTauronContext(value: TauronContextValue): void {
 export function injectTauronContext(): TauronContextValue {
   const ctx = inject(TauronContextKey);
   if (!ctx) {
-    throw new Error('injectTauronContext must be used within a component that called provideTauronContext');
+    throw new Error(
+      'injectTauronContext must be used within a component that called provideTauronContext',
+    );
   }
   return ctx;
 }

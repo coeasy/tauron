@@ -14,8 +14,16 @@ describe('plugin state machine', () => {
   describe('TRANSITIONS', () => {
     it('has entries for all 10 states', () => {
       const states: PluginState[] = [
-        'DISCOVERED', 'INSTALLING', 'INSTALLED', 'ENABLING', 'ENABLED',
-        'DISABLING', 'DISABLED', 'ERRORED', 'UNINSTALLING', 'UPGRADING',
+        'DISCOVERED',
+        'INSTALLING',
+        'INSTALLED',
+        'ENABLING',
+        'ENABLED',
+        'DISABLING',
+        'DISABLED',
+        'ERRORED',
+        'UNINSTALLING',
+        'UPGRADING',
       ];
       for (const state of states) {
         expect(TRANSITIONS[state]).toBeDefined();

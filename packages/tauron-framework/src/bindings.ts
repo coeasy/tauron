@@ -9,11 +9,7 @@
 // ──────────────────────────────────────────────────────────────────────────
 
 import type { Backend, Principal, Unlisten } from '@tauron/host';
-import {
-  createSignal,
-  type Signal,
-  type Cleanup,
-} from './signals.js';
+import { createSignal, type Signal, type Cleanup } from './signals.js';
 
 /** 调用状态。 */
 export type CallState<T> =
@@ -31,10 +27,7 @@ export type CallState<T> =
 export function useInvoke<T = unknown>(
   backend: Backend,
   cmd: string,
-): readonly [
-  Signal<CallState<T>>,
-  (args?: Record<string, unknown>) => Promise<T | undefined>,
-] {
+): readonly [Signal<CallState<T>>, (args?: Record<string, unknown>) => Promise<T | undefined>] {
   const state = createSignal<CallState<T>>({ status: 'idle' });
 
   const call = async (args?: Record<string, unknown>): Promise<T | undefined> => {

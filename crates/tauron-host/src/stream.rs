@@ -621,7 +621,14 @@ mod tests {
         assert_eq!(reg.active_total(), MAX_STREAMS_PER_PLUGIN + 1);
 
         // 关掉一条后应能再开——闸是"容量"，不是"一次性熔断"。
-        let victim = reg.handles.keys().next().unwrap().clone();
+        // 必须挑一条**属于 p1** 的句柄：句柄表还混着 p2 的流，close 现在按
+        // 归属主体校验（拿 p2 的句柄以 p1 身份关流会 E_AUTH_DENIED，是正确的拒绝）。
+        let victim = reg
+            .handles
+            .iter()
+            .find(|(_, h)| h.subscriber == "p1")
+            .map(|(id, _)| id.clone())
+            .expect("应存在 p1 的流句柄");
         reg.close(&victim, "p1", StreamKind::End).expect("关流");
         assert!(reg.open("c-1", "p1").is_ok(), "腾出容量后应可再开");
         assert_eq!(reg.active_for("p1"), MAX_STREAMS_PER_PLUGIN);

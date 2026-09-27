@@ -103,10 +103,7 @@ export function buildInvokeResultMessage(
 /**
  * 构建 event 消息（插件 → Host）
  */
-export function buildEmitMessage(
-  eventName: string,
-  payload: unknown,
-): PluginToBridgeMessage {
+export function buildEmitMessage(eventName: string, payload: unknown): PluginToBridgeMessage {
   return {
     type: BRIDGE_MESSAGE_TYPE,
     direction: 'plugin-to-host',

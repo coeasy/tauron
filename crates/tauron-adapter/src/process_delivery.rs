@@ -66,18 +66,18 @@ impl CallDelivery for ProcessCallDelivery {
             "target": call.target,
         });
         let bytes = serde_json::to_vec(&frame).map_err(|e| {
-            HostError::new(ErrorCode::E_STATE_INVALID_TRANSITION, format!("序列化进程调用帧失败：{e}"))
+            HostError::new(
+                ErrorCode::E_STATE_INVALID_TRANSITION,
+                format!("序列化进程调用帧失败：{e}"),
+            )
         })?;
 
-        self.proc_runtime
-            .spawner()
-            .write_frame(pid, &bytes)
-            .map_err(|e| {
-                HostError::new(
-                    ErrorCode::E_STATE_INVALID_TRANSITION,
-                    format!("写入 sidecar stdin 失败（pid {pid}）：{e}"),
-                )
-            })?;
+        self.proc_runtime.spawner().write_frame(pid, &bytes).map_err(|e| {
+            HostError::new(
+                ErrorCode::E_STATE_INVALID_TRANSITION,
+                format!("写入 sidecar stdin 失败（pid {pid}）：{e}"),
+            )
+        })?;
 
         Ok(DeliveryReceipt { delivered: true, reason: None })
     }
@@ -124,10 +124,7 @@ impl ProcessFrameSink for ProcessFrameSinkImpl {
             .and_then(|e| e.get("code").and_then(|c| c.as_i64()))
             .map(|c| c.to_string())
             .or_else(|| {
-                error
-                    .and_then(|e| e.get("message"))
-                    .and_then(|m| m.as_str())
-                    .map(|s| s.to_string())
+                error.and_then(|e| e.get("message")).and_then(|m| m.as_str()).map(|s| s.to_string())
             });
 
         // 结算。**幂等**：重复回帧（sidecar 重发 / 宿主已按 TTL 回收该 pending）
@@ -136,14 +133,11 @@ impl ProcessFrameSink for ProcessFrameSinkImpl {
         // 1.0-W7（P2-1）：其余失败**必须留痕**。此前这里是 `let _ =`，把
         // `settle_call` 的**全部**错误一并吞掉——包括非幂等的内部失败，
         // 结果通道出问题时既无计数也无日志，故障点被彻底淹没。
-        if let Err(err) = self
-            .registry
-            .settle_call(&call_id, CallOutcome { ok, result, error_code })
+        if let Err(err) =
+            self.registry.settle_call(&call_id, CallOutcome { ok, result, error_code })
         {
-            if !matches!(
-                err.code,
-                ErrorCode::E_CALL_NOT_FOUND | ErrorCode::E_CALL_ALREADY_SETTLED
-            ) {
+            if !matches!(err.code, ErrorCode::E_CALL_NOT_FOUND | ErrorCode::E_CALL_ALREADY_SETTLED)
+            {
                 eprintln!(
                     "[tauron] sidecar 回帧结算失败（callId={call_id}）：{} — {}",
                     err.code, err.message

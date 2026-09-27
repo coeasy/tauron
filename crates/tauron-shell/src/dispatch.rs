@@ -514,4 +514,47 @@ mod tests {
         assert_eq!(err.code, format!("{}", PluginErrorCode::InvalidPayload));
         assert!(sink.0.lock().unwrap().is_empty());
     }
+
+    /// **编译期证据：孤儿 crate `tauron-shell` 的消费者链路真实可跑**（R9 接通）。
+    ///
+    /// 本 crate 是 `examples/minimal-app/src-tauri` 声明的框架层依赖（真实依赖边），
+    /// 但示例尚未在 `invoke_handler` 上激活三条信封命令。这里用一条单测把
+    /// 「链路连通」钉成**编译期可验证**的事实：真的构造 [`HostState`]（内部持有
+    /// `PluginRegistry` + `EventBus`）、注册并启用插件、挂分发器、订阅总线，再跑通
+    /// 一次 `plugin_invoke` 信封往返（请求 → 注册表状态检查 → 分发 → 响应，
+    /// `call_id` 回填）与一次事件回传。任一环断裂（类型被删 / 方法改名）本测试即
+    /// 编译失败或红——这就是"不是只有文件存在"的判据。
+    #[test]
+    fn plugin_invoke_envelope_round_trip_is_the_consumer_link_evidence() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counter(Arc<AtomicUsize>);
+        impl EventSubscriber for Counter {
+            fn deliver(&self, _event: &Event) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        // ① HostState 内含 PluginRegistry（register/transition）与 EventBus（subscribe）：
+        //    启用插件 + 挂分发器 = 消费者链路的三块拼图。
+        let state = HostState::new();
+        enable(&state, "com.example.frame");
+        state.set_dispatcher(Arc::new(EchoDispatcher::new()));
+        let hits = Arc::new(AtomicUsize::new(0));
+        state.subscribe("plugin:com.example.frame:changed", Box::new(Counter(hits.clone())));
+
+        // ② plugin_invoke 信封往返：请求 → 注册表状态检查 → 分发 → 响应。
+        let req = request("com.example.frame");
+        let expected_call_id = req.call_id.clone();
+        let res = state.handle_invoke(req);
+        assert!(res.ok, "envelope round-trip failed: {res:?}");
+        assert_eq!(res.call_id, expected_call_id, "响应必须回填请求的 callId");
+        assert_eq!(res.result.unwrap()["method"], "format");
+
+        // ③ 同一 HostState 的事件总线真回传（信封链路与事件链路同源可用）。
+        state
+            .handle_emit("plugin:com.example.frame:changed", serde_json::json!({ "n": 1 }))
+            .expect("emit should succeed");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
 }

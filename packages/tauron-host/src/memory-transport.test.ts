@@ -66,6 +66,8 @@ describe('MemoryTransport', () => {
     expect(transport.principal()).toEqual({ kind: 'plugin', id: 'p.demo' });
     await expect(transport.invoke('host_ping')).resolves.toBe('pong');
     await expect(transport.invoke('host_missing')).rejects.toThrow('command not found');
-    expect(() => transport.register('invalid-command', () => undefined)).toThrow('Invalid host command');
+    expect(() => transport.register('invalid-command', () => undefined)).toThrow(
+      'Invalid host command',
+    );
   });
 });

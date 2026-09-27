@@ -5,14 +5,13 @@
 // ──────────────────────────────────────────────────────────────────────────
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { MockBackend, HostException, HOST_ERROR_CODES, type MockInvokeCase } from '@tauron/host';
+import { MockBackend, HostException, type MockInvokeCase } from '@tauron/host';
 import {
   PluginManagerStore,
   designTokens,
   safemodeTokens,
   toCssVariables,
   toCssText,
-  type PluginSummary,
   type PluginListState,
 } from '../src/index.js';
 
@@ -75,10 +74,12 @@ describe('PluginManagerStore', () => {
 
   it('refresh 成功时返回插件列表', async () => {
     const plugins = makePlugins(3);
-    const b = makeBackend([{
-      cmd: 'host_registry_list',
-      result: { plugins },
-    }]);
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_list',
+        result: { plugins },
+      },
+    ]);
     const s = new PluginManagerStore(b);
     const result = await s.refresh();
     expect(result).toHaveLength(3);
@@ -90,10 +91,12 @@ describe('PluginManagerStore', () => {
   });
 
   it('refresh 成功后状态为 success', async () => {
-    const b = makeBackend([{
-      cmd: 'host_registry_list',
-      result: { plugins: makePlugins(2) },
-    }]);
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_list',
+        result: { plugins: makePlugins(2) },
+      },
+    ]);
     const s = new PluginManagerStore(b);
     await s.refresh();
     expect(s.state.status).toBe('success');
@@ -103,15 +106,17 @@ describe('PluginManagerStore', () => {
   });
 
   it('refresh 失败时状态为 error', async () => {
-    const b = makeBackend([{
-      cmd: 'host_registry_list',
-      error: new HostException({
-        code: 'E_HOST_PANIC',
-        rawCode: 'E_HOST_PANIC',
-        message: 'boom',
-        retryable: true,
-      }),
-    }]);
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_list',
+        error: new HostException({
+          code: 'E_HOST_PANIC',
+          rawCode: 'E_HOST_PANIC',
+          message: 'boom',
+          retryable: true,
+        }),
+      },
+    ]);
     const s = new PluginManagerStore(b);
     const result = await s.refresh();
     expect(result).toEqual([]);
@@ -123,13 +128,14 @@ describe('PluginManagerStore', () => {
   });
 
   it('refresh 加载过程中状态为 loading', async () => {
-    let resolve: ((v: unknown) => void) | undefined;
-    const b = makeBackend([{
-      cmd: 'host_registry_list',
-      result: {
-        plugins: makePlugins(1),
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_list',
+        result: {
+          plugins: makePlugins(1),
+        },
       },
-    }]);
+    ]);
     const s = new PluginManagerStore(b);
     const promise = s.refresh();
     // 在 promise resolve 之前，状态应为 loading
@@ -145,59 +151,71 @@ describe('PluginManagerStore', () => {
   });
 
   it('refresh 后 iconUrl 正确传递', async () => {
-    const b = makeBackend([{
-      cmd: 'host_registry_list',
-      result: {
-        plugins: [{
-          id: 'test.icon',
-          name: 'Icon Plugin',
-          version: '1.0.0',
-          type: 'js',
-          state: 'running',
-          disabled_by_safemode: false,
-          icon_url: 'https://example.com/icon.png',
-        }],
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_list',
+        result: {
+          plugins: [
+            {
+              id: 'test.icon',
+              name: 'Icon Plugin',
+              version: '1.0.0',
+              type: 'js',
+              state: 'running',
+              disabled_by_safemode: false,
+              icon_url: 'https://example.com/icon.png',
+            },
+          ],
+        },
       },
-    }]);
+    ]);
     const s = new PluginManagerStore(b);
     const result = await s.refresh();
     expect(result[0]?.iconUrl).toBe('https://example.com/icon.png');
   });
 
   it('refresh 后 description 正确传递', async () => {
-    const b = makeBackend([{
-      cmd: 'host_registry_list',
-      result: {
-        plugins: [{
-          id: 'test.desc',
-          name: 'Desc Plugin',
-          version: '1.0.0',
-          type: 'js',
-          state: 'running',
-          disabled_by_safemode: false,
-          description: 'A test plugin',
-        }],
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_list',
+        result: {
+          plugins: [
+            {
+              id: 'test.desc',
+              name: 'Desc Plugin',
+              version: '1.0.0',
+              type: 'js',
+              state: 'running',
+              disabled_by_safemode: false,
+              description: 'A test plugin',
+            },
+          ],
+        },
       },
-    }]);
+    ]);
     const s = new PluginManagerStore(b);
     const result = await s.refresh();
     expect(result[0]?.description).toBe('A test plugin');
   });
 
   it('refresh 后无 iconUrl 时为 undefined', async () => {
-    const b = makeBackend([{
-      cmd: 'host_registry_list',
-      result: {
-        plugins: [{
-          id: 'test.noicon',
-          name: 'No Icon',
-          version: '1.0.0',
-          type: 'js',
-          state: 'running',
-          disabled_by_safemode: false,
-        }],
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_list',
+        result: {
+          plugins: [
+            {
+              id: 'test.noicon',
+              name: 'No Icon',
+              version: '1.0.0',
+              type: 'js',
+              state: 'running',
+              disabled_by_safemode: false,
+            },
+          ],
+        },
       },
-    }]);
+    ]);
     const s = new PluginManagerStore(b);
     const result = await s.refresh();
     expect(result[0]).not.toHaveProperty('iconUrl');
@@ -220,34 +238,36 @@ describe('PluginManagerStore', () => {
     const spy = vi.fn();
     store.subscribe(spy);
     store.select('test.plugin0');
-    expect(spy).toHaveBeenCalledWith(
-      expect.objectContaining({ selectedId: 'test.plugin0' }),
-    );
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ selectedId: 'test.plugin0' }));
   });
 
   // ── enable/disable/uninstall/tryEnable/purge ─────────────────────────
 
   it('enable 成功', async () => {
-    const b = makeBackend([{
-      cmd: 'host_registry_admin',
-      args: { op: { op: 'enable', id: 'test.plugin0' } },
-      result: {},
-    }]);
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_admin',
+        args: { op: { op: 'enable', id: 'test.plugin0' } },
+        result: {},
+      },
+    ]);
     const s = new PluginManagerStore(b);
     const result = await s.enable('test.plugin0');
     expect(result).toEqual({ ok: true });
   });
 
   it('enable 失败返回错误', async () => {
-    const b = makeBackend([{
-      cmd: 'host_registry_admin',
-      error: new HostException({
-        code: 'E_AUTH_DENIED',
-        rawCode: 'E_AUTH_DENIED',
-        message: 'no perm',
-        retryable: false,
-      }),
-    }]);
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_admin',
+        error: new HostException({
+          code: 'E_AUTH_DENIED',
+          rawCode: 'E_AUTH_DENIED',
+          message: 'no perm',
+          retryable: false,
+        }),
+      },
+    ]);
     const s = new PluginManagerStore(b);
     const result = await s.enable('test.plugin0');
     expect(result.ok).toBe(false);
@@ -257,54 +277,64 @@ describe('PluginManagerStore', () => {
   });
 
   it('disable 成功', async () => {
-    const b = makeBackend([{
-      cmd: 'host_registry_admin',
-      args: { op: { op: 'disable', id: 'test.plugin0' } },
-      result: {},
-    }]);
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_admin',
+        args: { op: { op: 'disable', id: 'test.plugin0' } },
+        result: {},
+      },
+    ]);
     const s = new PluginManagerStore(b);
     const result = await s.disable('test.plugin0');
     expect(result).toEqual({ ok: true });
   });
 
   it('uninstall 成功', async () => {
-    const b = makeBackend([{
-      cmd: 'host_registry_admin',
-      args: { op: { op: 'uninstall', id: 'test.plugin0' } },
-      result: {},
-    }]);
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_admin',
+        args: { op: { op: 'uninstall', id: 'test.plugin0' } },
+        result: {},
+      },
+    ]);
     const s = new PluginManagerStore(b);
     const result = await s.uninstall('test.plugin0');
     expect(result).toEqual({ ok: true });
   });
 
   it('tryEnable 成功', async () => {
-    const b = makeBackend([{
-      cmd: 'host_registry_admin',
-      args: { op: { op: 'enable', id: 'test.plugin0' } },
-      result: {},
-    }]);
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_admin',
+        args: { op: { op: 'enable', id: 'test.plugin0' } },
+        result: {},
+      },
+    ]);
     const s = new PluginManagerStore(b);
     const result = await s.tryEnable('test.plugin0');
     expect(result).toEqual({ ok: true });
   });
 
   it('purge 成功', async () => {
-    const b = makeBackend([{
-      cmd: 'host_registry_admin',
-      args: { op: { op: 'purge', id: 'test.plugin0' } },
-      result: {},
-    }]);
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_admin',
+        args: { op: { op: 'purge', id: 'test.plugin0' } },
+        result: {},
+      },
+    ]);
     const s = new PluginManagerStore(b);
     const result = await s.purge('test.plugin0');
     expect(result).toEqual({ ok: true });
   });
 
   it('管理操作失败时返回结构化错误', async () => {
-    const b = makeBackend([{
-      cmd: 'host_registry_admin',
-      error: new Error('network error'),
-    }]);
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_admin',
+        error: new Error('network error'),
+      },
+    ]);
     const s = new PluginManagerStore(b);
     const result = await s.disable('test.plugin0');
     expect(result.ok).toBe(false);
@@ -337,10 +367,12 @@ describe('PluginManagerStore', () => {
   });
 
   it('多个订阅者各自独立', async () => {
-    const b = makeBackend([{
-      cmd: 'host_registry_list',
-      result: { plugins: makePlugins(1) },
-    }]);
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_list',
+        result: { plugins: makePlugins(1) },
+      },
+    ]);
     const s = new PluginManagerStore(b);
     const spy1 = vi.fn();
     const spy2 = vi.fn();
@@ -353,10 +385,12 @@ describe('PluginManagerStore', () => {
   });
 
   it('订阅者异常不影响其他订阅者', async () => {
-    const b = makeBackend([{
-      cmd: 'host_registry_list',
-      result: { plugins: makePlugins(1) },
-    }]);
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_list',
+        result: { plugins: makePlugins(1) },
+      },
+    ]);
     const s = new PluginManagerStore(b);
     const spy1 = vi.fn(() => {
       throw new Error('subscriber error');
@@ -371,21 +405,23 @@ describe('PluginManagerStore', () => {
   // ── disabledBySafemode 标记 ───────────────────────────────────────────
 
   it('disabledBySafemode 标记正确传递', async () => {
-    const b = makeBackend([{
-      cmd: 'host_registry_list',
-      result: {
-        plugins: [
-          {
-            id: 'test.safemode',
-            name: 'Safemode Plugin',
-            version: '1.0.0',
-            type: 'js',
-            state: 'disabled',
-            disabled_by_safemode: true,
-          },
-        ],
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_list',
+        result: {
+          plugins: [
+            {
+              id: 'test.safemode',
+              name: 'Safemode Plugin',
+              version: '1.0.0',
+              type: 'js',
+              state: 'disabled',
+              disabled_by_safemode: true,
+            },
+          ],
+        },
       },
-    }]);
+    ]);
     const s = new PluginManagerStore(b);
     const result = await s.refresh();
     expect(result[0]?.disabledBySafemode).toBe(true);
@@ -393,11 +429,13 @@ describe('PluginManagerStore', () => {
   });
 
   it('tryEnable 操作传递 enable（D15 无 trial_enable 操作名，safemode 由宿主状态机判定）', async () => {
-    const b = makeBackend([{
-      cmd: 'host_registry_admin',
-      args: { op: { op: 'enable', id: 'test.safemode' } },
-      result: {},
-    }]);
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_admin',
+        args: { op: { op: 'enable', id: 'test.safemode' } },
+        result: {},
+      },
+    ]);
     const s = new PluginManagerStore(b);
     const result = await s.tryEnable('test.safemode');
     expect(result).toEqual({ ok: true });
@@ -482,7 +520,9 @@ describe('designTokens', () => {
 
   it('toCssText 所有行以分号结尾', () => {
     const css = toCssText();
-    const lines = css.split('\n').filter((l) => l.trim() && !l.startsWith(':root') && l.trim() !== '}');
+    const lines = css
+      .split('\n')
+      .filter((l) => l.trim() && !l.startsWith(':root') && l.trim() !== '}');
     for (const line of lines) {
       if (line.trim()) {
         expect(line.trimEnd()).toMatch(/;$/);

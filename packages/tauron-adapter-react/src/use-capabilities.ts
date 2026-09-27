@@ -5,11 +5,7 @@
  */
 
 import { useMemo } from 'react';
-import {
-  getCapabilities,
-  isTauri,
-  type RuntimeCapabilities,
-} from '@tauron/core';
+import { getCapabilities, isTauri, type RuntimeCapabilities } from '@tauron/core';
 
 /**
  * useCapabilities — 获取运行时能力集

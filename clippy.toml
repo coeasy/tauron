@@ -3,9 +3,9 @@
 # 这里只放**阈值类**配置——clippy 的 lint 级别（deny/warn/allow）不放这里，
 # 由 CI 命令行（`-- -D warnings`）或各 crate 的 `[lints]` 段控制。
 #
-# ⚠️ 诚实边界：本仓库**尚未**做过 clippy 清理，CI 里的 clippy 任务是
-# advisory（`continue-on-error: true`），不构成合并门禁。详见 CHANGELOG.md
-# 的「已知债务」。
+# 本仓库已做过 clippy 清理（`-D warnings` 零告警）。CI 里的 clippy 任务是
+# **硬门禁**：`cargo clippy --workspace --all-targets --locked -- -D warnings`
+# 非零即失败。因此再出现告警就是**新引入**的问题。详见 CHANGELOG.md。
 
 # 适配层的 `cmd_*` 入口普遍是「状态 + 若干参数」的直筒签名，7 个参数
 # （clippy 默认阈值）偏紧，放宽到 9 以只保留真正的坏味道。

@@ -7,11 +7,7 @@
 // - expect：断言工具
 // ──────────────────────────────────────────────────────────────────────────
 
-export {
-  MockRegistry,
-  createMockRegistry,
-  createPopulatedRegistry,
-} from './mock-registry.js';
+export { MockRegistry, createMockRegistry, createPopulatedRegistry } from './mock-registry.js';
 export type {
   MockPluginManifest,
   PluginState,

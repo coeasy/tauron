@@ -10,6 +10,8 @@
 import { adoptRuntimeCapabilities, type Backend } from './backend.js';
 import { translate_at_boundary } from './errors.js';
 import type { JsonValue, PendingCallInfo } from './events.js';
+// 诚实降级载体（`ProviderResult<T> = T | UnsupportedBody`）——与 DialogClient 同源。
+import type { ProviderResult } from './dialog-client.js';
 
 export interface ShellClientOptions {
   backend: Backend;
@@ -130,10 +132,7 @@ export interface RecoveryPersistence {
 
 /** 故障类型（由 Rust 侧 `(phase, trial)` 派生，不参与判定、只供展示）。 */
 export type RecoveryFailureKind =
-  | 'boot-failure'
-  | 'safemode-failure'
-  | 'repairmode-failure'
-  | 'trial-failure';
+  'boot-failure' | 'safemode-failure' | 'repairmode-failure' | 'trial-failure';
 
 /**
  * 一条崩溃诊断上下文（`host_recover_boot` 的 `lastContext` 元素，R7）。
@@ -325,6 +324,149 @@ export interface MarketUpdateResult {
   reason: string | null;
 }
 
+// ── R9：菜单 / 托盘 / 文件 / HTTP / 更新 / 主题（主窗特权面）──
+// 全部为「主窗专属」命令：宿主侧经 require_main_window 校验 caller，
+// 插件 webview 调用会被拒（E_FORBIDDEN）。缺省装配时走诚实降级
+// （`ProviderResult` 的 Unsupported 分支），不伪造成功。
+
+/** 菜单项规格（Rust `MenuItemSpec`，线形 camelCase）。 */
+export interface MenuItemSpec {
+  /** 稳定 id（点击事件里带上它）。 */
+  id: string;
+  /** 显示文本。 */
+  label: string;
+  /** 点击时发布到事件总线的 topic；缺省 = 只记录不发布。 */
+  event?: string;
+  /** 是否可点（缺省 true）。 */
+  enabled?: boolean;
+}
+
+/** 菜单规格（Rust `MenuSpec`）。 */
+export interface MenuSpec {
+  /** 顶层菜单项（按序）。 */
+  items: MenuItemSpec[];
+}
+
+/** 菜单操作结果（Rust `MenuOutcome`）。`applied === false` = 平台未应用（降级）。 */
+export interface MenuOutcome {
+  applied: boolean;
+  /** 菜单项数量（诊断用）。 */
+  itemCount: number;
+  /** `applied === false` 时的原因；成功时为 `null`。 */
+  reason: string | null;
+}
+
+/** 托盘规格（Rust `TraySpec`）。 */
+export interface TraySpec {
+  /** 悬浮提示文本。 */
+  tooltip?: string;
+  /** 托盘右键菜单。 */
+  menu?: MenuSpec;
+}
+
+/** 托盘操作结果（Rust `TrayOutcome`）。`applied === false` = 平台未应用（降级）。 */
+export interface TrayOutcome {
+  applied: boolean;
+  reason: string | null;
+}
+
+/** 目录项（`host_fs_list` 的行；Rust `FsEntry`）。 */
+export interface FsEntry {
+  /** 文件名（不含父路径）。 */
+  name: string;
+  /** 绝对路径。 */
+  path: string;
+  isDir: boolean;
+  /** 文件字节数（目录为 0）。 */
+  size: number;
+}
+
+/** `host_fs_stat` 结果（Rust `FsStat`）。 */
+export interface FsStat {
+  path: string;
+  isDir: boolean;
+  isFile: boolean;
+  size: number;
+  /** 宿主视角是否只读。 */
+  readonly: boolean;
+}
+
+/**
+ * `host_fs_read` 结果（Rust `FsReadResult`）。
+ *
+ * 二进制按 UTF-8 **有损**解码（不引入 base64）；`truncated` 如实标注是否超上限。
+ */
+export interface FsReadResult {
+  path: string;
+  text: string;
+  /** 实际读取的字节数。 */
+  bytes: number;
+  truncated: boolean;
+}
+
+/** `host_fs_write` 结果（Rust `FsWriteResult`）。 */
+export interface FsWriteResult {
+  path: string;
+  /** 写入的字节数。 */
+  bytes: number;
+}
+
+/** HTTP 请求规格（Rust `HttpRequestSpec`）。 */
+export interface HttpRequestSpec {
+  /** 仅 `GET` / `POST`（缺省 GET）。 */
+  method?: string;
+  /** 目标 URL（仅 `http` / `https`）。 */
+  url: string;
+  headers?: Record<string, string>;
+  /** 请求体（POST）。 */
+  body?: string;
+  /** 超时（毫秒，缺省 30000）。 */
+  timeoutMs?: number;
+  /** 响应体字节上限（缺省 1 MiB）。 */
+  maxBytes?: number;
+}
+
+/** HTTP 响应（Rust `HttpResponseSpec`）。 */
+export interface HttpResponseSpec {
+  status: number;
+  /** 响应头（小写键）。 */
+  headers: Record<string, string>;
+  /** 响应体（UTF-8 有损）。 */
+  body: string;
+  truncated: boolean;
+}
+
+/** `host_updater_check` 结果（Rust `UpdaterCheckOutcome`）。 */
+export interface UpdaterCheckOutcome {
+  available: boolean;
+  version: string | null;
+  url: string | null;
+  releasedAt: string | null;
+  /** 是否走了降级/不可用路径（端点不可达、签名非法等）。 */
+  degraded: boolean;
+  reason: string | null;
+}
+
+/** `host_updater_status` 结果（Rust `UpdaterStatus`；非 provider 型，直接返回）。 */
+export interface UpdaterStatus {
+  /** 更新提供者是否已装配（`EndpointClient` 已注入）。 */
+  available: boolean;
+  /** 进程内更新状态机线值；无则 `null`。 */
+  state: string | null;
+  grayscalePercent: number;
+  crashGateStopped: boolean;
+  reason: string | null;
+}
+
+/** 一个可用主题（Rust `tauron_theme::ThemeContribute`）。 */
+export interface ThemeContribute {
+  id: string;
+  name: string;
+  isDark: boolean;
+  /** 预览用颜色（供 UI 画色块）。 */
+  previewColors: string[];
+}
+
 /** 贡献注册条目。 */
 export interface ContributeEntry {
   pluginId: string;
@@ -483,12 +625,10 @@ export class ShellClient {
   }
 
   private call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-    return this.backend
-      .invoke<T>(cmd, args)
-      .catch((err: unknown) => {
-        // R2-c：壳命令同属插件/壳 webview → 宿主的边界，走同一条显式翻译。
-        throw translate_at_boundary(err, 'plugin-webview→host').error;
-      });
+    return this.backend.invoke<T>(cmd, args).catch((err: unknown) => {
+      // R2-c：壳命令同属插件/壳 webview → 宿主的边界，走同一条显式翻译。
+      throw translate_at_boundary(err, 'plugin-webview→host').error;
+    });
   }
 
   // ── 窗口管理 ──
@@ -702,9 +842,14 @@ export class ShellClient {
 
   // ── 品牌 ──
 
-  /** 获取品牌信息。 */
-  async brandInfo(): Promise<BrandInfo> {
-    return this.call<BrandInfo>('host_brand_info');
+  /**
+   * 获取品牌信息。
+   *
+   * 返回值是 {@link ProviderResult}：宿主未装配品牌提供者时返回
+   * `{ supported: false, reason, fallback }`（诚实降级），而不是空对象冒充成功。
+   */
+  async brandInfo(): Promise<ProviderResult<BrandInfo>> {
+    return this.call<ProviderResult<BrandInfo>>('host_brand_info');
   }
 
   // ── i18n ──
@@ -787,8 +932,26 @@ export class ShellClient {
   // ── 注册表（全量）──
 
   /** 列出所有插件（privileged 档，仅主窗可用）。 */
-  async registryListAll(): Promise<Array<{ id: string; name: string; version: string; state: string; pluginType: string; disabledBySafemode: boolean }>> {
-    return this.call<Array<{ id: string; name: string; version: string; state: string; pluginType: string; disabledBySafemode: boolean }>>('host_registry_list_all');
+  async registryListAll(): Promise<
+    Array<{
+      id: string;
+      name: string;
+      version: string;
+      state: string;
+      pluginType: string;
+      disabledBySafemode: boolean;
+    }>
+  > {
+    return this.call<
+      Array<{
+        id: string;
+        name: string;
+        version: string;
+        state: string;
+        pluginType: string;
+        disabledBySafemode: boolean;
+      }>
+    >('host_registry_list_all');
   }
 
   // ── 进程插件运行时（P0-2，privileged 档，仅主窗可用）──
@@ -851,5 +1014,125 @@ export class ShellClient {
    */
   async callTakeResult(callId: string): Promise<PendingCallInfo> {
     return this.call<PendingCallInfo>('host_call_take', { req: { callId } });
+  }
+
+  // ── 菜单（R9，主窗专属）──
+  // 缺省装配（非 Tauri 宿主 / 无 MenuSink）时宿主返回 `Unsupported`；
+  // Tauri 宿主注入 `TauriMenuSink` 后为真实现（`tauri::menu`）。
+
+  /**
+   * 设置应用菜单。
+   *
+   * 菜单点击**不新造传输**：宿主按 `MenuItemSpec.event` 指定的 topic 经既有
+   * 事件总线回传（`host_events_drain` 取件），事件载荷含 `{ id, source:'menu' }`。
+   */
+  async menuSet(spec: MenuSpec): Promise<ProviderResult<MenuOutcome>> {
+    return this.call<ProviderResult<MenuOutcome>>('host_menu_set', { spec });
+  }
+
+  /** 弹出上下文菜单（目标为主窗）。 */
+  async menuPopup(spec: MenuSpec): Promise<ProviderResult<MenuOutcome>> {
+    return this.call<ProviderResult<MenuOutcome>>('host_menu_popup', { spec });
+  }
+
+  /** 移除应用菜单。 */
+  async menuReset(): Promise<ProviderResult<MenuOutcome>> {
+    return this.call<ProviderResult<MenuOutcome>>('host_menu_reset');
+  }
+
+  // ── 系统托盘（R9，主窗专属）──
+
+  /** 创建/更新系统托盘（id 恒为宿主固定值；重复调用即更新既有托盘）。 */
+  async trayCreate(spec: TraySpec): Promise<ProviderResult<TrayOutcome>> {
+    return this.call<ProviderResult<TrayOutcome>>('host_tray_create', { spec });
+  }
+
+  /** 设置托盘右键菜单（托盘不存在时宿主如实返回 `applied: false`）。 */
+  async traySetMenu(spec: MenuSpec): Promise<ProviderResult<TrayOutcome>> {
+    return this.call<ProviderResult<TrayOutcome>>('host_tray_set_menu', { spec });
+  }
+
+  /** 移除系统托盘。 */
+  async trayRemove(): Promise<ProviderResult<TrayOutcome>> {
+    return this.call<ProviderResult<TrayOutcome>>('host_tray_remove');
+  }
+
+  // ── 文件系统（R9，主窗专属；**限定宿主允许根目录内**）──
+  // 路径穿越防护：宿主 canonicalize 后校验 `starts_with(允许根)`；越界/无允许根
+  // 时返回 `Unsupported` 或明确错误码，不会放行。
+
+  /** 读取文本文件（`maxBytes` 缺省 4 MiB，超限时 `truncated: true`）。 */
+  async fsRead(path: string, maxBytes?: number): Promise<ProviderResult<FsReadResult>> {
+    return this.call<ProviderResult<FsReadResult>>('host_fs_read', {
+      path,
+      ...(maxBytes !== undefined ? { maxBytes } : {}),
+    });
+  }
+
+  /** 写入文本文件（覆盖）。 */
+  async fsWrite(path: string, text: string): Promise<ProviderResult<FsWriteResult>> {
+    return this.call<ProviderResult<FsWriteResult>>('host_fs_write', { path, text });
+  }
+
+  /** 列目录。 */
+  async fsList(path: string): Promise<ProviderResult<FsEntry[]>> {
+    return this.call<ProviderResult<FsEntry[]>>('host_fs_list', { path });
+  }
+
+  /** 取元数据。 */
+  async fsStat(path: string): Promise<ProviderResult<FsStat>> {
+    return this.call<ProviderResult<FsStat>>('host_fs_stat', { path });
+  }
+
+  /** 建目录。 */
+  async fsMkdir(path: string, recursive: boolean): Promise<ProviderResult<null>> {
+    return this.call<ProviderResult<null>>('host_fs_mkdir', { path, recursive });
+  }
+
+  /** 删除文件或**空**目录（不递归）。 */
+  async fsRemove(path: string): Promise<ProviderResult<null>> {
+    return this.call<ProviderResult<null>>('host_fs_remove', { path });
+  }
+
+  // ── HTTP（R9，主窗专属）──
+  // 本仓未装配真实 HTTP 提供者（reqwest 的 TLS 后端不在离线缓存），
+  // 缺省恒返回 `Unsupported`（如实，不伪造响应）。
+
+  /** 发起一次 HTTP 请求（缺省诚实降级为 `Unsupported`）。 */
+  async httpRequest(spec: HttpRequestSpec): Promise<ProviderResult<HttpResponseSpec>> {
+    return this.call<ProviderResult<HttpResponseSpec>>('host_http_request', { spec });
+  }
+
+  // ── 更新通道（R9，主窗专属；接孤儿 crate `tauron-distribute`）──
+
+  /**
+   * 检查更新（真跑 `tauron-distribute` 的灰度 + 签名 + 清单校验）。
+   *
+   * `EndpointClient` 由宿主注入；缺省无端点 → `Unsupported`（区分于「已是最新」）。
+   */
+  async updaterCheck(currentVersion: string): Promise<ProviderResult<UpdaterCheckOutcome>> {
+    return this.call<ProviderResult<UpdaterCheckOutcome>>('host_updater_check', { currentVersion });
+  }
+
+  /** 更新通道状态（灰度批次 / 崩溃门禁 / 提供者可用性）。 */
+  async updaterStatus(): Promise<UpdaterStatus> {
+    return this.call<UpdaterStatus>('host_updater_status');
+  }
+
+  // ── 主题（R9，主窗专属；接孤儿 crate `tauron-theme`）──
+
+  /** 列出可用主题（含内置 light/dark）。 */
+  async themeList(): Promise<ThemeContribute[]> {
+    return this.call<ThemeContribute[]>('host_theme_list');
+  }
+
+  /** 读取单个主题（不存在时返回 `Unsupported`，不伪造空主题）。 */
+  async themeGet(id: string): Promise<ProviderResult<JsonValue>> {
+    return this.call<ProviderResult<JsonValue>>('host_theme_get', { id });
+  }
+
+  /** 切换激活主题。 */
+  async themeSet(id: string): Promise<ProviderResult<JsonValue>> {
+    return this.call<ProviderResult<JsonValue>>('host_theme_set', { id });
   }
 }

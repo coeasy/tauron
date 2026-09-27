@@ -52,10 +52,7 @@ export interface TauriBackendOptions {
 /** 从 `@tauri-apps/api` 抽出的最小接口面（便于测试替身）。 */
 export interface TauriApi {
   invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T>;
-  listen(
-    event: string,
-    handler: (event: { payload: unknown }) => void,
-  ): Promise<() => void>;
+  listen(event: string, handler: (event: { payload: unknown }) => void): Promise<() => void>;
   /** Tauri v2 流式通道；旧版本可能没有。 */
   Channel?: new <T>() => { onmessage: (message: T) => void };
 }
@@ -74,8 +71,7 @@ async function loadTauriApi(): Promise<TauriApi> {
       ]);
       const api: TauriApi = {
         invoke: (cmd, args) => core.invoke(cmd, args),
-        listen: (name, handler) =>
-          event.listen(name, handler as (e: unknown) => void),
+        listen: (name, handler) => event.listen(name, handler as (e: unknown) => void),
       };
       // `Channel` 在新版本才导出；缺失时降级为无进度推送。
       const maybeChannel = (core as { Channel?: TauriApi['Channel'] }).Channel;
@@ -182,10 +178,7 @@ export function createTauriBackend(options: TauriBackendOptions = {}): TauronBac
       await api.invoke<void>(TAURON_COMMANDS.cancel, { request: { callId } });
     },
 
-    async listen(
-      topic: string,
-      handler: (payload: unknown) => void,
-    ): Promise<() => void> {
+    async listen(topic: string, handler: (payload: unknown) => void): Promise<() => void> {
       const api = await load();
       return api.listen(topic, (event) => handler(event.payload));
     },

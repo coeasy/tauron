@@ -21,7 +21,7 @@ function fakeApi(overrides: Partial<TauriApi> = {}): {
   const api: TauriApi = {
     invoke:
       overrides.invoke ??
-      (async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
+      (async <T>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
         calls.push(args === undefined ? { cmd } : { cmd, args });
         return { callId: 'x', ok: true, result: 'ok' } as unknown as T;
       }),
@@ -61,7 +61,7 @@ describe('createTauriBackend.invoke', () => {
   it('成功时透传 Rust 返回的响应', async () => {
     const expected: PluginInvokeResponse = { callId: 'c1', ok: true, result: 42 };
     const { api } = fakeApi({
-      invoke: async <T,>() => expected as unknown as T,
+      invoke: async <T>() => expected as unknown as T,
     });
     const backend = createTauriBackend({ loader: async () => api });
 
@@ -122,7 +122,7 @@ describe('createTauriBackend.invoke', () => {
     try {
       let settled = false;
       const { api } = fakeApi({
-        invoke: <T,>() =>
+        invoke: <T>() =>
           new Promise<T>((resolve) => {
             setTimeout(() => {
               settled = true;
@@ -132,9 +132,7 @@ describe('createTauriBackend.invoke', () => {
       });
       const backend = createTauriBackend({ loader: async () => api });
 
-      const promise = backend.invoke(
-        buildRequest({ pluginId: 'p', method: 'm', timeoutMs: 0 }),
-      );
+      const promise = backend.invoke(buildRequest({ pluginId: 'p', method: 'm', timeoutMs: 0 }));
       await vi.advanceTimersByTimeAsync(60_000);
       const res = await promise;
 
@@ -249,10 +247,8 @@ describe('createTauriBackend.invoke', () => {
     });
     const backend = createTauriBackend({ loader: async () => api });
 
-    await backend.invoke(
-      buildRequest({ pluginId: 'p', method: 'm' }),
-      undefined,
-      (event) => received.push(event.percentage),
+    await backend.invoke(buildRequest({ pluginId: 'p', method: 'm' }), undefined, (event) =>
+      received.push(event.percentage),
     );
 
     expect(channels).toHaveLength(1);
@@ -264,11 +260,7 @@ describe('createTauriBackend.invoke', () => {
     const { api, calls } = fakeApi();
     const backend = createTauriBackend({ loader: async () => api });
 
-    await backend.invoke(
-      buildRequest({ pluginId: 'p', method: 'm' }),
-      undefined,
-      () => undefined,
-    );
+    await backend.invoke(buildRequest({ pluginId: 'p', method: 'm' }), undefined, () => undefined);
 
     expect(calls[0]!.args).not.toHaveProperty('channel');
   });

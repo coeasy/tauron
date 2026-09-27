@@ -233,9 +233,9 @@ describe('HostRpc（R5）', () => {
     // 幂等：重复退订不得再发一次退订
     const before = backend.invocations.filter((i) => i.cmd === 'host_events_unsubscribe').length;
     off();
-    expect(
-      backend.invocations.filter((i) => i.cmd === 'host_events_unsubscribe').length,
-    ).toBe(before);
+    expect(backend.invocations.filter((i) => i.cmd === 'host_events_unsubscribe').length).toBe(
+      before,
+    );
   });
 
   it('单个订阅者回调抛错，不得吞掉同批其余帧（逐订阅者隔离）', async () => {

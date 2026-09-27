@@ -31,14 +31,14 @@ export interface RuntimeCapabilities {
 export const TAURI_CAPABILITIES: RuntimeCapabilities = {
   store: true,
   http: true,
-  tray: false,            // P0-2 诚实化：tauri-plugin-tray 未集成
-  globalShortcut: false,  // P0-2 诚实化：tauri-plugin-global-shortcut 未集成
-  autostart: false,       // P0-2 诚实化：tauri-plugin-autostart 未集成
-  updater: false,         // P0-2 诚实化：tauri-plugin-updater 未集成
-  shell: false,           // P0-2 诚实化：tauri-plugin-shell 未集成
-  singleInstance: false,  // P0-2 诚实化：tauri-plugin-single-instance 未集成
-  processPlugin: false,   // P0-2 诚实化：tauron-proc 是 stub 模拟
-  wasmPlugin: false,      // P0-2 诚实化：tauron-wasm 是 stub 模拟
+  tray: false, // P0-2 诚实化：tauri-plugin-tray 未集成
+  globalShortcut: false, // P0-2 诚实化：tauri-plugin-global-shortcut 未集成
+  autostart: false, // P0-2 诚实化：tauri-plugin-autostart 未集成
+  updater: false, // P0-2 诚实化：tauri-plugin-updater 未集成
+  shell: false, // P0-2 诚实化：tauri-plugin-shell 未集成
+  singleInstance: false, // P0-2 诚实化：tauri-plugin-single-instance 未集成
+  processPlugin: false, // P0-2 诚实化：tauron-proc 是 stub 模拟
+  wasmPlugin: false, // P0-2 诚实化：tauron-wasm 是 stub 模拟
 };
 
 /** Web 运行时能力（降级） */

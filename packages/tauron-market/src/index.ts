@@ -9,13 +9,7 @@
  */
 
 // ---- Types ----
-export type {
-  PluginPackage,
-  IndexEntry,
-  IndexFile,
-  KeyPair,
-  SignatureResult,
-} from './types.js';
+export type { PluginPackage, IndexEntry, IndexFile, KeyPair, SignatureResult } from './types.js';
 
 // ---- Signing ----
 export {

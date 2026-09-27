@@ -205,7 +205,10 @@ export class Computed<T> {
 }
 
 /** 创建派生信号。 */
-export function createComputed<T>(compute: () => T, isEqual?: (a: T, b: T) => boolean): Computed<T> {
+export function createComputed<T>(
+  compute: () => T,
+  isEqual?: (a: T, b: T) => boolean,
+): Computed<T> {
   return new Computed(compute, isEqual);
 }
 

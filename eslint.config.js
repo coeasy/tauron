@@ -17,6 +17,10 @@ export default tseslint.config(
       '**/dist/**',
       '**/node_modules/**',
       '**/*.tsbuildinfo',
+      // Rust/Cargo 构建产物（gitignore 的 `**/target/`）。tauri-build 会在
+      // `target/debug/build/*/out/` 下生成 `__global-api-script.js` 之类的
+      // 脚本文件，它们是生成物而非本仓库源码，不属于 lint 范围。
+      '**/target/**',
       // 示例的 Tauri 工程是独立依赖树，不进 lint 范围
       'examples/minimal-app/src-tauri/**',
       'examples/minimal-app/dist/**',

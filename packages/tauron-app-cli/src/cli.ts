@@ -21,17 +21,29 @@ import {
   validatePackConfig,
 } from './pack.js';
 import {
-  ensureDir, writeFile, writeFiles, readJsonFile, writeJsonFile, pathExists,
+  ensureDir,
+  writeFile,
+  writeFiles,
+  readJsonFile,
+  writeJsonFile,
+  pathExists,
+  findTauronRoot,
+  toPosixRelative,
 } from './fs-operations.js';
 import { initProject } from './init.js';
+import { scaffold } from './scaffold.js';
 import { doctor } from './doctor.js';
 import { createTemplate } from './template.js';
 import type { PackConfig, PluginFileInfo, ResolvedPackConfig } from './pack.js';
 import type { PluginConfig } from './plugin.js';
+import type { ScaffoldConfigInput } from './scaffold.js';
 
 // ── 命令注册表 ──
 
-type CommandHandler = (args: string[], options: Record<string, string | boolean>) => void | Promise<void>;
+type CommandHandler = (
+  args: string[],
+  options: Record<string, string | boolean>,
+) => void | Promise<void>;
 
 interface CommandDef {
   name: string;
@@ -65,7 +77,11 @@ interface PackManifestFile {
 
 // ── 参数解析 ──
 
-function parseArgs(argv: string[]): { command: string; args: string[]; options: Record<string, string | boolean> } {
+function parseArgs(argv: string[]): {
+  command: string;
+  args: string[];
+  options: Record<string, string | boolean>;
+} {
   const raw = argv.slice(2); // skip node + script
   const positionals: string[] = [];
   const options: Record<string, string | boolean> = {};
@@ -152,7 +168,10 @@ function loadPackFiles(
     try {
       return { ok: true, files: readPluginArchive(fs.readFileSync(path.resolve(file))) };
     } catch (err) {
-      return { ok: false, error: `插件安装包校验失败：${err instanceof Error ? err.message : String(err)}` };
+      return {
+        ok: false,
+        error: `插件安装包校验失败：${err instanceof Error ? err.message : String(err)}`,
+      };
     }
   }
   const manifest = readJsonFile<PackManifestFile>(file);
@@ -188,15 +207,149 @@ function printWarn(msg: string): void {
   console.warn(`⚠ ${msg}`);
 }
 
+// ── 新工程脚手架（一键路径） ──
+
+/**
+ * `tauron-app new <dir>` 的实现。
+ *
+ * 「一键」的真实边界（不夸大）：
+ * - 产出的 `src-tauri/` 是**真装配**（`state_init_with_adapter_config` +
+ *   `tauron_generate_handler![]` + 窗口销毁回收 + `capabilities/default.json`），
+ *   形态与 `examples/minimal-app` 同源，实测两档 `cargo check` 均通过；
+ * - 依赖坐标是 `path` / `file:` 指向**本机 tauron 检出根**——因为 20 个 npm 包与
+ *   15 个 crate 都还没发布，registry 坐标今天不可能解析。所以这条路径要求目标
+ *   工程与 tauron 检出同机可见（`--tauron-path` 可显式指定）；
+ * - 前端链路已闭合到 `npm run tauri dev`：`vite.config.ts`（端口/产物目录与
+ *   `tauri.conf.json` 对齐）+ 根 `index.html` + `beforeDevCommand` / `beforeBuildCommand`；
+ * - `src-tauri/icons/` 是**纯色占位图**——文件必须给（否则 Windows 上 `tauri-build`
+ *   生成资源文件时连 `cargo check` 都过不去），但发布前须替换成品牌图标。
+ */
+async function newAppProject(
+  args: string[],
+  options: Record<string, string | boolean>,
+): Promise<void> {
+  const targetDir = args[0] ?? (options.dir as string | undefined);
+  if (targetDir === undefined) {
+    printError('缺少目标目录：tauron-app new <dir>');
+    process.exitCode = 1;
+    return;
+  }
+  const absTarget = path.resolve(targetDir);
+  const name = (options.name as string | undefined) ?? path.basename(absTarget);
+  const capabilitiesRaw = options.capabilities as string | undefined;
+  const capabilities = capabilitiesRaw
+    ? capabilitiesRaw
+        .split(',')
+        .map((c) => c.trim())
+        .filter((c) => c !== '')
+    : [];
+
+  // tauron 检出根：显式 --tauron-path 优先；否则从 CLI 自身位置逐级上溯。
+  let tauronPath = options['tauron-path'] as string | undefined;
+  if (tauronPath === undefined) {
+    const root = findTauronRoot();
+    if (root === null) {
+      printError(
+        '未能在当前目录树定位 tauron 源码检出根（判据：crates/tauron-adapter/Cargo.toml）。',
+      );
+      printInfo('tauron 尚未发布到 npm / crates.io，path/file 依赖必须指向本机检出根；');
+      printInfo('请显式传 --tauron-path <tauron 检出根相对目标工程根的路径>。');
+      process.exitCode = 1;
+      return;
+    }
+    tauronPath = toPosixRelative(absTarget, root);
+  }
+
+  const input: ScaffoldConfigInput = {
+    name,
+    capabilities,
+    tauronPath,
+    ...(options.description !== undefined ? { description: options.description as string } : {}),
+    ...(options.framework !== undefined ? { framework: options.framework as string } : {}),
+    ...(options.shell !== undefined ? { shell: options.shell as string } : {}),
+    ...(options.brand !== undefined ? { brand: options.brand as string } : {}),
+  };
+
+  const result = scaffold(input);
+  if (!result.ok) {
+    printError(result.error ?? '脚手架生成失败');
+    process.exitCode = 1;
+    return;
+  }
+
+  if (options['dry-run'] === true) {
+    const total = result.files.size + result.binaryFiles.size;
+    printInfo(`--dry-run：将生成 ${total} 个文件到 ${absTarget}`);
+    for (const file of result.files.keys()) {
+      console.log(`  ${file}`);
+    }
+    for (const file of result.binaryFiles.keys()) {
+      console.log(`  ${file}`);
+    }
+    return;
+  }
+
+  if (pathExists(absTarget) && options.force !== true) {
+    const existing = fs.readdirSync(absTarget);
+    if (existing.length > 0) {
+      printError(`目录已存在且非空：${absTarget}（加 --force 才覆盖）`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  const written = writeFiles(result.files, absTarget);
+  const writtenBinaries = writeFiles(result.binaryFiles, absTarget);
+  const failures = [...written.failed, ...writtenBinaries.failed];
+  if (failures.length > 0) {
+    for (const failure of failures) {
+      printError(`${failure.path}：${failure.error}`);
+    }
+    process.exitCode = 1;
+    return;
+  }
+
+  const fileCount = written.written.length + writtenBinaries.written.length;
+  printSuccess(`工程已生成：${absTarget}（${fileCount} 个文件）`);
+  printInfo(
+    `tauron 检出根：${tauronPath}（已写入 Cargo.toml 的 path 依赖与 package.json 的 file: 依赖）`,
+  );
+  printInfo('下一步：');
+  printInfo(`  cd ${targetDir} && npm install`);
+  printInfo(
+    '  npm run tauri dev                      # 一键起开发环境（beforeDevCommand 自动拉 vite）',
+  );
+  printInfo('  cd src-tauri && cargo check            # 或单独验证 tauron 装配能编译');
+  printInfo('  cd src-tauri && cargo check --features substrate-only   # 只取底座（57 条命令）');
+  printWarn('src-tauri/icons/ 是**占位图**（纯色），发布前请替换成自己的品牌图标。');
+}
+
 // ── 命令处理器 ──
 
 const HELP_COMMANDS: CommandDef[] = [
   {
+    name: 'new',
+    description: '创建新的 tauron 应用工程（含真装配的 src-tauri 与 capability）',
+    usage:
+      'tauron-app new <dir> [--name <n>] [--framework react|vue|svelte|vanilla] [--shell tauri|electron] [--capabilities a,b] [--tauron-path <p>] [--force] [--dry-run]',
+    handler: newAppProject,
+  },
+  {
+    name: 'create',
+    description: 'new 的别名（`create-tauron-app <dir>` 也走这条）',
+    usage: 'tauron-app create <dir> [同上]',
+    handler: newAppProject,
+  },
+  {
     name: 'init',
     description: '一键接入现有 Tauri 项目',
-    usage: 'tauron-app init [--config <file>] [--dry-run]',
+    usage: 'tauron-app init [--dir <p>] [--tauron-path <p>] [--config <file>] [--dry-run]',
     handler: async (_args, options) => {
       const result = await initProject({
+        ...(options.dir !== undefined ? { dir: options.dir as string } : {}),
+        ...(options['tauron-path'] !== undefined
+          ? { tauronPath: options['tauron-path'] as string }
+          : {}),
         configPath: (options.config as string) ?? 'client-config.json',
         dryRun: options['dry-run'] === true,
       });
@@ -209,6 +362,8 @@ const HELP_COMMANDS: CommandDef[] = [
         }
       } else {
         printError(result.error ?? '接入失败');
+        // 失败必须反映到退出码：否则脚本 / CI 会把「没接上」当成功。
+        process.exitCode = 1;
       }
     },
   },
@@ -292,6 +447,21 @@ const HELP_COMMANDS: CommandDef[] = [
             process.exitCode = 1;
             return;
           }
+          const dir = options.dir as string | undefined;
+          const baseDir = dir !== undefined ? path.resolve(dir) : null;
+          // 落盘时才需要坐标；只打印 JSON 时不猜路径。
+          // 探测失败**如实报错**，而不是退回 `workspace:*` —— 那在生成目录里解析不了。
+          let tauronPath: string | undefined;
+          if (baseDir !== null) {
+            const tauronRoot = findTauronRoot();
+            if (tauronRoot === null) {
+              printError('未找到 tauron 源码检出根（判据：crates/tauron-adapter/Cargo.toml）');
+              printInfo('请在本仓库内运行，或用 --tauron-path 指定检出根。');
+              process.exitCode = 1;
+              return;
+            }
+            tauronPath = toPosixRelative(baseDir, tauronRoot);
+          }
           const result = pluginScaffold({
             id,
             name,
@@ -299,16 +469,20 @@ const HELP_COMMANDS: CommandDef[] = [
             version: '0.1.0',
             permissions: [],
             enabled: true,
+            ...(tauronPath !== undefined ? { tauronPath } : {}),
           });
           if (result.ok) {
-            const dir = options.dir as string | undefined;
-            if (dir) {
-              const baseDir = path.resolve(dir);
+            if (baseDir !== null) {
               await ensureDir(baseDir);
               for (const [filePath, content] of result.files) {
                 await writeFiles(new Map([[filePath, content]]), baseDir);
               }
               printSuccess(`插件已创建：${baseDir}`);
+              if (tauronPath !== undefined) {
+                printInfo(
+                  `依赖坐标：file:${tauronPath}/packages/...（tauron 未发布到 npm，这是唯一可解析的形态）`,
+                );
+              }
             } else {
               console.log(JSON.stringify(result, null, 2));
             }
@@ -322,14 +496,14 @@ const HELP_COMMANDS: CommandDef[] = [
           const name = (options.name as string) ?? 'my-plugin';
           const dir = options.dir as string | undefined;
           const dryRun = options['dry-run'] === true;
-          
+
           try {
             const result = await createTemplate(type, name, {
               ...(dir !== undefined ? { baseDir: dir } : {}),
               overwrite: options.overwrite === true,
               dryRun,
             });
-            
+
             if (result.ok) {
               printSuccess(`插件模板已创建：${result.path}`);
               if (result.files && result.files.length > 0) {
@@ -363,7 +537,9 @@ const HELP_COMMANDS: CommandDef[] = [
             return;
           }
           const packFiles = scanned.files.filter((file) => file.path !== 'manifest.json');
-          const sourceManifest = readJsonFile<Record<string, unknown>>(path.join(dir, 'manifest.json'));
+          const sourceManifest = readJsonFile<Record<string, unknown>>(
+            path.join(dir, 'manifest.json'),
+          );
           if (!sourceManifest.ok || sourceManifest.data === undefined) {
             printError(sourceManifest.error ?? '插件 manifest 读取失败');
             process.exitCode = 1;
@@ -439,13 +615,16 @@ const HELP_COMMANDS: CommandDef[] = [
             return;
           }
 
-          const result = await pluginSign({
-            dir: (options.dir as string) ?? path.dirname(path.resolve(file)),
-            algorithm: (options.algorithm as string) ?? 'ed25519',
-            kid: (options.kid as string) ?? 'tauron-001',
-            privateKey,
-            includeSource: options['include-source'] === true,
-          }, packManifest.files);
+          const result = await pluginSign(
+            {
+              dir: (options.dir as string) ?? path.dirname(path.resolve(file)),
+              algorithm: (options.algorithm as string) ?? 'ed25519',
+              kid: (options.kid as string) ?? 'tauron-001',
+              privateKey,
+              includeSource: options['include-source'] === true,
+            },
+            packManifest.files,
+          );
 
           if (!result.ok || result.signature === undefined) {
             printError(result.error ?? '签名失败');
@@ -594,7 +773,9 @@ const HELP_COMMANDS: CommandDef[] = [
       typeDecls.push(`export interface PluginManifest {`);
       for (const [key, value] of Object.entries(m)) {
         const tsType = inferTsType(value);
-        typeDecls.push(`  ${key}${typeof value === 'undefined' || value === null ? '?' : ''}: ${tsType};`);
+        typeDecls.push(
+          `  ${key}${typeof value === 'undefined' || value === null ? '?' : ''}: ${tsType};`,
+        );
       }
       typeDecls.push('}');
       typeDecls.push('');
@@ -622,8 +803,22 @@ function inferTsType(value: unknown): string {
 
 // ── 主入口 ──
 
+/**
+ * `create-tauron-app` 与 `tauron-app` 是**同一个 bin 文件**（见 package.json 的
+ * `bin` 字段）。前者是脚手架语义，按惯例直接 `create-tauron-app my-app`，不带子命令；
+ * 这里把这种调用归一到 `new <dir>`，让两个入口都能用同一套实现。
+ */
+function normalizeArgv(argv: string[]): string[] {
+  const invoked = argv[1] ?? '';
+  const base = path.basename(invoked).replace(/\.(c|m)?js$/, '');
+  if (base === 'create-tauron-app') {
+    return [...argv.slice(0, 2), 'new', ...argv.slice(2)];
+  }
+  return argv;
+}
+
 export async function main(argv?: string[]): Promise<void> {
-  const parsed = parseArgs(argv ?? process.argv);
+  const parsed = parseArgs(normalizeArgv(argv ?? process.argv));
   const { command, args, options } = parsed;
 
   if (command === 'help' || command === '--help' || command === '-h') {
@@ -660,7 +855,11 @@ function printUsage(): void {
 }
 
 // 直接运行时执行
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith('cli.js') || process.argv[1]?.endsWith('cli.mjs')) {
+if (
+  import.meta.url === `file://${process.argv[1]}` ||
+  process.argv[1]?.endsWith('cli.js') ||
+  process.argv[1]?.endsWith('cli.mjs')
+) {
   main().catch((err) => {
     printError(err instanceof Error ? err.message : String(err));
     process.exitCode = 1;

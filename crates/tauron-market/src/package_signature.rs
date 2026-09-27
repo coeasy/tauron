@@ -99,7 +99,11 @@ pub fn parse_issued_at_utc_secs(input: &str) -> Option<i64> {
     let hour: i64 = s.get(11..13)?.parse().ok()?;
     let minute: i64 = s.get(14..16)?.parse().ok()?;
     let second: i64 = s.get(17..19)?.parse().ok()?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
     {
         return None;
     }
@@ -165,7 +169,7 @@ pub fn verify_tpkg(
     let cursor = std::io::Cursor::new(archive);
     let mut zip = zip::ZipArchive::new(cursor)
         .map_err(|e| MarketError::ManifestFormat(format!("ZIP 解析失败：{e}")))?;
-    if zip.len() == 0 || zip.len() > MAX_ENTRIES || zip.len() != signature.files.len() {
+    if zip.is_empty() || zip.len() > MAX_ENTRIES || zip.len() != signature.files.len() {
         return Err(MarketError::ManifestFormat("ZIP 条目数与签名文件清单不一致".into()));
     }
     let mut total_unpacked = 0u64;
@@ -356,12 +360,8 @@ pub fn verify_package_signature(
     }
 
     // v2 载荷：元数据 + 逐文件的 path/size/hash（顺序敏感）。
-    let payload = signing_payload(
-        &sidecar.algorithm,
-        &sidecar.kid,
-        &sidecar.issued_at,
-        &sidecar.files,
-    );
+    let payload =
+        signing_payload(&sidecar.algorithm, &sidecar.kid, &sidecar.issued_at, &sidecar.files);
 
     let signature_bytes = decode_hex(&sidecar.signature)
         .filter(|bytes| bytes.len() == 64)
@@ -388,10 +388,12 @@ pub fn verify_package_signature(
 }
 
 fn decode_hex(input: &str) -> Option<Vec<u8>> {
-    if input.len() % 2 != 0 {
+    if !input.len().is_multiple_of(2) {
         return None;
     }
     let mut out = Vec::with_capacity(input.len() / 2);
+    // 保留 chunks_exact：clippy 建议的 `as_chunks::<2>()` 依赖不稳定 API，不为此引入不稳定特性。
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     for pair in input.as_bytes().chunks_exact(2) {
         let hi = hex_nibble(pair[0])?;
         let lo = hex_nibble(pair[1])?;
@@ -515,11 +517,8 @@ mod tests {
     fn expired_issued_at_is_rejected() {
         let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let spki = key.verifying_key().to_bytes();
-        let files = vec![SignedFile {
-            path: "manifest.json".into(),
-            size: 1,
-            hash: "c".repeat(64),
-        }];
+        let files =
+            vec![SignedFile { path: "manifest.json".into(), size: 1, hash: "c".repeat(64) }];
         let issued = "2000-01-01T00:00:00.000Z"; // 远早于上限
         let payload = signing_payload("ed25519", "kid-x", issued, &files);
         let sig = ed25519_dalek::Signer::sign(&key, &payload);
@@ -539,11 +538,8 @@ mod tests {
     fn future_issued_at_is_rejected() {
         let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
         let spki = key.verifying_key().to_bytes();
-        let files = vec![SignedFile {
-            path: "manifest.json".into(),
-            size: 1,
-            hash: "d".repeat(64),
-        }];
+        let files =
+            vec![SignedFile { path: "manifest.json".into(), size: 1, hash: "d".repeat(64) }];
         let issued = "2099-01-01T00:00:00.000Z";
         let payload = signing_payload("ed25519", "kid-y", issued, &files);
         let sig = ed25519_dalek::Signer::sign(&key, &payload);

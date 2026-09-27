@@ -250,6 +250,14 @@ pub static COMMANDS: &[CommandAuth] = &[
 ///   `host_registry_list` 同族）：`host_notifications_list`。插件读**自己的**通知
 ///   是正当功能，所以不能一刀切拒绝；但 `items` / `total` / `unread` / `dispatchLog`
 ///   必须**同源**于可见集合——只裁数组、留着全局未读数仍然是泄露。
+/// - **R9 新增能力域 —— 全部仅主窗**（`require_main_window`，与上一条同一套写法、
+///   同一拒绝码 `E_AUTH_DENIED`）：menu / tray / fs / http / updater / theme
+///   共 18 条 —— `host_menu_set|popup|reset`、`host_tray_create|set_menu|remove`、
+///   `host_fs_read|write|list|stat|mkdir|remove`、`host_http_request`、
+///   `host_updater_check|status`、`host_theme_list|get|set`。理由：菜单/托盘是
+///   **应用级** UI 原语（非某插件私有），fs/http 是宿主级 I/O 与网络原语（越权面
+///   最大），updater 是宿主级更新通道，theme 是全局激活态——都不属任何插件，
+///   插件 webview 调用一律拒绝。
 ///
 /// 实现位置：`tauron-adapter` 的 `*_as` 核心函数（每个都写清了"为什么这条要绑
 /// 身份 / 为什么这条主窗专属"），wire 包装器一律 `Caller::from_label(window.label())`
