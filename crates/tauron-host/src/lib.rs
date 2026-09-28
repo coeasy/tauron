@@ -17,6 +17,9 @@ pub mod call_delivery;
 pub mod call_state;
 pub mod config;
 pub mod error;
+pub mod wire;
+pub mod provider;
+pub mod execution;
 pub mod eventbus;
 pub mod lifecycle;
 pub mod manifest;
@@ -45,6 +48,16 @@ pub use registry::{PendingCall, PluginEntry, PluginFilter, Registry, RegistryCon
 pub use runtime::{LeaseReaper, ReapOutcome, ReapStats, RuntimeHandle, RuntimeLease, RuntimeTable};
 
 // V4 universal/industrial foundation exports.
+pub use execution::{
+    current_domain, in_domain, require_domain, ExecutionDomain, ExecutionDomainGuard, ExecutionError,
+};
+pub use provider::{
+    CapabilityEpoch, ProviderLifecycle, ProviderLifecycleError, ProviderState,
+};
+pub use wire::{
+    decode_json as decode_wire_json, encode_json as encode_wire_json, WireError, WireExtensions,
+    WireFrame, WireHeader, DEFAULT_MAX_WIRE_BYTES, JSON_V1_CODEC, WIRE_VERSION_V1,
+};
 pub use call_state::{AtomicCallState, CallTerminalState};
 pub use production::{
     is_production_safe, validate as validate_production_readiness, DeploymentMode,
