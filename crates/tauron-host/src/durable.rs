@@ -29,8 +29,8 @@ fn payload_checksum<T: Serialize>(
     generation: u64,
     payload: &T,
 ) -> Result<String, DurableError> {
-    let canonical =
-        serde_json::to_vec(&(schema, generation, payload)).map_err(|e| DurableError::InvalidJson(e.to_string()))?;
+    let canonical = serde_json::to_vec(&(schema, generation, payload))
+        .map_err(|e| DurableError::InvalidJson(e.to_string()))?;
     Ok(hex::encode(Sha256::digest(canonical)))
 }
 
@@ -45,12 +45,7 @@ impl<T: Serialize> DurableEnvelope<T> {
             return Err(DurableError::MissingSchema);
         }
         let checksum = payload_checksum(&schema, generation, &payload)?;
-        Ok(Self {
-            schema,
-            generation,
-            payload,
-            checksum,
-        })
+        Ok(Self { schema, generation, payload, checksum })
     }
 
     pub fn verify(&self) -> Result<(), DurableError> {
