@@ -124,7 +124,7 @@ pub struct ChangeEvent {
 /// 与 `tauron-notify` 的环形缓冲、`MemoryWindowSink` 的留痕上限同一策略。
 pub const MAX_PENDING_EVENTS: usize = 1024;
 
-/// 变更订阅者（简单广播：每个订阅者一条独立队列）。
+/// 变更订阅者：按 namespace 隔离，每个订阅者一条有界 FIFO。
 #[derive(Default)]
 pub struct Watcher {
     /// subscriber id → (namespace, bounded FIFO). Namespace isolation is enforced here.
@@ -786,7 +786,7 @@ mod tests {
         // `broadcast` 是无条件 push：订阅者从不 drain 时队列会随每次写入无限增长。
         // 到顶后丢最旧，稳定在 MAX_PENDING_EVENTS。
         let mut w = Watcher::default();
-        let id = w.subscribe();
+        let id = w.subscribe("p");
         for i in 0..(MAX_PENDING_EVENTS + 25) {
             w.broadcast(&ChangeEvent {
                 plugin_id: "p".to_string(),
