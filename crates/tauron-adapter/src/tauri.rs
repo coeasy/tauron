@@ -3056,6 +3056,11 @@ fn command_state_with_dir_and_config(
     if cfg.recovery_data_dir.is_none() {
         cfg.recovery_data_dir = dir;
     }
+    // V4 production profile: resolve platform-owned defaults first, then validate.
+    // Invalid production configuration must fail before any managed state is exposed.
+    if let Err(reason) = cfg.validate_production_readiness() {
+        panic!("[tauron] production readiness check failed: {reason}");
+    }
     // R1b：先建底座（唯一一份），再在同一底座上装插件运行时。
     let mut substrate = SubstrateState::with_adapter_config(&cfg);
     // R7-3：注入 Tauri 系统通知通道。注入点只有这里（`OnceLock` 只设一次）——
