@@ -87,7 +87,7 @@ mod tests {
                 let state = Arc::clone(&state);
                 joins.push(thread::spawn(move || state.try_finish(candidate)));
             }
-            let winners = joins.into_iter().filter(|j| j.join().unwrap()).count();
+            let winners = joins.into_iter().map(|j| j.join().unwrap()).filter(|won| *won).count();
             assert_eq!(winners, 1);
             assert!(state.terminal().is_some());
         }
