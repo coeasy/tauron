@@ -272,7 +272,8 @@ describe('门禁：应用层宿主错误码 TS ↔ Rust 一致', () => {
 
   it('V4 retryClass 一致，panic 不得自动重试', () => {
     const lookup = variantToCode();
-    const retryBlock = /pub const fn retry_class\(self\)[\s\S]*?\n    \}/.exec(hostErrorSrc)?.[0] ?? '';
+    const retryBlock =
+      /pub const fn retry_class\(self\)[\s\S]*?\n    \}/.exec(hostErrorSrc)?.[0] ?? '';
     expect(retryBlock, 'retry_class() must exist').not.toBe('');
     const rustClass = new Map<string, string>();
     for (const m of retryBlock.matchAll(/Self::(E_\w+)\s*=>\s*RetryClass::(\w+)/g)) {
