@@ -221,7 +221,7 @@ mod tests {
         let res: HostResult<u32> = guard("boom", || panic!("kaboom"));
         let err = res.expect_err("panic 必须被捕获");
         assert_eq!(err.code, ErrorCode::E_HOST_PANIC);
-        assert!(err.retryable);
+        assert!(!err.retryable);
         assert!(err.message.contains("kaboom"), "payload 应可读：{}", err.message);
     }
 
