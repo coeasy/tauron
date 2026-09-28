@@ -364,10 +364,7 @@ impl EventBus {
     /// 撤销只阻止**后续新订阅**；既有订阅必须由管理面显式退订或在主体销毁时
     /// 级联回收。这样授权事实与订阅资源的生命周期不会在本层暗中混为一谈。
     pub fn revoke(&self, subscriber: &str, topic: &str) -> bool {
-        self.approvals
-            .lock()
-            .remove(&(subscriber.to_string(), topic.to_string()))
-            .is_some()
+        self.approvals.lock().remove(&(subscriber.to_string(), topic.to_string())).is_some()
     }
 
     /// 稳定顺序列出全部审批，供宿主管理面审计/展示。
@@ -905,10 +902,7 @@ mod tests {
         declare(&b, "com.a", "plugin:com.a:private", false);
 
         b.approve("com.b", "plugin:com.a:private");
-        assert_eq!(
-            b.approvals(),
-            vec![("com.b".to_string(), "plugin:com.a:private".to_string())]
-        );
+        assert_eq!(b.approvals(), vec![("com.b".to_string(), "plugin:com.a:private".to_string())]);
         assert!(b.subscribe("com.b", "w1", "plugin:com.a:private").is_ok());
 
         assert!(b.revoke("com.b", "plugin:com.a:private"));
