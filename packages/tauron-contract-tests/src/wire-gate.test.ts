@@ -248,14 +248,19 @@ describe('门禁：应用层宿主错误码 TS ↔ Rust 一致', () => {
     );
   }
 
-  it('线名逐项同序一致（Rust ErrorCode ↔ TS HOST_ERROR_CODES）', () => {
-    const rustCodes = [...variantToCode().values()];
-    expect(rustCodes, 'Rust 侧应解析出全部变体').toEqual([...HOST_ERROR_CODES]);
-    // 不再硬编码个数（此前写死 18，新增 `E_STREAM_FULL` 就得改这里——个数是从
-    // 两侧解析结果里导出的，硬编码只会制造"改一处忘一处"的假失败）。
-    // 这里改钉**下限**：确保正则真的抓到了码表，而不是空匹配蒙混过关。
-    expect(HOST_ERROR_CODES.length).toBeGreaterThanOrEqual(18);
-    expect(rustCodes.length).toBe(HOST_ERROR_CODES.length);
+  const registry = JSON.parse(read('contracts/error/error-codes.json')) as {
+    version: number;
+    codes: Array<{ code: string; retryClass: string }>;
+  };
+
+  it('Rust/TS 都与 canonical error registry 同集合一致（协议身份不依赖源码顺序）', () => {
+    const canonical = registry.codes.map((entry) => entry.code).sort();
+    const rustCodes = [...variantToCode().values()].sort();
+    const tsCodes = [...HOST_ERROR_CODES].sort();
+    expect(registry.version).toBe(1);
+    expect(rustCodes, 'Rust error codes must match canonical registry').toEqual(canonical);
+    expect(tsCodes, 'TS error codes must match canonical registry').toEqual(canonical);
+    expect(canonical.length).toBeGreaterThanOrEqual(18);
   });
 
   it('线名必须等于枚举变体名（E_* 大写蛇形，禁止 camelCase 漂移）', () => {
@@ -266,17 +271,14 @@ describe('门禁：应用层宿主错误码 TS ↔ Rust 一致', () => {
     }
   });
 
-  it('可重试集合一致（Rust variant → 线名 → TS 集合）', () => {
-    const open = hostErrorSrc.indexOf('matches!(', hostErrorSrc.indexOf('pub fn retryable'));
-    expect(open, 'retryable() matches! not found').toBeGreaterThan(-1);
-    const block = hostErrorSrc.slice(open, hostErrorSrc.indexOf(')', open) + 1);
-    const lookup = variantToCode();
-    const rustRetryable = [...block.matchAll(/Self::(E_\w+)/g)]
-      .map((m) => m[1]!)
-      .map((v) => lookup.get(v))
-      .filter((c): c is string => Boolean(c));
-    expect(rustRetryable.sort()).toEqual([...RETRYABLE_HOST_ERROR_CODES].sort());
-    expect(rustRetryable).toHaveLength(3);
+  it('可自动重试集合由 canonical registry 锁定，panic 永不自动重试', () => {
+    const canonicalRetryable = registry.codes
+      .filter((entry) => entry.retryClass === 'auto-idempotent')
+      .map((entry) => entry.code)
+      .sort();
+    expect([...RETRYABLE_HOST_ERROR_CODES].sort()).toEqual(canonicalRetryable);
+    expect(canonicalRetryable).toEqual(['E_CALL_TIMEOUT', 'E_PLUGIN_FILTERED']);
+    expect(canonicalRetryable).not.toContain('E_HOST_PANIC');
   });
 
   it('HostError 必须以结构化 JSON 穿越 IPC（禁止 {:?} 文本转储）', () => {
