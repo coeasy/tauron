@@ -703,12 +703,7 @@ impl Registry {
     /// **顺带回收该调用上的流并补发 `end` 终帧**：handler 忘了关流时，接收方靠这一帧
     /// 才会结束等待（R5 不变量 3）。这是唯一兜底，因此不能省。
     pub fn call_end(&self, call_id: &str) -> HostResult<PendingCall> {
-        self.end_call(
-            call_id,
-            CallTerminalState::Completed,
-            StreamKind::End,
-            None,
-        )
+        self.end_call(call_id, CallTerminalState::Completed, StreamKind::End, None)
     }
 
     /// 取消调用（仅回收，不返回条目）。流以 `error` 终帧收尾并带上原因。
