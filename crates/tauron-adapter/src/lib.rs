@@ -23,7 +23,9 @@ pub mod tauri;
 /// 进程插件投递实现（0.4-A1：Process 形态的 `CallDelivery` + sidecar 回帧接收器）。
 pub mod process_delivery;
 
-/// WASM 插件投递实现（任务二：`PluginType::Wasm` 经 `tauron-wasm` 校验层）。
+/// WASM broker is optional in V4 minimal profile. Without it, Wasm delivery is
+/// intentionally absent and select_delivery() returns the canonical unwired result.
+#[cfg(feature = "runtime-wasm-broker")]
 pub mod wasm_delivery;
 
 /// 启动恢复的持久化与崩溃检测（平台无关，纯 std）。
@@ -72,6 +74,7 @@ use tauron_recovery::{
 use tauron_settings::{Migration, SettingsError, SettingsStore};
 
 use crate::process_delivery::ProcessCallDelivery;
+#[cfg(feature = "runtime-wasm-broker")]
 use crate::wasm_delivery::WasmCallDelivery;
 
 /// 贡献注册条目（命令/菜单/面板/设置Tab）。
@@ -2522,10 +2525,13 @@ impl PluginRuntimeState {
             DeliveryKind::Process,
             Box::new(ProcessCallDelivery::new(proc_runtime.clone(), registry.clone())),
         );
-        // 任务二（接通 tauron-wasm）：Wasm 形态不再落 `UnwiredDelivery`——
-        // 投递路径现在**真的经过** `tauron-wasm` 的配置/ABI/崩溃预算校验层，
-        // 但执行层无运行时，仍诚实返回 `delivered: false`（详见模块头）。
-        map.insert(DeliveryKind::Wasm, Box::new(WasmCallDelivery::new(registry.clone())));
+        #[cfg(feature = "runtime-wasm-broker")]
+        {
+            // Broker feature only wires validation/delivery metadata. The actual WASM
+            // engine remains an on-demand runtime pack and must still report unsupported
+            // until that engine is installed/ready.
+            map.insert(DeliveryKind::Wasm, Box::new(WasmCallDelivery::new(registry.clone())));
+        }
         map
     }
 
