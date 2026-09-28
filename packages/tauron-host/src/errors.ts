@@ -75,12 +75,12 @@ export type HostErrorCode = (typeof HOST_ERROR_CODES)[number];
 /**
  * 可重试错误（与 Rust `ErrorCode::retryable()` 完全一致）。
  *
- * 仅超时、宿主 panic、插件被过滤这三类值得由框架层自动重试；
- * 其余都是确定性失败，重试只会放大成本。
+ * V4: only operations whose error class is AutoIdempotent are projected as
+ * wire-level retryable. A caught host panic is deliberately excluded because
+ * catch_unwind cannot prove that pre-panic side effects rolled back.
  */
 export const RETRYABLE_HOST_ERROR_CODES: readonly HostErrorCode[] = [
   'E_CALL_TIMEOUT',
-  'E_HOST_PANIC',
   'E_PLUGIN_FILTERED',
 ];
 
