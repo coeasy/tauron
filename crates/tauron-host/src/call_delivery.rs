@@ -259,20 +259,18 @@ mod tests {
     fn unwired_delivery_honestly_reports_no_path() {
         let delivery = UnwiredDelivery;
         assert_eq!(delivery.target_kind(), DeliveryKind::Unwired);
-        let call = PendingCall {
-            call_id: "c1".into(),
-            plugin_id: "main".into(),
-            cmd: "x".into(),
-            args: serde_json::Value::Null,
-            caller: "main".into(),
-            target: "com.example.b".into(),
-            state: crate::registry::CallState::Pending,
-            result: None,
-            error_code: None,
-            seq: 1,
-            created_at: std::time::Instant::now(),
-            expires_at: std::time::Instant::now(),
-        };
+        let now = std::time::Instant::now();
+        let call = PendingCall::new(
+            "c1".into(),
+            "main".into(),
+            "x".into(),
+            serde_json::Value::Null,
+            "main".into(),
+            "com.example.b".into(),
+            1,
+            now,
+            now,
+        );
         let receipt = delivery.deliver(&call).unwrap();
         assert!(!receipt.delivered);
         assert!(receipt.reason.is_some(), "未投递时 reason 必非空");
