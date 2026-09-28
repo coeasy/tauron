@@ -72,20 +72,47 @@ export const HOST_ERROR_CODES = [
 
 export type HostErrorCode = (typeof HOST_ERROR_CODES)[number];
 
+/** V4 structured retry semantics. Automatic retry still requires operation idempotency + budget. */
+export type RetryClass = 'never' | 'manual' | 'auto-idempotent' | 'after-reconnect';
+
+/** Canonical retry class mirror of Rust `ErrorCode::retry_class()`. */
+export const HOST_RETRY_CLASS: Readonly<Record<HostErrorCode, RetryClass>> = Object.freeze({
+  E_HOST_PANIC: 'never',
+  E_UNKNOWN_PLUGIN: 'never',
+  E_AUTH_DENIED: 'never',
+  E_INVALID_MANIFEST: 'never',
+  E_STATE_INVALID_TRANSITION: 'never',
+  E_CALL_NOT_FOUND: 'never',
+  E_CALL_TIMEOUT: 'manual',
+  E_FORBIDDEN_PERMISSION: 'never',
+  E_ABI_MISMATCH: 'never',
+  E_PLUGIN_DISABLED: 'never',
+  E_REGISTRY_FULL: 'never',
+  E_CALL_PENDING_FULL: 'never',
+  E_SUBSCRIPTION_FULL: 'never',
+  E_PLUGIN_EXISTS: 'never',
+  E_INSTALL_FAILED: 'never',
+  E_PLUGIN_FILTERED: 'manual',
+  E_PLUGIN_TYPE_NO_RUNTIME: 'never',
+  E_LEASE_EXPIRED: 'after-reconnect',
+  E_STREAM_FULL: 'never',
+  E_CALL_ALREADY_SETTLED: 'never',
+  E_CONTRIBUTES_DRIFT: 'never',
+});
+
 /**
- * 可重试错误（与 Rust `ErrorCode::retryable()` 完全一致）。
- *
- * 仅超时、宿主 panic、插件被过滤这三类值得由框架层自动重试；
- * 其余都是确定性失败，重试只会放大成本。
+ * Legacy compatibility list: only codes that are intrinsically safe for bounded automatic
+ * replay belong here. V4 intentionally contains no such error until an operation proves
+ * idempotency separately; panic/timeouts are never blindly replayed.
  */
-export const RETRYABLE_HOST_ERROR_CODES: readonly HostErrorCode[] = [
-  'E_CALL_TIMEOUT',
-  'E_HOST_PANIC',
-  'E_PLUGIN_FILTERED',
-];
+export const RETRYABLE_HOST_ERROR_CODES: readonly HostErrorCode[] = [];
+
+export function retryClassOf(code: HostErrorCode | string): RetryClass {
+  return isHostErrorCode(code) ? HOST_RETRY_CLASS[code] : 'never';
+}
 
 export function isRetryable(code: HostErrorCode | string): boolean {
-  return (RETRYABLE_HOST_ERROR_CODES as readonly string[]).includes(code);
+  return retryClassOf(code) === 'auto-idempotent';
 }
 
 export function isHostErrorCode(v: string): v is HostErrorCode {
@@ -135,6 +162,10 @@ function tryParseHostError(value: string | null | undefined): HostErrorShape | n
         rawCode,
         message: typeof rec.message === 'string' ? rec.message : t,
         retryable: typeof rec.retryable === 'boolean' ? rec.retryable : isRetryable(code),
+        retryClass:
+          typeof rec.retryClass === 'string' && isRetryClass(rec.retryClass)
+            ? rec.retryClass
+            : retryClassOf(code),
       };
     }
   } catch {
@@ -159,6 +190,15 @@ function extractCode(msg: string): {
 }
 
 /** 规范化后的宿主错误（跨 IPC 的最小契约）。 */
+export function isRetryClass(value: string): value is RetryClass {
+  return (
+    value === 'never' ||
+    value === 'manual' ||
+    value === 'auto-idempotent' ||
+    value === 'after-reconnect'
+  );
+}
+
 export interface HostErrorShape {
   /**
    * 线上错误码，见 {@link HOST_ERROR_CODES}；不在表内时为 `E_UNKNOWN`。
@@ -176,8 +216,10 @@ export interface HostErrorShape {
   rawCode: string | null;
   /** 面向开发者/日志的可读描述；**不得**作为 UI 文案或分支判断依据。 */
   message: string;
-  /** 宿主是否建议重试（= {@link RETRYABLE_HOST_ERROR_CODES}）。 */
+  /** Legacy automatic-retry compatibility flag. Prefer {@link HostErrorShape.retryClass}. */
   retryable: boolean;
+  /** Structured V4 retry semantics. Never implies an unbounded SDK retry loop. */
+  retryClass: RetryClass;
 }
 
 /**
@@ -199,7 +241,11 @@ export function normalizeError(err: unknown): HostErrorShape {
       const code = isHostErrorCode(rawCode) ? rawCode : 'E_UNKNOWN';
       const message = typeof rec.message === 'string' ? rec.message : String(err);
       const retryable = typeof rec.retryable === 'boolean' ? rec.retryable : isRetryable(code);
-      return { code, rawCode, message, retryable };
+      const retryClass =
+        typeof rec.retryClass === 'string' && isRetryClass(rec.retryClass)
+          ? rec.retryClass
+          : retryClassOf(code);
+      return { code, rawCode, message, retryable, retryClass };
     }
 
     // 2) Tauri/IPC 层错误：内层消息可能是 `to_tauri_err` 的 JSON 字符串，也可能是纯文本。
@@ -207,14 +253,14 @@ export function normalizeError(err: unknown): HostErrorShape {
     const parsed = tryParseHostError(msg);
     if (parsed) return parsed;
     const { code, rawCode } = extractCode(msg);
-    return { code, rawCode, message: msg, retryable: isRetryable(code) };
+    return { code, rawCode, message: msg, retryable: isRetryable(code), retryClass: retryClassOf(code) };
   }
 
   if (err instanceof Error) {
     const parsed = tryParseHostError(err.message);
     if (parsed) return parsed;
     const { code, rawCode } = extractCode(err.message);
-    return { code, rawCode, message: err.message, retryable: isRetryable(code) };
+    return { code, rawCode, message: err.message, retryable: isRetryable(code), retryClass: retryClassOf(code) };
   }
 
   const msg = typeof err === 'string' ? err : String(err);
@@ -224,6 +270,7 @@ export function normalizeError(err: unknown): HostErrorShape {
       rawCode: extractCode(msg).rawCode,
       message: msg,
       retryable: false,
+      retryClass: 'never',
     }
   );
 }
@@ -234,6 +281,7 @@ export class HostException extends Error {
   /** 宿主实际发来的原始码串（见 {@link HostErrorShape.rawCode}）。 */
   readonly rawCode: string | null;
   readonly retryable: boolean;
+  readonly retryClass: RetryClass;
 
   constructor(shape: HostErrorShape) {
     super(shape.message);
@@ -241,6 +289,7 @@ export class HostException extends Error {
     this.code = shape.code;
     this.rawCode = shape.rawCode;
     this.retryable = shape.retryable;
+    this.retryClass = shape.retryClass;
   }
 
   /** 序列化成可跨 IPC 传输的形状。 */
@@ -250,6 +299,7 @@ export class HostException extends Error {
       rawCode: this.rawCode,
       message: this.message,
       retryable: this.retryable,
+      retryClass: this.retryClass,
     };
   }
 }
