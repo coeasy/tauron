@@ -20,7 +20,13 @@ export {
   translate_at_boundary,
   UNWIRED_BOUNDARIES,
 } from './errors.js';
-export type { BoundaryTranslation, HostBoundary, HostErrorCode, HostErrorShape, RetryClass } from './errors.js';
+export type {
+  BoundaryTranslation,
+  HostBoundary,
+  HostErrorCode,
+  HostErrorShape,
+  RetryClass,
+} from './errors.js';
 
 export type { Backend, ChannelPort, Principal, Unlisten } from './backend.js';
 export { MockBackend } from './backend.js';
