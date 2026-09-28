@@ -52,11 +52,7 @@ impl Default for CallGraph {
 
 impl CallGraph {
     pub fn new(max_hops: u16, reentrancy: ReentrancyPolicy) -> Self {
-        Self {
-            active: HashMap::new(),
-            max_hops: max_hops.max(1),
-            reentrancy,
-        }
+        Self { active: HashMap::new(), max_hops: max_hops.max(1), reentrancy }
     }
 
     pub fn begin(
@@ -83,18 +79,13 @@ impl CallGraph {
             1
         };
         if depth > self.max_hops {
-            return Err(CallGraphError::HopLimitExceeded {
-                depth,
-                limit: self.max_hops,
-            });
+            return Err(CallGraphError::HopLimitExceeded { depth, limit: self.max_hops });
         }
 
         let mut cursor = parent.map(str::to_string);
         while let Some(id) = cursor {
-            let ancestor = self
-                .active
-                .get(&id)
-                .ok_or_else(|| CallGraphError::ParentMissing(id.clone()))?;
+            let ancestor =
+                self.active.get(&id).ok_or_else(|| CallGraphError::ParentMissing(id.clone()))?;
             if ancestor.caller == callee || ancestor.callee == callee {
                 return Err(CallGraphError::CycleDetected(callee));
             }
@@ -106,12 +97,7 @@ impl CallGraph {
 
         self.active.insert(
             call_id,
-            ActiveCall {
-                caller,
-                callee,
-                parent: parent.map(str::to_string),
-                depth,
-            },
+            ActiveCall { caller, callee, parent: parent.map(str::to_string), depth },
         );
         Ok(depth)
     }
@@ -126,8 +112,7 @@ impl CallGraph {
 
     pub fn clear_principal(&mut self, principal: &str) -> usize {
         let before = self.active.len();
-        self.active
-            .retain(|_, call| call.caller != principal && call.callee != principal);
+        self.active.retain(|_, call| call.caller != principal && call.callee != principal);
         before - self.active.len()
     }
 }
@@ -149,21 +134,13 @@ pub enum CausationError {
 
 impl EventCausation {
     pub fn root(root_id: impl Into<String>, budget: u16) -> Self {
-        Self {
-            root_id: root_id.into(),
-            parent_id: None,
-            depth: 0,
-            budget: budget.max(1),
-        }
+        Self { root_id: root_id.into(), parent_id: None, depth: 0, budget: budget.max(1) }
     }
 
     pub fn child(&self, event_id: impl Into<String>) -> Result<Self, CausationError> {
         let next = self.depth.saturating_add(1);
         if next > self.budget {
-            return Err(CausationError::BudgetExhausted {
-                depth: next,
-                budget: self.budget,
-            });
+            return Err(CausationError::BudgetExhausted { depth: next, budget: self.budget });
         }
         Ok(Self {
             root_id: self.root_id.clone(),
@@ -207,9 +184,6 @@ mod tests {
         let root = EventCausation::root("evt-root", 2);
         let one = root.child("evt-1").unwrap();
         let two = one.child("evt-2").unwrap();
-        assert!(matches!(
-            two.child("evt-3"),
-            Err(CausationError::BudgetExhausted { .. })
-        ));
+        assert!(matches!(two.child("evt-3"), Err(CausationError::BudgetExhausted { .. })));
     }
 }
