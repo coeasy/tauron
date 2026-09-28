@@ -218,8 +218,8 @@ export interface HostErrorShape {
   message: string;
   /** Legacy automatic-retry compatibility flag. Prefer {@link HostErrorShape.retryClass}. */
   retryable: boolean;
-  /** Structured V4 retry semantics. Never implies an unbounded SDK retry loop. */
-  retryClass: RetryClass;
+  /** Structured V4 retry semantics. Optional on legacy/N-1 input shapes. */
+  retryClass?: RetryClass;
 }
 
 /**
@@ -289,7 +289,7 @@ export class HostException extends Error {
     this.code = shape.code;
     this.rawCode = shape.rawCode;
     this.retryable = shape.retryable;
-    this.retryClass = shape.retryClass;
+    this.retryClass = shape.retryClass ?? retryClassOf(shape.code);
   }
 
   /** 序列化成可跨 IPC 传输的形状。 */
