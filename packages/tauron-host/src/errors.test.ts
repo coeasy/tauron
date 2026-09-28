@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 
 import {
   HOST_ERROR_CODES,
+  HOST_RETRY_CLASS,
   RETRYABLE_HOST_ERROR_CODES,
   HostException,
   isAppLayerErrorCode,
   isHostErrorCode,
   isRetryable,
+  retryClassOf,
   normalizeError,
   translate_at_boundary,
 } from './errors.js';
@@ -40,18 +42,20 @@ describe('HOST_ERROR_CODES', () => {
     }
   });
 
-  it('可重试集合恰好 3 个，且都在线名全集内', () => {
-    expect(RETRYABLE_HOST_ERROR_CODES).toHaveLength(3);
-    for (const c of RETRYABLE_HOST_ERROR_CODES) {
-      expect(HOST_ERROR_CODES as readonly string[]).toContain(c);
-    }
+  it('V4 不把 panic/timeout 当作可自动重放', () => {
+    expect(RETRYABLE_HOST_ERROR_CODES).toEqual([]);
+    expect(HOST_RETRY_CLASS.E_HOST_PANIC).toBe('never');
+    expect(HOST_RETRY_CLASS.E_CALL_TIMEOUT).toBe('manual');
+    expect(HOST_RETRY_CLASS.E_LEASE_EXPIRED).toBe('after-reconnect');
   });
 
-  it('isRetryable 对未知线名返回 false（不静默当可重试）', () => {
-    expect(isRetryable('E_CALL_TIMEOUT')).toBe(true);
-    expect(isRetryable('E_HOST_PANIC')).toBe(true);
+  it('isRetryable 仅表示 auto-idempotent；manual 不是自动重试', () => {
+    expect(isRetryable('E_CALL_TIMEOUT')).toBe(false);
+    expect(isRetryable('E_HOST_PANIC')).toBe(false);
     expect(isRetryable('E_AUTH_DENIED')).toBe(false);
     expect(isRetryable('totally-unknown')).toBe(false);
+    expect(retryClassOf('E_CALL_TIMEOUT')).toBe('manual');
+    expect(retryClassOf('E_HOST_PANIC')).toBe('never');
   });
 
   it('isHostErrorCode 区分已知与未知', () => {
@@ -65,7 +69,8 @@ describe('normalizeError', () => {
     const shape = normalizeError({ code: 'E_CALL_TIMEOUT', message: 'call expired' });
     expect(shape.code).toBe('E_CALL_TIMEOUT');
     expect(shape.message).toBe('call expired');
-    expect(shape.retryable).toBe(true);
+    expect(shape.retryable).toBe(false);
+    expect(shape.retryClass).toBe('manual');
   });
 
   it('确定性失败标 retryable=false', () => {
@@ -73,8 +78,10 @@ describe('normalizeError', () => {
     expect(normalizeError({ code: 'E_INSTALL_FAILED', message: 'bad sig' }).retryable).toBe(false);
   });
 
-  it('E_PLUGIN_FILTERED 可重试（用户修改配置后重试）', () => {
-    expect(normalizeError({ code: 'E_PLUGIN_FILTERED', message: 'filtered' }).retryable).toBe(true);
+  it('E_PLUGIN_FILTERED 需要人工修改配置，不允许 SDK 自动重放', () => {
+    const shape = normalizeError({ code: 'E_PLUGIN_FILTERED', message: 'filtered' });
+    expect(shape.retryable).toBe(false);
+    expect(shape.retryClass).toBe('manual');
   });
 
   it('非标准 code 归入 E_UNKNOWN，不按可重试处理', () => {
@@ -99,12 +106,14 @@ describe('normalizeError', () => {
     const json = JSON.stringify({
       code: 'E_CALL_TIMEOUT',
       message: 'call expired',
-      retryable: true,
+      retryable: false,
+      retryClass: 'manual',
     });
     const shape = normalizeError({ message: json });
     expect(shape.code).toBe('E_CALL_TIMEOUT');
     expect(shape.message, '必须取 JSON 内的 message，不是整串转储').toBe('call expired');
-    expect(shape.retryable, '必须取宿主给出的 retryable').toBe(true);
+    expect(shape.retryable).toBe(false);
+    expect(shape.retryClass).toBe('manual');
   });
 
   it('Error.message 是 JSON 字符串 → 同样还原', () => {
@@ -112,6 +121,7 @@ describe('normalizeError', () => {
       code: 'E_AUTH_DENIED',
       message: 'denied',
       retryable: false,
+      retryClass: 'never',
     });
     const shape = normalizeError(new Error(json));
     expect(shape.code).toBe('E_AUTH_DENIED');
@@ -148,6 +158,7 @@ describe('normalizeError', () => {
       expect(typeof shape.code).toBe('string');
       expect(typeof shape.message).toBe('string');
       expect(typeof shape.retryable).toBe('boolean');
+      expect(typeof shape.retryClass).toBe('string');
     }
   });
 });
@@ -161,6 +172,7 @@ describe('HostException', () => {
         rawCode: 'E_STATE_INVALID_TRANSITION',
         message: '非法迁移',
         retryable: false,
+        retryClass: 'never',
       });
     } catch (e) {
       caught = e as HostException;
@@ -170,6 +182,7 @@ describe('HostException', () => {
     expect(caught?.code).toBe('E_STATE_INVALID_TRANSITION');
     expect(caught?.rawCode).toBe('E_STATE_INVALID_TRANSITION');
     expect(caught?.retryable).toBe(false);
+    expect(caught?.retryClass).toBe('never');
     expect(caught?.name).toBe('HostException');
     expect(caught?.toShape()).toEqual({
       code: 'E_STATE_INVALID_TRANSITION',
