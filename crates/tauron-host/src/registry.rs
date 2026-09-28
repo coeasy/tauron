@@ -225,6 +225,41 @@ pub struct PendingCall {
     pub expires_at: Instant,
 }
 
+impl PendingCall {
+    /// Canonical constructor: every pending call owns a shared V4 terminal arbiter.
+    ///
+    /// Keeping construction here prevents test/runtime call sites from accidentally creating
+    /// a call without the exactly-once terminal state used by settle/cancel/timeout races.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        call_id: String,
+        plugin_id: String,
+        cmd: String,
+        args: serde_json::Value,
+        caller: String,
+        target: String,
+        seq: u64,
+        created_at: Instant,
+        expires_at: Instant,
+    ) -> Self {
+        Self {
+            call_id,
+            plugin_id,
+            cmd,
+            args,
+            caller,
+            target,
+            state: CallState::Pending,
+            terminal: Arc::new(AtomicCallState::new()),
+            result: None,
+            error_code: None,
+            seq,
+            created_at,
+            expires_at,
+        }
+    }
+}
+
 /// 跨主体调用的状态（0.4-A1）。
 ///
 /// 只有两态，不是状态机：**没有「执行中」**——宿主不知道执行方是本地 JS、
@@ -648,21 +683,17 @@ impl Registry {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let call_id = Uuid::new_v4().to_string();
         let now = Instant::now();
-        let call = PendingCall {
-            call_id: call_id.clone(),
-            plugin_id: quota_owner.to_string(),
-            cmd: cmd.to_string(),
+        let call = PendingCall::new(
+            call_id.clone(),
+            quota_owner.to_string(),
+            cmd.to_string(),
             args,
-            caller: caller.to_string(),
-            target: target.to_string(),
-            state: CallState::Pending,
-            terminal: Arc::new(AtomicCallState::new()),
-            result: None,
-            error_code: None,
+            caller.to_string(),
+            target.to_string(),
             seq,
-            created_at: now,
-            expires_at: now + self.config.pending_ttl,
-        };
+            now,
+            now + self.config.pending_ttl,
+        );
         pending.insert(call_id, call.clone());
         Ok(call)
     }
