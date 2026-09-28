@@ -9,18 +9,13 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
-# 1.0-W6：`plugin-install` 进默认特性。
-#
-# 理由：「装插件」是「多插件框架」这个承诺的**动词**，不该默认缺席——此前默认
-# 关闭导致"能力表说能装、invoke 说 command not found"，而这个落差只能靠接入方
-# 读源码才能发现。**诚实语义保持不变**：即使 feature 打开，
-# `plugin_install_dir` 未配置时安装**仍然明确不可用**（`AdapterConfig` 的字段
-# 注释与 `cmd_registry_install` 的错误路径都如实表达这一点）。
-#
-# 关掉它的方式：`default-features = false`（只想取底座的接入方）。
-default = ["plugin-install"]
+# V4 minimal-substrate rule: optional extension installation is opt-in.
+# Base consumers must not pull market/signature/archive dependencies merely by depending
+# on tauron-adapter. Extension/full profiles enable `plugin-install` explicitly.
+default = []
 # 启用 Tauri v2 命令桥接（#[tauri::command] 包装 + invoke_handler）
 tauri = ["dep:tauri"]
+runtime-wasm-broker = ["dep:tauron-wasm", "dep:chrono"]
 plugin-install = ["dep:tauron-acl", "dep:tauron-market", "dep:zip", "dep:ed25519-dalek", "dep:sha2", "dep:hex", "tauron-market/signing"]
 
 [dependencies]
@@ -55,14 +50,14 @@ tauron-theme = { path = "../tauron-theme", version = "1.0.2" }
 # 更新通道（`host_updater_*` 域）：`check_for_update` / 灰度 / 崩溃门禁 / 清单校验。
 tauron-distribute = { path = "../tauron-distribute", version = "1.0.2" }
 # WASM 插件形态的**状态层**校验（配置/ABI/崩溃预算）。执行层无运行时（诚实失败）。
-tauron-wasm = { path = "../tauron-wasm", version = "1.0.2" }
+tauron-wasm = { path = "../tauron-wasm", version = "1.0.2", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 parking_lot = { workspace = true }
 uuid = { workspace = true }
 semver = { workspace = true }
 # WASM 投递器构造 ABI 指纹的 `generated_at`（tauron-wasm 的 `DateTime<Utc>`）。
-chrono = { workspace = true }
+chrono = { workspace = true, optional = true }
 # 可选：仅在 `tauri` feature 下编译，核心逻辑保持平台无关
 tauri = { version = "2", optional = true, default-features = false, features = ["wry", "tray-icon"] }
 
