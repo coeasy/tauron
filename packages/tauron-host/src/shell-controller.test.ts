@@ -238,6 +238,8 @@ describe('ShellController', () => {
       pluginId: 'com.install',
       pluginName: 'Install Me',
       version: '1.0.0',
+      reviewToken: 'review-token-1',
+      packageDigest: 'a'.repeat(64),
       permissions: [
         { permission: 'host:notify', risk: 'low', description: '发送通知', defaultChecked: true },
       ],
@@ -264,7 +266,11 @@ describe('ShellController', () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(preview).toHaveBeenCalledWith('/tmp/install.tpkg');
     expect(confirm).toHaveBeenCalledOnce();
-    expect(install).toHaveBeenCalledWith('/tmp/install.tpkg', ['host:notify']);
+    expect(install).toHaveBeenCalledWith(
+      '/tmp/install.tpkg',
+      ['host:notify'],
+      'review-token-1',
+    );
     expect(admin).toHaveBeenCalledWith({ op: 'enable', id: 'com.install' });
     expect(launch).toHaveBeenCalledWith('com.install');
     expect(alert).toHaveBeenCalledOnce();
