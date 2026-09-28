@@ -615,6 +615,9 @@ pub const SUBSTRATE_COMMANDS: &[&str] = &[
     "host_events_subscribe",
     "host_events_unsubscribe",
     "host_events_drain",
+    "host_events_approve",
+    "host_events_revoke",
+    "host_events_approvals",
     "host_i18n_t",
     "host_i18n_t_params",
     "host_i18n_set_locale",
@@ -4352,6 +4355,59 @@ pub fn cmd_events_unsubscribe(state: &SubstrateState, token: &str) -> HostResult
         let bus = state.bus.lock();
         bus.unsubscribe(token)
     })?
+}
+
+/// 一条 EventBus 私有 topic 审批事实。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EventApproval {
+    pub subscriber: String,
+    pub topic: String,
+}
+
+/// 主窗批准插件订阅私有 topic。
+pub fn cmd_events_approve_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    subscriber: &str,
+    topic: &str,
+) -> HostResult<()> {
+    require_main_window(caller, "host_events_approve")?;
+    if subscriber.trim().is_empty() || topic.trim().is_empty() {
+        return Err(HostError::new(
+            ErrorCode::E_AUTH_DENIED,
+            "subscriber 与 topic 均不可为空",
+        ));
+    }
+    guard("events_approve", || state.bus.lock().approve(subscriber, topic))
+}
+
+/// 主窗撤销插件私有 topic 审批。幂等；返回是否真实删除。
+pub fn cmd_events_revoke_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    subscriber: &str,
+    topic: &str,
+) -> HostResult<bool> {
+    require_main_window(caller, "host_events_revoke")?;
+    guard("events_revoke", || state.bus.lock().revoke(subscriber, topic))
+}
+
+/// 主窗读取全部 EventBus 审批事实。
+pub fn cmd_events_approvals_as(
+    caller: &Caller,
+    state: &SubstrateState,
+) -> HostResult<Vec<EventApproval>> {
+    require_main_window(caller, "host_events_approvals")?;
+    guard("events_approvals", || {
+        state
+            .bus
+            .lock()
+            .approvals()
+            .into_iter()
+            .map(|(subscriber, topic)| EventApproval { subscriber, topic })
+            .collect()
+    })
 }
 
 /// 按订阅者回收多选择器订阅的分组登记（§8-3 零悬挂）。
