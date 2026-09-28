@@ -8,16 +8,19 @@
 export {
   APP_LAYER_ERROR_CODE_PATTERN,
   HOST_ERROR_CODES,
+  HOST_RETRY_CLASS,
   RETRYABLE_HOST_ERROR_CODES,
   HostException,
   isAppLayerErrorCode,
   isHostErrorCode,
   isRetryable,
+  isRetryClass,
+  retryClassOf,
   normalizeError,
   translate_at_boundary,
   UNWIRED_BOUNDARIES,
 } from './errors.js';
-export type { BoundaryTranslation, HostBoundary, HostErrorCode, HostErrorShape } from './errors.js';
+export type { BoundaryTranslation, HostBoundary, HostErrorCode, HostErrorShape, RetryClass } from './errors.js';
 
 export type { Backend, ChannelPort, Principal, Unlisten } from './backend.js';
 export { MockBackend } from './backend.js';
