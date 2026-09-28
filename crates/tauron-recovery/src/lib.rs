@@ -272,6 +272,9 @@ pub struct RecoveryEngine {
     snapshot_meta: Option<SnapshotMeta>,
     /// 恢复中标记（恢复自身幂等）。
     recovery_in_progress: bool,
+    /// 当前已开始但尚未提交的恢复动作。只存在内存中：进程崩溃后该动作必须
+    /// 允许重放，绝不能在外部副作用完成前被误记为 executed。
+    pending_action: Option<String>,
     /// 关键事件摘要（最旧在前，长度 ≤ [`Self::CONTEXT_CAPACITY`]）。
     context: Vec<BootContextEntry>,
 }
@@ -297,6 +300,7 @@ impl RecoveryEngine {
             executed_effects: HashSet::new(),
             snapshot_meta: None,
             recovery_in_progress: false,
+            pending_action: None,
             context: Vec::new(),
         }
     }
@@ -603,10 +607,12 @@ impl RecoveryEngine {
         self.executed_actions.contains(key)
     }
 
-    /// 执行恢复动作（幂等）。
+    /// 开始恢复动作（幂等）。
     ///
-    /// 返回 `Ok(true)` 表示本次执行；`Ok(false)` 表示已执行过（去重）。
-    /// 返回 `Err` 表示恢复进行中（不可重入）。
+    /// V4 语义：这里只进入 in-progress，**不**提前写 `executed_actions`。
+    /// 调用方必须把 `action.idempotency_key` 传给外部副作用，使重放本身也幂等；
+    /// 外部效果成功后再调用 `complete_recovery` 提交。若进程在两者之间崩溃，
+    /// pending_action 不持久化，下一次启动会重放，而不是错误地跳过动作。
     pub fn execute_action(&mut self, action: &RecoveryAction) -> RecoveryResult<bool> {
         if self.recovery_in_progress {
             return Err(RecoveryError::RecoveryInProgress);
@@ -614,22 +620,46 @@ impl RecoveryEngine {
         if self.executed_actions.contains(&action.idempotency_key) {
             return Ok(false);
         }
-        // 标记恢复进行中（恢复自身幂等）。
         self.recovery_in_progress = true;
-        self.executed_actions.insert(action.idempotency_key.clone());
-        // 注意：这里不立即清除 recovery_in_progress，
-        // 因为恢复动作可能有副作用需要后续调用 complete_recovery。
+        self.pending_action = Some(action.idempotency_key.clone());
         Ok(true)
     }
 
-    /// 完成恢复（清除恢复中标记）。
+    /// 提交恢复：只有到这里动作才成为 executed。
     pub fn complete_recovery(&mut self) {
+        if let Some(key) = self.pending_action.take() {
+            self.executed_actions.insert(key);
+        }
+        self.recovery_in_progress = false;
+    }
+
+    /// 放弃本次恢复尝试，不把动作标为 executed；下一轮允许安全重试。
+    pub fn abort_recovery(&mut self) {
+        self.pending_action = None;
         self.recovery_in_progress = false;
     }
 
     /// 恢复中标记是否置位。
     pub fn is_recovery_in_progress(&self) -> bool {
         self.recovery_in_progress
+    }
+
+    #[test]
+    fn aborted_recovery_is_replayable_and_not_marked_executed() {
+        let mut e = engine_with_plugins();
+        let key = RecoveryAction::idempotency_key("p.audio", "restart", 7);
+        let action = RecoveryAction {
+            plugin_id: "p.audio".into(),
+            action_kind: "restart".into(),
+            idempotency_key: key.clone(),
+        };
+        assert!(e.execute_action(&action).unwrap());
+        assert!(!e.action_executed(&key));
+        e.abort_recovery();
+        assert!(!e.action_executed(&key));
+        assert!(e.execute_action(&action).unwrap(), "未提交动作必须允许重放");
+        e.complete_recovery();
+        assert!(e.action_executed(&key));
     }
 
     // ── 外部副作用追踪 ──────────────────────────────────────────────
@@ -741,6 +771,7 @@ impl RecoveryEngine {
             executed_effects,
             snapshot_meta,
             recovery_in_progress: false,
+            pending_action: None,
             context,
         })
     }
@@ -1027,8 +1058,9 @@ mod tests {
             idempotency_key: key.clone(),
         };
         assert!(e.execute_action(&action).unwrap());
-        assert!(e.action_executed(&key));
+        assert!(!e.action_executed(&key), "begin 阶段不能提前标成 executed");
         e.complete_recovery();
+        assert!(e.action_executed(&key), "只有 commit 后才算 executed");
     }
 
     // ── 外部副作用追踪 ──────────────────────────────────────────────
