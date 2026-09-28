@@ -494,9 +494,8 @@ fn digest_file_and_rewind(file: &mut std::fs::File) -> HostResult<String> {
     use sha2::{Digest, Sha256};
     use std::io::{Read, Seek, SeekFrom};
 
-    file.seek(SeekFrom::Start(0)).map_err(|e| {
-        HostError::new(ErrorCode::E_INSTALL_FAILED, format!("定位安装包失败：{e}"))
-    })?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("定位安装包失败：{e}")))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
