@@ -15,10 +15,7 @@ pub struct ContentIdentity {
 
 impl ContentIdentity {
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        Self {
-            sha256: hex::encode(Sha256::digest(bytes)),
-            size: bytes.len() as u64,
-        }
+        Self { sha256: hex::encode(Sha256::digest(bytes)), size: bytes.len() as u64 }
     }
 
     pub fn verify(&self, bytes: &[u8]) -> bool {
