@@ -197,20 +197,18 @@ mod tests {
     }
 
     fn pending(target: &str) -> PendingCall {
-        PendingCall {
-            call_id: "c1".into(),
-            plugin_id: "main".into(),
-            cmd: "run".into(),
-            args: serde_json::Value::Null,
-            caller: "main".into(),
-            target: target.into(),
-            state: tauron_host::registry::CallState::Pending,
-            result: None,
-            error_code: None,
-            seq: 1,
-            created_at: std::time::Instant::now(),
-            expires_at: std::time::Instant::now(),
-        }
+        let now = std::time::Instant::now();
+        PendingCall::new(
+            "c1".into(),
+            "main".into(),
+            "run".into(),
+            serde_json::Value::Null,
+            "main".into(),
+            target.into(),
+            1,
+            now,
+            now,
+        )
     }
 
     /// **接通证据**：合法 WASM 配置 → 校验通过 → 仍按"无运行时"诚实失败
