@@ -56,7 +56,6 @@ pub enum ProcessStatus {
     Unknown,
 }
 
-
 /// 进程启动器（可注入）。
 ///
 /// **契约**：`spawn` 返回 `Ok` 即表示操作系统层面**真的**有一个进程在跑，
