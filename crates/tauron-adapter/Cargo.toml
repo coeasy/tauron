@@ -15,6 +15,7 @@ homepage.workspace = true
 default = []
 # 启用 Tauri v2 命令桥接（#[tauri::command] 包装 + invoke_handler）
 tauri = ["dep:tauri"]
+runtime-wasm-broker = ["dep:tauron-wasm", "dep:chrono"]
 plugin-install = ["dep:tauron-acl", "dep:tauron-market", "dep:zip", "dep:ed25519-dalek", "dep:sha2", "dep:hex", "tauron-market/signing"]
 
 [dependencies]
@@ -49,14 +50,14 @@ tauron-theme = { path = "../tauron-theme", version = "1.0.2" }
 # 更新通道（`host_updater_*` 域）：`check_for_update` / 灰度 / 崩溃门禁 / 清单校验。
 tauron-distribute = { path = "../tauron-distribute", version = "1.0.2" }
 # WASM 插件形态的**状态层**校验（配置/ABI/崩溃预算）。执行层无运行时（诚实失败）。
-tauron-wasm = { path = "../tauron-wasm", version = "1.0.2" }
+tauron-wasm = { path = "../tauron-wasm", version = "1.0.2", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 parking_lot = { workspace = true }
 uuid = { workspace = true }
 semver = { workspace = true }
 # WASM 投递器构造 ABI 指纹的 `generated_at`（tauron-wasm 的 `DateTime<Utc>`）。
-chrono = { workspace = true }
+chrono = { workspace = true, optional = true }
 # 可选：仅在 `tauri` feature 下编译，核心逻辑保持平台无关
 tauri = { version = "2", optional = true, default-features = false, features = ["wry", "tray-icon"] }
 
