@@ -482,6 +482,19 @@ export class HostClient {
  * **不得**被插件代码使用：该命令不在插件 capability 模板内，
  * 因此插件侧 invoke 会以 `E_AUTH_DENIED` 失败（门禁 §8-3）。
  */
+export interface InstallReviewToken {
+  packageDigest: string;
+  manifestDigest: string;
+  permissionDigest: string;
+  keyId: string;
+  publisherId: string | null;
+  pluginId: string;
+  version: string;
+  issuedAt: number;
+  expiresAt: number;
+  nonce: string;
+}
+
 export class AdminClient {
   private readonly backend: Backend;
 
@@ -500,6 +513,7 @@ export class AdminClient {
   async registryInstall(
     packagePath: string,
     approvedPermissions: string[],
+    reviewToken: InstallReviewToken,
   ): Promise<{
     pluginId: string;
     version: string;
@@ -512,7 +526,7 @@ export class AdminClient {
         version: string;
         installPath: string;
         approvedPermissions: string[];
-      }>('host_registry_install', { packagePath, approvedPermissions })
+      }>('host_registry_install', { packagePath, approvedPermissions, reviewToken })
       .catch((err: unknown) => {
         throw translate_at_boundary(err, 'plugin-webview→host').error;
       });
@@ -528,6 +542,7 @@ export class AdminClient {
       description: string;
       defaultChecked: boolean;
     }>;
+    reviewToken: InstallReviewToken;
   }> {
     return this.backend
       .invoke<{
@@ -540,6 +555,7 @@ export class AdminClient {
           description: string;
           defaultChecked: boolean;
         }>;
+        reviewToken: InstallReviewToken;
       }>('host_registry_install_preview', { packagePath })
       .catch((err: unknown) => {
         throw translate_at_boundary(err, 'plugin-webview→host').error;
