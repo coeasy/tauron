@@ -98,10 +98,7 @@ pub fn encode_json<T: Serialize>(
     frame.header.validate()?;
     let bytes = serde_json::to_vec(frame).map_err(|e| WireError::InvalidJson(e.to_string()))?;
     if bytes.len() > max_bytes {
-        return Err(WireError::FrameTooLarge {
-            actual: bytes.len(),
-            limit: max_bytes,
-        });
+        return Err(WireError::FrameTooLarge { actual: bytes.len(), limit: max_bytes });
     }
     Ok(bytes)
 }
@@ -111,10 +108,7 @@ pub fn decode_json<T: DeserializeOwned>(
     max_bytes: usize,
 ) -> Result<WireFrame<T>, WireError> {
     if bytes.len() > max_bytes {
-        return Err(WireError::FrameTooLarge {
-            actual: bytes.len(),
-            limit: max_bytes,
-        });
+        return Err(WireError::FrameTooLarge { actual: bytes.len(), limit: max_bytes });
     }
     let frame: WireFrame<T> =
         serde_json::from_slice(bytes).map_err(|e| WireError::InvalidJson(e.to_string()))?;
@@ -134,13 +128,7 @@ mod tests {
 
     #[test]
     fn json_v1_round_trip_is_transport_neutral() {
-        let mut frame = WireFrame::new(
-            "host.call.request/1",
-            7,
-            Payload {
-                call_id: "c-1".into(),
-            },
-        );
+        let mut frame = WireFrame::new("host.call.request/1", 7, Payload { call_id: "c-1".into() });
         frame.extensions.insert("traceparent".into(), serde_json::json!("00-ab"));
         let bytes = encode_json(&frame, DEFAULT_MAX_WIRE_BYTES).unwrap();
         let decoded: WireFrame<Payload> = decode_json(&bytes, DEFAULT_MAX_WIRE_BYTES).unwrap();
@@ -179,10 +167,7 @@ mod tests {
         let bytes = vec![b'x'; 17];
         assert_eq!(
             decode_json::<serde_json::Value>(&bytes, 16),
-            Err(WireError::FrameTooLarge {
-                actual: 17,
-                limit: 16
-            })
+            Err(WireError::FrameTooLarge { actual: 17, limit: 16 })
         );
     }
 }
