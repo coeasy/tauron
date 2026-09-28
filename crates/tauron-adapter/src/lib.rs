@@ -1836,6 +1836,10 @@ pub struct WindowRelaunchOutcome {
 pub struct SubstrateState {
     /// V4 deployment posture carried into command paths (not only checked at construction).
     pub deployment_mode: tauron_host::DeploymentMode,
+    /// Canonical acyclic service order used by platform lifecycle bindings.
+    pub service_startup_order: Arc<Vec<String>>,
+    /// Reverse topological order for deterministic shutdown.
+    pub service_shutdown_order: Arc<Vec<String>>,
     pub bus: Arc<Mutex<EventBus>>,
     /// 宿主设置文档（R7-2：`tauron-settings` 的 [`SettingsStore`]，激活孤儿 crate）。
     ///
@@ -2237,6 +2241,32 @@ fn authz_table_selfcheck() -> &'static Result<(), String> {
     CHECK.get_or_init(|| tauron_host::authz::validate_command_registry().map_err(|e| e.message))
 }
 
+fn canonical_substrate_service_graph() -> tauron_host::ServiceGraph {
+    use tauron_host::{ServiceGraph, ServiceNode};
+    let mut graph = ServiceGraph::default();
+    for node in [
+        ServiceNode { id: "contract".into(), requires: vec![] },
+        ServiceNode { id: "policy".into(), requires: vec!["contract".into()] },
+        ServiceNode { id: "recovery".into(), requires: vec!["contract".into()] },
+        ServiceNode { id: "settings".into(), requires: vec!["contract".into()] },
+        ServiceNode {
+            id: "capability".into(),
+            requires: vec!["contract".into(), "policy".into()],
+        },
+        ServiceNode {
+            id: "provider".into(),
+            requires: vec!["capability".into()],
+        },
+        ServiceNode {
+            id: "message".into(),
+            requires: vec!["policy".into(), "capability".into()],
+        },
+    ] {
+        graph.insert(node).expect("canonical Tauron service IDs are unique");
+    }
+    graph
+}
+
 impl SubstrateState {
     /// 底座装配：恢复持久化 + i18n + origin 清单 + 通知存储。
     ///
@@ -2256,6 +2286,16 @@ impl SubstrateState {
         if let Err(error) = cfg.validate_for_start() {
             panic!("[tauron] {error}");
         }
+
+        // V4 ServiceGraph: cycles/missing dependencies are build/startup defects, never
+        // runtime retry conditions. Compute both orders before creating service state.
+        let service_graph = canonical_substrate_service_graph();
+        let service_startup_order = service_graph
+            .startup_order()
+            .unwrap_or_else(|e| panic!("[tauron] service dependency graph invalid: {e:?}"));
+        let service_shutdown_order = service_graph
+            .shutdown_order()
+            .unwrap_or_else(|e| panic!("[tauron] service dependency graph invalid: {e:?}"));
 
         // §8-17 生产自检（P1-10）：档位表是构建期常量，错了就是构建缺陷。
         // 失败**立即 panic**（与同一构造函数里 `NotifyStore::new(512).expect(..)` 的
@@ -2300,6 +2340,8 @@ impl SubstrateState {
 
         Self {
             deployment_mode: cfg.deployment_mode,
+            service_startup_order: Arc::new(service_startup_order),
+            service_shutdown_order: Arc::new(service_shutdown_order),
             bus: Arc::new(Mutex::new(EventBus::default())),
             settings: Arc::new(Mutex::new(settings)),
             settings_path,
@@ -13302,5 +13344,22 @@ mod v4_production_config_tests {
         let mut cfg = AdapterConfig::default();
         cfg.origin_allowlist.push("tauri://localhost".to_string());
         assert!(cfg.production_readiness().caller_identity_policy_enabled);
+    }
+}
+
+
+#[cfg(test)]
+mod v4_service_graph_wiring_tests {
+    use super::*;
+
+    #[test]
+    fn substrate_construction_uses_acyclic_service_graph_and_reverse_shutdown() {
+        let state = SubstrateState::with_adapter_config(&AdapterConfig::default());
+        assert_eq!(state.service_startup_order.first().map(String::as_str), Some("contract"));
+        let mut reversed = state.service_startup_order.as_ref().clone();
+        reversed.reverse();
+        assert_eq!(&reversed, state.service_shutdown_order.as_ref());
+        assert!(state.service_startup_order.iter().any(|id| id == "message"));
+        assert!(state.service_startup_order.iter().any(|id| id == "provider"));
     }
 }
