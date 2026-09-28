@@ -473,7 +473,9 @@ const MAX_INSTALL_REVIEWS: usize = 64;
 #[cfg(feature = "plugin-install")]
 struct VerifiedPluginPackage {
     manifest: PluginManifest,
-    archive: Vec<u8>,
+    /// Open handle to the exact archive bytes that were verified. Commit extracts from this
+    /// handle, not by reopening the path, closing the verify→extract TOCTOU window.
+    archive: std::fs::File,
     package_digest: String,
     manifest_digest: String,
     permission_digest: String,
@@ -485,6 +487,31 @@ struct VerifiedPluginPackage {
 fn digest_bytes(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(bytes))
+}
+
+#[cfg(feature = "plugin-install")]
+fn digest_file_and_rewind(file: &mut std::fs::File) -> HostResult<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Seek, SeekFrom};
+
+    file.seek(SeekFrom::Start(0)).map_err(|e| {
+        HostError::new(ErrorCode::E_INSTALL_FAILED, format!("定位安装包失败：{e}"))
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|e| {
+            HostError::new(ErrorCode::E_INSTALL_FAILED, format!("读取安装包失败：{e}"))
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|e| {
+        HostError::new(ErrorCode::E_INSTALL_FAILED, format!("重置安装包位置失败：{e}"))
+    })?;
+    Ok(hex::encode(hasher.finalize()))
 }
 
 #[cfg(feature = "plugin-install")]
@@ -3159,7 +3186,7 @@ fn registry_install_inner(
         HostError::new(ErrorCode::E_INSTALL_FAILED, format!("创建临时安装目录失败：{e}"))
     })?;
     let unpack_result = (|| -> HostResult<()> {
-        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&archive))
+        let mut zip = zip::ZipArchive::new(archive)
             .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("打开包失败：{e}")))?;
         // 解包常量（条目数 / 单文件 / 解压总量 / 压缩比）与路径清洗**不在这里**
         // 重复实现：它们在 `read_verified_package` → `verify_tpkg` →
@@ -3274,8 +3301,9 @@ fn read_verified_package(
         return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "仅支持本地 .tpkg 安装"));
     }
     let sidecar_path = PathBuf::from(format!("{package_path}.sig"));
-    let archive = std::fs::read(&source)
-        .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("读取安装包失败：{e}")))?;
+    let mut archive = std::fs::File::open(&source)
+        .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("打开安装包失败：{e}")))?;
+    let package_digest = digest_file_and_rewind(&mut archive)?;
     let sidecar = std::fs::read_to_string(&sidecar_path).map_err(|e| {
         HostError::new(ErrorCode::E_INSTALL_FAILED, format!("读取签名 sidecar 失败：{e}"))
     })?;
@@ -3287,8 +3315,14 @@ fn read_verified_package(
         HostError::new(ErrorCode::E_INSTALL_FAILED, format!("未信任的签名 kid `{}`", envelope.kid))
     })?;
     let (verified, manifest) =
-        tauron_market::package_signature::verify_tpkg(&archive, &sidecar, public_key)
+        tauron_market::package_signature::verify_tpkg_reader(&mut archive, &sidecar, public_key)
             .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, e.to_string()))?;
+    {
+        use std::io::{Seek, SeekFrom};
+        archive.seek(SeekFrom::Start(0)).map_err(|e| {
+            HostError::new(ErrorCode::E_INSTALL_FAILED, format!("重置已验签包位置失败：{e}"))
+        })?;
+    }
     if verified.kid != envelope.kid {
         return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "验签 kid 不一致"));
     }
@@ -3299,7 +3333,7 @@ fn read_verified_package(
         )
     })?;
     Ok(VerifiedPluginPackage {
-        package_digest: digest_bytes(&archive),
+        package_digest,
         manifest_digest: digest_bytes(&manifest_bytes),
         permission_digest: permission_digest(&manifest),
         key_id: envelope.kid,
