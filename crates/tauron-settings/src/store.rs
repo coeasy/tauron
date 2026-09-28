@@ -165,10 +165,7 @@ impl Watcher {
 
     /// 取出某订阅者的全部待消费事件（消费即清空）。
     pub fn drain(&mut self, id: u64) -> Vec<ChangeEvent> {
-        self.queues
-            .get_mut(&id)
-            .map(|(_, q)| q.drain(..).collect())
-            .unwrap_or_default()
+        self.queues.get_mut(&id).map(|(_, q)| q.drain(..).collect()).unwrap_or_default()
     }
 
     /// 活跃订阅者数（用于"卸载零悬挂"类门禁）。
@@ -734,9 +731,7 @@ mod tests {
         let mut s = store_with_audio();
         s.set_layer("p.audio", LayerKind::Builtin, json!({"volume": 10}));
         let sub = s.watch("p.audio");
-        let (_op, event) = s
-            .set_deferred("p.audio", "p.audio", "volume", &json!(50))
-            .unwrap();
+        let (_op, event) = s.set_deferred("p.audio", "p.audio", "volume", &json!(50)).unwrap();
         assert!(s.drain(sub).is_empty(), "staged mutation must not notify watchers");
         assert_eq!(s.revision(), 0);
         let committed = s.publish_committed_change(event);
@@ -748,9 +743,14 @@ mod tests {
     #[test]
     fn watcher_is_namespace_scoped() {
         let mut s = store_with_audio();
-        s.register("p.video", "1.0.0", &json!({
-            "type":"object","properties":{"brightness":{"type":"integer"}}
-        })).unwrap();
+        s.register(
+            "p.video",
+            "1.0.0",
+            &json!({
+                "type":"object","properties":{"brightness":{"type":"integer"}}
+            }),
+        )
+        .unwrap();
         let audio = s.watch("p.audio");
         let video = s.watch("p.video");
         s.set("p.audio", "p.audio", "volume", &json!(50)).unwrap();
