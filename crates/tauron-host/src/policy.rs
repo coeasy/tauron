@@ -34,10 +34,7 @@ pub struct PolicyAuthority {
 
 impl PolicyAuthority {
     pub fn new() -> Self {
-        Self {
-            policy_epoch: 1,
-            grants: HashMap::new(),
-        }
+        Self { policy_epoch: 1, grants: HashMap::new() }
     }
 
     pub fn policy_epoch(&self) -> u64 {
@@ -87,10 +84,7 @@ impl PolicyAuthority {
         }
         let current = self.grant_version(principal);
         if token.grant_version != current {
-            return Err(DecisionError::StaleGrant {
-                token: token.grant_version,
-                current,
-            });
+            return Err(DecisionError::StaleGrant { token: token.grant_version, current });
         }
         Ok(())
     }
@@ -125,9 +119,6 @@ mod tests {
     fn token_cannot_be_replayed_for_other_operation() {
         let a = PolicyAuthority::new();
         let token = a.decide("p1", "http.request");
-        assert_eq!(
-            a.validate(&token, "p1", "process.spawn"),
-            Err(DecisionError::ScopeMismatch)
-        );
+        assert_eq!(a.validate(&token, "p1", "process.spawn"), Err(DecisionError::ScopeMismatch));
     }
 }
