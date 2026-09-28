@@ -97,10 +97,40 @@ pub enum ErrorCode {
     E_CONTRIBUTES_DRIFT,
 }
 
+/// V4 retry semantics. A boolean cannot safely express panic/transaction/reconnect behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RetryClass {
+    /// Never retry automatically. User/admin action or deterministic repair is required.
+    Never,
+    /// A human may intentionally repeat the operation after inspecting the failure.
+    Manual,
+    /// SDK/host may retry only when the operation is independently declared idempotent.
+    AutoIdempotent,
+    /// Retry is meaningful only after a fresh authenticated session/transport is established.
+    AfterReconnect,
+}
+
 impl ErrorCode {
-    /// 该错误是否可自动重试（供宿主决策是否重派，而非无限重试）。
+    /// Stable retry classification. Operation idempotency and retry budgets remain separate facts.
+    pub const fn retry_class(self) -> RetryClass {
+        match self {
+            // A panic can happen after a partial side effect. catch_unwind is containment,
+            // not rollback proof; automatic retry is therefore unsafe by default.
+            Self::E_HOST_PANIC => RetryClass::Never,
+            Self::E_CALL_TIMEOUT => RetryClass::Manual,
+            Self::E_PLUGIN_FILTERED => RetryClass::Manual,
+            Self::E_LEASE_EXPIRED => RetryClass::AfterReconnect,
+            _ => RetryClass::Never,
+        }
+    }
+
+    /// Legacy wire compatibility. True only when an automatic retry may be considered.
+    ///
+    /// V4 intentionally returns false for panic/timeouts until a specific operation proves
+    /// idempotency and a bounded RetryPolicy elects to retry.
     pub const fn retryable(self) -> bool {
-        matches!(self, Self::E_CALL_TIMEOUT | Self::E_HOST_PANIC | Self::E_PLUGIN_FILTERED)
+        matches!(self.retry_class(), RetryClass::AutoIdempotent)
     }
 }
 
@@ -148,13 +178,20 @@ pub struct HostError {
     pub code: ErrorCode,
     /// 面向开发者/日志的说明。
     pub message: String,
-    /// 是否可自动重试。
+    /// Legacy compatibility flag. Prefer `retry_class`.
     pub retryable: bool,
+    /// V4 structured retry semantics; never implies an unbounded SDK retry loop.
+    pub retry_class: RetryClass,
 }
 
 impl HostError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), retryable: code.retryable() }
+        Self {
+            code,
+            message: message.into(),
+            retryable: code.retryable(),
+            retry_class: code.retry_class(),
+        }
     }
 }
 
@@ -198,7 +235,8 @@ mod tests {
         let res: HostResult<u32> = guard("boom", || panic!("kaboom"));
         let err = res.expect_err("panic 必须被捕获");
         assert_eq!(err.code, ErrorCode::E_HOST_PANIC);
-        assert!(err.retryable);
+        assert!(!err.retryable);
+        assert_eq!(err.retry_class, RetryClass::Never);
         assert!(err.message.contains("kaboom"), "payload 应可读：{}", err.message);
     }
 
@@ -218,8 +256,11 @@ mod tests {
 
     #[test]
     fn error_code_retryability() {
-        assert!(ErrorCode::E_CALL_TIMEOUT.retryable());
-        assert!(ErrorCode::E_HOST_PANIC.retryable());
+        assert!(!ErrorCode::E_CALL_TIMEOUT.retryable());
+        assert!(!ErrorCode::E_HOST_PANIC.retryable());
+        assert_eq!(ErrorCode::E_HOST_PANIC.retry_class(), RetryClass::Never);
+        assert_eq!(ErrorCode::E_CALL_TIMEOUT.retry_class(), RetryClass::Manual);
+        assert_eq!(ErrorCode::E_LEASE_EXPIRED.retry_class(), RetryClass::AfterReconnect);
         assert!(!ErrorCode::E_INVALID_MANIFEST.retryable());
         assert!(!ErrorCode::E_ABI_MISMATCH.retryable());
         // 声明/事实不一致是**确定性**故障：重试不会让缺失的注册出现。
