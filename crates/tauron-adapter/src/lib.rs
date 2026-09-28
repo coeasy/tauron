@@ -2485,7 +2485,8 @@ mod substrate_only_tests {
         assert!(AdapterConfig::default().validate_production_readiness().is_ok());
 
         let prod = AdapterConfig::production();
-        let err = prod.validate_production_readiness().expect_err("empty production config must fail");
+        let err =
+            prod.validate_production_readiness().expect_err("empty production config must fail");
         assert!(err.contains("origin allowlist"), "err={err}");
         assert!(err.contains("recovery data directory"), "err={err}");
 
@@ -2886,11 +2887,9 @@ pub fn cmd_registry_install_reviewed_as(
     require_main_window(caller, "host_registry_install")?;
     let verified = read_verified_package(state, package_path)?;
     let now = unix_time_seconds();
-    let review = state
-        .install_reviews
-        .lock()
-        .remove(review_token)
-        .ok_or_else(|| HostError::new(ErrorCode::E_INSTALL_FAILED, "安装审批 token 不存在或已使用"))?;
+    let review = state.install_reviews.lock().remove(review_token).ok_or_else(|| {
+        HostError::new(ErrorCode::E_INSTALL_FAILED, "安装审批 token 不存在或已使用")
+    })?;
     if review.expires_at <= now {
         return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "安装审批已过期，请重新预览"));
     }
