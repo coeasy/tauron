@@ -172,6 +172,7 @@ impl fmt::Display for ErrorCode {
 /// `message` 与 `retryable`；若只传字符串，前端只能靠正则从
 /// `HostError { code: E_XXX, … }` 转储里反抠错误码，`message` 字段整个丢失。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize)]
+#[serde(rename_all = "camelCase")]
 #[error("{code}: {message}")]
 pub struct HostError {
     /// 协议化错误码。
