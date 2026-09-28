@@ -442,7 +442,85 @@ pub struct PluginInstallPreview {
     pub plugin_name: String,
     pub version: String,
     pub permissions: Vec<PluginPermissionReview>,
+    /// One-time cryptographic binding between what the user reviewed and what commit installs.
+    pub review_token: InstallReviewToken,
 }
+
+/// V4 install approval token. It is one-time, bounded and bound to verified package facts.
+#[cfg(feature = "plugin-install")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstallReviewToken {
+    pub package_digest: String,
+    pub manifest_digest: String,
+    pub permission_digest: String,
+    pub key_id: String,
+    pub publisher_id: Option<String>,
+    pub plugin_id: String,
+    pub version: String,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub nonce: String,
+}
+
+#[cfg(feature = "plugin-install")]
+const INSTALL_REVIEW_TTL_SECS: u64 = 10 * 60;
+#[cfg(feature = "plugin-install")]
+const MAX_INSTALL_REVIEWS: usize = 64;
+
+#[cfg(feature = "plugin-install")]
+struct VerifiedPluginPackage {
+    manifest: PluginManifest,
+    archive: Vec<u8>,
+    package_digest: String,
+    manifest_digest: String,
+    permission_digest: String,
+    key_id: String,
+    publisher_id: Option<String>,
+}
+
+#[cfg(feature = "plugin-install")]
+fn digest_bytes(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+#[cfg(feature = "plugin-install")]
+fn permission_digest(manifest: &PluginManifest) -> String {
+    let mut permissions: Vec<&str> =
+        manifest.permissions.iter().map(|p| p.as_str()).collect();
+    permissions.sort_unstable();
+    digest_bytes(permissions.join("\n").as_bytes())
+}
+
+#[cfg(feature = "plugin-install")]
+fn mint_install_review(verified: &VerifiedPluginPackage) -> InstallReviewToken {
+    let issued_at = unix_time_seconds();
+    InstallReviewToken {
+        package_digest: verified.package_digest.clone(),
+        manifest_digest: verified.manifest_digest.clone(),
+        permission_digest: verified.permission_digest.clone(),
+        key_id: verified.key_id.clone(),
+        publisher_id: verified.publisher_id.clone(),
+        plugin_id: verified.manifest.id.to_string(),
+        version: verified.manifest.version.to_string(),
+        issued_at,
+        expires_at: issued_at.saturating_add(INSTALL_REVIEW_TTL_SECS),
+        nonce: uuid::Uuid::new_v4().to_string(),
+    }
+}
+
+#[cfg(feature = "plugin-install")]
+fn review_matches_verified(token: &InstallReviewToken, verified: &VerifiedPluginPackage) -> bool {
+    token.package_digest == verified.package_digest
+        && token.manifest_digest == verified.manifest_digest
+        && token.permission_digest == verified.permission_digest
+        && token.key_id == verified.key_id
+        && token.publisher_id == verified.publisher_id
+        && token.plugin_id == verified.manifest.id.as_str()
+        && token.version == verified.manifest.version.to_string()
+}
+
 
 /// 可选能力未装配时的明确说明。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1756,6 +1834,8 @@ pub struct WindowRelaunchOutcome {
 /// **一份插件状态都不建**。
 #[derive(Clone)]
 pub struct SubstrateState {
+    /// V4 deployment posture carried into command paths (not only checked at construction).
+    pub deployment_mode: tauron_host::DeploymentMode,
     pub bus: Arc<Mutex<EventBus>>,
     /// 宿主设置文档（R7-2：`tauron-settings` 的 [`SettingsStore`]，激活孤儿 crate）。
     ///
@@ -2066,6 +2146,9 @@ pub struct PluginRuntimeState {
     pub deliveries: Arc<HashMap<DeliveryKind, Box<dyn CallDelivery>>>,
     #[cfg(feature = "plugin-install")]
     install_config: Option<InstallRuntimeConfig>,
+    /// One-time bounded install-review tokens. Preview mints; commit consumes.
+    #[cfg(feature = "plugin-install")]
+    install_reviews: Arc<Mutex<HashMap<String, InstallReviewToken>>>,
 }
 
 #[cfg(feature = "plugin-install")]
@@ -2216,6 +2299,7 @@ impl SubstrateState {
         }
 
         Self {
+            deployment_mode: cfg.deployment_mode,
             bus: Arc::new(Mutex::new(EventBus::default())),
             settings: Arc::new(Mutex::new(settings)),
             settings_path,
@@ -2338,6 +2422,8 @@ impl PluginRuntimeState {
                 signing_keys: cfg.plugin_signing_keys,
                 acl_signing_key: cfg.acl_signing_key,
             }),
+            #[cfg(feature = "plugin-install")]
+            install_reviews: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -2833,7 +2919,30 @@ pub fn cmd_registry_install_as(
     approved_permissions: &[String],
 ) -> HostResult<PluginInstallResult> {
     require_main_window(caller, "host_registry_install")?;
-    guard("registry_install", || registry_install_inner(state, package_path, approved_permissions))?
+    if state.deployment_mode == tauron_host::DeploymentMode::Production {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "production install requires InstallReviewToken from host_registry_install_preview",
+        ));
+    }
+    guard("registry_install_legacy", || {
+        registry_install_inner(state, package_path, approved_permissions, None)
+    })?
+}
+
+/// V4 reviewed install path. This is the only path wired to production Tauri IPC.
+#[cfg(feature = "plugin-install")]
+pub fn cmd_registry_install_reviewed_as(
+    caller: &Caller,
+    state: &PluginRuntimeState,
+    package_path: &str,
+    approved_permissions: &[String],
+    review_token: &InstallReviewToken,
+) -> HostResult<PluginInstallResult> {
+    require_main_window(caller, "host_registry_install")?;
+    guard("registry_install_reviewed", || {
+        registry_install_inner(state, package_path, approved_permissions, Some(review_token))
+    })?
 }
 
 #[cfg(feature = "plugin-install")]
@@ -2855,7 +2964,8 @@ fn registry_install_preview_inner(
     package_path: &str,
 ) -> HostResult<PluginInstallPreview> {
     use tauron_host::manifest::{embedded_permission_index, PluginType};
-    let (manifest, _signature) = read_verified_package(state, package_path)?;
+    let verified = read_verified_package(state, package_path)?;
+    let manifest = &verified.manifest;
     if manifest.plugin_type != PluginType::Js {
         return Err(HostError::new(ErrorCode::E_PLUGIN_TYPE_NO_RUNTIME, "当前仅支持 JS 插件安装"));
     }
@@ -2871,9 +2981,25 @@ fn registry_install_preview_inner(
         unix_time_seconds(),
         1,
     )?;
+    let review_token = mint_install_review(&verified);
+    {
+        let now = unix_time_seconds();
+        let mut reviews = state.install_reviews.lock();
+        reviews.retain(|_, token| token.expires_at > now);
+        if reviews.len() >= MAX_INSTALL_REVIEWS {
+            if let Some(oldest) = reviews
+                .values()
+                .min_by_key(|token| token.issued_at)
+                .map(|token| token.nonce.clone())
+            {
+                reviews.remove(&oldest);
+            }
+        }
+        reviews.insert(review_token.nonce.clone(), review_token.clone());
+    }
     Ok(PluginInstallPreview {
         plugin_id: manifest.id.to_string(),
-        plugin_name: manifest.name,
+        plugin_name: manifest.name.clone(),
         version: manifest.version.to_string(),
         permissions: rows
             .grants
@@ -2885,6 +3011,7 @@ fn registry_install_preview_inner(
                 default_checked: grant.risk != tauron_host::manifest::Risk::High,
             })
             .collect(),
+        review_token,
     })
 }
 
@@ -2893,6 +3020,7 @@ fn registry_install_inner(
     state: &PluginRuntimeState,
     package_path: &str,
     approved_permissions: &[String],
+    review_token: Option<&InstallReviewToken>,
 ) -> HostResult<PluginInstallResult> {
     use std::collections::BTreeSet;
     use tauron_acl::{draft_grant_set, validate_grants, AclStore};
@@ -2910,7 +3038,39 @@ fn registry_install_inner(
             "ACL HMAC key 未配置或少于 32 字节",
         ));
     }
-    let (manifest, archive) = read_verified_package(state, package_path)?;
+    let verified = read_verified_package(state, package_path)?;
+    if let Some(review_token) = review_token {
+        let now = unix_time_seconds();
+        let stored = state
+            .install_reviews
+            .lock()
+            .remove(&review_token.nonce)
+            .ok_or_else(|| {
+                HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    "install review token is unknown, expired, or already consumed",
+                )
+            })?;
+        if stored != *review_token || review_token.expires_at <= now {
+            return Err(HostError::new(
+                ErrorCode::E_INSTALL_FAILED,
+                "install review token is stale or has been tampered with; preview again",
+            ));
+        }
+        if !review_matches_verified(review_token, &verified) {
+            return Err(HostError::new(
+                ErrorCode::E_INSTALL_FAILED,
+                "package changed after approval; preview and approval must be repeated",
+            ));
+        }
+    } else if state.deployment_mode == tauron_host::DeploymentMode::Production {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "production install requires an unexpired one-time InstallReviewToken",
+        ));
+    }
+
+    let VerifiedPluginPackage { manifest, archive, .. } = verified;
     if manifest.plugin_type != PluginType::Js {
         return Err(HostError::new(
             ErrorCode::E_PLUGIN_TYPE_NO_RUNTIME,
@@ -3064,7 +3224,7 @@ fn unix_time_seconds() -> u64 {
 fn read_verified_package(
     state: &PluginRuntimeState,
     package_path: &str,
-) -> HostResult<(PluginManifest, Vec<u8>)> {
+) -> HostResult<VerifiedPluginPackage> {
     let config = state.install_config.as_ref().ok_or_else(|| {
         HostError::new(
             ErrorCode::E_INSTALL_FAILED,
@@ -3100,7 +3260,18 @@ fn read_verified_package(
     if verified.kid != envelope.kid {
         return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "验签 kid 不一致"));
     }
-    Ok((manifest, archive))
+    let manifest_bytes = serde_json::to_vec(&manifest).map_err(|e| {
+        HostError::new(ErrorCode::E_INSTALL_FAILED, format!("manifest canonicalization failed: {e}"))
+    })?;
+    Ok(VerifiedPluginPackage {
+        package_digest: digest_bytes(&archive),
+        manifest_digest: digest_bytes(&manifest_bytes),
+        permission_digest: permission_digest(&manifest),
+        key_id: envelope.kid,
+        publisher_id: manifest.publisher.clone(),
+        manifest,
+        archive,
+    })
 }
 
 pub fn cmd_registry_admin(
