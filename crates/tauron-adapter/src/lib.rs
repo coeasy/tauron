@@ -147,6 +147,76 @@ impl ContributesRegistry {
 }
 
 impl AdapterConfig {
+    /// Select the deployment posture. Production activates fail-closed readiness gates.
+    pub fn with_deployment_mode(mut self, mode: tauron_host::DeploymentMode) -> Self {
+        self.deployment_mode = mode;
+        self
+    }
+
+    /// Declare that a non-origin transport has a verified caller identity policy.
+    pub fn with_caller_identity_policy(mut self, enabled: bool) -> Self {
+        self.caller_identity_policy_enabled = enabled;
+        self
+    }
+
+    /// Explicitly disable durable recovery instead of silently falling back to memory-only.
+    pub fn with_recovery_unsupported(mut self, unsupported: bool) -> Self {
+        self.recovery_explicitly_unsupported = unsupported;
+        self
+    }
+
+    /// Declare that privileged administration is connected to an audit sink.
+    pub fn with_admin_audit(mut self, available: bool) -> Self {
+        self.admin_audit_available = available;
+        self
+    }
+
+    /// Test-only/development provider declaration. Production rejects this flag.
+    pub fn with_mock_provider(mut self, enabled: bool) -> Self {
+        self.mock_provider_enabled = enabled;
+        self
+    }
+
+    /// Derive the canonical V4 production-readiness facts from actual adapter configuration.
+    pub fn production_readiness(&self) -> tauron_host::ProductionReadiness {
+        #[cfg(feature = "plugin-install")]
+        let install_trust_configured = self.plugin_install_dir.is_some()
+            && !self.plugin_signing_keys.is_empty()
+            && self.acl_signing_key.as_ref().is_some_and(|key| key.len() >= 32);
+        #[cfg(not(feature = "plugin-install"))]
+        let install_trust_configured = true;
+
+        tauron_host::ProductionReadiness {
+            caller_identity_policy_enabled: self.caller_identity_policy_enabled
+                || !self.origin_allowlist.is_empty(),
+            durable_recovery_available: self.recovery_data_dir.is_some(),
+            recovery_explicitly_unsupported: self.recovery_explicitly_unsupported,
+            install_feature_enabled: cfg!(feature = "plugin-install"),
+            install_trust_configured,
+            audit_for_admin_operations_available: self.admin_audit_available,
+            writable_data_dir_available: self.recovery_data_dir.is_some(),
+            mock_provider_enabled: self.mock_provider_enabled,
+        }
+    }
+
+    /// Fail-closed production startup validation. Development/Test compatibility is unchanged.
+    pub fn validate_for_start(&self) -> HostResult<()> {
+        let violations =
+            tauron_host::validate_production_readiness(self.deployment_mode, &self.production_readiness());
+        if violations.is_empty() {
+            return Ok(());
+        }
+        let detail = violations
+            .iter()
+            .map(|v| format!("{}: {}", v.code, v.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(HostError::new(
+            ErrorCode::E_STATE_INVALID_TRANSITION,
+            format!("production readiness rejected host startup: {detail}"),
+        ))
+    }
+
     /// 从第三方集成用的 [`ClientConfig`] 派生装配配置。
     ///
     /// **这是 `ClientConfig` 的生产消费点**。在此之前 `ClientConfig`
@@ -172,6 +242,11 @@ impl AdapterConfig {
 
         Self {
             registry: Some(cfg.registry_config()),
+            deployment_mode: tauron_host::DeploymentMode::Development,
+            caller_identity_policy_enabled: false,
+            recovery_explicitly_unsupported: false,
+            admin_audit_available: false,
+            mock_provider_enabled: false,
             recovery_data_dir,
             required_plugins: HashSet::new(),
             origin_allowlist: Vec::new(),
@@ -217,6 +292,16 @@ impl AdapterConfig {
 /// 集合，即 `CommandState::new` 的既有行为（单元测试不需要磁盘）。
 #[derive(Debug, Clone, Default)]
 pub struct AdapterConfig {
+    /// Deployment posture. Development is the backwards-compatible default for tests/local use.
+    pub deployment_mode: tauron_host::DeploymentMode,
+    /// A custom/non-origin transport can assert only after it installs verified caller identity.
+    pub caller_identity_policy_enabled: bool,
+    /// Production may explicitly declare recovery unsupported instead of pretending it is durable.
+    pub recovery_explicitly_unsupported: bool,
+    /// Privileged admin operations must be auditable in production.
+    pub admin_audit_available: bool,
+    /// Production forbids mock/test providers.
+    pub mock_provider_enabled: bool,
     /// 注册表配置（上限、TTL、加载过滤器）。`None` = [`RegistryConfig::default()`]。
     pub registry: Option<RegistryConfig>,
     /// 宿主数据目录：恢复标记（崩溃检测）落盘位置。
@@ -2083,6 +2168,12 @@ impl SubstrateState {
     /// **不消费 `cfg.registry`**：注册表属插件运行时（[`PluginRuntimeState`]），
     /// 底座装配不该顺带建一份——那正是 R1 要拆掉的东西。
     pub fn with_adapter_config(cfg: &AdapterConfig) -> Self {
+        // V4 Production Profile: compatibility fallbacks are allowed only outside production.
+        // Production startup must fail before any service/state side effect is created.
+        if let Err(error) = cfg.validate_for_start() {
+            panic!("[tauron] {error}");
+        }
+
         // §8-17 生产自检（P1-10）：档位表是构建期常量，错了就是构建缺陷。
         // 失败**立即 panic**（与同一构造函数里 `NotifyStore::new(512).expect(..)` 的
         // 失败姿态一致）——让缺陷在第一次启动就暴露，而不是带病运行到越权发生。
@@ -13011,5 +13102,34 @@ mod tests {
             manifest.entry.ui = Some(ui.to_string());
             manifest
         }
+    }
+}
+
+
+#[cfg(test)]
+mod v4_production_config_tests {
+    use super::*;
+
+    #[test]
+    fn development_defaults_remain_test_friendly() {
+        assert!(AdapterConfig::default().validate_for_start().is_ok());
+    }
+
+    #[test]
+    fn production_default_is_fail_closed() {
+        let cfg = AdapterConfig::default()
+            .with_deployment_mode(tauron_host::DeploymentMode::Production);
+        let error = cfg.validate_for_start().expect_err("empty production config must fail");
+        assert_eq!(error.code, ErrorCode::E_STATE_INVALID_TRANSITION);
+        assert!(error.message.contains("CALLER_IDENTITY_POLICY_REQUIRED"));
+        assert!(error.message.contains("ADMIN_AUDIT_REQUIRED"));
+        assert!(error.message.contains("DATA_DIR_REQUIRED"));
+    }
+
+    #[test]
+    fn origin_allowlist_is_real_identity_policy_evidence() {
+        let mut cfg = AdapterConfig::default();
+        cfg.origin_allowlist.push("tauri://localhost".to_string());
+        assert!(cfg.production_readiness().caller_identity_policy_enabled);
     }
 }
