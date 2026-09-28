@@ -25,6 +25,19 @@ const CONTROLLER_CAPS = [
   'host_window_create',
 ];
 
+const REVIEW_TOKEN = {
+  packageDigest: 'a'.repeat(64),
+  manifestDigest: 'b'.repeat(64),
+  permissionDigest: 'c'.repeat(64),
+  keyId: 'publisher-key-1',
+  publisherId: 'publisher.example',
+  pluginId: 'com.install',
+  version: '1.0.0',
+  issuedAt: 1,
+  expiresAt: 9999999999,
+  nonce: 'review-1',
+};
+
 describe('ShellController', () => {
   let backend: MockBackend;
   let controller: ShellController;
@@ -241,6 +254,7 @@ describe('ShellController', () => {
       permissions: [
         { permission: 'host:notify', risk: 'low', description: '发送通知', defaultChecked: true },
       ],
+      reviewToken: REVIEW_TOKEN,
     });
     const install = vi.spyOn(AdminClient.prototype, 'registryInstall').mockResolvedValue({
       pluginId: 'com.install',
@@ -264,7 +278,7 @@ describe('ShellController', () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(preview).toHaveBeenCalledWith('/tmp/install.tpkg');
     expect(confirm).toHaveBeenCalledOnce();
-    expect(install).toHaveBeenCalledWith('/tmp/install.tpkg', ['host:notify']);
+    expect(install).toHaveBeenCalledWith('/tmp/install.tpkg', ['host:notify'], REVIEW_TOKEN);
     expect(admin).toHaveBeenCalledWith({ op: 'enable', id: 'com.install' });
     expect(launch).toHaveBeenCalledWith('com.install');
     expect(alert).toHaveBeenCalledOnce();
@@ -278,6 +292,7 @@ describe('ShellController', () => {
       permissions: [
         { permission: 'host:notify', risk: 'low', description: '发送通知', defaultChecked: true },
       ],
+      reviewToken: REVIEW_TOKEN,
     });
     const install = vi.spyOn(AdminClient.prototype, 'registryInstall');
     vi.spyOn(window, 'confirm').mockReturnValue(false);
