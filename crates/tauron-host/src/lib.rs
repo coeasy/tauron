@@ -46,6 +46,12 @@ pub use runtime::{LeaseReaper, ReapOutcome, ReapStats, RuntimeHandle, RuntimeLea
 
 // V4 universal/industrial foundation exports.
 pub use call_state::{AtomicCallState, CallTerminalState};
-pub use production::{is_production_safe, validate as validate_production_readiness, DeploymentMode, ProductionReadiness, ReadinessViolation};
+pub use production::{
+    is_production_safe, validate as validate_production_readiness, DeploymentMode,
+    ProductionReadiness, ReadinessViolation,
+};
 pub use service_graph::{ServiceGraph, ServiceGraphError, ServiceNode};
-pub use target::{current_target_spec, resolve_best as resolve_best_target, TargetAbi, TargetArch, TargetOs, TargetSpec};
+pub use target::{
+    current_target_spec, resolve_best as resolve_best_target, TargetAbi, TargetArch, TargetOs,
+    TargetSpec,
+};
