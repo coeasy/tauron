@@ -573,6 +573,8 @@ pub struct CapabilitiesBody {
     pub commands: Vec<String>,
     pub unsupported: Vec<UnsupportedDomain>,
     pub plugin_runtime: bool,
+    /// V4 compile-time target fact used by ArtifactVariantResolver before any OS loader call.
+    pub target: tauron_host::TargetSpec,
 }
 
 /// 返回当前装配形态能力快照。能力列表与 handler 宏由 wire-gate 锁定一致。
@@ -681,6 +683,7 @@ pub fn cmd_host_capabilities(state: &SubstrateState) -> HostResult<CapabilitiesB
             commands: commands.into_iter().map(str::to_string).collect(),
             unsupported,
             plugin_runtime,
+            target: tauron_host::current_target_spec(),
         })
     })?
 }
