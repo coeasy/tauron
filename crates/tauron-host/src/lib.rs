@@ -13,6 +13,11 @@
 //! "IPC 接线"分开验证。
 
 pub mod authz;
+pub mod storage;
+pub mod portable_path;
+pub mod generation;
+pub mod durable;
+pub mod activation;
 pub mod policy;
 pub mod call_graph;
 pub mod admission;
@@ -51,6 +56,13 @@ pub use registry::{PendingCall, PluginEntry, PluginFilter, Registry, RegistryCon
 pub use runtime::{LeaseReaper, ReapOutcome, ReapStats, RuntimeHandle, RuntimeLease, RuntimeTable};
 
 // V4 universal/industrial foundation exports.
+pub use activation::{ActivationError, ActivationRecord, ContentIdentity};
+pub use durable::{
+    decode_durable, encode_durable, DurableEnvelope, DurableError, MigrationSnapshot,
+};
+pub use generation::{Generation, GenerationError, GenerationHandle, GenerationRegistry};
+pub use portable_path::{join_scoped, validate_portable_relative, PortablePathError};
+pub use storage::{SingleWriterLease, StorageNamespace, WriterLeaseError, WriterLeaseTable};
 pub use admission::{
     AdmissionController, AdmissionError, CreditWindow, FairQueue, ResourceKind, ResourceLimit,
 };
