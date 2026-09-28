@@ -350,24 +350,31 @@ impl EventBus {
         self.topics.read().get(topic).cloned()
     }
 
-    // ── 用户审批（§4.5 安装期审批流的运行期落地）─────────────────
-    //
-    // ⚠️ **接入状态**：`approve` 目前**没有任何线上入口**——适配层没有对应命令，
-    // `@tauron/host` 也没有对应方法，全仓只有本文件单测调用它。因此运行期
-    // `approvals` 表恒空、`is_approved` 分支在生产中不可达，跨插件订阅私有
-    // topic 只能靠声明方把 topic 标 `public: true`。
-    //
-    // 方向是**安全**的（fail-closed：未授权即拒绝，不会误放行），要真正启用
-    // 审批流需补：(1) 一条「批准/撤销 (subscriber, topic)」的命令 + TS 方法；
-    // (2) 调用方据 `E_AUTH_DENIED` 弹出审批 UI。审批记录已随
-    // `dispose_subscriber` 回收（见其单测），无需额外清理。
+    // ── 用户审批（私有 topic 的运行期授权）───────────────────────
 
-    /// 用户显式审批：允许 `subscriber` 订阅私有 `topic`。
+    /// 用户/宿主策略显式审批：允许 `subscriber` 订阅私有 `topic`。
     ///
-    /// 无线上入口，见上方接入状态说明；调用前请确认这是宿主内部策略而非
-    /// 用户交互的结果。
+    /// 这里只维护 EventBus 的最小授权事实；谁有权批准由 adapter/Policy 边界判定。
     pub fn approve(&self, subscriber: &str, topic: &str) {
         self.approvals.lock().insert((subscriber.to_string(), topic.to_string()), ());
+    }
+
+    /// 撤销一条审批（幂等）。返回本次是否真的删除了记录。
+    ///
+    /// 撤销只阻止**后续新订阅**；既有订阅必须由管理面显式退订或在主体销毁时
+    /// 级联回收。这样授权事实与订阅资源的生命周期不会在本层暗中混为一谈。
+    pub fn revoke(&self, subscriber: &str, topic: &str) -> bool {
+        self.approvals
+            .lock()
+            .remove(&(subscriber.to_string(), topic.to_string()))
+            .is_some()
+    }
+
+    /// 稳定顺序列出全部审批，供宿主管理面审计/展示。
+    pub fn approvals(&self) -> Vec<(String, String)> {
+        let mut rows: Vec<_> = self.approvals.lock().keys().cloned().collect();
+        rows.sort();
+        rows
     }
 
     pub fn is_approved(&self, subscriber: &str, topic: &str) -> bool {
@@ -890,6 +897,28 @@ mod tests {
         b.approve("com.b", "plugin:com.a:private");
         let o = b.subscribe("com.b", "w1", "plugin:com.a:private").unwrap();
         assert!(!o.duplicate);
+    }
+
+    #[test]
+    fn private_topic_approval_can_be_listed_and_revoked() {
+        let b = bus(16);
+        declare(&b, "com.a", "plugin:com.a:private", false);
+
+        b.approve("com.b", "plugin:com.a:private");
+        assert_eq!(
+            b.approvals(),
+            vec![("com.b".to_string(), "plugin:com.a:private".to_string())]
+        );
+        assert!(b.subscribe("com.b", "w1", "plugin:com.a:private").is_ok());
+
+        assert!(b.revoke("com.b", "plugin:com.a:private"));
+        assert!(!b.revoke("com.b", "plugin:com.a:private"), "重复撤销应幂等");
+        assert!(b.approvals().is_empty());
+        assert!(!b.is_approved("com.b", "plugin:com.a:private"));
+
+        // 新订阅重新 fail-closed；已存在订阅由订阅生命周期负责，不在 revoke 时
+        // 隐式删除，避免授权表与资源表产生跨锁原子性假象。
+        assert!(b.subscribe("com.b", "w2", "plugin:com.a:private").is_err());
     }
 
     #[test]
