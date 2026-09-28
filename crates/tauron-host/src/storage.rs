@@ -51,9 +51,7 @@ impl WriterLeaseTable {
     ) -> Result<SingleWriterLease, WriterLeaseError> {
         let key = namespace.key();
         if let Some(existing) = self.active.get(&key) {
-            return Err(WriterLeaseError::Busy {
-                owner: existing.owner.clone(),
-            });
+            return Err(WriterLeaseError::Busy { owner: existing.owner.clone() });
         }
         let epoch = self.epochs.get(&key).copied().unwrap_or(0).saturating_add(1);
         self.epochs.insert(key.clone(), epoch);
@@ -99,10 +97,7 @@ mod tests {
     fn only_one_writer_exists_and_epoch_advances_after_release() {
         let mut table = WriterLeaseTable::default();
         let first = table.acquire(ns(), "host-a").unwrap();
-        assert!(matches!(
-            table.acquire(ns(), "host-b"),
-            Err(WriterLeaseError::Busy { .. })
-        ));
+        assert!(matches!(table.acquire(ns(), "host-b"), Err(WriterLeaseError::Busy { .. })));
         table.release(&first).unwrap();
         let second = table.acquire(ns(), "host-b").unwrap();
         assert!(second.epoch > first.epoch);
