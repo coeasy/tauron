@@ -1883,6 +1883,9 @@ pub struct SubstrateState {
     /// [`SubstrateState::settings_path`] 读回，每次写成功后落盘。`None` = 不落盘
     /// （测试与底座-only 宿主），行为与之前一致。
     pub settings: Arc<Mutex<SettingsStore>>,
+    /// Serialize settings mutations across stage → durable write → commit/rollback without
+    /// holding the SettingsStore mutex across filesystem I/O.
+    pub settings_write_lock: Arc<Mutex<()>>,
     /// 设置文档的落盘位置（`None` = 纯内存，重启即丢）。
     pub settings_path: Option<std::path::PathBuf>,
     /// **只写不读**的兼容通知日志（R8 之前的 `host_notify` 产物）。
@@ -2365,6 +2368,7 @@ impl SubstrateState {
             service_shutdown_order: Arc::new(service_shutdown_order),
             bus: Arc::new(Mutex::new(EventBus::default())),
             settings: Arc::new(Mutex::new(settings)),
+            settings_write_lock: Arc::new(Mutex::new(())),
             settings_path,
             notifications: Arc::new(Mutex::new(Vec::new())),
             notify_store: Arc::new(Mutex::new(notify_store)),
@@ -4691,6 +4695,11 @@ pub fn host_settings_data_version(state: &SubstrateState) -> Option<String> {
     state.settings.lock().data_version(HOST_SETTINGS_NAMESPACE).map(str::to_string)
 }
 
+/// Monotonic revision of successfully committed host-setting writes.
+pub fn host_settings_revision(state: &SubstrateState) -> u64 {
+    state.settings.lock().revision()
+}
+
 /// `host_settings_get`：读取设置。
 ///
 /// **线形不变**（前端契约）：入参 `key: string`，返回任意 JSON；未写过的键
@@ -4722,17 +4731,28 @@ pub fn cmd_settings_set(
                 "设置键不能为空（调用方可能传了 undefined/null）".to_string(),
             ));
         }
+
+        // One writer owns stage → durable write → commit/rollback. The SettingsStore mutex
+        // itself is released before filesystem I/O, avoiding a lock-across-blocking-I/O path.
+        let _write = state.settings_write_lock.lock();
         let path = settings_path(key);
-        {
+        let (before, event) = {
             let mut store = state.settings.lock();
-            store
-                .set(HOST_SETTINGS_NAMESPACE, HOST_SETTINGS_NAMESPACE, &path, &value)
+            let before = store.snapshot_all();
+            let (_op, event) = store
+                .set_deferred(HOST_SETTINGS_NAMESPACE, HOST_SETTINGS_NAMESPACE, &path, &value)
                 .map_err(settings_to_host_error)?;
+            (before, event)
+        };
+
+        if let Err(error) = persist_settings_doc(state) {
+            state.settings.lock().restore(&before);
+            return Err(error);
         }
-        // 落盘。写成功但落盘失败必须**如实失败**——否则前端显示"已保存"，
-        // 重启后设置却没了（这正是本仓此前的行为：Store 只改内存态，
-        // 没有调用方承担磁盘 I/O，`snapshot_all`/`restore` 只在测试里出现过）。
-        persist_settings_doc(state)
+
+        // Watchers only observe a revision after durable persistence succeeded.
+        state.settings.lock().publish_committed_change(event);
+        Ok(())
     })?
 }
 
@@ -4745,12 +4765,19 @@ pub fn cmd_settings_set(
 /// **线形**：入参 `doc: object`（键 = 设置键，值 = 设置值），返回 `()`。
 /// 非对象文档返回 `E_INVALID_MANIFEST`（不静默退化成空文档）。写入后数据版本
 /// 标注为 [`HOST_SETTINGS_SCHEMA_V1`]，[`cmd_settings_migrate`] 才知道起点。
-pub fn cmd_settings_adopt_legacy(state: &SubstrateState, doc: serde_json::Value) -> HostResult<()> {
+pub fn cmd_settings_adopt_legacy(
+    state: &SubstrateState,
+    doc: serde_json::Value,
+) -> HostResult<()> {
     guard("settings_adopt_legacy", || {
+        let _write = state.settings_write_lock.lock();
+        let before = state.settings.lock().snapshot_all();
         host_settings_adopt_legacy(state, doc)?;
-        // 接手旧版文档同样要落盘：只改内存态的话，重启后磁盘上的旧文档又盖回来，
-        // 迁移看起来"成功"了却永远不生效。
-        persist_settings_doc(state)
+        if let Err(error) = persist_settings_doc(state) {
+            state.settings.lock().restore(&before);
+            return Err(error);
+        }
+        Ok(())
     })?
 }
 
@@ -4780,11 +4807,14 @@ pub fn cmd_settings_adopt_legacy_as(
 /// 穿过 IPC 边界。
 pub fn cmd_settings_migrate(state: &SubstrateState) -> HostResult<usize> {
     guard("settings_migrate", || {
+        let _write = state.settings_write_lock.lock();
+        let before = state.settings.lock().snapshot_all();
         let steps = host_settings_migrate(state)?;
-        // 只有真的发生了迁移（steps > 0）才落盘：已是当前版本时不该因为一次
-        // 诊断性的 migrate 调用而重写磁盘（也避免无谓的临时文件抖动）。
         if steps > 0 {
-            persist_settings_doc(state)?;
+            if let Err(error) = persist_settings_doc(state) {
+                state.settings.lock().restore(&before);
+                return Err(error);
+            }
         }
         Ok(steps)
     })?
@@ -13386,5 +13416,27 @@ mod v4_service_graph_wiring_tests {
         assert_eq!(&reversed, state.service_shutdown_order.as_ref());
         assert!(state.service_startup_order.iter().any(|id| id == "message"));
         assert!(state.service_startup_order.iter().any(|id| id == "provider"));
+    }
+}
+
+
+#[cfg(test)]
+mod v4_settings_transaction_tests {
+    use super::*;
+
+    #[test]
+    fn in_memory_settings_commit_advances_revision_after_set() {
+        let state = SubstrateState::with_adapter_config(&AdapterConfig::default());
+        assert_eq!(host_settings_revision(&state), 0);
+        cmd_settings_set(&state, "theme", serde_json::json!("dark")).unwrap();
+        assert_eq!(host_settings_revision(&state), 1);
+        assert_eq!(cmd_settings_get(&state, "theme").unwrap(), serde_json::json!("dark"));
+    }
+
+    #[test]
+    fn settings_write_lock_is_shared_by_cloned_substrate_state() {
+        let state = SubstrateState::with_adapter_config(&AdapterConfig::default());
+        let cloned = state.clone();
+        assert!(Arc::ptr_eq(&state.settings_write_lock, &cloned.settings_write_lock));
     }
 }
