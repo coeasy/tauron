@@ -95,8 +95,12 @@ mod tests {
     fn shutdown_is_reverse_topology() {
         let mut graph = ServiceGraph::default();
         graph.insert(ServiceNode { id: "contract".into(), requires: vec![] }).unwrap();
-        graph.insert(ServiceNode { id: "policy".into(), requires: vec!["contract".into()] }).unwrap();
-        graph.insert(ServiceNode { id: "runtime".into(), requires: vec!["policy".into()] }).unwrap();
+        graph
+            .insert(ServiceNode { id: "policy".into(), requires: vec!["contract".into()] })
+            .unwrap();
+        graph
+            .insert(ServiceNode { id: "runtime".into(), requires: vec!["policy".into()] })
+            .unwrap();
 
         assert_eq!(graph.startup_order().unwrap(), vec!["contract", "policy", "runtime"]);
         assert_eq!(graph.shutdown_order().unwrap(), vec!["runtime", "policy", "contract"]);
@@ -105,11 +109,10 @@ mod tests {
     #[test]
     fn missing_dependency_fails_before_start() {
         let mut graph = ServiceGraph::default();
-        graph.insert(ServiceNode { id: "runtime".into(), requires: vec!["policy".into()] }).unwrap();
-        assert!(matches!(
-            graph.startup_order(),
-            Err(ServiceGraphError::MissingDependency { .. })
-        ));
+        graph
+            .insert(ServiceNode { id: "runtime".into(), requires: vec!["policy".into()] })
+            .unwrap();
+        assert!(matches!(graph.startup_order(), Err(ServiceGraphError::MissingDependency { .. })));
     }
 
     #[test]
