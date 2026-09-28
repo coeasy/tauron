@@ -17,11 +17,21 @@ export interface ShellClientOptions {
   backend: Backend;
 }
 
+export interface HostTargetSpec {
+  os: 'windows' | 'macos' | 'linux' | 'ios' | 'android' | 'other';
+  arch: 'x86-64' | 'aarch64' | 'x86' | 'armv7' | 'wasm32' | 'other';
+  abi?: 'msvc' | 'gnu' | 'musl' | 'android' | 'apple' | 'wasi' | { other: string };
+  minOsVersion?: string;
+  cpuFeatures: string[];
+}
+
 export interface HostCapabilities {
   families: string[];
   commands: string[];
   unsupported: Array<{ domain: string; reason: string }>;
   pluginRuntime: boolean;
+  /** Host-produced target fact; never supplied by the client. */
+  target: HostTargetSpec;
 }
 
 /** 窗口操作结果。 */
