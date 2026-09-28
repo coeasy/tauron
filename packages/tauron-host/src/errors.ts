@@ -253,14 +253,26 @@ export function normalizeError(err: unknown): HostErrorShape {
     const parsed = tryParseHostError(msg);
     if (parsed) return parsed;
     const { code, rawCode } = extractCode(msg);
-    return { code, rawCode, message: msg, retryable: isRetryable(code), retryClass: retryClassOf(code) };
+    return {
+      code,
+      rawCode,
+      message: msg,
+      retryable: isRetryable(code),
+      retryClass: retryClassOf(code),
+    };
   }
 
   if (err instanceof Error) {
     const parsed = tryParseHostError(err.message);
     if (parsed) return parsed;
     const { code, rawCode } = extractCode(err.message);
-    return { code, rawCode, message: err.message, retryable: isRetryable(code), retryClass: retryClassOf(code) };
+    return {
+      code,
+      rawCode,
+      message: err.message,
+      retryable: isRetryable(code),
+      retryClass: retryClassOf(code),
+    };
   }
 
   const msg = typeof err === 'string' ? err : String(err);
