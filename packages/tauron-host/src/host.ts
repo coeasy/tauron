@@ -500,6 +500,7 @@ export class AdminClient {
   async registryInstall(
     packagePath: string,
     approvedPermissions: string[],
+    reviewToken: string,
   ): Promise<{
     pluginId: string;
     version: string;
@@ -512,7 +513,7 @@ export class AdminClient {
         version: string;
         installPath: string;
         approvedPermissions: string[];
-      }>('host_registry_install', { packagePath, approvedPermissions })
+      }>('host_registry_install', { packagePath, reviewToken, approvedPermissions })
       .catch((err: unknown) => {
         throw translate_at_boundary(err, 'plugin-webview→host').error;
       });
@@ -522,6 +523,8 @@ export class AdminClient {
     pluginId: string;
     pluginName: string;
     version: string;
+    reviewToken: string;
+    packageDigest: string;
     permissions: Array<{
       permission: string;
       risk: string;
@@ -534,6 +537,8 @@ export class AdminClient {
         pluginId: string;
         pluginName: string;
         version: string;
+        reviewToken: string;
+        packageDigest: string;
         permissions: Array<{
           permission: string;
           risk: string;
