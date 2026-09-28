@@ -45,6 +45,7 @@ export type {
   PluginCallRequest,
   ContributeEntryInput,
   ContributesReconcileReport,
+  InstallReviewToken,
 } from './host.js';
 
 export { ShellClient, SIDECAR_ABI_CONTRACT } from './shell-client.js';
