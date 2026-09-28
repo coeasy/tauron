@@ -1,6 +1,6 @@
 {
   "name": "minimal-app",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "tauron 应用层贯通示例：iframe 插件握手/调用 + 窗口控制 + 自动更新 + 剪贴板",
   "type": "module",
   "private": true,

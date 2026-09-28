@@ -1,6 +1,6 @@
 {
   "name": "@tauron/app-cli",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "tauron 应用 CLI 工具：create-tauron-app 脚手架、plugin new/dev/pack/sign/publish、brand build",
   "license": "MIT",
   "repository": {
@@ -30,7 +30,6 @@
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "create-tauron-app": "./dist/cli.js",
     "tauron-app": "./dist/cli.js"
   },
   "exports": {

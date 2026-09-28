@@ -1,6 +1,6 @@
 {
   "name": "@tauron/cli",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "tauron CLI 工具（设计文档 §7）：create-tauron-app 脚手架、plugin new/dev/test/pack/sign/publish、doctor 诊断",
   "license": "MIT",
   "repository": {

@@ -1,6 +1,6 @@
 {
   "name": "@tauron/plugin-sdk",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "tauron 插件 SDK（设计文档 §2.4/§4.2B）：PluginBridge postMessage 沙箱通信、插件宿主侧代理",
   "license": "MIT",
   "repository": {

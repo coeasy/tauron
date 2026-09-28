@@ -56,7 +56,7 @@ tauron 插件系统在**清单层**定义了四种插件类型（`PluginType` �
 
 ### 获取 CLI
 
-`@tauron/cli@1.0.1` 已发布到 npm，可通过 `npm install -g @tauron/cli@1.0.1` 安装；
+`@tauron/cli@1.0.2` 已发布到 npm，可通过 `npm install -g @tauron/cli@1.0.2` 安装；
 在 Tauron 仓库内开发时也可直接运行 bin。
 
 **下文一律用 `tauron` 代指 `node packages/tauron-cli/bin/tauron.js`（在仓库根执行）。**
@@ -64,7 +64,7 @@ tauron 插件系统在**清单层**定义了四种插件类型（`PluginType` �
 ### 验证
 
 ```bash
-tauron --version   # tauron v1.0.1
+tauron --version   # tauron v1.0.2
 tauron doctor      # 环境诊断：探测 Node / pnpm / Rust / Tauri CLI
 ```
 
@@ -159,7 +159,7 @@ tauron plugin new com.example.sys  --type process  # 骨架含 main.js
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.js",
-  "devDependencies": { "@tauron/plugin-sdk": "^1.0.1" }
+  "devDependencies": { "@tauron/plugin-sdk": "^1.0.2" }
 }
 ```
 

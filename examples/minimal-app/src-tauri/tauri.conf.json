@@ -1,6 +1,6 @@
 {
   "productName": "Tauron Minimal App",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "identifier": "com.tauron.minimal-app",
   "build": {
     "devUrl": "http://localhost:5173",

@@ -1,6 +1,6 @@
 {
   "name": "@tauron/market",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "tauron 插件市场（设计文档 §8）：Ed25519 签名、index.json 生成、插件注册表",
   "license": "MIT",
   "repository": {

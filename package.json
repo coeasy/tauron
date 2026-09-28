@@ -1,7 +1,7 @@
 {
   "name": "tauron-workspace",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "tauron — Tauri 2 之上的插件化桌面客户端基础设施 monorepo",
   "type": "module",
   "packageManager": "pnpm@11.7.0",

@@ -3,7 +3,7 @@
 Create a Tauri 2 client project with Tauron pre-wired.
 
 ```sh
-npm create tauron-app@1.0.1 -- ./my-app
+npm create tauron-app@1.0.2 -- ./my-app
 cd my-app
 npm install
 npm run tauri dev
@@ -12,7 +12,7 @@ npm run tauri dev
 To use a local Tauron checkout while developing Tauron itself:
 
 ```sh
-npm create tauron-app@1.0.1 -- ./my-app --tauron-path ../tauron
+npm create tauron-app@1.0.2 -- ./my-app --tauron-path ../tauron
 ```
 
 Generated projects pin the Tauron JavaScript and Rust packages to the matching

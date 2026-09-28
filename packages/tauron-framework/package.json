@@ -1,6 +1,6 @@
 {
   "name": "@tauron/framework",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "tauron 框架薄封装：细粒度 signals 响应式内核 + 框架无关 bindings（useInvoke/useEvent/useCapabilities）",
   "license": "MIT",
   "repository": {

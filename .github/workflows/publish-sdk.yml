@@ -29,6 +29,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
+      - name: Verify the create-tauron-app launcher before publishing
+        run: node scripts/verify-create-tauron-app.mjs
       - run: cargo test --workspace --locked
       - run: pnpm publish:npm -- --check
       # The crate preflight intentionally uses --offline so it can validate

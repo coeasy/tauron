@@ -23,7 +23,7 @@ Tauron 不承诺“一套安装方式覆盖所有客户端”。各宿主仍需�
 
 - `tauron-app new` 生成 Tauri 2 工程，支持 React、Vue、Svelte 和 Vanilla TypeScript 前端。
 - `tauron-app init` 面向已有 Tauri 2 工程；会保留现有 `invoke_handler`、Tauri capability 和 Tauron client config。已有处理器需要手工合并时，CLI 会报告不完整并返回非零状态。
-- 插入的依赖默认固定到 Tauron `1.0.1`；本地 Tauron 源码开发须明确传入 `--tauron-path`。
+- 插入的依赖默认固定到 Tauron `1.0.2`；本地 Tauron 源码开发须明确传入 `--tauron-path`。
 - 对于已有自定义 host protocol、Capability Broker、租约或其他运行时约束的复杂宿主，应通过独立适配层接入 Tauron；本项目不代替宿主的安全与生命周期治理。
 
 `harness_dock` 可作为复杂宿主边界的架构参考，不能据此推断 Tauron 已兼容它或已实现其专用协议适配器。

@@ -47,7 +47,7 @@ export interface ScaffoldConfig {
    * tauron 源码检出根相对**生成工程根**的路径（可选）。
    *
    * 给出时生成本地源码 `path` / `file:` 依赖，适用于 Tauron 贡献开发；省略时
-   * 生成固定 `1.0.1` registry 依赖，适用于第三方项目。
+   * 生成固定 `1.0.2` registry 依赖，适用于第三方项目。
    */
   tauronPath?: string;
 }
@@ -265,7 +265,7 @@ export function validateConfig(config: ScaffoldConfigInput): ScaffoldConfig {
 // ──────────────────────────────────────────────────────────────────────────
 
 /** 框架包版本（与 @tauron/host 同源发版）。 */
-const FRAMEWORK_VERSION = '1.0.1';
+const FRAMEWORK_VERSION = '1.0.2';
 
 /** 去掉路径尾部的 `/` 与 `\`。 */
 function trimTrailingSlash(p: string): string {

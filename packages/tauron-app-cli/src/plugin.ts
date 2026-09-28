@@ -238,7 +238,7 @@ export function validatePluginConfig(config: PluginConfigInput): PluginConfig {
 // ──────────────────────────────────────────────────────────────────────────
 
 /** 框架包版本（与 @tauron/host 同源发版）。 */
-const FRAMEWORK_VERSION = '1.0.1';
+const FRAMEWORK_VERSION = '1.0.2';
 
 /**
  * 生成插件 manifest.json 内容。

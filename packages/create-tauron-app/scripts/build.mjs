@@ -9,7 +9,7 @@ const output = join(root, 'dist', 'create-tauron-app.js');
 mkdirSync(dirname(output), { recursive: true });
 writeFileSync(
   output,
-  `#!/usr/bin/env node\nimport { main } from '@tauron/app-cli/cli';\n\nmain().catch((error) => {\n  console.error(error instanceof Error ? error.message : String(error));\n  process.exitCode = 1;\n});\n`,
+  `#!/usr/bin/env node\nimport { main } from '@tauron/app-cli/cli';\n\nmain(['node', 'tauron-app', 'new', ...process.argv.slice(2)]).catch((error) => {\n  console.error(error instanceof Error ? error.message : String(error));\n  process.exitCode = 1;\n});\n`,
   'utf8',
 );
 chmodSync(output, 0o755);
