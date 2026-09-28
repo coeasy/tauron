@@ -170,11 +170,13 @@ describe('契约 3：HostException', () => {
       code: 'E_CALL_TIMEOUT',
       rawCode: 'E_CALL_TIMEOUT',
       message: 'timed out',
-      retryable: true,
+      retryable: false,
+      retryClass: 'manual',
     });
     expect(exc.code).toBe('E_CALL_TIMEOUT');
     expect(exc.rawCode).toBe('E_CALL_TIMEOUT');
-    expect(exc.retryable).toBe(true);
+    expect(exc.retryable).toBe(false);
+    expect(exc.retryClass).toBe('manual');
     expect(exc.message).toBe('timed out');
     expect(exc.name).toBe('HostException');
   });
@@ -185,6 +187,7 @@ describe('契约 3：HostException', () => {
       rawCode: 'E_AUTH_DENIED',
       message: 'denied',
       retryable: false,
+      retryClass: 'never' as const,
     };
     const exc = new HostException(shape);
     expect(exc.toShape()).toEqual(shape);
@@ -196,6 +199,7 @@ describe('契约 3：HostException', () => {
       rawCode: null,
       message: 'x',
       retryable: false,
+      retryClass: 'never',
     });
     expect(exc).toBeInstanceOf(Error);
   });
