@@ -419,6 +419,10 @@ pub struct PluginInstallPreview {
     pub plugin_name: String,
     pub version: String,
     pub permissions: Vec<PluginPermissionReview>,
+    /// Opaque one-time approval token. Commit must present this exact token.
+    pub review_token: String,
+    /// SHA-256 of the exact package bytes shown during preview (diagnostic/UI display).
+    pub package_digest: String,
 }
 
 /// 可选能力未装配时的明确说明。
@@ -2043,6 +2047,10 @@ pub struct PluginRuntimeState {
     pub deliveries: Arc<HashMap<DeliveryKind, Box<dyn CallDelivery>>>,
     #[cfg(feature = "plugin-install")]
     install_config: Option<InstallRuntimeConfig>,
+    /// Ephemeral, host-owned approval records. Tokens are opaque UUIDs; package content
+    /// is rebound and re-verified at commit time, closing preview/commit TOCTOU.
+    #[cfg(feature = "plugin-install")]
+    install_reviews: Arc<Mutex<HashMap<String, InstallReviewRecord>>>,
 }
 
 #[cfg(feature = "plugin-install")]
@@ -2051,7 +2059,22 @@ struct InstallRuntimeConfig {
     root: PathBuf,
     signing_keys: std::collections::BTreeMap<String, Vec<u8>>,
     acl_signing_key: Option<Vec<u8>>,
+    deployment_mode: DeploymentMode,
 }
+
+#[cfg(feature = "plugin-install")]
+#[derive(Debug, Clone)]
+struct InstallReviewRecord {
+    package_digest: String,
+    plugin_id: String,
+    version: String,
+    expires_at: u64,
+}
+
+#[cfg(feature = "plugin-install")]
+const INSTALL_REVIEW_TTL_SECS: u64 = 600;
+#[cfg(feature = "plugin-install")]
+const MAX_INSTALL_REVIEWS: usize = 64;
 
 impl core::ops::Deref for PluginRuntimeState {
     type Target = SubstrateState;
@@ -2308,7 +2331,10 @@ impl PluginRuntimeState {
                 root,
                 signing_keys: cfg.plugin_signing_keys,
                 acl_signing_key: cfg.acl_signing_key,
+                deployment_mode: cfg.deployment_mode,
             }),
+            #[cfg(feature = "plugin-install")]
+            install_reviews: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -2834,7 +2860,50 @@ pub fn cmd_registry_install_as(
     approved_permissions: &[String],
 ) -> HostResult<PluginInstallResult> {
     require_main_window(caller, "host_registry_install")?;
+    if state
+        .install_config
+        .as_ref()
+        .is_some_and(|cfg| cfg.deployment_mode == DeploymentMode::Production)
+    {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "Production 安装必须先 preview 并携带一次性 review token",
+        ));
+    }
     guard("registry_install", || registry_install_inner(state, package_path, approved_permissions))?
+}
+
+/// V4 production-safe install path: consumes a one-time review token and binds the
+/// commit to the exact package digest/plugin/version that the user reviewed.
+#[cfg(feature = "plugin-install")]
+pub fn cmd_registry_install_reviewed_as(
+    caller: &Caller,
+    state: &PluginRuntimeState,
+    package_path: &str,
+    review_token: &str,
+    approved_permissions: &[String],
+) -> HostResult<PluginInstallResult> {
+    require_main_window(caller, "host_registry_install")?;
+    let verified = read_verified_package(state, package_path)?;
+    let now = unix_time_seconds();
+    let review = state
+        .install_reviews
+        .lock()
+        .remove(review_token)
+        .ok_or_else(|| HostError::new(ErrorCode::E_INSTALL_FAILED, "安装审批 token 不存在或已使用"))?;
+    if review.expires_at <= now {
+        return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "安装审批已过期，请重新预览"));
+    }
+    if review.package_digest != verified.package_digest
+        || review.plugin_id != verified.manifest.id.to_string()
+        || review.version != verified.manifest.version.to_string()
+    {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "安装包与已审批内容不一致，请重新预览",
+        ));
+    }
+    registry_install_verified_inner(state, verified, approved_permissions)
 }
 
 #[cfg(feature = "plugin-install")]
@@ -2856,7 +2925,8 @@ fn registry_install_preview_inner(
     package_path: &str,
 ) -> HostResult<PluginInstallPreview> {
     use tauron_host::manifest::{embedded_permission_index, PluginType};
-    let (manifest, _signature) = read_verified_package(state, package_path)?;
+    let verified = read_verified_package(state, package_path)?;
+    let manifest = verified.manifest;
     if manifest.plugin_type != PluginType::Js {
         return Err(HostError::new(ErrorCode::E_PLUGIN_TYPE_NO_RUNTIME, "当前仅支持 JS 插件安装"));
     }
@@ -2872,10 +2942,33 @@ fn registry_install_preview_inner(
         unix_time_seconds(),
         1,
     )?;
+    let now = unix_time_seconds();
+    let review_token = uuid::Uuid::new_v4().to_string();
+    {
+        let mut reviews = state.install_reviews.lock();
+        reviews.retain(|_, review| review.expires_at > now);
+        if reviews.len() >= MAX_INSTALL_REVIEWS {
+            return Err(HostError::new(
+                ErrorCode::E_INSTALL_FAILED,
+                "待审批安装已达上限；请完成或等待现有审批过期",
+            ));
+        }
+        reviews.insert(
+            review_token.clone(),
+            InstallReviewRecord {
+                package_digest: verified.package_digest.clone(),
+                plugin_id: manifest.id.to_string(),
+                version: manifest.version.to_string(),
+                expires_at: now.saturating_add(INSTALL_REVIEW_TTL_SECS),
+            },
+        );
+    }
     Ok(PluginInstallPreview {
         plugin_id: manifest.id.to_string(),
         plugin_name: manifest.name,
         version: manifest.version.to_string(),
+        review_token,
+        package_digest: verified.package_digest,
         permissions: rows
             .grants
             .into_iter()
@@ -2895,6 +2988,16 @@ fn registry_install_inner(
     package_path: &str,
     approved_permissions: &[String],
 ) -> HostResult<PluginInstallResult> {
+    let verified = read_verified_package(state, package_path)?;
+    registry_install_verified_inner(state, verified, approved_permissions)
+}
+
+#[cfg(feature = "plugin-install")]
+fn registry_install_verified_inner(
+    state: &PluginRuntimeState,
+    verified: VerifiedPackage,
+    approved_permissions: &[String],
+) -> HostResult<PluginInstallResult> {
     use std::collections::BTreeSet;
     use tauron_acl::{draft_grant_set, validate_grants, AclStore};
     use tauron_host::manifest::{embedded_permission_index, PluginType};
@@ -2911,7 +3014,7 @@ fn registry_install_inner(
             "ACL HMAC key 未配置或少于 32 字节",
         ));
     }
-    let (manifest, archive) = read_verified_package(state, package_path)?;
+    let VerifiedPackage { manifest, archive, .. } = verified;
     if manifest.plugin_type != PluginType::Js {
         return Err(HostError::new(
             ErrorCode::E_PLUGIN_TYPE_NO_RUNTIME,
@@ -3062,10 +3165,17 @@ fn unix_time_seconds() -> u64 {
 }
 
 #[cfg(feature = "plugin-install")]
+struct VerifiedPackage {
+    manifest: PluginManifest,
+    archive: Vec<u8>,
+    package_digest: String,
+}
+
+#[cfg(feature = "plugin-install")]
 fn read_verified_package(
     state: &PluginRuntimeState,
     package_path: &str,
-) -> HostResult<(PluginManifest, Vec<u8>)> {
+) -> HostResult<VerifiedPackage> {
     let config = state.install_config.as_ref().ok_or_else(|| {
         HostError::new(
             ErrorCode::E_INSTALL_FAILED,
@@ -3101,7 +3211,9 @@ fn read_verified_package(
     if verified.kid != envelope.kid {
         return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "验签 kid 不一致"));
     }
-    Ok((manifest, archive))
+    use sha2::Digest as _;
+    let package_digest = hex::encode(sha2::Sha256::digest(&archive));
+    Ok(VerifiedPackage { manifest, archive, package_digest })
 }
 
 pub fn cmd_registry_admin(
