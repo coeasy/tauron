@@ -189,6 +189,7 @@ describe('HostException', () => {
       rawCode: 'E_STATE_INVALID_TRANSITION',
       message: '非法迁移',
       retryable: false,
+      retryClass: 'never',
     });
   });
 });
