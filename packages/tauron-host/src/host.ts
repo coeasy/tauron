@@ -496,6 +496,33 @@ export class AdminClient {
     });
   }
 
+  /** Approve a plugin subscriber for one private EventBus topic. */
+  async eventsApprove(subscriber: string, topic: string): Promise<void> {
+    await this.backend
+      .invoke('host_events_approve', { subscriber, topic })
+      .catch((err: unknown) => {
+        throw translate_at_boundary(err, 'plugin-webview→host').error;
+      });
+  }
+
+  /** Revoke a private-topic approval. Returns true when a grant actually existed. */
+  async eventsRevoke(subscriber: string, topic: string): Promise<boolean> {
+    return this.backend
+      .invoke<boolean>('host_events_revoke', { subscriber, topic })
+      .catch((err: unknown) => {
+        throw translate_at_boundary(err, 'plugin-webview→host').error;
+      });
+  }
+
+  /** List current private-topic approval facts for the host administration UI. */
+  async eventsApprovals(): Promise<Array<{ subscriber: string; topic: string }>> {
+    return this.backend
+      .invoke<Array<{ subscriber: string; topic: string }>>('host_events_approvals', {})
+      .catch((err: unknown) => {
+        throw translate_at_boundary(err, 'plugin-webview→host').error;
+      });
+  }
+
   /** Install a verified local package after the host UI has shown and collected approval. */
   async registryInstall(
     packagePath: string,
