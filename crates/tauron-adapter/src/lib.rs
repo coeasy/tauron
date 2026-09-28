@@ -201,8 +201,10 @@ impl AdapterConfig {
 
     /// Fail-closed production startup validation. Development/Test compatibility is unchanged.
     pub fn validate_for_start(&self) -> HostResult<()> {
-        let violations =
-            tauron_host::validate_production_readiness(self.deployment_mode, &self.production_readiness());
+        let violations = tauron_host::validate_production_readiness(
+            self.deployment_mode,
+            &self.production_readiness(),
+        );
         if violations.is_empty() {
             return Ok(());
         }
@@ -487,8 +489,7 @@ fn digest_bytes(bytes: &[u8]) -> String {
 
 #[cfg(feature = "plugin-install")]
 fn permission_digest(manifest: &PluginManifest) -> String {
-    let mut permissions: Vec<&str> =
-        manifest.permissions.iter().map(|p| p.as_str()).collect();
+    let mut permissions: Vec<&str> = manifest.permissions.iter().map(|p| p.as_str()).collect();
     permissions.sort_unstable();
     digest_bytes(permissions.join("\n").as_bytes())
 }
@@ -520,7 +521,6 @@ fn review_matches_verified(token: &InstallReviewToken, verified: &VerifiedPlugin
         && token.plugin_id == verified.manifest.id.as_str()
         && token.version == verified.manifest.version.to_string()
 }
-
 
 /// 可选能力未装配时的明确说明。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2252,18 +2252,9 @@ fn canonical_substrate_service_graph() -> tauron_host::ServiceGraph {
         ServiceNode { id: "policy".into(), requires: vec!["contract".into()] },
         ServiceNode { id: "recovery".into(), requires: vec!["contract".into()] },
         ServiceNode { id: "settings".into(), requires: vec!["contract".into()] },
-        ServiceNode {
-            id: "capability".into(),
-            requires: vec!["contract".into(), "policy".into()],
-        },
-        ServiceNode {
-            id: "provider".into(),
-            requires: vec!["capability".into()],
-        },
-        ServiceNode {
-            id: "message".into(),
-            requires: vec!["policy".into(), "capability".into()],
-        },
+        ServiceNode { id: "capability".into(), requires: vec!["contract".into(), "policy".into()] },
+        ServiceNode { id: "provider".into(), requires: vec!["capability".into()] },
+        ServiceNode { id: "message".into(), requires: vec!["policy".into(), "capability".into()] },
     ] {
         graph.insert(node).expect("canonical Tauron service IDs are unique");
     }
@@ -3086,16 +3077,12 @@ fn registry_install_inner(
     let verified = read_verified_package(state, package_path)?;
     if let Some(review_token) = review_token {
         let now = unix_time_seconds();
-        let stored = state
-            .install_reviews
-            .lock()
-            .remove(&review_token.nonce)
-            .ok_or_else(|| {
-                HostError::new(
-                    ErrorCode::E_INSTALL_FAILED,
-                    "install review token is unknown, expired, or already consumed",
-                )
-            })?;
+        let stored = state.install_reviews.lock().remove(&review_token.nonce).ok_or_else(|| {
+            HostError::new(
+                ErrorCode::E_INSTALL_FAILED,
+                "install review token is unknown, expired, or already consumed",
+            )
+        })?;
         if stored != *review_token || review_token.expires_at <= now {
             return Err(HostError::new(
                 ErrorCode::E_INSTALL_FAILED,
@@ -3306,7 +3293,10 @@ fn read_verified_package(
         return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "验签 kid 不一致"));
     }
     let manifest_bytes = serde_json::to_vec(&manifest).map_err(|e| {
-        HostError::new(ErrorCode::E_INSTALL_FAILED, format!("manifest canonicalization failed: {e}"))
+        HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            format!("manifest canonicalization failed: {e}"),
+        )
     })?;
     Ok(VerifiedPluginPackage {
         package_digest: digest_bytes(&archive),
@@ -13321,7 +13311,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod v4_production_config_tests {
     use super::*;
@@ -13333,8 +13322,8 @@ mod v4_production_config_tests {
 
     #[test]
     fn production_default_is_fail_closed() {
-        let cfg = AdapterConfig::default()
-            .with_deployment_mode(tauron_host::DeploymentMode::Production);
+        let cfg =
+            AdapterConfig::default().with_deployment_mode(tauron_host::DeploymentMode::Production);
         let error = cfg.validate_for_start().expect_err("empty production config must fail");
         assert_eq!(error.code, ErrorCode::E_STATE_INVALID_TRANSITION);
         assert!(error.message.contains("CALLER_IDENTITY_POLICY_REQUIRED"));
@@ -13349,7 +13338,6 @@ mod v4_production_config_tests {
         assert!(cfg.production_readiness().caller_identity_policy_enabled);
     }
 }
-
 
 #[cfg(test)]
 mod v4_service_graph_wiring_tests {
