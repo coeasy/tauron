@@ -3226,9 +3226,9 @@ fn read_verified_package(
     let mut package_hasher = sha2::Sha256::new();
     let mut hash_buffer = [0u8; 64 * 1024];
     loop {
-        let n = archive
-            .read(&mut hash_buffer)
-            .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("读取安装包失败：{e}")))?;
+        let n = archive.read(&mut hash_buffer).map_err(|e| {
+            HostError::new(ErrorCode::E_INSTALL_FAILED, format!("读取安装包失败：{e}"))
+        })?;
         if n == 0 {
             break;
         }
@@ -7572,10 +7572,7 @@ mod tests {
         });
         let replacement = vec![
             ("manifest.json".to_string(), serde_json::to_vec(&manifest).unwrap()),
-            (
-                "src/index.js".to_string(),
-                b"export const activate = () => 'replacement';".to_vec(),
-            ),
+            ("src/index.js".to_string(), b"export const activate = () => 'replacement';".to_vec()),
             ("index.html".to_string(), b"<!doctype html><body>replacement</body>".to_vec()),
         ];
         let (same_path, _) = signed_tpkg(dir.path(), id, &replacement);
