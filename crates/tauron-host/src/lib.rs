@@ -13,6 +13,9 @@
 //! "IPC 接线"分开验证。
 
 pub mod authz;
+pub mod policy;
+pub mod call_graph;
+pub mod admission;
 pub mod call_delivery;
 pub mod call_state;
 pub mod config;
@@ -48,6 +51,14 @@ pub use registry::{PendingCall, PluginEntry, PluginFilter, Registry, RegistryCon
 pub use runtime::{LeaseReaper, ReapOutcome, ReapStats, RuntimeHandle, RuntimeLease, RuntimeTable};
 
 // V4 universal/industrial foundation exports.
+pub use admission::{
+    AdmissionController, AdmissionError, CreditWindow, FairQueue, ResourceKind, ResourceLimit,
+};
+pub use call_graph::{
+    CallGraph, CallGraphError, CausationError, EventCausation, ReentrancyPolicy,
+    DEFAULT_MAX_CALL_HOPS, DEFAULT_MAX_CAUSATION_DEPTH,
+};
+pub use policy::{DecisionError, DecisionToken, PolicyAuthority};
 pub use execution::{
     current_domain, in_domain, require_domain, ExecutionDomain, ExecutionDomainGuard, ExecutionError,
 };
