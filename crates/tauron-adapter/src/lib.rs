@@ -2168,6 +2168,12 @@ impl SubstrateState {
     /// **不消费 `cfg.registry`**：注册表属插件运行时（[`PluginRuntimeState`]），
     /// 底座装配不该顺带建一份——那正是 R1 要拆掉的东西。
     pub fn with_adapter_config(cfg: &AdapterConfig) -> Self {
+        // V4 canonical production boundary: every host shape (Tauri, embedded, custom)
+        // passes this constructor, so Production cannot bypass fail-closed validation.
+        if let Err(reason) = cfg.validate_production_readiness() {
+            panic!("[tauron] production readiness check failed: {reason}");
+        }
+
         // §8-17 生产自检（P1-10）：档位表是构建期常量，错了就是构建缺陷。
         // 失败**立即 panic**（与同一构造函数里 `NotifyStore::new(512).expect(..)` 的
         // 失败姿态一致）——让缺陷在第一次启动就暴露，而不是带病运行到越权发生。
