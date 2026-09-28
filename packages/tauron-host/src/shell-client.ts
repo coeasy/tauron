@@ -555,8 +555,10 @@ export interface ReapStats {
 
 /** sidecar 健康快照（`host_runtime_health`）。 */
 export interface RuntimeHealth {
-  /** 进程是否仍存活（宿主以 `Child::try_wait` 真探测，不是猜测）。 */
+  /** Proven alive only; false also covers the explicit unknown state. */
   alive: boolean;
+  /** V4 liveness tri-state: unknown does not consume crash budget. */
+  status: 'alive' | 'exited' | 'unknown';
   pid: number;
   /** **每插件**崩溃窗口内的崩溃次数（`tauron-proc` 的 `CrashTracker`）。 */
   crashes: number;
