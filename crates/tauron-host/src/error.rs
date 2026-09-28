@@ -97,10 +97,33 @@ pub enum ErrorCode {
     E_CONTRIBUTES_DRIFT,
 }
 
+/// V4: public retry semantics are richer than a boolean.  The existing wire-level
+/// `retryable` field is retained for compatibility, but only `AutoIdempotent`
+/// maps to true.  In particular, a caught panic is not proof that state rolled back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RetryClass {
+    Never,
+    Manual,
+    AutoIdempotent,
+    AfterReconnect,
+}
+
 impl ErrorCode {
-    /// 该错误是否可自动重试（供宿主决策是否重派，而非无限重试）。
+    /// Retry classification used by policy/schedulers.
+    pub const fn retry_class(self) -> RetryClass {
+        match self {
+            Self::E_CALL_TIMEOUT | Self::E_PLUGIN_FILTERED => RetryClass::AutoIdempotent,
+            Self::E_LEASE_EXPIRED => RetryClass::AfterReconnect,
+            Self::E_HOST_PANIC => RetryClass::Never,
+            _ => RetryClass::Never,
+        }
+    }
+
+    /// Backward-compatible wire projection.  A panic is deliberately false:
+    /// catch_unwind prevents process termination but cannot prove side effects rolled back.
     pub const fn retryable(self) -> bool {
-        matches!(self, Self::E_CALL_TIMEOUT | Self::E_HOST_PANIC | Self::E_PLUGIN_FILTERED)
+        matches!(self.retry_class(), RetryClass::AutoIdempotent)
     }
 }
 
@@ -219,7 +242,9 @@ mod tests {
     #[test]
     fn error_code_retryability() {
         assert!(ErrorCode::E_CALL_TIMEOUT.retryable());
-        assert!(ErrorCode::E_HOST_PANIC.retryable());
+        assert!(!ErrorCode::E_HOST_PANIC.retryable());
+        assert_eq!(ErrorCode::E_HOST_PANIC.retry_class(), RetryClass::Never);
+        assert_eq!(ErrorCode::E_LEASE_EXPIRED.retry_class(), RetryClass::AfterReconnect);
         assert!(!ErrorCode::E_INVALID_MANIFEST.retryable());
         assert!(!ErrorCode::E_ABI_MISMATCH.retryable());
         // 声明/事实不一致是**确定性**故障：重试不会让缺失的注册出现。
