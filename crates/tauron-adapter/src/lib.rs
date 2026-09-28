@@ -11823,6 +11823,7 @@ mod tests {
     fn runtime_health_serializes_camel_case() {
         let h = RuntimeHealth {
             alive: false,
+            status: tauron_proc::ProcessStatus::Exited,
             pid: 7,
             crashes: 2,
             consecutive_failures: 1,
@@ -11839,6 +11840,7 @@ mod tests {
             v,
             serde_json::json!({
                 "alive": false,
+                "status": "exited",
                 "pid": 7,
                 "crashes": 2,
                 "consecutiveFailures": 1,
@@ -13481,7 +13483,6 @@ mod v4_service_graph_wiring_tests {
         assert!(state.service_startup_order.iter().any(|id| id == "provider"));
     }
 }
-
 
 #[cfg(test)]
 mod v4_settings_transaction_tests {
