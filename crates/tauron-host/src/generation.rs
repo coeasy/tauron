@@ -31,11 +31,7 @@ pub enum GenerationError {
     #[error("resource {0} has no active generation")]
     NotActive(String),
     #[error("stale handle for {resource}: handle={handle:?}, active={active:?}")]
-    StaleHandle {
-        resource: String,
-        handle: Generation,
-        active: Generation,
-    },
+    StaleHandle { resource: String, handle: Generation, active: Generation },
     #[error("unknown generation lease {0}")]
     UnknownLease(String),
 }
@@ -48,11 +44,7 @@ pub struct GenerationRegistry {
 
 impl GenerationRegistry {
     pub fn activate(&mut self, resource: &str) -> Generation {
-        let next = self
-            .active
-            .get(resource)
-            .copied()
-            .map_or(Generation::INITIAL, Generation::next);
+        let next = self.active.get(resource).copied().map_or(Generation::INITIAL, Generation::next);
         self.active.insert(resource.to_string(), next);
         next
     }
@@ -66,13 +58,8 @@ impl GenerationRegistry {
             .current(resource)
             .ok_or_else(|| GenerationError::NotActive(resource.to_string()))?;
         let token = Uuid::new_v4().to_string();
-        self.leases
-            .insert(token.clone(), (resource.to_string(), generation));
-        Ok(GenerationHandle {
-            resource: resource.to_string(),
-            generation,
-            token,
-        })
+        self.leases.insert(token.clone(), (resource.to_string(), generation));
+        Ok(GenerationHandle { resource: resource.to_string(), generation, token })
     }
 
     pub fn validate(&self, handle: &GenerationHandle) -> Result<(), GenerationError> {
@@ -101,10 +88,7 @@ impl GenerationRegistry {
     }
 
     pub fn leases_for(&self, resource: &str, generation: Generation) -> usize {
-        self.leases
-            .values()
-            .filter(|(r, g)| r == resource && *g == generation)
-            .count()
+        self.leases.values().filter(|(r, g)| r == resource && *g == generation).count()
     }
 
     pub fn retire_unleased(
@@ -129,10 +113,7 @@ mod tests {
         assert_eq!(r.activate("plugin:p"), Generation(1));
         let old = r.lease("plugin:p").unwrap();
         assert_eq!(r.activate("plugin:p"), Generation(2));
-        assert!(matches!(
-            r.validate(&old),
-            Err(GenerationError::StaleHandle { .. })
-        ));
+        assert!(matches!(r.validate(&old), Err(GenerationError::StaleHandle { .. })));
         assert_eq!(r.leases_for("plugin:p", Generation(1)), 1);
         assert!(!r.retire_unleased("plugin:p", Generation(1)).unwrap());
         assert!(r.release(&old.token));
