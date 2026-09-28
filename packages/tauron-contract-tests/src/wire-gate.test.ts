@@ -249,14 +249,17 @@ describe('门禁：应用层宿主错误码 TS ↔ Rust 一致', () => {
     );
   }
 
-  it('线名逐项同序一致（Rust ErrorCode ↔ TS HOST_ERROR_CODES）', () => {
+  it('线名集合与 canonical registry 一致；source declaration order 不属于协议', () => {
     const rustCodes = [...variantToCode().values()];
-    expect(rustCodes, 'Rust 侧应解析出全部变体').toEqual([...HOST_ERROR_CODES]);
-    // 不再硬编码个数（此前写死 18，新增 `E_STREAM_FULL` 就得改这里——个数是从
-    // 两侧解析结果里导出的，硬编码只会制造"改一处忘一处"的假失败）。
-    // 这里改钉**下限**：确保正则真的抓到了码表，而不是空匹配蒙混过关。
+    const registry = JSON.parse(read('contracts/error/error-codes.json')) as {
+      codes: Array<{ code: string; retryClass: string }>;
+    };
+    const canonicalCodes = registry.codes.map((entry) => entry.code);
+    expect(new Set(rustCodes).size).toBe(rustCodes.length);
+    expect(new Set(HOST_ERROR_CODES).size).toBe(HOST_ERROR_CODES.length);
+    expect([...rustCodes].sort()).toEqual([...canonicalCodes].sort());
+    expect([...HOST_ERROR_CODES].sort()).toEqual([...canonicalCodes].sort());
     expect(HOST_ERROR_CODES.length).toBeGreaterThanOrEqual(18);
-    expect(rustCodes.length).toBe(HOST_ERROR_CODES.length);
   });
 
   it('线名必须等于枚举变体名（E_* 大写蛇形，禁止 camelCase 漂移）', () => {
@@ -280,10 +283,15 @@ describe('门禁：应用层宿主错误码 TS ↔ Rust 一致', () => {
         .toLowerCase();
       rustClass.set(code!, cls);
     }
-    // Unlisted variants use the explicit Never fallback.
-    for (const code of HOST_ERROR_CODES) {
-      const expected = rustClass.get(code) ?? 'never';
-      expect(HOST_RETRY_CLASS[code], code).toBe(expected);
+    const registry = JSON.parse(read('contracts/error/error-codes.json')) as {
+      codes: Array<{ code: keyof typeof HOST_RETRY_CLASS; retryClass: string }>;
+    };
+    // Unlisted Rust variants use the explicit Never fallback; canonical registry is the
+    // language-neutral public source and every binding must agree with it.
+    for (const entry of registry.codes) {
+      const expected = rustClass.get(entry.code) ?? 'never';
+      expect(HOST_RETRY_CLASS[entry.code], entry.code).toBe(expected);
+      expect(entry.retryClass, entry.code).toBe(expected);
     }
     expect(HOST_RETRY_CLASS.E_HOST_PANIC).toBe('never');
     expect(HOST_RETRY_CLASS.E_CALL_TIMEOUT).toBe('manual');
