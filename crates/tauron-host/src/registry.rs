@@ -1739,12 +1739,13 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         assert_eq!(r.gc_expired(), 1, "TTL GC 必须回收过期条目（计划 §4.1）");
         assert_eq!(r.pending_len(), 0);
-        // 超时查询返回 E_CALL_TIMEOUT（可重试）。
+        // 超时查询返回 E_CALL_TIMEOUT，但 V4 不允许 SDK 盲目自动重放。
         let call2 = r.call_begin(&id, "b", serde_json::json!({})).unwrap();
         std::thread::sleep(Duration::from_millis(5));
         let e = r.call_status(&call2.call_id, Instant::now()).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_CALL_TIMEOUT);
-        assert!(e.retryable);
+        assert!(!e.retryable);
+        assert_eq!(e.retry_class, crate::error::RetryClass::Manual);
         // 不超时前查询成功。
         let call3 = r.call_begin(&id, "c", serde_json::json!({})).unwrap();
         let c = r.call_status(&call3.call_id, Instant::now()).unwrap();
@@ -1782,15 +1783,13 @@ mod tests {
 
         let err = r.call_end(&c.call_id).unwrap_err();
         assert_eq!(err.code, ErrorCode::E_CALL_TIMEOUT);
-        // `E_CALL_TIMEOUT` 属于框架的可重试集合（`ErrorCode::retryable()`）——
-        // 超时是暂时性失败，重发可能成功。这里断言的是"码对了、可重试标志随码走"。
-        assert!(err.retryable, "超时应保持可重试（与 ErrorCode::retryable 一致）");
+        assert!(!err.retryable, "V4 timeout is manual, not blindly auto-retryable");
+        assert_eq!(err.retry_class, crate::error::RetryClass::Manual);
 
-        // 条目**没有**被摘掉：拒绝路径不得改动状态（调用方仍能观察到它）。
-        assert_eq!(r.pending_len(), 1);
-        // 取消同理，也不会把它当正常路径吞掉。
-        assert_eq!(r.call_cancel(&c.call_id).unwrap_err().code, ErrorCode::E_CALL_TIMEOUT);
-        assert_eq!(r.pending_len(), 1);
+        // Expiry is itself the terminal transition: remove the call and close bound resources
+        // immediately so a timed-out caller cannot become a permanent pending orphan.
+        assert_eq!(r.pending_len(), 0);
+        assert_eq!(r.call_cancel(&c.call_id).unwrap_err().code, ErrorCode::E_CALL_NOT_FOUND);
     }
 
     // ────────────────────────────────────────────────────────────
