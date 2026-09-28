@@ -29,10 +29,7 @@ impl ProviderState {
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ProviderLifecycleError {
     #[error("invalid provider lifecycle transition: {from:?} -> {to:?}")]
-    InvalidTransition {
-        from: ProviderState,
-        to: ProviderState,
-    },
+    InvalidTransition { from: ProviderState, to: ProviderState },
 }
 
 #[derive(Debug)]
@@ -42,9 +39,7 @@ pub struct CapabilityEpoch {
 
 impl Default for CapabilityEpoch {
     fn default() -> Self {
-        Self {
-            value: AtomicU64::new(1),
-        }
+        Self { value: AtomicU64::new(1) }
     }
 }
 
@@ -70,10 +65,7 @@ pub struct ProviderLifecycle {
 
 impl Default for ProviderLifecycle {
     fn default() -> Self {
-        Self {
-            state: ProviderState::Registered,
-            epoch: CapabilityEpoch::default(),
-        }
+        Self { state: ProviderState::Registered, epoch: CapabilityEpoch::default() }
     }
 }
 
@@ -91,10 +83,7 @@ impl ProviderLifecycle {
             return Ok(self.epoch.current());
         }
         if !allowed(self.state, to) {
-            return Err(ProviderLifecycleError::InvalidTransition {
-                from: self.state,
-                to,
-            });
+            return Err(ProviderLifecycleError::InvalidTransition { from: self.state, to });
         }
         self.state = to;
         Ok(self.epoch.bump())
