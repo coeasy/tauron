@@ -42,10 +42,7 @@ pub enum AdmissionError {
     #[error("resource {kind:?} global budget exceeded")]
     GlobalBudgetExceeded { kind: ResourceKind },
     #[error("resource {kind:?} budget exceeded for principal {principal}")]
-    PrincipalBudgetExceeded {
-        kind: ResourceKind,
-        principal: String,
-    },
+    PrincipalBudgetExceeded { kind: ResourceKind, principal: String },
     #[error("credit window exhausted: requested {requested}, available {available}")]
     CreditExhausted { requested: u64, available: u64 },
 }
@@ -93,29 +90,14 @@ impl AdmissionController {
             });
         }
 
-        self.global.insert(
-            kind,
-            Usage {
-                count: global.count + count,
-                bytes: global.bytes + bytes,
-            },
-        );
-        self.principals.insert(
-            key,
-            Usage {
-                count: local.count + count,
-                bytes: local.bytes + bytes,
-            },
-        );
+        self.global
+            .insert(kind, Usage { count: global.count + count, bytes: global.bytes + bytes });
+        self.principals
+            .insert(key, Usage { count: local.count + count, bytes: local.bytes + bytes });
         let token = Uuid::new_v4().to_string();
         self.reservations.insert(
             token.clone(),
-            Reservation {
-                principal: principal.to_string(),
-                kind,
-                count,
-                bytes,
-            },
+            Reservation { principal: principal.to_string(), kind, count, bytes },
         );
         Ok(token)
     }
@@ -161,10 +143,7 @@ pub struct CreditWindow {
 impl CreditWindow {
     pub fn new(initial: u64, max: u64) -> Self {
         let max = max.max(1);
-        Self {
-            available: initial.min(max),
-            max,
-        }
+        Self { available: initial.min(max), max }
     }
 
     pub fn available(&self) -> u64 {
@@ -261,10 +240,7 @@ mod tests {
     fn credit_window_prevents_slow_consumer_overrun() {
         let mut c = CreditWindow::new(2, 4);
         c.consume(2).unwrap();
-        assert!(matches!(
-            c.consume(1),
-            Err(AdmissionError::CreditExhausted { .. })
-        ));
+        assert!(matches!(c.consume(1), Err(AdmissionError::CreditExhausted { .. })));
         c.grant(3);
         assert_eq!(c.available(), 3);
     }
