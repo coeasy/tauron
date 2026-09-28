@@ -3070,7 +3070,7 @@ fn registry_install_verified_inner(
         HostError::new(ErrorCode::E_INSTALL_FAILED, format!("创建临时安装目录失败：{e}"))
     })?;
     let unpack_result = (|| -> HostResult<()> {
-        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&archive))
+        let mut zip = zip::ZipArchive::new(archive)
             .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("打开包失败：{e}")))?;
         // 解包常量（条目数 / 单文件 / 解压总量 / 压缩比）与路径清洗**不在这里**
         // 重复实现：它们在 `read_verified_package` → `verify_tpkg` →
@@ -3166,7 +3166,7 @@ fn unix_time_seconds() -> u64 {
 #[cfg(feature = "plugin-install")]
 struct VerifiedPackage {
     manifest: PluginManifest,
-    archive: Vec<u8>,
+    archive: std::fs::File,
     package_digest: String,
 }
 
@@ -3192,8 +3192,8 @@ fn read_verified_package(
         return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "仅支持本地 .tpkg 安装"));
     }
     let sidecar_path = PathBuf::from(format!("{package_path}.sig"));
-    let archive = std::fs::read(&source)
-        .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("读取安装包失败：{e}")))?;
+    let mut archive = std::fs::File::open(&source)
+        .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("打开安装包失败：{e}")))?;
     let sidecar = std::fs::read_to_string(&sidecar_path).map_err(|e| {
         HostError::new(ErrorCode::E_INSTALL_FAILED, format!("读取签名 sidecar 失败：{e}"))
     })?;
@@ -3204,14 +3204,37 @@ fn read_verified_package(
     let public_key = config.signing_keys.get(&envelope.kid).ok_or_else(|| {
         HostError::new(ErrorCode::E_INSTALL_FAILED, format!("未信任的签名 kid `{}`", envelope.kid))
     })?;
+    use sha2::Digest as _;
+    use std::io::{Read as _, Seek as _};
+
+    // Hash the package with a fixed buffer, then rewind the same open handle for ZIP
+    // verification. Replacing the pathname after this point does not switch the inode/
+    // file object used by this transaction.
+    let mut package_hasher = sha2::Sha256::new();
+    let mut hash_buffer = [0u8; 64 * 1024];
+    loop {
+        let n = archive
+            .read(&mut hash_buffer)
+            .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("读取安装包失败：{e}")))?;
+        if n == 0 {
+            break;
+        }
+        package_hasher.update(&hash_buffer[..n]);
+    }
+    let package_digest = hex::encode(package_hasher.finalize());
+    archive
+        .seek(std::io::SeekFrom::Start(0))
+        .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("重置安装包失败：{e}")))?;
+
     let (verified, manifest) =
-        tauron_market::package_signature::verify_tpkg(&archive, &sidecar, public_key)
+        tauron_market::package_signature::verify_tpkg_reader(&mut archive, &sidecar, public_key)
             .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, e.to_string()))?;
     if verified.kid != envelope.kid {
         return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "验签 kid 不一致"));
     }
-    use sha2::Digest as _;
-    let package_digest = hex::encode(sha2::Sha256::digest(&archive));
+    archive
+        .seek(std::io::SeekFrom::Start(0))
+        .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("重置安装包失败：{e}")))?;
     Ok(VerifiedPackage { manifest, archive, package_digest })
 }
 
