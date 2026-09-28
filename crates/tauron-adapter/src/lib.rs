@@ -4471,10 +4471,7 @@ pub fn cmd_events_approve_as(
 ) -> HostResult<()> {
     require_main_window(caller, "host_events_approve")?;
     if subscriber.trim().is_empty() || topic.trim().is_empty() {
-        return Err(HostError::new(
-            ErrorCode::E_AUTH_DENIED,
-            "subscriber 与 topic 均不可为空",
-        ));
+        return Err(HostError::new(ErrorCode::E_AUTH_DENIED, "subscriber 与 topic 均不可为空"));
     }
     guard("events_approve", || state.bus.lock().approve(subscriber, topic))
 }
@@ -4828,10 +4825,7 @@ pub fn cmd_settings_set(
 /// **线形**：入参 `doc: object`（键 = 设置键，值 = 设置值），返回 `()`。
 /// 非对象文档返回 `E_INVALID_MANIFEST`（不静默退化成空文档）。写入后数据版本
 /// 标注为 [`HOST_SETTINGS_SCHEMA_V1`]，[`cmd_settings_migrate`] 才知道起点。
-pub fn cmd_settings_adopt_legacy(
-    state: &SubstrateState,
-    doc: serde_json::Value,
-) -> HostResult<()> {
+pub fn cmd_settings_adopt_legacy(state: &SubstrateState, doc: serde_json::Value) -> HostResult<()> {
     guard("settings_adopt_legacy", || {
         let _write = state.settings_write_lock.lock();
         let before = state.settings.lock().snapshot_all();
