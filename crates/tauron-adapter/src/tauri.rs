@@ -841,6 +841,40 @@ pub fn host_events_drain(
     crate::cmd_events_drain(&state, &subscriber, &kind).map_err(to_tauri_err)
 }
 
+/// `host_events_approve`：主窗批准插件订阅私有 topic。
+#[tauri::command]
+pub fn host_events_approve(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    subscriber: String,
+    topic: String,
+) -> Result<(), TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_events_approve_as(&caller, &state, &subscriber, &topic).map_err(to_tauri_err)
+}
+
+/// `host_events_revoke`：主窗撤销插件订阅私有 topic 的审批。
+#[tauri::command]
+pub fn host_events_revoke(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    subscriber: String,
+    topic: String,
+) -> Result<bool, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_events_revoke_as(&caller, &state, &subscriber, &topic).map_err(to_tauri_err)
+}
+
+/// `host_events_approvals`：主窗列出当前审批事实。
+#[tauri::command]
+pub fn host_events_approvals(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+) -> Result<Vec<crate::EventApproval>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_events_approvals_as(&caller, &state).map_err(to_tauri_err)
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // scoped-read 档命令（结果按可见性过滤）
 // ──────────────────────────────────────────────────────────────────────────
@@ -2791,6 +2825,9 @@ macro_rules! tauron_substrate_handler {
             $crate::tauri::host_events_subscribe,
             $crate::tauri::host_events_unsubscribe,
             $crate::tauri::host_events_drain,
+            $crate::tauri::host_events_approve,
+            $crate::tauri::host_events_revoke,
+            $crate::tauri::host_events_approvals,
             // i18n 域
             $crate::tauri::host_i18n_t,
             $crate::tauri::host_i18n_t_params,
@@ -2872,6 +2909,9 @@ macro_rules! tauron_plugin_handler {
             $crate::tauri::host_events_subscribe,
             $crate::tauri::host_events_unsubscribe,
             $crate::tauri::host_events_drain,
+            $crate::tauri::host_events_approve,
+            $crate::tauri::host_events_revoke,
+            $crate::tauri::host_events_approvals,
             $crate::tauri::host_i18n_t,
             $crate::tauri::host_i18n_t_params,
             $crate::tauri::host_i18n_set_locale,
