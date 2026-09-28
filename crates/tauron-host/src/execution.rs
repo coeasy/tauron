@@ -38,10 +38,7 @@ thread_local! {
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ExecutionError {
     #[error("operation requires execution domain {required}, current domain is {actual}")]
-    WrongDomain {
-        required: ExecutionDomain,
-        actual: String,
-    },
+    WrongDomain { required: ExecutionDomain, actual: String },
 }
 
 pub struct ExecutionDomainGuard {
