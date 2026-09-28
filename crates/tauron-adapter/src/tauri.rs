@@ -909,11 +909,18 @@ pub fn host_registry_install(
     state: State<'_, PluginRuntimeState>,
     window: TauriCallerSource,
     package_path: String,
+    review_token: String,
     approved_permissions: Vec<String>,
 ) -> Result<crate::PluginInstallResult, TauriError> {
     let caller = window.caller().map_err(to_tauri_err)?;
-    crate::cmd_registry_install_as(&caller, &state, &package_path, &approved_permissions)
-        .map_err(to_tauri_err)
+    crate::cmd_registry_install_reviewed_as(
+        &caller,
+        &state,
+        &package_path,
+        &review_token,
+        &approved_permissions,
+    )
+    .map_err(to_tauri_err)
 }
 
 #[cfg(feature = "plugin-install")]
