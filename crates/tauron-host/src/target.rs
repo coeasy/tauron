@@ -130,3 +130,89 @@ mod tests {
         assert_eq!(resolve_best(&variants, &host()), Some(&exact));
     }
 }
+
+
+/// Current compilation target advertised by Host capability negotiation.
+///
+/// This is intentionally derived from compile-time cfg facts instead of user input, so callers
+/// cannot claim a different OS/architecture/ABI to influence artifact selection.
+pub fn current_target_spec() -> TargetSpec {
+    let os = if cfg!(target_os = "windows") {
+        TargetOs::Windows
+    } else if cfg!(target_os = "macos") {
+        TargetOs::Macos
+    } else if cfg!(target_os = "linux") {
+        TargetOs::Linux
+    } else if cfg!(target_os = "ios") {
+        TargetOs::Ios
+    } else if cfg!(target_os = "android") {
+        TargetOs::Android
+    } else {
+        TargetOs::Other
+    };
+
+    let arch = if cfg!(target_arch = "x86_64") {
+        TargetArch::X86_64
+    } else if cfg!(target_arch = "aarch64") {
+        TargetArch::Aarch64
+    } else if cfg!(target_arch = "x86") {
+        TargetArch::X86
+    } else if cfg!(target_arch = "arm") {
+        TargetArch::Armv7
+    } else if cfg!(target_arch = "wasm32") {
+        TargetArch::Wasm32
+    } else {
+        TargetArch::Other
+    };
+
+    let abi = if cfg!(target_env = "msvc") {
+        Some(TargetAbi::Msvc)
+    } else if cfg!(target_env = "musl") {
+        Some(TargetAbi::Musl)
+    } else if cfg!(target_os = "android") {
+        Some(TargetAbi::Android)
+    } else if cfg!(any(target_os = "macos", target_os = "ios")) {
+        Some(TargetAbi::Apple)
+    } else if cfg!(target_env = "gnu") {
+        Some(TargetAbi::Gnu)
+    } else {
+        None
+    };
+
+    TargetSpec {
+        os,
+        arch,
+        abi,
+        min_os_version: None,
+        cpu_features: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod current_target_tests {
+    use super::*;
+
+    #[test]
+    fn current_target_is_not_an_uninitialized_placeholder() {
+        let target = current_target_spec();
+        // Every supported CI platform must resolve concrete OS/arch facts.
+        if cfg!(any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "ios",
+            target_os = "android"
+        )) {
+            assert_ne!(target.os, TargetOs::Other);
+        }
+        if cfg!(any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "x86",
+            target_arch = "arm",
+            target_arch = "wasm32"
+        )) {
+            assert_ne!(target.arch, TargetArch::Other);
+        }
+    }
+}
