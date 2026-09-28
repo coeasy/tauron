@@ -7511,6 +7511,88 @@ mod tests {
 
     #[cfg(feature = "plugin-install")]
     #[test]
+    fn reviewed_install_rejects_package_replaced_after_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("plugins");
+        let id = "com.install.reviewed";
+        let (package, verifying_key) = signed_install_fixture(dir.path(), id);
+        let state = install_state(install_root.clone(), &verifying_key);
+
+        let preview =
+            cmd_registry_install_preview_as(&Caller::MainWindow, &state, package.to_str().unwrap())
+                .unwrap();
+
+        // Replace the exact path with another correctly signed package having the same
+        // plugin id/version/permissions but different executable content. A permission-only
+        // approval check would accept this; the V4 digest-bound review must not.
+        let manifest = serde_json::json!({
+            "id": id,
+            "name": "Install Fixture",
+            "version": "1.0.0",
+            "type": "js",
+            "entry": { "js": "src/index.js", "ui": "index.html" },
+            "permissions": ["store:allow-get"],
+            "framework": ">=1.0.0, <2.0.0"
+        });
+        let replacement = vec![
+            ("manifest.json".to_string(), serde_json::to_vec(&manifest).unwrap()),
+            (
+                "src/index.js".to_string(),
+                b"export const activate = () => 'replacement';".to_vec(),
+            ),
+            ("index.html".to_string(), b"<!doctype html><body>replacement</body>".to_vec()),
+        ];
+        let (same_path, _) = signed_tpkg(dir.path(), id, &replacement);
+        assert_eq!(same_path, package);
+
+        let err = cmd_registry_install_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            package.to_str().unwrap(),
+            &preview.review_token,
+            &["store:allow-get".into()],
+        )
+        .expect_err("package replacement after preview must be rejected");
+        assert_eq!(err.code, ErrorCode::E_INSTALL_FAILED);
+        assert!(err.message.contains("已审批内容不一致"), "{}", err.message);
+        assert!(!install_root.join(id).exists());
+    }
+
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn reviewed_install_accepts_the_exact_previewed_package_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("plugins");
+        let (package, verifying_key) = signed_install_fixture(dir.path(), "com.install.review-ok");
+        let state = install_state(install_root.clone(), &verifying_key);
+        let preview =
+            cmd_registry_install_preview_as(&Caller::MainWindow, &state, package.to_str().unwrap())
+                .unwrap();
+
+        let installed = cmd_registry_install_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            package.to_str().unwrap(),
+            &preview.review_token,
+            &["store:allow-get".into()],
+        )
+        .unwrap();
+        assert_eq!(installed.plugin_id, "com.install.review-ok");
+
+        let reused = cmd_registry_install_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            package.to_str().unwrap(),
+            &preview.review_token,
+            &["store:allow-get".into()],
+        )
+        .expect_err("review token must be one-time");
+        assert_eq!(reused.code, ErrorCode::E_INSTALL_FAILED);
+        assert!(reused.message.contains("不存在或已使用"), "{}", reused.message);
+    }
+
+    #[cfg(feature = "plugin-install")]
+    #[test]
     fn signed_package_preview_install_enable_call_and_uninstall_form_one_chain() {
         let dir = tempfile::tempdir().unwrap();
         let install_root = dir.path().join("plugins");
