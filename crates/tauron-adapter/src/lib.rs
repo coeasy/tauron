@@ -2051,8 +2051,10 @@ impl RuntimeSpawnProfile {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeHealth {
-    /// 进程是否仍存活（由注入的 [`ProcSpawner::is_alive`] 判定）。
+    /// Proven-alive flag. Unknown is deliberately false rather than optimistic true.
     pub alive: bool,
+    /// V4 tri-state process probe. Unknown means ownership/probe could not prove either state.
+    pub status: tauron_proc::ProcessStatus,
     /// 该租约绑定的进程号。
     pub pid: u32,
     /// 崩溃窗口内的崩溃次数（`tauron_proc::CrashTracker`，**唯一**计数来源）。
@@ -4237,15 +4239,21 @@ fn refuse_exhausted_crash_budget(
 pub fn cmd_runtime_health(state: &PluginRuntimeState, lease: &str) -> HostResult<RuntimeHealth> {
     guard("runtime_health", || {
         let entry = state.registry.runtime_lease(lease)?;
-        let alive = state.proc_runtime.spawner().is_alive(entry.pid);
+        let status = state.proc_runtime.spawner().status(entry.pid);
+        let alive = matches!(status, tauron_proc::ProcessStatus::Alive);
 
-        if !alive && state.registry.runtime_mark_crashed(lease)? {
+        // Unknown is a degraded diagnostic state, not a crash: never consume crash budget unless
+        // the process is positively observed Exited.
+        if matches!(status, tauron_proc::ProcessStatus::Exited)
+            && state.registry.runtime_mark_crashed(lease)?
+        {
             state.proc_runtime.record_crash(&entry.plugin_id);
             deliver_runtime_crash(state, &entry.plugin_id);
         }
 
         Ok(RuntimeHealth {
             alive,
+            status,
             pid: entry.pid,
             crashes: state.proc_runtime.crash_count(&entry.plugin_id),
             consecutive_failures: state.recovery.lock().counter().consecutive_failures,
