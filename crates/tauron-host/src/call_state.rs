@@ -48,12 +48,7 @@ impl AtomicCallState {
     /// Attempt the single legal terminal transition. Losing racers perform cleanup only.
     pub fn try_finish(&self, terminal: CallTerminalState) -> bool {
         self.state
-            .compare_exchange(
-                Self::PENDING,
-                terminal as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
+            .compare_exchange(Self::PENDING, terminal as u8, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 }
@@ -87,7 +82,8 @@ mod tests {
                 let state = Arc::clone(&state);
                 joins.push(thread::spawn(move || state.try_finish(candidate)));
             }
-            let winners = joins.into_iter().map(|j| j.join().unwrap()).filter(|won| *won).count();
+            let winners =
+                joins.into_iter().map(|j| j.join().unwrap()).filter(|won| *won).count();
             assert_eq!(winners, 1);
             assert!(state.terminal().is_some());
         }
