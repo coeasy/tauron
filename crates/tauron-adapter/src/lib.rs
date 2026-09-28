@@ -2207,8 +2207,15 @@ impl SubstrateState {
             match load_settings_doc(path) {
                 Ok(Some(entries)) => settings.restore(&entries),
                 Ok(None) => {}
+                Err(e) if cfg.deployment_mode == DeploymentMode::Production => {
+                    panic!(
+                        "[tauron] production settings store is unreadable ({}): {}",
+                        path.display(),
+                        e.message
+                    );
+                }
                 Err(e) => eprintln!(
-                    "[tauron] 设置文档 {} 读回失败，本轮以空文档启动：{}",
+                    "[tauron] 设置文档 {} 读回失败，本轮以空文档启动（非 Production）：{}",
                     path.display(),
                     e.message
                 ),
