@@ -146,7 +146,66 @@ impl ContributesRegistry {
     }
 }
 
+/// V4 deployment posture. Development/Test preserve the historical permissive
+/// integration defaults; Production requires an explicit fail-closed readiness check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeploymentMode {
+    #[default]
+    Development,
+    Test,
+    Production,
+}
+
 impl AdapterConfig {
+    /// Construct an explicitly production-scoped configuration. Callers must still
+    /// provide the required security/durability settings before readiness validation.
+    pub fn production() -> Self {
+        Self { deployment_mode: DeploymentMode::Production, ..Self::default() }
+    }
+
+    /// V4 production readiness validation.
+    ///
+    /// This deliberately validates only facts owned by AdapterConfig. Provider/runtime
+    /// health is checked later by capability/readiness orchestration and must not be
+    /// guessed here.
+    pub fn validate_production_readiness(&self) -> Result<(), String> {
+        if self.deployment_mode != DeploymentMode::Production {
+            return Ok(());
+        }
+
+        let mut failures = Vec::new();
+        if self.origin_allowlist.is_empty() {
+            failures.push("origin allowlist is empty (production origin gate would be disabled)");
+        }
+        if self.recovery_data_dir.is_none() {
+            failures.push("recovery data directory is missing (durable recovery unavailable)");
+        }
+
+        #[cfg(feature = "plugin-install")]
+        {
+            let install_partially_configured = self.plugin_install_dir.is_some()
+                || !self.plugin_signing_keys.is_empty()
+                || self.acl_signing_key.is_some();
+            if install_partially_configured {
+                if self.plugin_install_dir.is_none() {
+                    failures.push("plugin install root is missing");
+                }
+                if self.plugin_signing_keys.is_empty() {
+                    failures.push("plugin signing trust set is empty");
+                }
+                if self.acl_signing_key.as_ref().is_none_or(|key| key.len() < 32) {
+                    failures.push("ACL signing key is missing or shorter than 32 bytes");
+                }
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
+
     /// 从第三方集成用的 [`ClientConfig`] 派生装配配置。
     ///
     /// **这是 `ClientConfig` 的生产消费点**。在此之前 `ClientConfig`
@@ -171,6 +230,7 @@ impl AdapterConfig {
             .or(fallback_data_dir);
 
         Self {
+            deployment_mode: DeploymentMode::Development,
             registry: Some(cfg.registry_config()),
             recovery_data_dir,
             required_plugins: HashSet::new(),
@@ -217,6 +277,8 @@ impl AdapterConfig {
 /// 集合，即 `CommandState::new` 的既有行为（单元测试不需要磁盘）。
 #[derive(Debug, Clone, Default)]
 pub struct AdapterConfig {
+    /// Deployment posture. Production enables fail-closed readiness validation.
+    pub deployment_mode: DeploymentMode,
     /// 注册表配置（上限、TTL、加载过滤器）。`None` = [`RegistryConfig::default()`]。
     pub registry: Option<RegistryConfig>,
     /// 宿主数据目录：恢复标记（崩溃检测）落盘位置。
@@ -2392,6 +2454,36 @@ mod substrate_only_tests {
     /// 编译期证据同样在这个函数里——若底座命令的签名还能看见 `registry` /
     /// `contributes`，本函数就**编译不过**（`state.registry` 在 `&SubstrateState`
     /// 上不存在）。这不是约定，是类型系统。
+    #[test]
+    fn production_readiness_is_fail_closed_but_development_stays_compatible() {
+        assert!(AdapterConfig::default().validate_production_readiness().is_ok());
+
+        let prod = AdapterConfig::production();
+        let err = prod.validate_production_readiness().expect_err("empty production config must fail");
+        assert!(err.contains("origin allowlist"), "err={err}");
+        assert!(err.contains("recovery data directory"), "err={err}");
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut ready = AdapterConfig::production();
+        ready.origin_allowlist = vec!["tauri://localhost".into()];
+        ready.recovery_data_dir = Some(temp.path().to_path_buf());
+        assert!(ready.validate_production_readiness().is_ok());
+    }
+
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn production_readiness_rejects_partial_install_trust_configuration() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = AdapterConfig::production();
+        cfg.origin_allowlist = vec!["tauri://localhost".into()];
+        cfg.recovery_data_dir = Some(temp.path().to_path_buf());
+        cfg.plugin_install_dir = Some(temp.path().join("plugins"));
+
+        let err = cfg.validate_production_readiness().expect_err("partial trust must fail");
+        assert!(err.contains("plugin signing trust set"), "err={err}");
+        assert!(err.contains("ACL signing key"), "err={err}");
+    }
+
     #[test]
     fn substrate_only_state_serves_base_commands() {
         let state = SubstrateState::with_adapter_config(&AdapterConfig::default());
