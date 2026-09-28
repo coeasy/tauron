@@ -131,7 +131,6 @@ mod tests {
     }
 }
 
-
 /// Current compilation target advertised by Host capability negotiation.
 ///
 /// This is intentionally derived from compile-time cfg facts instead of user input, so callers
@@ -179,13 +178,7 @@ pub fn current_target_spec() -> TargetSpec {
         None
     };
 
-    TargetSpec {
-        os,
-        arch,
-        abi,
-        min_os_version: None,
-        cpu_features: Vec::new(),
-    }
+    TargetSpec { os, arch, abi, min_os_version: None, cpu_features: Vec::new() }
 }
 
 #[cfg(test)]
