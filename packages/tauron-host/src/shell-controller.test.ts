@@ -281,6 +281,8 @@ describe('ShellController', () => {
       pluginId: 'com.install',
       pluginName: 'Install Me',
       version: '1.0.0',
+      reviewToken: 'review-token-rejected',
+      packageDigest: 'b'.repeat(64),
       permissions: [
         { permission: 'host:notify', risk: 'low', description: '发送通知', defaultChecked: true },
       ],
