@@ -1763,10 +1763,7 @@ mod tests {
             r.call_cancel(&call.call_id).unwrap_err().code,
             ErrorCode::E_CALL_ALREADY_SETTLED
         );
-        assert_eq!(
-            r.call_end(&call.call_id).unwrap_err().code,
-            ErrorCode::E_CALL_ALREADY_SETTLED
-        );
+        assert_eq!(r.call_end(&call.call_id).unwrap_err().code, ErrorCode::E_CALL_ALREADY_SETTLED);
         let taken = r.take_call(&call.call_id).unwrap();
         assert_eq!(taken.result, Some(serde_json::json!({"winner":"result"})));
         assert_eq!(r.pending_len(), 0);
