@@ -41,7 +41,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: 22.23.2
           cache: pnpm
 
       # pnpm 11 默认拒绝依赖的 postinstall 脚本；`pnpm-workspace.yaml` 的
@@ -102,6 +102,15 @@ jobs:
           toolchain: 1.98.0
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # V4 minimal-profile proof: default adapter must not pull extension install deps.
+      - name: 最小底座依赖门禁
+        run: |
+          cargo tree -p tauron-adapter --no-default-features -e normal > /tmp/tauron-minimal-tree.txt
+          if grep -E 'tauron-(market|acl)|(^| )zip v|ed25519-dalek' /tmp/tauron-minimal-tree.txt; then
+            echo "minimal tauron-adapter unexpectedly pulls plugin-install dependencies" >&2
+            exit 1
+          fi
 
       # `--locked` 是硬要求：本仓库提交 Cargo.lock，构建必须可复现。
       - name: 测试
