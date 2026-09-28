@@ -644,24 +644,6 @@ impl RecoveryEngine {
         self.recovery_in_progress
     }
 
-    #[test]
-    fn aborted_recovery_is_replayable_and_not_marked_executed() {
-        let mut e = engine_with_plugins();
-        let key = RecoveryAction::idempotency_key("p.audio", "restart", 7);
-        let action = RecoveryAction {
-            plugin_id: "p.audio".into(),
-            action_kind: "restart".into(),
-            idempotency_key: key.clone(),
-        };
-        assert!(e.execute_action(&action).unwrap());
-        assert!(!e.action_executed(&key));
-        e.abort_recovery();
-        assert!(!e.action_executed(&key));
-        assert!(e.execute_action(&action).unwrap(), "未提交动作必须允许重放");
-        e.complete_recovery();
-        assert!(e.action_executed(&key));
-    }
-
     // ── 外部副作用追踪 ──────────────────────────────────────────────
 
     /// 检查外部效果是否已执行。
@@ -1045,6 +1027,24 @@ mod tests {
         // 恢复进行中，第二次执行应报错。
         assert!(matches!(e.execute_action(&action), Err(RecoveryError::RecoveryInProgress)));
         e.complete_recovery();
+    }
+
+    #[test]
+    fn aborted_recovery_is_replayable_and_not_marked_executed() {
+        let mut e = engine_with_plugins();
+        let key = RecoveryAction::idempotency_key("p.audio", "restart", 7);
+        let action = RecoveryAction {
+            plugin_id: "p.audio".into(),
+            action_kind: "restart".into(),
+            idempotency_key: key.clone(),
+        };
+        assert!(e.execute_action(&action).unwrap());
+        assert!(!e.action_executed(&key));
+        e.abort_recovery();
+        assert!(!e.action_executed(&key));
+        assert!(e.execute_action(&action).unwrap(), "未提交动作必须允许重放");
+        e.complete_recovery();
+        assert!(e.action_executed(&key));
     }
 
     #[test]
