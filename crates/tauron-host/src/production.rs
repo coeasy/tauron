@@ -31,7 +31,7 @@ pub struct ProductionReadiness {
 }
 
 /// One production-readiness violation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadinessViolation {
     pub code: &'static str,
