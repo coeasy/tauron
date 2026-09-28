@@ -171,6 +171,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          toolchain: 1.98.0
           targets: ${{ matrix.rust-targets }}
 
       # 缓存示例工程（被 workspace `exclude`，是独立依赖树）。
