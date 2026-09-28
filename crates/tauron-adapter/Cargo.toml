@@ -35,9 +35,9 @@ tauron-recovery = { workspace = true }
 # recovery；且 `workspace = true` 不允许在使用处覆盖 `default-features`，而
 # tauron-market 这里必须 `default-features = false`。version 与根 `[workspace.package]`
 # 的 1.0.0 同源。
-tauron-settings = { path = "../tauron-settings", version = "1.0.0" }
-tauron-acl = { path = "../tauron-acl", version = "1.0.0", optional = true }
-tauron-market = { path = "../tauron-market", version = "1.0.0", default-features = false, optional = true }
+tauron-settings = { path = "../tauron-settings", version = "1.0.1" }
+tauron-acl = { path = "../tauron-acl", version = "1.0.1", optional = true }
+tauron-market = { path = "../tauron-market", version = "1.0.1", default-features = false, optional = true }
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
 ed25519-dalek = { version = "3", optional = true }
 sha2 = { version = "0.10", optional = true }
@@ -45,17 +45,17 @@ hex = { workspace = true, optional = true }
 # 进程插件 host（P0-2 激活孤儿 crate）：只被**插件运行时域**用到——
 # `tauron_host` 不依赖它（租约表认识的是 plugin_id/pid，不认识进程 API），
 # 启动/探测存活留在适配层这一侧，平台细节与进程细节都不进核心。
-tauron-proc = { path = "../tauron-proc", version = "1.0.0" }
+tauron-proc = { path = "../tauron-proc", version = "1.0.1" }
 # ── 任务二：孤儿 crate 接通（此前无任何 crate 依赖它们）──────────────────────
 # 品牌配置合并/校验（`host_brand_info` 的真实实现）。
-tauron-brand = { path = "../tauron-brand", version = "1.0.0" }
+tauron-brand = { path = "../tauron-brand", version = "1.0.1" }
 # 主题注册表（`host_theme_*` 域；与既有 settings 的 `theme` 键不冲突——那是键值，
 # 这里是真的主题定义表）。
-tauron-theme = { path = "../tauron-theme", version = "1.0.0" }
+tauron-theme = { path = "../tauron-theme", version = "1.0.1" }
 # 更新通道（`host_updater_*` 域）：`check_for_update` / 灰度 / 崩溃门禁 / 清单校验。
-tauron-distribute = { path = "../tauron-distribute", version = "1.0.0" }
+tauron-distribute = { path = "../tauron-distribute", version = "1.0.1" }
 # WASM 插件形态的**状态层**校验（配置/ABI/崩溃预算）。执行层无运行时（诚实失败）。
-tauron-wasm = { path = "../tauron-wasm", version = "1.0.0" }
+tauron-wasm = { path = "../tauron-wasm", version = "1.0.1" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 parking_lot = { workspace = true }

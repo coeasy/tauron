@@ -33,13 +33,13 @@ describe('runCli', () => {
   it('returns help for help command', async () => {
     const result = await runCli(['--help']);
     expect(result.success).toBe(true);
-    expect(result.message).toContain('tauron v1.0.0');
+    expect(result.message).toContain('tauron v1.0.1');
   });
 
   it('returns version for version command', async () => {
     const result = await runCli(['--version']);
     expect(result.success).toBe(true);
-    expect(result.message).toContain('v1.0.0');
+    expect(result.message).toContain('v1.0.1');
   });
 
   it('runs doctor command', async () => {

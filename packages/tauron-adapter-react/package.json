@@ -1,6 +1,6 @@
 {
   "name": "@tauron/adapter-react",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "tauron React 适配器（设计文档 §4.2）：useInvoke/useEvent/useCapabilities/usePluginId 钩子、ReactiveStore",
   "license": "MIT",
   "repository": {

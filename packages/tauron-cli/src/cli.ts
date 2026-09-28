@@ -93,7 +93,7 @@ export async function runCli(
     case 'version':
     case '--version':
     case '-v':
-      return { success: true, message: 'tauron v1.0.0' };
+      return { success: true, message: 'tauron v1.0.1' };
     default:
       return {
         success: false,
@@ -263,7 +263,7 @@ function pluginNewCommand(args: string[], options: CliOptions): CliResult {
  * 获取帮助文本
  */
 function getHelpText(): string {
-  return `tauron v1.0.0 — tauron CLI
+  return `tauron v1.0.1 — tauron CLI
 
 Usage:
   tauron <command> [options]

@@ -1,6 +1,6 @@
 {
   "name": "@tauron/ui-primitives",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "tauron UI 原语：零宿主依赖的 Web Components + 设计令牌 + 动效基础设施（任意宿主可直接取用）",
   "license": "MIT",
   "repository": {

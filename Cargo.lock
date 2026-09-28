@@ -3441,7 +3441,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-acl"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "hex",
  "hmac",
@@ -3454,7 +3454,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-adapter"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -3484,7 +3484,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-brand"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "serde",
@@ -3494,7 +3494,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-distribute"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3503,7 +3503,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-host"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "hex",
@@ -3520,7 +3520,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-i18n"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3529,7 +3529,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-market"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "ed25519-dalek",
  "serde",
@@ -3542,7 +3542,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-notify"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3552,7 +3552,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-proc"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "parking_lot",
@@ -3563,7 +3563,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-recovery"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3572,7 +3572,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-schema"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "regex",
  "serde",
@@ -3583,7 +3583,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-settings"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3594,7 +3594,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-shell"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "hex",
@@ -3614,7 +3614,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-theme"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3624,7 +3624,7 @@ dependencies = [
 
 [[package]]
 name = "tauron-wasm"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "parking_lot",

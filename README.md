@@ -31,9 +31,9 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
   用来演示链路，不是产品形态的客户端。
 - **不是 Tauri 的替代品**。它建在 Tauri 2 之上——Tauri 管窗口 / WebView / IPC，
   tauron 管其上的插件运行时与能力治理。
-- **不是「已发布、可 `install` 的 SDK」**。20 个可发布 npm 包与 15 个 crate **都未发布到
-  registry**，只能 path / workspace 接入。
-- **当前版本为 1.0.0**。公开 API 遵循语义化版本；具体未接入的运行时与平台能力见下方成熟度说明。
+- **可通过 registry 安装的 SDK**。20 个可发布 npm 包与 15 个 Rust crate 已发布；具体
+  接入方式见[安装与使用](./docs/installation.md)。
+- **当前版本为 1.0.1**。公开 API 遵循语义化版本；具体未接入的运行时与平台能力见下方成熟度说明。
 
 ### 成熟度：哪些是真的，哪些还是占位
 
@@ -56,7 +56,7 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
 | 做一个要装第三方插件的桌面客户端 | ✅ 接应用层，按「三档装配」选档 |
 | 需要一个带设置中心 / 白标 / 崩溃恢复的客户端底座 | ✅ 接应用层 |
 | 想要开箱即用的成品桌面应用 | ❌ 这是框架，没有成品 |
-| 想要 `pnpm add` 就能用的稳定 SDK | ⚠️ API 进入 1.0.0 semver 阶段，但 npm / crates.io 发布尚未完成 |
+| 想要 `pnpm add` 就能用的稳定 SDK | ✅ Tauron SDK v1.0.1 提供 npm 与 crates.io 安装 |
 
 **准备上手**：[安装与使用](./docs/installation.md) —— 三种「安装」怎么选、
 各平台安装步骤、从源码构建、装完怎么自检。
@@ -90,21 +90,21 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
 | 产出 | 状态 |
 |---|---|
 | `src-tauri/`（`Cargo.toml` / `main.rs` / `build.rs` / `capabilities/default.json` / `tauri.conf.json`） | ✅ **真装配**：`state_init_with_adapter_config` + `tauron_generate_handler![]`（80 条）+ 窗口销毁回收 + capability 覆盖 `plugin-*` 窗。形态与 `examples/minimal-app` 同源 |
-| 依赖坐标 | ✅ 默认固定到 `1.0.0` registry；源码开发须显式使用 `--tauron-path`。公开 registry 发布完成前生成工程无法解析这些包 |
+| 依赖坐标 | ✅ 默认固定到 `1.0.1` registry；源码开发须显式使用 `--tauron-path` |
 | 前端 bundler / dev-server 配置 | ✅ `vite.config.ts`（`server.port` 与 `devUrl` 一致、`outDir` 与 `frontendDist` 一致、排除 `src-tauri/`）+ 根 `index.html` + `tauri.conf.json` 的 `beforeDevCommand` / `beforeBuildCommand` |
 | `src-tauri/icons/` | ⚠️ 生成**纯色占位图**（`32x32.png` / `128x128.png` / `128x128@2x.png` / `icon.png` / `icon.ico` / `icon.icns`）——**发布前须替换成品牌图标**。不给文件连 `cargo check` 都过不去：`tauri-build` 在 Windows 上要 `icons/icon.ico` 才能生成资源文件 |
 
 > **实测（2026-09-27）**：生成的工程（含占位图标与 vite 配置）开箱即可编译——默认形态
 > 与 `--features substrate-only` 两档 `cargo check` **均通过**（`Finished dev profile`）。
 >
-> **这条实测只覆盖 Rust 侧**。前端那一半（`npm install` → `npm run tauri dev`）**未在本机
-> 验证过**——它要从 registry 拉 `vite` / `@tauri-apps/cli`，沙箱没有网络。另有两条前置：
+> **公共 registry 消费验收**已覆盖脚手架创建、前端依赖安装与构建、Rust adapter 安装及 Tauri 2 项目编译。
+> 本机 `npm run tauri dev` 仍需要安装系统 WebView 与 Tauri CLI。另有两条源码开发前置：
 > ① `file:` 依赖是**软链**，所以本机 tauron 检出必须已 `pnpm install`（供 `@tauron/host`
 > 解析它自己的 `workspace:*` 依赖）；② `packages/*/dist` 必须是已构建状态（`pnpm -r build`）。
 
 ```bash
-# npm / crates.io 正式发布完成后：
-npm create tauron-app@1.0.0 -- ./my-app --framework react
+# npm / crates.io 正式发布：
+npm create tauron-app@1.0.1 -- ./my-app --framework react
 
 # 在 Tauron 仓库内开发时，显式启用本地源码依赖：
 node packages/tauron-app-cli/dist/cli.js new ./my-app --tauron-path ..
@@ -122,7 +122,7 @@ cargo check --features substrate-only                       # 只取底座：57 
 （显式切换为本地源码）、`--dry-run`、`--force`。
 
 **已有 Tauri 2 项目**改用注入式接入：`tauron-app init --dir <你的项目>`——它会加固定
-`1.0.0` 依赖、接线 Builder 链，并保留现有权限与 client config；若你原有 `.invoke_handler(..)`
+`1.0.1` 依赖、接线 Builder 链，并保留现有权限与 client config；若你原有 `.invoke_handler(..)`
 已存在，它会保留该处理器、报告需要手工合并的步骤，并以非零状态结束。
 
 v1 官方宿主范围为 Tauri 2；React、Vue、Svelte 与原生 TypeScript 是前端选择。其他客户端宿主
@@ -130,25 +130,21 @@ v1 官方宿主范围为 Tauri 2；React、Vue、Svelte 与原生 TypeScript 是
 
 ### 1. 安装依赖
 
-> ⚠️ **尚未发布到 registry**：21 个 npm package manifests 中有 20 个可发布包，另有
-> 1 个 `private` 契约测试包；15 个 crate 的内部
-> 互引用是 path 依赖（cargo 打包要求 path 依赖同时给出 `version`）。
-> 所以下面**不能**用 `pnpm add @tauron/...` / `cargo add tauron-*` 的 registry 形式，
-> 现阶段请按 path / workspace 方式接入：
+> **SDK 已发布到公共 registry**：20 个公开 npm 包与 15 个 Rust crate 可直接安装；另有
+> 1 个仅供仓库内部测试的私有 npm 包。下面给出最小依赖示例：
 
 ```bash
-# 前端：同一 pnpm workspace 内用 workspace 协议
-pnpm add @tauron/types@workspace:* @tauron/core@workspace:*
-# 跨仓库则用 file: 协议指向本仓库的 packages/<包名>
+# 前端：选择需要的入口包，包管理器会安装其传递依赖
+pnpm add @tauron/host @tauron/ui
 ```
 
 ```toml
 # src-tauri/Cargo.toml
 [dependencies]
-tauron-shell = { path = "../tauron/crates/tauron-shell", features = ["tauri"] }
+tauron-adapter = { version = "=1.0.1", features = ["tauri"] }
 ```
 
-发布到 npm / crates.io 的阻塞项登记在 [CHANGELOG.md 的「已知债务」](./CHANGELOG.md)。
+本地源码开发可使用 workspace/path 依赖；发布包用户无需手工安装内部依赖。
 
 ### 2. 注册 Rust 命令层
 
@@ -157,7 +153,7 @@ tauron-shell = { path = "../tauron/crates/tauron-shell", features = ["tauri"] }
 ```toml
 # src-tauri/Cargo.toml
 [dependencies]
-tauron-shell = { version = "=1.0.0", features = ["tauri"] }
+tauron-shell = { version = "=1.0.1", features = ["tauri"] }
 ```
 
 ```rust
@@ -625,7 +621,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 # 1. 更新工作区与所有 npm 包版本，并同步示例应用的 package.json、Cargo.toml、
 #    tauri.conf.json；release 工作流会校验全部版本一致
 # 2. 更新 CHANGELOG.md
-git tag v1.0.0 && git push origin v1.0.0
+git tag v1.0.1 && git push origin v1.0.1
 ```
 
 > `cargo fmt`、`cargo clippy`、ESLint 和应用示例装配均为硬门禁。`cargo-deny`

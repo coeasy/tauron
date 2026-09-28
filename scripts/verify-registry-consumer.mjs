@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Clean-directory install/build smoke test for a published Tauron 1.0.0 SDK.
+// Clean-directory install/build smoke test for a published Tauron 1.0.1 SDK.
 // Run only after the npm and crates.io packages have been published.
 import { execFileSync, execSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -21,11 +21,11 @@ try {
   const cargoDir = join(ROOT, 'cargo-consumer');
 
   console.log('1/5 Create a starter with the public npm command');
-  run('npm', ['create', '--yes', 'tauron-app@1.0.0', '--', appDir, '--framework', 'vanilla'], ROOT);
+  run('npm', ['create', '--yes', 'tauron-app@1.0.1', '--', appDir, '--framework', 'vanilla'], ROOT);
 
   console.log('2/5 Resolve the public JavaScript packages with pnpm');
   run('pnpm', ['install', '--no-frozen-lockfile'], appDir);
-  run('pnpm', ['add', '@tauron/host@1.0.0', '@tauron/ui@1.0.0'], appDir);
+  run('pnpm', ['add', '@tauron/host@1.0.1', '@tauron/ui@1.0.1'], appDir);
   run('pnpm', ['run', 'build'], appDir);
 
   console.log('3/5 Install the Rust host adapter using cargo add');
@@ -34,7 +34,7 @@ try {
     'cargo',
     [
       'add',
-      'tauron-adapter@=1.0.0',
+      'tauron-adapter@=1.0.1',
       '--features',
       'tauri',
       '--manifest-path',

@@ -11,6 +11,13 @@
 
 ---
 
+## [1.0.1] - 2026-09-28
+
+### Fixed
+
+- 修复 Windows 命令包装器下 `create-tauron-app <dir>` 的识别，确保 npm 脚手架命令可直接创建工程。
+- 将公共 npm 包、Rust crates 与示例客户端同步到 `1.0.1`，并从 registry 验收第三方 Tauri 2 消费工程。
+
 ## [1.0.0] - 2026-09-27
 
 首个版本。框架层（`@tauron/types|core|plugin-sdk|adapter-*|cli|market|shell-matrix|dual-world|contract-tests` + `tauron-shell`）
@@ -797,5 +804,6 @@ RPC 握手时自报指纹（**尚未实现**：0.4-A1 已把 `tauron-proc` 的 R
 3. `git tag vX.Y.Z && git push origin vX.Y.Z`
 4. `release.yml` 会校验工作区、npm 包与示例应用版本一致，再矩阵构建并自动创建公开 Release
 
+[1.0.1]: https://github.com/coeasy/tauron/releases/tag/v1.0.1
 [1.0.0]: https://github.com/coeasy/tauron/releases/tag/v1.0.0
 [0.1.0]: https://github.com/coeasy/tauron/releases/tag/v0.1.0

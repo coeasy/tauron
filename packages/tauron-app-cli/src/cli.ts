@@ -216,7 +216,7 @@ function printWarn(msg: string): void {
  * - 产出的 `src-tauri/` 是**真装配**（`state_init_with_adapter_config` +
  *   `tauron_generate_handler![]` + 窗口销毁回收 + `capabilities/default.json`），
  *   形态与 `examples/minimal-app` 同源，实测两档 `cargo check` 均通过；
- * - 普通使用把依赖固定到 registry 的 1.0.0；源码贡献时可用 `--tauron-path`
+ * - 普通使用把依赖固定到 registry 的 1.0.1；源码贡献时可用 `--tauron-path`
  *   显式指向本地 checkout；
  * - 前端链路已闭合到 `npm run tauri dev`：`vite.config.ts`（端口/产物目录与
  *   `tauri.conf.json` 对齐）+ 根 `index.html` + `beforeDevCommand` / `beforeBuildCommand`；
@@ -307,7 +307,7 @@ async function newAppProject(
   printSuccess(`工程已生成：${absTarget}（${fileCount} 个文件）`);
   printInfo(
     tauronPath === undefined
-      ? 'Tauron 依赖：固定使用 registry 版本 1.0.0'
+      ? 'Tauron 依赖：固定使用 registry 版本 1.0.1'
       : `Tauron 源码：${tauronPath}（已写入 Cargo path 与 npm file: 依赖）`,
   );
   printInfo('下一步：');

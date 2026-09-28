@@ -1,6 +1,6 @@
 {
   "name": "@tauron/shell-matrix",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "tauron Shell 矩阵（设计文档 §7.2）：4 种 shell 形态的插件加载与管理",
   "license": "MIT",
   "repository": {

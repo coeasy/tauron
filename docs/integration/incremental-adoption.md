@@ -8,7 +8,7 @@
 > [canonical 归属](../architecture/canonical-owners.md)。
 >
 > **不想手工接线**：`@tauron/app-cli` 的 `tauron-app new`（新建工程）/ `tauron-app init`
-> （注入现有 Tauri 2 项目）会按本文档的装配生成 `src-tauri`，并固定依赖到 Tauron `1.0.0`
+> （注入现有 Tauri 2 项目）会按本文档的装配生成 `src-tauri`，并固定依赖到 Tauron `1.0.1`
 > ——见 [安装与使用 · §3.2](../installation.md)。源码贡献时可显式用 `--tauron-path` 切换成本地
 > `path` / `file:` 坐标。生成物已含 vite 配置、`before*Command` 钩子与
 > 占位图标，`npm install && npm run tauri dev` 可一键起步；`src-tauri/icons/` 是纯色占位图，
