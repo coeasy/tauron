@@ -10,7 +10,7 @@
 // （`tauri-plugin-store`）承担，本 crate 只暴露 `snapshot()`/`restore()`
 // 以便序列化。这样"逻辑正确性"与"存储接线"可分开测试。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use serde_json::{Map, Value};
 
@@ -113,6 +113,8 @@ pub struct ChangeEvent {
     pub key: String,
     pub value: Value,
     pub source: LayerKind,
+    /// Monotonic store revision assigned only after the mutation is committed.
+    pub revision: u64,
 }
 
 /// 单个订阅者待消费事件的**上限**（环形：超限丢最旧一条）。
@@ -125,15 +127,15 @@ pub const MAX_PENDING_EVENTS: usize = 1024;
 /// 变更订阅者（简单广播：每个订阅者一条独立队列）。
 #[derive(Default)]
 pub struct Watcher {
-    /// 订阅者 id → 待消费事件。
-    queues: BTreeMap<u64, Vec<ChangeEvent>>,
+    /// subscriber id → (namespace, bounded FIFO). Namespace isolation is enforced here.
+    queues: BTreeMap<u64, (String, VecDeque<ChangeEvent>)>,
     next_id: u64,
 }
 
 impl Watcher {
-    pub fn subscribe(&mut self) -> u64 {
+    pub fn subscribe(&mut self, plugin_id: &str) -> u64 {
         let id = self.next_id;
-        self.queues.insert(id, Vec::new());
+        self.queues.insert(id, (plugin_id.to_string(), VecDeque::new()));
         self.next_id += 1;
         id
     }
@@ -143,17 +145,30 @@ impl Watcher {
     }
 
     pub fn broadcast(&mut self, event: &ChangeEvent) {
-        for q in self.queues.values_mut() {
-            if q.len() >= MAX_PENDING_EVENTS {
-                q.remove(0);
+        for (namespace, q) in self.queues.values_mut() {
+            if namespace != &event.plugin_id {
+                continue;
             }
-            q.push(event.clone());
+            // Rapid writes of the same key coalesce to the latest committed revision.
+            if let Some(last) = q.back_mut() {
+                if last.plugin_id == event.plugin_id && last.key == event.key {
+                    *last = event.clone();
+                    continue;
+                }
+            }
+            if q.len() >= MAX_PENDING_EVENTS {
+                q.pop_front();
+            }
+            q.push_back(event.clone());
         }
     }
 
     /// 取出某订阅者的全部待消费事件（消费即清空）。
     pub fn drain(&mut self, id: u64) -> Vec<ChangeEvent> {
-        self.queues.get_mut(&id).map(std::mem::take).unwrap_or_default()
+        self.queues
+            .get_mut(&id)
+            .map(|(_, q)| q.drain(..).collect())
+            .unwrap_or_default()
     }
 
     /// 活跃订阅者数（用于"卸载零悬挂"类门禁）。
@@ -167,6 +182,8 @@ pub struct SettingsStore {
     registry: SchemaRegistry,
     states: BTreeMap<String, PluginState>,
     watcher: Watcher,
+    /// Monotonic committed revision. Staged/rolled-back mutations never advance it.
+    revision: u64,
     /// 命名空间 → 已注册的迁移步骤。
     migrations: BTreeMap<String, Vec<Migration>>,
 }
@@ -177,6 +194,7 @@ impl SettingsStore {
             registry: SchemaRegistry::new(),
             states: BTreeMap::new(),
             watcher: Watcher::default(),
+            revision: 0,
             migrations: BTreeMap::new(),
         }
     }
@@ -223,9 +241,11 @@ impl SettingsStore {
         Ok((merged, source_map(s)))
     }
 
-    /// 写入一个键。**先校验、再判等值回落、最后落盘并广播**。
+    /// Write and immediately commit an in-memory setting change.
     ///
-    /// 返回写入了什么：真值或 unset（继承）。
+    /// Host adapters that have an external durable store should use
+    /// [`Self::set_deferred`] + durable commit + [`Self::publish_committed_change`]
+    /// so watchers never observe a change that later rolls back.
     pub fn set(
         &mut self,
         writer: &str,
@@ -233,6 +253,19 @@ impl SettingsStore {
         path: &str,
         value: &Value,
     ) -> SettingsResult<merge::WriteOp> {
+        let (op, event) = self.set_deferred(writer, plugin_id, path, value)?;
+        self.publish_committed_change(event);
+        Ok(op)
+    }
+
+    /// Apply a validated mutation without publishing it. The caller owns commit/rollback.
+    pub fn set_deferred(
+        &mut self,
+        writer: &str,
+        plugin_id: &str,
+        path: &str,
+        value: &Value,
+    ) -> SettingsResult<(merge::WriteOp, ChangeEvent)> {
         // 门禁 1：schema 已注册。
         let entry = self
             .registry
@@ -281,16 +314,31 @@ impl SettingsStore {
         // 迁移的起点由此明确，不需要猜。
         s.schema_version = schema_version;
 
-        // 广播（合并后的实际值，而非用户写的那层）。
+        // Build but do not publish the event. Revision is assigned only after external durable
+        // persistence succeeds, preventing watchers from observing rolled-back state.
         let final_value = self.get_key(plugin_id, path)?.unwrap_or(Value::Null);
-        self.watcher.broadcast(&ChangeEvent {
+        let event = ChangeEvent {
             plugin_id: plugin_id.to_string(),
             key: path.to_string(),
             value: final_value,
             source: LayerKind::User,
-        });
+            revision: 0,
+        };
 
-        Ok(op)
+        Ok((op, event))
+    }
+
+    /// Commit a staged event: advance revision exactly once, then notify namespace-scoped watchers.
+    pub fn publish_committed_change(&mut self, mut event: ChangeEvent) -> ChangeEvent {
+        self.revision = self.revision.saturating_add(1);
+        event.revision = self.revision;
+        self.watcher.broadcast(&event);
+        event
+    }
+
+    /// Current committed revision. Rolled-back mutations never change this value.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// 显式设为继承（不落值）。
@@ -311,19 +359,12 @@ impl SettingsStore {
         Ok(())
     }
 
-    /// 订阅变更。
+    /// Subscribe to committed changes for exactly one namespace.
     ///
-    /// # 诚实边界
-    ///
-    /// - 本 API 目前**没有生产调用点**（仓内只有单测用）。`tauron-adapter` 的
-    ///   设置命令走的是"写即落盘"，没有订阅回推路径。要用它需要先在宿主侧
-    ///   接一条事件出口。
-    /// - `plugin_id` 参数当前**被忽略**：`broadcast` 会把所有命名空间的变更都投给
-    ///   每个订阅者。真要做按插件隔离的订阅，得先让 `ChangeEvent` 的过滤落到
-    ///   队列分发处，而不是在这里加一个没人读的参数。
-    /// - 队列有上限（[`MAX_PENDING_EVENTS`]）：订阅者不 `drain` 时丢最旧，不无限增长。
-    pub fn watch(&mut self, _plugin_id: &str) -> u64 {
-        self.watcher.subscribe()
+    /// The queue is bounded and same-key bursts coalesce. Events are published only by
+    /// [`Self::publish_committed_change`] after a caller declares the mutation committed.
+    pub fn watch(&mut self, plugin_id: &str) -> u64 {
+        self.watcher.subscribe(plugin_id)
     }
 
     /// 取消订阅。
@@ -689,6 +730,47 @@ mod tests {
     }
 
     #[test]
+    fn deferred_change_is_invisible_until_commit_and_gets_revision() {
+        let mut s = store_with_audio();
+        s.set_layer("p.audio", LayerKind::Builtin, json!({"volume": 10}));
+        let sub = s.watch("p.audio");
+        let (_op, event) = s
+            .set_deferred("p.audio", "p.audio", "volume", &json!(50))
+            .unwrap();
+        assert!(s.drain(sub).is_empty(), "staged mutation must not notify watchers");
+        assert_eq!(s.revision(), 0);
+        let committed = s.publish_committed_change(event);
+        assert_eq!(committed.revision, 1);
+        assert_eq!(s.revision(), 1);
+        assert_eq!(s.drain(sub), vec![committed]);
+    }
+
+    #[test]
+    fn watcher_is_namespace_scoped() {
+        let mut s = store_with_audio();
+        s.register("p.video", "1.0.0", &json!({
+            "type":"object","properties":{"brightness":{"type":"integer"}}
+        })).unwrap();
+        let audio = s.watch("p.audio");
+        let video = s.watch("p.video");
+        s.set("p.audio", "p.audio", "volume", &json!(50)).unwrap();
+        assert_eq!(s.drain(audio).len(), 1);
+        assert!(s.drain(video).is_empty(), "other namespace must not receive change");
+    }
+
+    #[test]
+    fn same_key_burst_coalesces_to_latest_revision() {
+        let mut s = store_with_audio();
+        let sub = s.watch("p.audio");
+        s.set("p.audio", "p.audio", "volume", &json!(20)).unwrap();
+        s.set("p.audio", "p.audio", "volume", &json!(30)).unwrap();
+        let events = s.drain(sub);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].value, json!(30));
+        assert_eq!(events[0].revision, 2);
+    }
+
+    #[test]
     fn watch_queue_is_per_subscriber() {
         let mut s = store_with_audio();
         s.set_layer("p.audio", LayerKind::Builtin, json!({"volume": 10}));
@@ -711,6 +793,7 @@ mod tests {
                 key: format!("k{i}"),
                 value: json!(i),
                 source: LayerKind::User,
+                revision: i as u64 + 1,
             });
         }
         let drained = w.drain(id);
