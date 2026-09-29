@@ -1416,8 +1416,7 @@ pub struct FsWriteResult {
 /// 命令层的 `UnsupportedBody`（如实，不伪造）。可注入假实现用于单测。
 pub trait FsSink: Send + Sync {
     /// 读取文件（至多 `max_bytes`）。V4 A95：安全关键 I/O 接收 root-scoped handle path。
-    fn read(&self, path: &tauron_host::ScopedPath, max_bytes: u64)
-        -> HostResult<(Vec<u8>, bool)>;
+    fn read(&self, path: &tauron_host::ScopedPath, max_bytes: u64) -> HostResult<(Vec<u8>, bool)>;
     /// 写入文件（覆盖）。V4 A95：Unix 实现通过 openat/O_NOFOLLOW。
     fn write(&self, path: &tauron_host::ScopedPath, bytes: &[u8]) -> HostResult<u64>;
     /// 列目录（当前仍是 partial enforcement，后续迁移到 directory handle）。
@@ -1448,22 +1447,19 @@ fn fs_io_error(op: &str, path: &std::path::Path, e: std::io::Error) -> HostError
     )
 }
 
-fn scoped_fs_error(op: &str, path: &tauron_host::ScopedPath, e: tauron_host::ScopedFsError) -> HostError {
+fn scoped_fs_error(
+    op: &str,
+    path: &tauron_host::ScopedPath,
+    e: tauron_host::ScopedFsError,
+) -> HostError {
     HostError::new(
         ErrorCode::E_STATE_INVALID_TRANSITION,
-        format!(
-            "scoped filesystem `{op}` failed（{}）：{e}",
-            path.display_path().display()
-        ),
+        format!("scoped filesystem `{op}` failed（{}）：{e}", path.display_path().display()),
     )
 }
 
 impl FsSink for StdFsSink {
-    fn read(
-        &self,
-        path: &tauron_host::ScopedPath,
-        max_bytes: u64,
-    ) -> HostResult<(Vec<u8>, bool)> {
+    fn read(&self, path: &tauron_host::ScopedPath, max_bytes: u64) -> HostResult<(Vec<u8>, bool)> {
         #[cfg(unix)]
         {
             return tauron_host::scoped_fs_read_hard(path, max_bytes)
@@ -1519,8 +1515,8 @@ impl FsSink for StdFsSink {
 
     fn stat(&self, path: &tauron_host::ScopedPath) -> HostResult<FsStat> {
         #[cfg(unix)]
-        let meta = tauron_host::scoped_fs_stat_hard(path)
-            .map_err(|e| scoped_fs_error("stat", path, e))?;
+        let meta =
+            tauron_host::scoped_fs_stat_hard(path).map_err(|e| scoped_fs_error("stat", path, e))?;
         #[cfg(not(unix))]
         let meta = {
             let display = path.display_path();
@@ -6244,10 +6240,7 @@ fn resolve_within_roots(roots: &[PathBuf], raw: &str) -> HostResult<PathBuf> {
 fn scoped_within_roots(roots: &[PathBuf], raw: &str) -> HostResult<tauron_host::ScopedPath> {
     let resolved = resolve_within_roots(roots, raw)?;
     let root = roots.iter().find(|root| resolved.starts_with(root)).ok_or_else(|| {
-        HostError::new(
-            ErrorCode::E_AUTH_DENIED,
-            format!("fs 路径 `{raw}` 未匹配任何可信 root"),
-        )
+        HostError::new(ErrorCode::E_AUTH_DENIED, format!("fs 路径 `{raw}` 未匹配任何可信 root"))
     })?;
     let relative = resolved.strip_prefix(root).map_err(|_| {
         HostError::new(
@@ -6262,10 +6255,7 @@ fn scoped_within_roots(roots: &[PathBuf], raw: &str) -> HostResult<tauron_host::
         )
     })?;
     tauron_host::ScopedPath::new(root.clone(), relative).map_err(|error| {
-        HostError::new(
-            ErrorCode::E_AUTH_DENIED,
-            format!("fs scoped path 拒绝 `{raw}`: {error}"),
-        )
+        HostError::new(ErrorCode::E_AUTH_DENIED, format!("fs scoped path 拒绝 `{raw}`: {error}"))
     })
 }
 
