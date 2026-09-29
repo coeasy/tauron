@@ -103,6 +103,11 @@ pub use production::{
     ReadinessViolation,
 };
 pub use provider::{CapabilityEpoch, ProviderLifecycle, ProviderLifecycleError, ProviderState};
+pub use scoped_fs::{
+    platform_enforcement as scoped_fs_enforcement, read_hard as scoped_fs_read_hard,
+    stat_hard as scoped_fs_stat_hard, write_hard as scoped_fs_write_hard, FsEnforcement,
+    ScopedFsError, ScopedPath,
+};
 pub use service_graph::{ServiceGraph, ServiceGraphError, ServiceNode};
 pub use storage::{SingleWriterLease, StorageNamespace, WriterLeaseError, WriterLeaseTable};
 pub use target::{
