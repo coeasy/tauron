@@ -130,11 +130,7 @@ async function conformCommand(args: string[], options: CliOptions): Promise<CliR
 
   const eq = args.find((arg) => arg.startsWith('--module='));
   const spaced = args.indexOf('--module');
-  const modulePath = eq
-    ? eq.slice('--module='.length)
-    : spaced >= 0
-      ? args[spaced + 1]
-      : undefined;
+  const modulePath = eq ? eq.slice('--module='.length) : spaced >= 0 ? args[spaced + 1] : undefined;
   if (!modulePath || modulePath.startsWith('-')) {
     return {
       success: false,
