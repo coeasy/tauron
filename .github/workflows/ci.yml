@@ -73,6 +73,9 @@ jobs:
       - name: Release Evidence 输入校验（V4 A110）
         run: node scripts/generate-release-evidence.mjs --check
 
+      - name: No-Lock-Across-Await（V4 A104）
+        run: node scripts/check-no-lock-across-await.mjs
+
       - name: 测试（第 3 步）
         run: pnpm -r --no-bail test
 
