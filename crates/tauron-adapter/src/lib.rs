@@ -69,7 +69,8 @@ use tauron_proc::{
     ProcSpawner, SpawnConfig,
 };
 use tauron_recovery::{
-    BootContextEntry, BootPhase, PluginState as RecoveryPluginState, RecoveryEngine,
+    BootContextEntry, BootPhase, EffectRecord, PluginState as RecoveryPluginState, RecoveryAction,
+    RecoveryEngine,
 };
 use tauron_settings::{Migration, SettingsError, SettingsStore};
 
@@ -5901,10 +5902,45 @@ pub fn cmd_recover_trial_enable(
         // 临时 guard 被临时值生命周期延长规则持有到整个 match 结束，于是错误分支里
         // 再次 `state.recovery.lock()` 就是自死锁（`parking_lot` 不重入，表现为
         // 空转而非挂起）。
+        // V4 A92: real RecoveryExecutor wiring. The incident sequence comes from the latest
+        // persisted failure context, so duplicate user clicks in one incident share a key while
+        // a later independent incident gets a new sequence.
+        let (action, should_execute) = {
+            let mut engine = state.recovery.lock();
+            let incident_seq =
+                engine.last_context().map(|entry| entry.ts).unwrap_or_else(recovery::now_ms);
+            let action = RecoveryAction {
+                plugin_id: id.as_str().to_string(),
+                action_kind: "trial-enable".to_string(),
+                idempotency_key: RecoveryAction::idempotency_key(
+                    id.as_str(),
+                    "trial-enable",
+                    incident_seq,
+                ),
+            };
+            let should_execute = engine.execute_action(&action).map_err(|e| {
+                HostError::new(
+                    ErrorCode::E_STATE_INVALID_TRANSITION,
+                    format!("恢复动作正在执行或不可开始：{e}"),
+                )
+            })?;
+            (action, should_execute)
+        };
+
+        if !should_execute {
+            let payload = recovery_boot_payload(state);
+            let mut result = payload.clone();
+            result["pluginId"] = serde_json::json!(id.as_str());
+            result["engineAction"] = serde_json::json!("trialEnable:deduplicated");
+            result["phaseReconcile"] = serde_json::to_value(phase_reconcile).unwrap_or_default();
+            return Ok(result);
+        }
+
         let trial = state.recovery.lock().trial_enable(id.as_str());
         match trial {
             Ok(()) => {}
             Err(tauron_recovery::RecoveryError::RestrictedInSafemode) => {
+                state.recovery.lock().abort_recovery();
                 let phase = state.recovery.lock().decide_boot_phase().as_str();
                 return Err(HostError::new(
                     ErrorCode::E_STATE_INVALID_TRANSITION,
@@ -5912,12 +5948,14 @@ pub fn cmd_recover_trial_enable(
                 ));
             }
             Err(tauron_recovery::RecoveryError::TrialExhausted(pid)) => {
+                state.recovery.lock().abort_recovery();
                 return Err(HostError::new(
                     ErrorCode::E_PLUGIN_DISABLED,
                     format!("插件 `{pid}` 已试验失败，回落 disabled-by-safemode，不可再次试启"),
                 ));
             }
             Err(e) => {
+                state.recovery.lock().abort_recovery();
                 return Err(HostError::new(
                     ErrorCode::E_STATE_INVALID_TRANSITION,
                     format!("试验性启用失败：{e}"),
@@ -5926,23 +5964,41 @@ pub fn cmd_recover_trial_enable(
         }
 
         // 试启成功后让注册表状态机跟着走 D28 试启迁移（§4.14：引擎负责判，
-        // 状态机负责执行）。插件已在运行则无需再动。注册表侧的守卫若拒绝
-        //（例如其独立试验预算已尽），以 `trialEnable:rejected` 如实回传——
-        // 下一次对账会按引擎判定再补发 `SafemodeExit` 收敛（引擎是权威，
-        // 注册表预算是纵深防御）。
-        let engine_action = if let Some(out) = state.registry.find(&id).map(|e| e.state.state) {
-            use tauron_host::lifecycle::State;
-            if out == State::Enabled || out == State::Running {
-                "alreadyEnabled".to_string()
-            } else {
-                match state.registry.report_event(&id, Event::TrialEnable) {
-                    Ok(o) => format!("trialEnable:{}", o.to.as_str()),
-                    Err(_) => "trialEnable:rejected".to_string(),
+        // 状态机负责执行）。外部副作用成功后才写 EffectRecord + commit action；
+        // 拒绝则 abort，允许同一 incident 的下一次显式请求安全重放。
+        let (engine_action, effect_committed) =
+            if let Some(out) = state.registry.find(&id).map(|e| e.state.state) {
+                use tauron_host::lifecycle::State;
+                if out == State::Enabled || out == State::Running {
+                    ("alreadyEnabled".to_string(), true)
+                } else {
+                    match state.registry.report_event(&id, Event::TrialEnable) {
+                        Ok(o) => (format!("trialEnable:{}", o.to.as_str()), true),
+                        Err(_) => ("trialEnable:rejected".to_string(), false),
+                    }
                 }
+            } else {
+                ("notInRegistry".to_string(), true)
+            };
+
+        {
+            let mut engine = state.recovery.lock();
+            if effect_committed {
+                engine.record_effect(EffectRecord {
+                    effect_id: format!("registry:{}:{}", id.as_str(), action.idempotency_key),
+                    action_key: action.idempotency_key.clone(),
+                    ts: recovery::now_ms(),
+                });
+                engine.complete_recovery();
+            } else {
+                engine.abort_recovery();
             }
-        } else {
-            "notInRegistry".to_string()
-        };
+        }
+
+        // Persist the action/effect ledger together with the recovery engine. This keeps
+        // deduplication valid across process restart, not only inside one in-memory session.
+        let snapshot = state.recovery.lock().to_json();
+        state.recovery_store.lock().save_json(&snapshot);
 
         let payload = recovery_boot_payload(state);
         let mut result = payload.clone();
@@ -8733,6 +8789,23 @@ mod tests {
     /// `trial_from_safemode` 不置位，该插件自行上报错误时走不到 D28 回落
     /// （与引擎的试验判定各自为政）；若不前置对账，刚装载、尚未被标记的
     /// 插件停在 `Installed`，试启事件会撞非法迁移。
+    #[test]
+    fn recovery_trial_enable_action_is_deduplicated_in_same_incident() {
+        let state = CommandState::new();
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
+        for _ in 0..2 {
+            cmd_recover_report(&state, "failure", None).unwrap();
+        }
+        let first = cmd_recover_trial_enable(&state, "com.a").unwrap();
+        assert_ne!(first["engineAction"], "trialEnable:deduplicated");
+        let second = cmd_recover_trial_enable(&state, "com.a").unwrap();
+        assert_eq!(second["engineAction"], "trialEnable:deduplicated");
+        let engine = state.recovery.lock();
+        let effect_id_prefix = "registry:com.a:";
+        let serialized = engine.to_json().to_string();
+        assert!(serialized.contains(effect_id_prefix), "effect ledger must be persisted in engine state");
+    }
+
     #[test]
     fn cmd_recover_trial_enable_drives_registry_trial_state() {
         let state = CommandState::new();

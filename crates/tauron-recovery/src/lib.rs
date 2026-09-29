@@ -145,16 +145,12 @@ pub struct SnapshotMeta {
 
 /// 恢复动作。
 ///
-/// ⚠️ **接入状态：本类型及下面整段「幂等恢复动作 / 外部副作用追踪」今天是
-/// 库内 API，没有任何生产调用方**——全仓只有本文件的单测引用它们
-/// （`tauron-adapter` 只接 `record_boot_failure*` / `trial_enable` /
-/// `BootPhase` / `PluginState` / `to_json`-`from_json`）。
-///
-/// 保留理由：它们是 §4.14「恢复动作幂等 + 外部副作用追踪」的**约定载体**
-/// （幂等键 = `plugin_id:action_kind:seq`、已执行集随快照 seq 截断），
-/// 供后续接上「实际执行恢复动作的执行器」时直接复用；但**今天的生产恢复
-/// 链路不经过它们**——判定只看标记文件与计数器，副作用不落已执行集。
-/// 因此不要据本段宣称「恢复动作已幂等」。
+/// V4 A92 production wiring: `tauron-adapter::cmd_recover_trial_enable` uses this action
+/// transaction around the real registry TrialEnable side effect. The action is begun before
+/// the side effect, aborted on rejection, and committed only after an EffectRecord is written.
+/// Idempotency remains `plugin_id:action_kind:seq`; the adapter derives seq from the persisted
+/// recovery incident context so duplicate UI requests in one incident are suppressed without
+/// blocking a later independent incident.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveryAction {
     pub plugin_id: String,
@@ -598,9 +594,9 @@ impl RecoveryEngine {
 
     // ── 幂等恢复动作 ────────────────────────────────────────────────
     //
-    // ⚠️ 整段是**无生产调用方**的约定载体（见 [`RecoveryAction`] 的接入状态
-    // 说明）：今天没有任何生产路径调用它们，`executed_actions` 在生产中恒为空。
-    // 因无插入方，`gc_executed_actions` 未被调用也**不构成活泄漏**。
+    // Production consumer: tauron-adapter's safe-mode trial-enable path. Keep this API
+    // transport-neutral; the engine owns idempotency state while the adapter owns the external
+    // registry side effect and persistence boundary.
 
     /// 检查恢复动作是否已执行（幂等去重）。
     pub fn action_executed(&self, key: &str) -> bool {
