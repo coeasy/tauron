@@ -38,6 +38,74 @@ pub struct ReadinessViolation {
     pub message: &'static str,
 }
 
+
+/// Machine-readable production self-test result (V4 A109).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductionDoctorReport {
+    pub deployment_mode: DeploymentMode,
+    pub production_safe: bool,
+    pub checks: Vec<ProductionDoctorCheck>,
+}
+
+/// One production self-test check. A failed check is release-blocking in Production.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductionDoctorCheck {
+    pub id: &'static str,
+    pub pass: bool,
+    pub required_in_production: bool,
+    pub message: &'static str,
+}
+
+/// Run the production security/readiness self-test without mutating host state.
+///
+/// Development/Test can expose warnings while remaining runnable; Production must have every
+/// required check pass before the Host advertises READY.
+pub fn doctor(mode: DeploymentMode, input: &ProductionReadiness) -> ProductionDoctorReport {
+    let checks = vec![
+        ProductionDoctorCheck {
+            id: "caller-identity",
+            pass: input.caller_identity_policy_enabled,
+            required_in_production: true,
+            message: "caller identity/origin policy is fail-closed",
+        },
+        ProductionDoctorCheck {
+            id: "recovery-durability",
+            pass: input.durable_recovery_available || input.recovery_explicitly_unsupported,
+            required_in_production: true,
+            message: "durable recovery is configured or explicitly unsupported",
+        },
+        ProductionDoctorCheck {
+            id: "install-trust",
+            pass: !input.install_feature_enabled || input.install_trust_configured,
+            required_in_production: true,
+            message: "plugin installation trust material is complete when install is enabled",
+        },
+        ProductionDoctorCheck {
+            id: "admin-audit",
+            pass: input.audit_for_admin_operations_available,
+            required_in_production: true,
+            message: "privileged administration has an audit sink",
+        },
+        ProductionDoctorCheck {
+            id: "durable-data-dir",
+            pass: input.writable_data_dir_available,
+            required_in_production: true,
+            message: "durable writable data directory is available",
+        },
+        ProductionDoctorCheck {
+            id: "no-mock-provider",
+            pass: !input.mock_provider_enabled,
+            required_in_production: true,
+            message: "mock/test providers are absent",
+        },
+    ];
+    let production_safe =
+        mode == DeploymentMode::Production && checks.iter().all(|check| check.pass);
+    ProductionDoctorReport { deployment_mode: mode, production_safe, checks }
+}
+
 /// Validate production-only invariants.
 ///
 /// Development and Test deliberately return no violations: callers can still expose
@@ -138,5 +206,22 @@ mod tests {
     fn production_ready_requires_every_security_fact() {
         let input = ready();
         assert!(is_production_safe(DeploymentMode::Production, &input));
+        let report = doctor(DeploymentMode::Production, &input);
+        assert!(report.production_safe);
+        assert!(report.checks.iter().all(|check| check.pass));
+    }
+
+    #[test]
+    fn doctor_reports_failed_production_facts_without_mutating_policy() {
+        let report = doctor(DeploymentMode::Production, &ProductionReadiness::default());
+        assert!(!report.production_safe);
+        assert!(report.checks.iter().any(|check| check.id == "caller-identity" && !check.pass));
+        assert!(report.checks.iter().any(|check| check.id == "admin-audit" && !check.pass));
+    }
+
+    #[test]
+    fn development_doctor_never_claims_production_safe() {
+        let report = doctor(DeploymentMode::Development, &ready());
+        assert!(!report.production_safe);
     }
 }
