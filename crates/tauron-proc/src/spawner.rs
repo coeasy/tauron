@@ -118,6 +118,15 @@ impl ProcessSandboxDescriptor {
 pub trait ProcessSandboxProvider: Send + Sync {
     fn descriptor(&self) -> ProcessSandboxDescriptor;
     fn configure(&self, command: &mut Command, cfg: &SpawnConfig) -> ProcResult<()>;
+
+    /// Terminate the provider-owned process tree for `pid`.
+    ///
+    /// `Ok(true)` means the containment primitive accepted the termination request; the caller
+    /// still waits/reaps the direct child. `Ok(false)` means this provider has no tree boundary
+    /// for the pid and the caller should fall back to direct-child termination.
+    fn terminate_tree(&self, _pid: u32) -> ProcResult<bool> {
+        Ok(false)
+    }
 }
 
 /// Compatibility provider used by the built-in CommandSpawner until an OS sandbox is installed.
@@ -133,6 +142,70 @@ impl ProcessSandboxProvider for UnsupportedProcessSandboxProvider {
 
     fn configure(&self, _command: &mut Command, _cfg: &SpawnConfig) -> ProcResult<()> {
         Ok(())
+    }
+}
+
+/// Unix/macOS built-in process-tree containment.
+///
+/// Each sidecar becomes leader of a fresh POSIX process group before exec. Explicit teardown and
+/// parent-crash cleanup send SIGKILL to the negative pgid, so descendants that inherited the group
+/// cannot outlive the runtime lease. This remains `Partial`: process groups do not isolate
+/// filesystem, network, or syscalls.
+#[cfg(unix)]
+#[derive(Debug, Default)]
+pub struct UnixProcessGroupSandboxProvider;
+
+#[cfg(unix)]
+impl ProcessSandboxProvider for UnixProcessGroupSandboxProvider {
+    fn descriptor(&self) -> ProcessSandboxDescriptor {
+        ProcessSandboxDescriptor {
+            enforcement: ProcessSandboxEnforcement::Partial,
+            process_tree_containment: true,
+            filesystem_isolation: false,
+            network_isolation: false,
+            syscall_isolation: false,
+            detail: "POSIX process-group containment + group termination; filesystem/network/syscall isolation not provided".into(),
+        }
+    }
+
+    fn configure(&self, command: &mut Command, _cfg: &SpawnConfig) -> ProcResult<()> {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        Ok(())
+    }
+
+    fn terminate_tree(&self, pid: u32) -> ProcResult<bool> {
+        let pgid = i32::try_from(pid).map_err(|_| {
+            ProcError::ProcessTerminated(format!("pid {pid} cannot be represented as POSIX pid_t"))
+        })?;
+        if pgid <= 0 {
+            return Err(ProcError::ProcessTerminated(format!(
+                "refusing to signal invalid process group {pgid}"
+            )));
+        }
+        // SAFETY: negative pid targets exactly the process group created in configure().
+        let rc = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+        if rc == 0 {
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(false);
+        }
+        Err(ProcError::ProcessTerminated(format!(
+            "terminate process group {pgid} failed: {error}"
+        )))
+    }
+}
+
+fn default_process_sandbox_provider() -> Arc<dyn ProcessSandboxProvider> {
+    #[cfg(unix)]
+    {
+        Arc::new(UnixProcessGroupSandboxProvider)
+    }
+    #[cfg(not(unix))]
+    {
+        Arc::new(UnsupportedProcessSandboxProvider)
     }
 }
 
@@ -377,8 +450,9 @@ impl SinkTable {
 ///   退出路径（卸载回收 / 进程退出）都会先走 `kill`，因此这条只覆盖异常路径。
 /// - `kill` 的**正路**（真的杀掉一个活进程）在测试里未验证：验证它必须真的起一个
 ///   进程，本仓测试明确不起真进程。无需进程的路径（未知 pid / 已退出）有测试。
-/// - 进程组/作业对象、`kill` 树（孙进程不随父进程一起死）、空闲超时 kill 均**未实现**：
-///   终止只覆盖直接子进程。
+/// - Unix/macOS 默认 provider 已用独立 POSIX process group 覆盖进程树终止；Windows
+///   默认 provider 仍为 unsupported，且所有平台的 filesystem/network/syscall 隔离仍
+///   未内建，因此默认 capability 最多是 partial、Production 仍 fail-closed。
 pub struct CommandSpawner {
     /// pid → `Child`。持有句柄是 `try_wait` 的前提（否则只能靠平台 API 探测，
     /// 那会引入平台分支与 unsafe）。stdin/stdout 已在 `spawn` 时 `take` 出去，
@@ -403,7 +477,7 @@ impl Default for CommandSpawner {
             children: Arc::new(Mutex::new(HashMap::new())),
             stdin_writers: Arc::new(Mutex::new(HashMap::new())),
             sinks: Arc::new(Mutex::new(SinkTable::default())),
-            sandbox_provider: Arc::new(UnsupportedProcessSandboxProvider),
+            sandbox_provider: default_process_sandbox_provider(),
         }
     }
 }
