@@ -26,9 +26,10 @@ const install = extractArray('PLUGIN_INSTALL_COMMANDS');
 
 function classify(command, set) {
   const family = command.replace(/^host_/, '').split('_')[0] || 'host';
-  const stateful = /events_|settings_|registry_|stream_|runtime_|contributes_|recover_|window_create|call_/.test(
-    command,
-  );
+  const stateful =
+    /events_|settings_|registry_|stream_|runtime_|contributes_|recover_|window_create|call_/.test(
+      command,
+    );
   const maturity = /host_market_(download|install)/.test(command)
     ? 'deprecated'
     : /install_preview/.test(command)
@@ -90,8 +91,7 @@ for (const entry of entries) {
 const ledger = {
   schemaVersion: 1,
   generatedFrom: 'crates/tauron-adapter/src/lib.rs canonical command arrays',
-  note:
-    'Generated V4 A105 ledger. Stable public commands may not exist without owner, producer, consumer, authorization, lifecycle, cleanup and test metadata.',
+  note: 'Generated V4 A105 ledger. Stable public commands may not exist without owner, producer, consumer, authorization, lifecycle, cleanup and test metadata.',
   counts: {
     substrate: substrate.length,
     pluginRuntime: runtime.length,
