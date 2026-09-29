@@ -51,7 +51,7 @@ mod linux {
     use std::io::{Read, Write};
     use std::mem::{size_of, MaybeUninit};
     use std::os::fd::AsRawFd;
-    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::Path;
 
@@ -60,9 +60,7 @@ mod linux {
         DEFAULT_MAX_WIRE_BYTES,
     };
 
-    use super::{
-        reference_wire_roundtrip, LocalHostReferenceError, REFERENCE_CONTROL_MAX_BYTES,
-    };
+    use super::{reference_wire_roundtrip, LocalHostReferenceError, REFERENCE_CONTROL_MAX_BYTES};
 
     fn write_packet(
         stream: &mut UnixStream,
@@ -184,10 +182,8 @@ mod linux {
 
         let proof = read_packet(&mut stream, REFERENCE_CONTROL_MAX_BYTES)?;
         let peer = broker.verify(&evidence, &challenge.challenge_id, &proof)?;
-        let active_generation = broker
-            .active_lease()
-            .ok_or(LocalHostBrokerError::NoOwner)?
-            .generation;
+        let active_generation =
+            broker.active_lease().ok_or(LocalHostBrokerError::NoOwner)?.generation;
         if peer.owner_generation != active_generation {
             return Err(LocalHostReferenceError::Protocol(
                 "authenticated peer generation became stale".into(),
@@ -213,12 +209,8 @@ mod linux {
         let challenge: PeerChallenge = serde_json::from_slice(&challenge_json)
             .map_err(|e| LocalHostReferenceError::Protocol(e.to_string()))?;
         let subject = current_client_subject();
-        let proof = peer_proof(
-            bootstrap_secret,
-            &subject,
-            &challenge.nonce,
-            challenge.owner_generation,
-        );
+        let proof =
+            peer_proof(bootstrap_secret, &subject, &challenge.nonce, challenge.owner_generation);
         write_packet(&mut stream, &proof, REFERENCE_CONTROL_MAX_BYTES)?;
         let ack = read_packet(&mut stream, REFERENCE_CONTROL_MAX_BYTES)?;
         if ack != b"ok" {
@@ -231,9 +223,8 @@ mod linux {
         read_packet(&mut stream, DEFAULT_MAX_WIRE_BYTES)
     }
 
-    pub(super) fn endpoint_permissions(
-        path: &Path,
-    ) -> Result<(u32, u32), LocalHostReferenceError> {
+    #[cfg(test)]
+    pub(super) fn endpoint_permissions(path: &Path) -> Result<(u32, u32), LocalHostReferenceError> {
         let parent = path.parent().ok_or_else(|| {
             LocalHostReferenceError::Protocol("socket path has no parent directory".into())
         })?;
@@ -266,11 +257,7 @@ mod linux {
             });
 
             let request = encode_wire_json(
-                &WireFrame::new(
-                    "reference.ping/1",
-                    1,
-                    serde_json::json!({"ping":"pong"}),
-                ),
+                &WireFrame::new("reference.ping/1", 1, serde_json::json!({"ping":"pong"})),
                 DEFAULT_MAX_WIRE_BYTES,
             )
             .unwrap();
@@ -304,7 +291,9 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{bind_endpoint, client_roundtrip, current_client_subject, peer_evidence, serve_one};
+pub use linux::{
+    bind_endpoint, client_roundtrip, current_client_subject, peer_evidence, serve_one,
+};
 
 #[cfg(not(target_os = "linux"))]
 pub fn current_client_subject() -> String {

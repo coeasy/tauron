@@ -3510,6 +3510,7 @@ dependencies = [
  "chrono",
  "hex",
  "hmac",
+ "libc",
  "parking_lot",
  "rustix",
  "semver",
