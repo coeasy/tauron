@@ -27,6 +27,7 @@ pub mod fault;
 pub mod generation;
 pub mod health;
 pub mod lifecycle;
+pub mod local_host;
 pub mod manifest;
 pub mod ordering;
 pub mod policy;
@@ -83,6 +84,10 @@ pub use execution::{
 pub use fault::{FaultBoundary, FaultError, FaultRecord, FaultState};
 pub use generation::{Generation, GenerationError, GenerationHandle, GenerationRegistry};
 pub use health::{Degradation, HealthReport, Liveness, Readiness};
+pub use local_host::{
+    peer_proof, AuthenticatedPeer, LocalHostBroker, LocalHostBrokerError, LocalHostLease,
+    PeerChallenge, PeerCredentialEvidence,
+};
 pub use ordering::{OrderedEventMeta, OrderingError, OrderingTracker};
 pub use policy::{DecisionError, DecisionToken, PolicyAuthority};
 pub use portable_path::{join_scoped, validate_portable_relative, PortablePathError};
