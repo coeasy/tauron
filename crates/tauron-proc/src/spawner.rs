@@ -1095,7 +1095,13 @@ mod tests {
             assert!(d.process_tree_containment);
             assert!(d.detail.contains("process-group"));
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            assert_eq!(d.enforcement, ProcessSandboxEnforcement::Partial);
+            assert!(d.process_tree_containment);
+            assert!(d.detail.contains("Job Object"));
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             assert_eq!(d.enforcement, ProcessSandboxEnforcement::Unsupported);
             assert!(!d.process_tree_containment);
