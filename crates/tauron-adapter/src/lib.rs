@@ -1440,6 +1440,7 @@ impl StdFsSink {
     }
 }
 
+#[cfg(not(unix))]
 fn fs_io_error(op: &str, path: &std::path::Path, e: std::io::Error) -> HostError {
     HostError::new(
         ErrorCode::E_STATE_INVALID_TRANSITION,
@@ -1500,7 +1501,7 @@ impl FsSink for StdFsSink {
         #[cfg(unix)]
         {
             let base = path.display_path();
-            return tauron_host::scoped_fs_list_hard(path)
+            tauron_host::scoped_fs_list_hard(path)
                 .map(|entries| {
                     entries
                         .into_iter()
@@ -1512,7 +1513,7 @@ impl FsSink for StdFsSink {
                         })
                         .collect()
                 })
-                .map_err(|e| scoped_fs_error("list", path, e));
+                .map_err(|e| scoped_fs_error("list", path, e))
         }
         #[cfg(not(unix))]
         {
@@ -1556,8 +1557,8 @@ impl FsSink for StdFsSink {
     fn mkdir(&self, path: &tauron_host::ScopedPath, recursive: bool) -> HostResult<()> {
         #[cfg(unix)]
         {
-            return tauron_host::scoped_fs_mkdir_hard(path, recursive)
-                .map_err(|e| scoped_fs_error("mkdir", path, e));
+            tauron_host::scoped_fs_mkdir_hard(path, recursive)
+                .map_err(|e| scoped_fs_error("mkdir", path, e))
         }
         #[cfg(not(unix))]
         {
@@ -1574,8 +1575,8 @@ impl FsSink for StdFsSink {
     fn remove(&self, path: &tauron_host::ScopedPath) -> HostResult<()> {
         #[cfg(unix)]
         {
-            return tauron_host::scoped_fs_remove_hard(path)
-                .map_err(|e| scoped_fs_error("remove", path, e));
+            tauron_host::scoped_fs_remove_hard(path)
+                .map_err(|e| scoped_fs_error("remove", path, e))
         }
         #[cfg(not(unix))]
         {
