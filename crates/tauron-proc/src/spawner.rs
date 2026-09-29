@@ -899,11 +899,20 @@ mod tests {
     }
 
     #[test]
-    fn built_in_command_spawner_reports_sandbox_unsupported_honestly() {
+    fn built_in_command_spawner_reports_platform_sandbox_honestly() {
         let d = CommandSpawner::new().sandbox_descriptor();
-        assert_eq!(d.enforcement, ProcessSandboxEnforcement::Unsupported);
-        assert!(!d.process_tree_containment);
-        assert!(d.detail.contains("direct child"));
+        #[cfg(unix)]
+        {
+            assert_eq!(d.enforcement, ProcessSandboxEnforcement::Partial);
+            assert!(d.process_tree_containment);
+            assert!(d.detail.contains("process-group"));
+        }
+        #[cfg(not(unix))]
+        {
+            assert_eq!(d.enforcement, ProcessSandboxEnforcement::Unsupported);
+            assert!(!d.process_tree_containment);
+            assert!(d.detail.contains("direct child"));
+        }
     }
 
     /// 配置不合格时**必须**在启动之前被挡下：不产生进程、不留下句柄。
