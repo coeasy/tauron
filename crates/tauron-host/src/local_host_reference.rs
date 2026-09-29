@@ -327,11 +327,10 @@ mod unix {
     }
 }
 
-
 #[cfg(target_os = "windows")]
 mod windows {
     use std::ffi::c_void;
-    use std::mem::{size_of, zeroed};
+    use std::mem::size_of;
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
     use std::ptr::{null, null_mut};
@@ -345,8 +344,8 @@ mod windows {
         SDDL_REVISION_1,
     };
     use windows_sys::Win32::Security::{
-        GetTokenInformation, RevertToSelf, SecurityImpersonation, TokenUser, PSECURITY_DESCRIPTOR,
-        SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+        GetTokenInformation, RevertToSelf, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+        TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE,
@@ -494,8 +493,7 @@ mod windows {
         let mut token = null_mut();
         // OpenAsSelf=FALSE means the client impersonation context is queried.
         // SAFETY: current thread is impersonating the connected client.
-        let ok =
-            unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 0, &mut token) };
+        let ok = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 0, &mut token) };
         if ok == 0 {
             return Err(std::io::Error::last_os_error().into());
         }
@@ -534,9 +532,7 @@ mod windows {
             let mut read = 0u32;
             let chunk = out.len().min(u32::MAX as usize) as u32;
             // SAFETY: out points to chunk writable bytes; synchronous I/O uses null OVERLAPPED.
-            let ok = unsafe {
-                ReadFile(handle, out.as_mut_ptr(), chunk, &mut read, null_mut())
-            };
+            let ok = unsafe { ReadFile(handle, out.as_mut_ptr(), chunk, &mut read, null_mut()) };
             if ok == 0 {
                 return Err(std::io::Error::last_os_error().into());
             }
@@ -555,8 +551,7 @@ mod windows {
             let mut written = 0u32;
             let chunk = bytes.len().min(u32::MAX as usize) as u32;
             // SAFETY: bytes points to chunk readable bytes; synchronous I/O uses null OVERLAPPED.
-            let ok =
-                unsafe { WriteFile(handle, bytes.as_ptr(), chunk, &mut written, null_mut()) };
+            let ok = unsafe { WriteFile(handle, bytes.as_ptr(), chunk, &mut written, null_mut()) };
             if ok == 0 {
                 return Err(std::io::Error::last_os_error().into());
             }
@@ -586,10 +581,7 @@ mod windows {
         write_all(handle, bytes)
     }
 
-    fn read_packet(
-        handle: HANDLE,
-        max_bytes: usize,
-    ) -> Result<Vec<u8>, LocalHostReferenceError> {
+    fn read_packet(handle: HANDLE, max_bytes: usize) -> Result<Vec<u8>, LocalHostReferenceError> {
         let mut len = [0u8; 4];
         read_exact(handle, &mut len)?;
         let len = u32::from_be_bytes(len) as usize;
@@ -636,9 +628,7 @@ mod windows {
             .unwrap_or_else(|_| "windows:sid=unavailable".to_string())
     }
 
-    fn peer_evidence(
-        handle: HANDLE,
-    ) -> Result<PeerCredentialEvidence, LocalHostReferenceError> {
+    fn peer_evidence(handle: HANDLE) -> Result<PeerCredentialEvidence, LocalHostReferenceError> {
         let peer = peer_sid(handle)?;
         let owner = current_process_sid()?;
         Ok(PeerCredentialEvidence {
@@ -738,7 +728,9 @@ mod windows {
 pub use unix::{bind_endpoint, client_roundtrip, current_client_subject, peer_evidence, serve_one};
 
 #[cfg(target_os = "windows")]
-pub use windows::{bind_endpoint, client_roundtrip, current_client_subject, serve_one, WindowsPipeListener};
+pub use windows::{
+    bind_endpoint, client_roundtrip, current_client_subject, serve_one, WindowsPipeListener,
+};
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub fn current_client_subject() -> String {

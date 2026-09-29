@@ -53,7 +53,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 #[cfg(target_os = "windows")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::path::PathBuf;
@@ -64,10 +63,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         decode_wire_json, encode_wire_json, LocalHostBroker, WireFrame, DEFAULT_MAX_WIRE_BYTES,
     };
 
-    let pipe = PathBuf::from(format!(
-        r"\\.\pipe\tauron-local-host-reference-{}",
-        std::process::id()
-    ));
+    let pipe =
+        PathBuf::from(format!(r"\\.\pipe\tauron-local-host-reference-{}", std::process::id()));
     let listener = bind_endpoint(&pipe)?;
     let secret = b"tauron-a106-reference-secret".to_vec();
     let server_secret = secret.clone();
