@@ -258,6 +258,7 @@ impl AdapterConfig {
             // `ClientConfig` 没有 fs 根目录字段（它管注册表/数据目录）：由宿主用
             // [`AdapterConfig::with_fs_roots`] 显式配置；缺省 = 该域不可用（如实）。
             fs_allowed_roots: Vec::new(),
+            http_policy: tauron_host::NetworkPolicy::default(),
             #[cfg(feature = "plugin-install")]
             plugin_install_dir: None,
             #[cfg(feature = "plugin-install")]
@@ -287,6 +288,12 @@ impl AdapterConfig {
     /// [`AdapterConfig::fs_allowed_roots`] 的语义说明）。
     pub fn with_fs_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.fs_allowed_roots = roots;
+        self
+    }
+
+    /// Configure the V4 HTTP/network scope. Default is deny-all.
+    pub fn with_http_policy(mut self, policy: tauron_host::NetworkPolicy) -> Self {
+        self.http_policy = policy;
         self
     }
 }
@@ -341,6 +348,8 @@ pub struct AdapterConfig {
     ///
     /// 装配方（生产宿主）应传宿主自己的数据/导出目录；测试传 tempdir。
     pub fs_allowed_roots: Vec<PathBuf>,
+    /// V4 A96 network scope. Empty/default is fail-closed even when a custom HTTP sink exists.
+    pub http_policy: tauron_host::NetworkPolicy,
     /// Package installation root. Installation remains unavailable when unset.
     #[cfg(feature = "plugin-install")]
     pub plugin_install_dir: Option<PathBuf>,
@@ -658,8 +667,8 @@ pub fn cmd_host_capabilities(state: &SubstrateState) -> HostResult<CapabilitiesB
             ),
             (
                 "http",
-                state.http_sink.native_supported(),
-                "未装配 HTTP 提供者：reqwest 的 TLS 后端不在离线依赖闭包内",
+                state.http_sink.native_supported() && !state.http_policy.domains.is_empty(),
+                "HTTP provider 或 V4 network scope 未配置",
             ),
             (
                 "updater",
@@ -1554,8 +1563,18 @@ pub trait HttpSink: Send + Sync {
     fn native_supported(&self) -> bool {
         false
     }
-    /// 发起一次请求。
-    fn request(&self, spec: &HttpRequestSpec) -> HostResult<ProviderResult<HttpResponseSpec>>;
+
+    /// Provider-side enforcement level. Production HTTP must cover redirects and DNS/private IP.
+    fn network_enforcement(&self) -> tauron_host::NetworkEnforcement {
+        tauron_host::NetworkEnforcement::UrlOnly
+    }
+
+    /// 发起一次请求。实现必须把同一个 policy 应用于每一跳 redirect 与 DNS 结果。
+    fn request(
+        &self,
+        spec: &HttpRequestSpec,
+        policy: &tauron_host::NetworkPolicy,
+    ) -> HostResult<ProviderResult<HttpResponseSpec>>;
 }
 
 /// HTTP sink 的**降级**实现（缺省）：恒返回 `UnsupportedBody`。
@@ -1567,7 +1586,11 @@ pub trait HttpSink: Send + Sync {
 pub struct UnavailableHttpSink;
 
 impl HttpSink for UnavailableHttpSink {
-    fn request(&self, _spec: &HttpRequestSpec) -> HostResult<ProviderResult<HttpResponseSpec>> {
+    fn request(
+        &self,
+        _spec: &HttpRequestSpec,
+        _policy: &tauron_host::NetworkPolicy,
+    ) -> HostResult<ProviderResult<HttpResponseSpec>> {
         Ok(ProviderResult::Unsupported(unsupported_body(
             "未装配 HTTP 提供者（reqwest 的 TLS 后端 hyper-tls/hyper-rustls 不在离线缓存中）",
             Some("注入自定义 HttpSink 实现"),
@@ -1957,6 +1980,8 @@ pub struct SubstrateState {
     pub fs_allowed_roots: Arc<Vec<PathBuf>>,
     /// **HTTP 能力**（R9）：缺省 = [`UnavailableHttpSink`]（诚实降级）。
     pub http_sink: Arc<dyn HttpSink>,
+    /// Parsed/validated V4 network scope shared with the concrete provider.
+    pub http_policy: Arc<tauron_host::NetworkPolicy>,
     /// **更新通道能力**（R9）：缺省 = [`DistributeUpdaterSink::unconfigured`]。
     pub updater_sink: Arc<dyn UpdaterSink>,
     /// **主题注册表**（任务二：接通孤儿 crate `tauron-theme`）。
@@ -2405,6 +2430,7 @@ impl SubstrateState {
                 cfg.fs_allowed_roots.iter().filter_map(|p| p.canonicalize().ok()).collect(),
             ),
             http_sink: Arc::new(UnavailableHttpSink),
+            http_policy: Arc::new(cfg.http_policy.clone()),
             updater_sink: Arc::new(DistributeUpdaterSink::unconfigured()),
             themes: Arc::new(Mutex::new(tauron_theme::ThemeRegistry::default())),
         }
@@ -6343,21 +6369,25 @@ fn validated_http_method(method: &str) -> HostResult<String> {
     }
 }
 
-/// URL scheme 白名单（仅 `http` / `https`）。
-fn validated_http_url(url: &str) -> HostResult<()> {
-    let u = url.trim();
-    if u.is_empty() {
-        return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "HTTP url 不能为空".to_string()));
-    }
-    let lower = u.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") {
-        Ok(())
-    } else {
-        Err(HostError::new(
-            ErrorCode::E_INVALID_MANIFEST,
-            format!("HTTP url `{url}` 非法：只接受 http/https scheme"),
-        ))
-    }
+fn authorize_http_url(
+    policy: &tauron_host::NetworkPolicy,
+    url: &str,
+) -> HostResult<tauron_host::AuthorizedUrl> {
+    policy.authorize_url(url).map_err(|error| {
+        let code = match error {
+            tauron_host::NetworkPolicyError::EmptyUrl
+            | tauron_host::NetworkPolicyError::InvalidUrl(_)
+            | tauron_host::NetworkPolicyError::SchemeDenied(_)
+            | tauron_host::NetworkPolicyError::HttpDenied
+            | tauron_host::NetworkPolicyError::EmbeddedCredentialsDenied
+            | tauron_host::NetworkPolicyError::HostMissing
+            | tauron_host::NetworkPolicyError::PortMissing(_)
+            | tauron_host::NetworkPolicyError::InvalidDomainRule(_)
+            | tauron_host::NetworkPolicyError::InvalidRedirectLimit => ErrorCode::E_INVALID_MANIFEST,
+            _ => ErrorCode::E_AUTH_DENIED,
+        };
+        HostError::new(code, format!("HTTP network policy denied request: {error}"))
+    })
 }
 
 /// `host_http_request`：发起一次 HTTP 请求（主窗专属）。
@@ -6370,8 +6400,17 @@ pub fn cmd_http_request(
 ) -> HostResult<ProviderResult<HttpResponseSpec>> {
     guard("http_request", || {
         validated_http_method(&spec.method)?;
-        validated_http_url(&spec.url)?;
-        state.http_sink.request(spec)
+        authorize_http_url(&state.http_policy, &spec.url)?;
+        if state.http_sink.native_supported()
+            && state.http_sink.network_enforcement()
+                != tauron_host::NetworkEnforcement::RedirectAndDns
+        {
+            return Ok(ProviderResult::Unsupported(unsupported_body(
+                "HTTP provider does not enforce V4 redirect/DNS/private-network policy",
+                Some("use a provider with NetworkEnforcement::RedirectAndDns"),
+            )));
+        }
+        state.http_sink.request(spec, &state.http_policy)
     })?
 }
 
@@ -12991,8 +13030,7 @@ mod tests {
         }
 
         #[test]
-        fn http_request_validates_then_degrades_honestly() {
-            let state = CommandState::new();
+        fn http_request_is_scope_checked_then_degrades_honestly() {
             let ok = HttpRequestSpec {
                 method: "get".into(),
                 url: "https://example.com".into(),
@@ -13001,20 +13039,43 @@ mod tests {
                 timeout_ms: None,
                 max_bytes: None,
             };
-            // 参数合法 → 缺省 UnavailableHttpSink 如实 Unsupported（不伪造响应）。
+
+            // V4 默认 fail-closed：即使 URL 语法合法，没有 domain scope 也不能发请求。
+            let denied = CommandState::new();
+            assert_eq!(
+                cmd_http_request(&denied, &ok).unwrap_err().code,
+                ErrorCode::E_AUTH_DENIED
+            );
+
+            let cfg = AdapterConfig::default().with_http_policy(
+                tauron_host::NetworkPolicy::public_https(vec![tauron_host::DomainRule::exact(
+                    "example.com",
+                )]),
+            );
+            let scoped = CommandState::with_adapter_config(cfg);
+            // scope 合法，但缺省 UnavailableHttpSink 仍如实 Unsupported（不伪造响应）。
             assert!(matches!(
-                cmd_http_request(&state, &ok).unwrap(),
+                cmd_http_request(&scoped, &ok).unwrap(),
                 ProviderResult::Unsupported(_)
             ));
+
             let bad_method = HttpRequestSpec { method: "DELETE".into(), ..ok.clone() };
             assert_eq!(
-                cmd_http_request(&state, &bad_method).unwrap_err().code,
+                cmd_http_request(&scoped, &bad_method).unwrap_err().code,
                 ErrorCode::E_INVALID_MANIFEST
             );
             let bad_url = HttpRequestSpec { url: "file:///etc/passwd".into(), ..ok.clone() };
             assert_eq!(
-                cmd_http_request(&state, &bad_url).unwrap_err().code,
+                cmd_http_request(&scoped, &bad_url).unwrap_err().code,
                 ErrorCode::E_INVALID_MANIFEST
+            );
+            let outside = HttpRequestSpec {
+                url: "https://other.example.net".into(),
+                ..ok.clone()
+            };
+            assert_eq!(
+                cmd_http_request(&scoped, &outside).unwrap_err().code,
+                ErrorCode::E_AUTH_DENIED
             );
         }
 

@@ -29,6 +29,7 @@ pub mod health;
 pub mod lifecycle;
 pub mod local_host;
 pub mod manifest;
+pub mod network_policy;
 pub mod ordering;
 pub mod policy;
 pub mod portable_path;
@@ -87,6 +88,10 @@ pub use health::{Degradation, HealthReport, Liveness, Readiness};
 pub use local_host::{
     peer_proof, AuthenticatedPeer, LocalHostBroker, LocalHostBrokerError, LocalHostLease,
     PeerChallenge, PeerCredentialEvidence,
+};
+pub use network_policy::{
+    is_public_ip, AuthorizedUrl, DomainRule, NetworkEnforcement, NetworkPolicy, NetworkPolicyError,
+    PrivateNetworkPolicy, RedirectAuthorization,
 };
 pub use ordering::{OrderedEventMeta, OrderingError, OrderingTracker};
 pub use policy::{DecisionError, DecisionToken, PolicyAuthority};
