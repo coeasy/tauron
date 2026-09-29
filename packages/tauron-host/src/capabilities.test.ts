@@ -4,8 +4,8 @@ import { MockBackend } from './backend.js';
 import { CAPABILITIES, capabilityMatrix, capabilityOf, isAvailable } from './capabilities.js';
 
 describe('CAPABILITIES（计划 §2.1 命令面镜像）', () => {
-  it('共 24 条：18 条插件命令 + 6 条主窗特权命令', () => {
-    expect(CAPABILITIES).toHaveLength(24);
+  it('共 27 条：18 条插件命令 + 9 条主窗特权命令', () => {
+    expect(CAPABILITIES).toHaveLength(27);
   });
 
   it('插件命令 18 条，其中 scoped-read 恰好 2 条（host_registry_list / host_contributes_list）', () => {
@@ -32,6 +32,9 @@ describe('CAPABILITIES（计划 §2.1 命令面镜像）', () => {
     // P0-2/M8 起 privileged 有管理、运行时和资源诊断命令；集合仍是**闭集**，
     // 任何新增特权命令都必须显式改这里（增量可见）。
     expect(priv.map((c) => c.command).sort()).toEqual([
+      'host_events_approvals',
+      'host_events_approve',
+      'host_events_revoke',
       'host_registry_admin',
       'host_registry_install',
       'host_registry_install_preview',
@@ -80,12 +83,12 @@ describe('isAvailable / capabilityMatrix', () => {
     expect(isAvailable(backend, 'totally-unknown')).toBe(false);
   });
 
-  it('capabilityMatrix 覆盖全部 24 条命令', () => {
+  it('capabilityMatrix 覆盖全部 27 条命令', () => {
     const backend = new MockBackend({
       capabilities: CAPABILITIES.map((c) => c.command),
     });
     const matrix = capabilityMatrix(backend);
-    expect(Object.keys(matrix)).toHaveLength(24);
+    expect(Object.keys(matrix)).toHaveLength(27);
     expect(Object.values(matrix).every(Boolean)).toBe(true);
   });
 
