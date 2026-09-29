@@ -282,7 +282,8 @@ describe('translate_at_boundary（R2-c）', () => {
       'host→plugin-webview',
     );
     expect(r.error.code).toBe('E_CALL_TIMEOUT');
-    expect(r.error.retryable).toBe(true);
+    expect(r.error.retryable).toBe(false);
+    expect(r.error.retryClass).toBe('manual');
     expect(r.translated).toBe(false);
   });
 
