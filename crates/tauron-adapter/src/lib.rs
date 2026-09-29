@@ -72,7 +72,9 @@ use tauron_recovery::{
     BootContextEntry, BootPhase, EffectRecord, PluginState as RecoveryPluginState, RecoveryAction,
     RecoveryEngine,
 };
-use tauron_settings::{Migration, SettingsError, SettingsStore};
+use tauron_settings::{
+    Migration, MigrationContract, MigrationReceipt, SettingsError, SettingsStore,
+};
 
 use crate::process_delivery::ProcessCallDelivery;
 #[cfg(feature = "runtime-wasm-broker")]
@@ -4893,7 +4895,12 @@ fn install_host_settings_schema(store: &mut SettingsStore) {
             HOST_SETTINGS_SCHEMA_V1,
             HOST_SETTINGS_SCHEMA_V2,
             migrate_host_settings_v1_to_v2,
-        ),
+        )
+        .with_contract(MigrationContract::new(
+            false, // no reverse function is shipped
+            false, // v1 readers do not understand v2 escaped keys
+            true,  // retain the pre-migration snapshot until probation/commit
+        )),
     );
 }
 
@@ -4937,9 +4944,18 @@ pub fn host_settings_adopt_legacy(
 ///
 /// 全有或全无：链路缺失或迁移结果过不了 schema 校验时用户层一个字节都不改，
 /// 返回 `E_INVALID_MANIFEST`（不新增错误码）。
+fn host_settings_migrate_transaction(
+    state: &SubstrateState,
+) -> HostResult<MigrationReceipt> {
+    state
+        .settings
+        .lock()
+        .migrate_transactional(HOST_SETTINGS_NAMESPACE, HOST_SETTINGS_SCHEMA_V2)
+        .map_err(settings_to_host_error)
+}
+
 pub fn host_settings_migrate(state: &SubstrateState) -> HostResult<usize> {
-    let mut store = state.settings.lock();
-    store.migrate(HOST_SETTINGS_NAMESPACE, HOST_SETTINGS_SCHEMA_V2).map_err(settings_to_host_error)
+    Ok(host_settings_migrate_transaction(state)?.steps())
 }
 
 /// 当前宿主设置的数据版本（诊断用；`None` = 既无数据也无标注）。
@@ -5057,11 +5073,11 @@ pub fn cmd_settings_adopt_legacy_as(
 pub fn cmd_settings_migrate(state: &SubstrateState) -> HostResult<usize> {
     guard("settings_migrate", || {
         let _write = state.settings_write_lock.lock();
-        let before = state.settings.lock().snapshot_all();
-        let steps = host_settings_migrate(state)?;
-        if steps > 0 {
+        let receipt = host_settings_migrate_transaction(state)?;
+        let steps = receipt.steps();
+        if receipt.changed() {
             if let Err(error) = persist_settings_doc(state) {
-                state.settings.lock().restore(&before);
+                state.settings.lock().rollback_migration(receipt);
                 return Err(error);
             }
         }
@@ -10365,6 +10381,49 @@ mod tests {
             cmd_settings_get(&state, "plugin:p.theme").unwrap(),
             serde_json::json!("dark"),
             "迁移后的值必须跨进程可读"
+        );
+    }
+
+    #[test]
+    fn host_settings_migration_declares_snapshot_required_contract() {
+        let state = CommandState::new();
+        host_settings_adopt_legacy(&state, serde_json::json!({"plugin:p.theme": "dark"})).unwrap();
+        let contract = state
+            .settings
+            .lock()
+            .migration_contract(HOST_SETTINGS_NAMESPACE, HOST_SETTINGS_SCHEMA_V2)
+            .unwrap();
+        assert!(!contract.reversible);
+        assert!(!contract.forward_compatible);
+        assert!(contract.requires_snapshot);
+    }
+
+    #[test]
+    fn settings_migration_persist_failure_restores_v1_data_and_version() {
+        let t = tempfile::tempdir().unwrap();
+        let blocker = t.path().join("not-a-directory");
+        std::fs::write(&blocker, b"file blocks create_dir_all").unwrap();
+        let state = CommandState::with_adapter_config(recovery_cfg(&blocker));
+
+        // Use the non-persisting core adoption path so the failure is injected specifically at
+        // migration commit, not while staging the legacy document.
+        host_settings_adopt_legacy(
+            &state,
+            serde_json::json!({"plugin:p.theme": "dark", "lang": "zh-CN"}),
+        )
+        .unwrap();
+        let before = state.settings.lock().snapshot(HOST_SETTINGS_NAMESPACE).unwrap();
+
+        let err = cmd_settings_migrate(&state).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST);
+        assert_eq!(
+            state.settings.lock().snapshot(HOST_SETTINGS_NAMESPACE).unwrap(),
+            before,
+            "durable commit failure must restore exact pre-migration state"
+        );
+        assert_eq!(
+            host_settings_data_version(&state).as_deref(),
+            Some(HOST_SETTINGS_SCHEMA_V1)
         );
     }
 

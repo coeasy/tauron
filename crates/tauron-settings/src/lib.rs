@@ -37,7 +37,10 @@ pub use merge::{
     split_unset, validate_path, write_path, WriteOp, UNSET_KEY,
 };
 pub use registry::{count_fields, Entry, SchemaRegistry, FIELD_LIMIT};
-pub use store::{ChangeEvent, Migration, PluginState, SettingsStore, MIGRATION_STEP_LIMIT};
+pub use store::{
+    ChangeEvent, Migration, MigrationContract, MigrationReceipt, PluginState, SettingsStore,
+    MIGRATION_STEP_LIMIT,
+};
 
 #[cfg(test)]
 mod integration_tests {
