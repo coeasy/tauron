@@ -30,16 +30,9 @@ pub struct FaultRecord {
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum FaultError {
     #[error("fault boundary {boundary} is not ready: {state:?}")]
-    NotReady {
-        boundary: String,
-        state: FaultState,
-    },
+    NotReady { boundary: String, state: FaultState },
     #[error("fault boundary {boundary} panicked during {operation}: {message}")]
-    Panicked {
-        boundary: String,
-        operation: String,
-        message: String,
-    },
+    Panicked { boundary: String, operation: String, message: String },
 }
 
 #[derive(Debug)]
@@ -52,12 +45,7 @@ pub struct FaultBoundary {
 
 impl FaultBoundary {
     pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            state: FaultState::Ready,
-            generation: 1,
-            last_fault: None,
-        }
+        Self { name: name.into(), state: FaultState::Ready, generation: 1, last_fault: None }
     }
 
     pub fn state(&self) -> FaultState {
@@ -76,18 +64,11 @@ impl FaultBoundary {
         if self.state == FaultState::Ready {
             Ok(())
         } else {
-            Err(FaultError::NotReady {
-                boundary: self.name.clone(),
-                state: self.state,
-            })
+            Err(FaultError::NotReady { boundary: self.name.clone(), state: self.state })
         }
     }
 
-    pub fn run<T>(
-        &mut self,
-        operation: &str,
-        f: impl FnOnce() -> T,
-    ) -> Result<T, FaultError> {
+    pub fn run<T>(&mut self, operation: &str, f: impl FnOnce() -> T) -> Result<T, FaultError> {
         self.ensure_ready()?;
         match catch_unwind(AssertUnwindSafe(f)) {
             Ok(value) => Ok(value),
@@ -152,10 +133,7 @@ mod tests {
             Err(FaultError::Panicked { .. })
         ));
         assert_eq!(boundary.state(), FaultState::Faulted);
-        assert!(matches!(
-            boundary.run("get", || 1_u8),
-            Err(FaultError::NotReady { .. })
-        ));
+        assert!(matches!(boundary.run("get", || 1_u8), Err(FaultError::NotReady { .. })));
         boundary.begin_reconcile().unwrap();
         boundary.reconcile_succeeded();
         assert_eq!(boundary.run("get", || 7_u8).unwrap(), 7);
