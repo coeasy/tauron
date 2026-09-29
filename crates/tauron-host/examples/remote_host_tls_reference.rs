@@ -61,14 +61,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         nonce: "remote-reference-nonce-1".into(),
         wire,
     };
-    let response = client_roundtrip_tls(
-        addr,
-        client_config,
-        ServerName::try_from("localhost")?,
-        &request,
-    )?;
-    let frame: WireFrame<serde_json::Value> =
-        decode_wire_json(&response, DEFAULT_MAX_WIRE_BYTES)?;
+    let response =
+        client_roundtrip_tls(addr, client_config, ServerName::try_from("localhost")?, &request)?;
+    let frame: WireFrame<serde_json::Value> = decode_wire_json(&response, DEFAULT_MAX_WIRE_BYTES)?;
     if frame.header.schema != "remote.reference.ping/1"
         || frame.payload["transport"] != "real-rustls-tls13"
     {
@@ -76,7 +71,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let observation = server.join().map_err(|_| "Remote TLS server thread panicked")??;
-    if observation.tls_protocol != "TLS1.3" || !observation.transport_id.starts_with("rustls-tls13:")
+    if observation.tls_protocol != "TLS1.3"
+        || !observation.transport_id.starts_with("rustls-tls13:")
     {
         return Err("Remote TLS transport evidence drift".into());
     }

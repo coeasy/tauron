@@ -9,17 +9,8 @@
       "arch": "x86_64",
       "rustTarget": "x86_64-unknown-linux-gnu",
       "coverage": "native-execution",
-      "profiles": [
-        "substrate",
-        "ffi",
-        "extension",
-        "tauri-desktop"
-      ],
-      "runtimes": [
-        "process",
-        "wasm-broker",
-        "remote-tls"
-      ],
+      "profiles": ["substrate", "ffi", "extension", "tauri-desktop"],
+      "runtimes": ["process", "wasm-broker", "remote-tls"],
       "localHostReference": "linux-uds",
       "releaseArtifact": true
     },
@@ -30,17 +21,8 @@
       "arch": "x86_64",
       "rustTarget": "x86_64-pc-windows-msvc",
       "coverage": "native-execution",
-      "profiles": [
-        "substrate",
-        "ffi",
-        "extension",
-        "tauri-desktop"
-      ],
-      "runtimes": [
-        "process",
-        "wasm-broker",
-        "remote-tls"
-      ],
+      "profiles": ["substrate", "ffi", "extension", "tauri-desktop"],
+      "runtimes": ["process", "wasm-broker", "remote-tls"],
       "localHostReference": "windows-named-pipe-sid",
       "releaseArtifact": true
     },
@@ -51,17 +33,8 @@
       "arch": "aarch64",
       "rustTarget": "aarch64-apple-darwin",
       "coverage": "native-execution",
-      "profiles": [
-        "substrate",
-        "ffi",
-        "extension",
-        "tauri-desktop"
-      ],
-      "runtimes": [
-        "process",
-        "wasm-broker",
-        "remote-tls"
-      ],
+      "profiles": ["substrate", "ffi", "extension", "tauri-desktop"],
+      "runtimes": ["process", "wasm-broker", "remote-tls"],
       "localHostReference": "macos-uds-getpeereid",
       "releaseArtifact": true
     },
@@ -72,17 +45,8 @@
       "arch": "x86_64",
       "rustTarget": "x86_64-apple-darwin",
       "coverage": "native-execution",
-      "profiles": [
-        "substrate",
-        "ffi",
-        "extension",
-        "tauri-desktop"
-      ],
-      "runtimes": [
-        "process",
-        "wasm-broker",
-        "remote-tls"
-      ],
+      "profiles": ["substrate", "ffi", "extension", "tauri-desktop"],
+      "runtimes": ["process", "wasm-broker", "remote-tls"],
       "localHostReference": "macos-uds-getpeereid",
       "releaseArtifact": true
     }

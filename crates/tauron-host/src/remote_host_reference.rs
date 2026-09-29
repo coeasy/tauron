@@ -16,9 +16,7 @@ use std::time::Duration;
 use rustls::client::ClientConnection;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::server::ServerConnection;
-use rustls::{
-    ClientConfig, ProtocolVersion, RootCertStore, ServerConfig, StreamOwned,
-};
+use rustls::{ClientConfig, ProtocolVersion, RootCertStore, ServerConfig, StreamOwned};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
