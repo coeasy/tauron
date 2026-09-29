@@ -600,6 +600,7 @@ impl ProcSpawner for CommandSpawner {
         let sinks = self.sinks.clone();
         let writers = self.stdin_writers.clone();
         let children = self.children.clone();
+        let sandbox_provider = self.sandbox_provider.clone();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             let mut buf: Vec<u8> = Vec::with_capacity(256);
@@ -661,9 +662,15 @@ impl ProcSpawner for CommandSpawner {
                 // 就是钉死这个形状的源码门禁。
                 let reclaimed = children.lock().remove(&pid);
                 if let Some(mut child) = reclaimed {
-                    let still_running = matches!(child.try_wait(), Ok(None));
-                    if still_running {
-                        children.lock().insert(pid, child);
+                    match child.try_wait() {
+                        Ok(Some(_)) => {
+                            // Parent is gone; descendants may still hold the same containment
+                            // boundary. Best-effort tree teardown prevents crash orphans.
+                            let _ = sandbox_provider.terminate_tree(pid);
+                        }
+                        Ok(None) | Err(_) => {
+                            children.lock().insert(pid, child);
+                        }
                     }
                 }
             }
@@ -703,28 +710,37 @@ impl ProcSpawner for CommandSpawner {
     /// 活进程）未验证**：验证它必须真的起一个进程，而本仓测试明确不起真进程
     /// （见模块头注释）。这是诚实标注的未验证部分，不是遗漏。
     fn kill(&self, pid: u32) -> ProcResult<KillOutcome> {
-        let mut children = self.children.lock();
-        let Some(mut child) = children.remove(&pid) else {
-            // 不在跟踪表里：本启动器起过的进程要么已被 `kill` 回收、要么
-            // `is_alive` 已观测到退出并把它移走。两种情况下都不存在"本启动器
-            // 还在跑的进程"，因此目标已达成，如实报 `AlreadyGone`。
+        let Some(mut child) = self.children.lock().remove(&pid) else {
             return Ok(KillOutcome::AlreadyGone);
         };
+
+        match self.sandbox_provider.terminate_tree(pid) {
+            Ok(true) => {
+                let _ = child.wait();
+                return Ok(KillOutcome::Terminated);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                // A failed containment teardown may have left the child running. Preserve the
+                // tracked handle so a later recovery attempt can retry instead of orphaning it.
+                self.children.lock().insert(pid, child);
+                return Err(error);
+            }
+        }
+
         match child.kill() {
             Ok(()) => {
-                // 必须 `wait`：Unix 上不 wait 会留下僵尸；Windows 上不 wait 会泄漏句柄。
                 let _ = child.wait();
                 Ok(KillOutcome::Terminated)
             }
             Err(e) => match child.try_wait() {
-                // `kill` 对**已自行退出**的子进程会报错。若 `try_wait` 能确认它
-                // 已经退出（并顺手回收），就按 `AlreadyGone` 如实上报，而不是
-                // 谎报成终止失败。
                 Ok(Some(_)) => Ok(KillOutcome::AlreadyGone),
-                // 仍在跑（权限不足等）或状态不明：**不得**谎报成功。
-                _ => Err(ProcError::ProcessTerminated(format!(
-                    "终止 pid {pid} 失败：{e}（进程可能仍在运行）"
-                ))),
+                _ => {
+                    self.children.lock().insert(pid, child);
+                    Err(ProcError::ProcessTerminated(format!(
+                        "终止 pid {pid} 失败：{e}（进程可能仍在运行，已保留跟踪句柄）"
+                    )))
+                }
             },
         }
     }
@@ -776,6 +792,18 @@ impl ProcSpawner for CommandSpawner {
     }
 }
 
+impl Drop for CommandSpawner {
+    fn drop(&mut self) {
+        // Final owner teardown must not abandon still-tracked sidecars. Reader threads only keep
+        // the internal tables alive, not another CommandSpawner, so every remaining pid is driven
+        // through the same tree-aware kill path.
+        let pids: Vec<u32> = self.children.lock().keys().copied().collect();
+        for pid in pids {
+            let _ = ProcSpawner::kill(self, pid);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -816,6 +844,44 @@ mod tests {
             self.configured.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(ProcError::InvalidSpawnConfig("sandbox rejected before exec".into()))
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_default_provider_reports_partial_real_process_tree_containment() {
+        let spawner = CommandSpawner::new();
+        let descriptor = spawner.sandbox_descriptor();
+        assert_eq!(descriptor.enforcement, ProcessSandboxEnforcement::Partial);
+        assert!(descriptor.process_tree_containment);
+        assert!(!descriptor.filesystem_isolation);
+        assert!(!descriptor.network_isolation);
+        assert!(!descriptor.syscall_isolation);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_process_group_is_real_and_tree_kill_removes_the_group() {
+        let spawner = CommandSpawner::new();
+        let mut cfg = cfg_with_path("/bin/sh");
+        cfg.args = vec!["-c".into(), "sleep 30 & wait".into()];
+        let spawned = spawner.spawn(&cfg).expect("spawn real process-group fixture");
+
+        let pid = i32::try_from(spawned.pid).unwrap();
+        // SAFETY: getpgid only inspects the live child pid.
+        assert_eq!(unsafe { libc::getpgid(pid) }, pid, "child must lead its own process group");
+        assert_eq!(spawner.kill(spawned.pid).unwrap(), KillOutcome::Terminated);
+
+        let mut group_gone = false;
+        for _ in 0..200 {
+            // SAFETY: signal 0 performs existence/permission probing only.
+            let rc = unsafe { libc::kill(-pid, 0) };
+            if rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                group_gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(group_gone, "process group must not survive runtime teardown");
     }
 
     #[test]
