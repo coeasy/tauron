@@ -1462,8 +1462,8 @@ impl FsSink for StdFsSink {
     fn read(&self, path: &tauron_host::ScopedPath, max_bytes: u64) -> HostResult<(Vec<u8>, bool)> {
         #[cfg(unix)]
         {
-            return tauron_host::scoped_fs_read_hard(path, max_bytes)
-                .map_err(|e| scoped_fs_error("read", path, e));
+            tauron_host::scoped_fs_read_hard(path, max_bytes)
+                .map_err(|e| scoped_fs_error("read", path, e))
         }
         #[cfg(not(unix))]
         {
@@ -1485,8 +1485,8 @@ impl FsSink for StdFsSink {
     fn write(&self, path: &tauron_host::ScopedPath, bytes: &[u8]) -> HostResult<u64> {
         #[cfg(unix)]
         {
-            return tauron_host::scoped_fs_write_hard(path, bytes)
-                .map_err(|e| scoped_fs_error("write", path, e));
+            tauron_host::scoped_fs_write_hard(path, bytes)
+                .map_err(|e| scoped_fs_error("write", path, e))
         }
         #[cfg(not(unix))]
         {
