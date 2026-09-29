@@ -22,18 +22,9 @@ pub struct OrderedEventMeta {
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum OrderingError {
     #[error("duplicate sequence {sequence} for {sender}->{receiver}")]
-    Duplicate {
-        sender: String,
-        receiver: String,
-        sequence: u64,
-    },
+    Duplicate { sender: String, receiver: String, sequence: u64 },
     #[error("sequence gap for {sender}->{receiver}: expected {expected}, got {actual}")]
-    Gap {
-        sender: String,
-        receiver: String,
-        expected: u64,
-        actual: u64,
-    },
+    Gap { sender: String, receiver: String, expected: u64, actual: u64 },
     #[error("state revision regressed: previous={previous}, actual={actual}")]
     RevisionRegression { previous: u64, actual: u64 },
 }
@@ -67,10 +58,7 @@ impl OrderingTracker {
         if let Some(revision) = meta.state_revision {
             if let Some(previous) = self.latest_revision {
                 if revision < previous {
-                    return Err(OrderingError::RevisionRegression {
-                        previous,
-                        actual: revision,
-                    });
+                    return Err(OrderingError::RevisionRegression { previous, actual: revision });
                 }
             }
             self.latest_revision = Some(revision);
@@ -99,14 +87,8 @@ mod tests {
     fn per_sender_receiver_sequence_detects_gap_and_duplicate() {
         let mut tracker = OrderingTracker::default();
         tracker.observe(&event(1)).unwrap();
-        assert!(matches!(
-            tracker.observe(&event(3)),
-            Err(OrderingError::Gap { .. })
-        ));
-        assert!(matches!(
-            tracker.observe(&event(1)),
-            Err(OrderingError::Duplicate { .. })
-        ));
+        assert!(matches!(tracker.observe(&event(3)), Err(OrderingError::Gap { .. })));
+        assert!(matches!(tracker.observe(&event(1)), Err(OrderingError::Duplicate { .. })));
     }
 
     #[test]
@@ -120,10 +102,7 @@ mod tests {
         second.state_revision = Some(3);
         assert_eq!(
             tracker.observe(&second),
-            Err(OrderingError::RevisionRegression {
-                previous: 4,
-                actual: 3
-            })
+            Err(OrderingError::RevisionRegression { previous: 4, actual: 3 })
         );
     }
 }
