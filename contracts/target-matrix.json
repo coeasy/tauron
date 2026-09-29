@@ -23,7 +23,7 @@
       "coverage": "native-execution",
       "profiles": ["substrate", "ffi", "extension", "tauri-desktop"],
       "runtimes": ["process", "wasm-broker"],
-      "localHostReference": "unsupported",
+      "localHostReference": "windows-named-pipe-sid",
       "releaseArtifact": true
     },
     {

@@ -9,7 +9,7 @@
 //! Honest support boundary:
 //! - Linux: UDS + SO_PEERCRED is implemented and executed in required CI.
 //! - macOS: UDS + getpeereid is implemented and executed on arm64 + Intel required CI.
-//! - Windows Named Pipe/SID remains open.
+//! - Windows: owner-only Named Pipe DACL + kernel-derived impersonation token SID is implemented.
 //! - Remote transport is out of scope; A108 remote chaos remains open until a real Remote Host
 //!   transport exists.
 
@@ -327,10 +327,420 @@ mod unix {
     }
 }
 
+
+#[cfg(target_os = "windows")]
+mod windows {
+    use std::ffi::c_void;
+    use std::mem::{size_of, zeroed};
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+    use std::ptr::{null, null_mut};
+
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, LocalFree, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE,
+        HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, RevertToSelf, SecurityImpersonation, TokenUser, PSECURITY_DESCRIPTOR,
+        SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE,
+        OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+    };
+    use windows_sys::Win32::System::Pipes::{
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, ImpersonateNamedPipeClient,
+        WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
+    };
+
+    use crate::{
+        peer_proof, LocalHostBroker, LocalHostBrokerError, PeerChallenge, PeerCredentialEvidence,
+        DEFAULT_MAX_WIRE_BYTES,
+    };
+
+    use super::{reference_wire_roundtrip, LocalHostReferenceError, REFERENCE_CONTROL_MAX_BYTES};
+
+    const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
+    const PIPE_CONNECT_TIMEOUT_MS: u32 = 5_000;
+
+    fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
+        value.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    fn wide_str(value: &str) -> Vec<u16> {
+        wide(std::ffi::OsStr::new(value))
+    }
+
+    struct OwnedHandle(HANDLE);
+
+    impl OwnedHandle {
+        fn new(handle: HANDLE) -> Result<Self, LocalHostReferenceError> {
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                Err(std::io::Error::last_os_error().into())
+            } else {
+                Ok(Self(handle))
+            }
+        }
+
+        fn raw(&self) -> HANDLE {
+            self.0
+        }
+    }
+
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
+                // SAFETY: this wrapper uniquely owns one valid Win32 handle.
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    struct LocalAllocation(*mut c_void);
+
+    impl Drop for LocalAllocation {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: SDDL/SID conversion APIs allocate these buffers for LocalFree.
+                unsafe {
+                    LocalFree(self.0);
+                }
+            }
+        }
+    }
+
+    struct RevertImpersonation;
+
+    impl Drop for RevertImpersonation {
+        fn drop(&mut self) {
+            // SAFETY: RevertToSelf has no pointer preconditions and is idempotent for our use.
+            unsafe {
+                RevertToSelf();
+            }
+        }
+    }
+
+    fn token_sid_string(token: HANDLE) -> Result<String, LocalHostReferenceError> {
+        let mut needed = 0u32;
+        // SAFETY: first call deliberately supplies no output buffer to obtain required length.
+        unsafe {
+            GetTokenInformation(token, TokenUser, null_mut(), 0, &mut needed);
+        }
+        if needed == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+
+        let mut buffer = vec![0u8; needed as usize];
+        // SAFETY: buffer has the size reported by GetTokenInformation and lives through parsing.
+        let ok = unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast::<c_void>(),
+                needed,
+                &mut needed,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+
+        // SAFETY: successful TokenUser output begins with a TOKEN_USER whose SID points into
+        // the same live buffer.
+        let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+        let mut text = null_mut();
+        // SAFETY: User.Sid is valid while buffer is alive; Windows allocates text for LocalFree.
+        if unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) } == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let _text_guard = LocalAllocation(text.cast::<c_void>());
+        let mut len = 0usize;
+        // SAFETY: ConvertSidToStringSidW returned a NUL-terminated UTF-16 string.
+        unsafe {
+            while *text.add(len) != 0 {
+                len += 1;
+            }
+        }
+        // SAFETY: text points to len initialized UTF-16 code units.
+        let slice = unsafe { std::slice::from_raw_parts(text, len) };
+        Ok(String::from_utf16_lossy(slice))
+    }
+
+    fn current_process_sid() -> Result<String, LocalHostReferenceError> {
+        let mut token = null_mut();
+        // SAFETY: pseudo process handle is valid and token receives an owned kernel handle.
+        let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        token_sid_string(OwnedHandle::new(token)?.raw())
+    }
+
+    fn peer_sid(pipe: HANDLE) -> Result<String, LocalHostReferenceError> {
+        // SAFETY: pipe is a connected server-side named-pipe handle.
+        if unsafe { ImpersonateNamedPipeClient(pipe) } == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let _revert = RevertImpersonation;
+        let mut token = null_mut();
+        // OpenAsSelf=FALSE means the client impersonation context is queried.
+        // SAFETY: current thread is impersonating the connected client.
+        let ok =
+            unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 0, &mut token) };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        token_sid_string(OwnedHandle::new(token)?.raw())
+    }
+
+    fn security_descriptor_for_current_user(
+    ) -> Result<(SECURITY_ATTRIBUTES, LocalAllocation), LocalHostReferenceError> {
+        let sid = current_process_sid()?;
+        // Protected DACL with one ACE: Generic-All for this exact user SID only.
+        let sddl = wide_str(&format!("D:P(A;;GA;;;{sid})"));
+        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+        // SAFETY: sddl is a valid NUL-terminated SDDL string; descriptor is an out pointer.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                null_mut(),
+            )
+        };
+        if ok == 0 || descriptor.is_null() {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let allocation = LocalAllocation(descriptor.cast::<c_void>());
+        let attrs = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        Ok((attrs, allocation))
+    }
+
+    fn read_exact(handle: HANDLE, mut out: &mut [u8]) -> Result<(), LocalHostReferenceError> {
+        while !out.is_empty() {
+            let mut read = 0u32;
+            let chunk = out.len().min(u32::MAX as usize) as u32;
+            // SAFETY: out points to chunk writable bytes; synchronous I/O uses null OVERLAPPED.
+            let ok = unsafe {
+                ReadFile(handle, out.as_mut_ptr(), chunk, &mut read, null_mut())
+            };
+            if ok == 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            if read == 0 {
+                return Err(LocalHostReferenceError::Protocol(
+                    "named pipe closed before packet completed".into(),
+                ));
+            }
+            out = &mut out[read as usize..];
+        }
+        Ok(())
+    }
+
+    fn write_all(handle: HANDLE, mut bytes: &[u8]) -> Result<(), LocalHostReferenceError> {
+        while !bytes.is_empty() {
+            let mut written = 0u32;
+            let chunk = bytes.len().min(u32::MAX as usize) as u32;
+            // SAFETY: bytes points to chunk readable bytes; synchronous I/O uses null OVERLAPPED.
+            let ok =
+                unsafe { WriteFile(handle, bytes.as_ptr(), chunk, &mut written, null_mut()) };
+            if ok == 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            if written == 0 {
+                return Err(LocalHostReferenceError::Protocol(
+                    "named pipe accepted zero bytes".into(),
+                ));
+            }
+            bytes = &bytes[written as usize..];
+        }
+        Ok(())
+    }
+
+    fn write_packet(
+        handle: HANDLE,
+        bytes: &[u8],
+        max_bytes: usize,
+    ) -> Result<(), LocalHostReferenceError> {
+        if bytes.len() > max_bytes || bytes.len() > u32::MAX as usize {
+            return Err(LocalHostReferenceError::Protocol(format!(
+                "packet too large: {} > {}",
+                bytes.len(),
+                max_bytes
+            )));
+        }
+        write_all(handle, &(bytes.len() as u32).to_be_bytes())?;
+        write_all(handle, bytes)
+    }
+
+    fn read_packet(
+        handle: HANDLE,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, LocalHostReferenceError> {
+        let mut len = [0u8; 4];
+        read_exact(handle, &mut len)?;
+        let len = u32::from_be_bytes(len) as usize;
+        if len > max_bytes {
+            return Err(LocalHostReferenceError::Protocol(format!(
+                "packet length {len} exceeds limit {max_bytes}"
+            )));
+        }
+        let mut bytes = vec![0u8; len];
+        read_exact(handle, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub struct WindowsPipeListener {
+        handle: OwnedHandle,
+    }
+
+    // HANDLE ownership may move to the one server thread; access remains single-threaded.
+    unsafe impl Send for WindowsPipeListener {}
+
+    /// Create one first-instance named pipe with a protected DACL for the current user.
+    pub fn bind_endpoint(path: &Path) -> Result<WindowsPipeListener, LocalHostReferenceError> {
+        let name = wide(path.as_os_str());
+        let (mut attrs, _descriptor) = security_descriptor_for_current_user()?;
+        // SAFETY: name/SECURITY_ATTRIBUTES remain alive for this synchronous create call.
+        let handle = unsafe {
+            CreateNamedPipeW(
+                name.as_ptr(),
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                PIPE_BUFFER_BYTES,
+                PIPE_BUFFER_BYTES,
+                PIPE_CONNECT_TIMEOUT_MS,
+                &mut attrs,
+            )
+        };
+        Ok(WindowsPipeListener { handle: OwnedHandle::new(handle)? })
+    }
+
+    pub fn current_client_subject() -> String {
+        current_process_sid()
+            .map(|sid| format!("windows:sid={sid}"))
+            .unwrap_or_else(|_| "windows:sid=unavailable".to_string())
+    }
+
+    fn peer_evidence(
+        handle: HANDLE,
+    ) -> Result<PeerCredentialEvidence, LocalHostReferenceError> {
+        let peer = peer_sid(handle)?;
+        let owner = current_process_sid()?;
+        Ok(PeerCredentialEvidence {
+            platform_subject: format!("windows:sid={peer}"),
+            endpoint_owner_verified: peer.eq_ignore_ascii_case(&owner),
+        })
+    }
+
+    pub fn serve_one(
+        listener: &WindowsPipeListener,
+        broker: &mut LocalHostBroker,
+    ) -> Result<(), LocalHostReferenceError> {
+        // SAFETY: listener owns a valid named-pipe server handle.
+        let connected = unsafe { ConnectNamedPipe(listener.handle.raw(), null_mut()) };
+        if connected == 0 {
+            // A client can connect between CreateNamedPipe and ConnectNamedPipe.
+            if unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
+                return Err(std::io::Error::last_os_error().into());
+            }
+        }
+
+        let handle = listener.handle.raw();
+        let result = (|| {
+            let evidence = peer_evidence(handle)?;
+            let challenge = broker.challenge(&evidence)?;
+            let challenge_json = serde_json::to_vec(&challenge)
+                .map_err(|e| LocalHostReferenceError::Protocol(e.to_string()))?;
+            write_packet(handle, &challenge_json, REFERENCE_CONTROL_MAX_BYTES)?;
+
+            let proof = read_packet(handle, REFERENCE_CONTROL_MAX_BYTES)?;
+            let peer = broker.verify(&evidence, &challenge.challenge_id, &proof)?;
+            let active_generation =
+                broker.active_lease().ok_or(LocalHostBrokerError::NoOwner)?.generation;
+            if peer.owner_generation != active_generation {
+                return Err(LocalHostReferenceError::Protocol(
+                    "authenticated peer generation became stale".into(),
+                ));
+            }
+            write_packet(handle, b"ok", REFERENCE_CONTROL_MAX_BYTES)?;
+
+            let request = read_packet(handle, DEFAULT_MAX_WIRE_BYTES)?;
+            let response = reference_wire_roundtrip(&request)?;
+            write_packet(handle, &response, DEFAULT_MAX_WIRE_BYTES)
+        })();
+
+        // SAFETY: handle is the connected server pipe; disconnection does not close the handle.
+        unsafe {
+            DisconnectNamedPipe(handle);
+        }
+        result
+    }
+
+    pub fn client_roundtrip(
+        path: &Path,
+        bootstrap_secret: &[u8],
+        request: &[u8],
+    ) -> Result<Vec<u8>, LocalHostReferenceError> {
+        let name = wide(path.as_os_str());
+        // SAFETY: name is a valid NUL-terminated named-pipe path.
+        if unsafe { WaitNamedPipeW(name.as_ptr(), PIPE_CONNECT_TIMEOUT_MS) } == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: arguments describe synchronous read/write access to the existing named pipe.
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                null_mut(),
+            )
+        };
+        let handle = OwnedHandle::new(handle)?;
+
+        let challenge_json = read_packet(handle.raw(), REFERENCE_CONTROL_MAX_BYTES)?;
+        let challenge: PeerChallenge = serde_json::from_slice(&challenge_json)
+            .map_err(|e| LocalHostReferenceError::Protocol(e.to_string()))?;
+        let subject = current_client_subject();
+        let proof =
+            peer_proof(bootstrap_secret, &subject, &challenge.nonce, challenge.owner_generation);
+        write_packet(handle.raw(), &proof, REFERENCE_CONTROL_MAX_BYTES)?;
+        let ack = read_packet(handle.raw(), REFERENCE_CONTROL_MAX_BYTES)?;
+        if ack != b"ok" {
+            return Err(LocalHostReferenceError::Protocol(
+                "authentication was not acknowledged".into(),
+            ));
+        }
+
+        write_packet(handle.raw(), request, DEFAULT_MAX_WIRE_BYTES)?;
+        read_packet(handle.raw(), DEFAULT_MAX_WIRE_BYTES)
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use unix::{bind_endpoint, client_roundtrip, current_client_subject, peer_evidence, serve_one};
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+pub use windows::{bind_endpoint, client_roundtrip, current_client_subject, serve_one, WindowsPipeListener};
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub fn current_client_subject() -> String {
     "unsupported-platform".to_string()
 }

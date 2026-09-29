@@ -3520,6 +3520,7 @@ dependencies = [
  "thiserror 2.0.20",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
