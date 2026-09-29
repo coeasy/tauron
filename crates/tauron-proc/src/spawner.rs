@@ -192,9 +192,7 @@ impl ProcessSandboxProvider for UnixProcessGroupSandboxProvider {
         if error.raw_os_error() == Some(libc::ESRCH) {
             return Ok(false);
         }
-        Err(ProcError::ProcessTerminated(format!(
-            "terminate process group {pgid} failed: {error}"
-        )))
+        Err(ProcError::ProcessTerminated(format!("terminate process group {pgid} failed: {error}")))
     }
 }
 
@@ -501,7 +499,9 @@ impl CommandSpawner {
 
     /// Inject an OS-specific V4 A97 sandbox provider.
     pub fn with_sandbox_provider(provider: Arc<dyn ProcessSandboxProvider>) -> Self {
-        Self { sandbox_provider: provider, ..Self::default() }
+        let mut spawner = Self::default();
+        spawner.sandbox_provider = provider;
+        spawner
     }
 
     pub fn sandbox_descriptor(&self) -> ProcessSandboxDescriptor {
