@@ -14,6 +14,24 @@ export { runCli, type CliResult } from './cli.js';
 // ---- Doctor ----
 export { runDoctor, formatDoctorReport, type DoctorReport, type DoctorCheck } from './doctor.js';
 
+// ---- V4 Host Conformance ----
+export {
+  HOST_CONFORMANCE_SCENARIOS,
+  formatHostConformanceReport,
+  loadHostConformanceAdapter,
+  runHostConformance,
+} from './conformance.js';
+export type {
+  ConformanceCheck,
+  HostCapabilitySnapshot,
+  HostConformanceAdapter,
+  HostConformanceMetadata,
+  HostConformanceReport,
+  HostConformanceScenario,
+  HostResourceSnapshot,
+  HostScenarioEvidence,
+} from './conformance.js';
+
 // ---- Scaffold ----
 export { createApp, type AppScaffoldResult } from './scaffold.js';
 
