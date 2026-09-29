@@ -104,9 +104,10 @@ pub use production::{
 };
 pub use provider::{CapabilityEpoch, ProviderLifecycle, ProviderLifecycleError, ProviderState};
 pub use scoped_fs::{
+    list_hard as scoped_fs_list_hard, mkdir_hard as scoped_fs_mkdir_hard,
     platform_enforcement as scoped_fs_enforcement, read_hard as scoped_fs_read_hard,
-    stat_hard as scoped_fs_stat_hard, write_hard as scoped_fs_write_hard, FsEnforcement,
-    ScopedFsError, ScopedPath,
+    remove_hard as scoped_fs_remove_hard, stat_hard as scoped_fs_stat_hard,
+    write_hard as scoped_fs_write_hard, FsEnforcement, ScopedDirEntry, ScopedFsError, ScopedPath,
 };
 pub use service_graph::{ServiceGraph, ServiceGraphError, ServiceNode};
 pub use storage::{SingleWriterLease, StorageNamespace, WriterLeaseError, WriterLeaseTable};
