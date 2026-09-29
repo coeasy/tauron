@@ -87,8 +87,9 @@ pub use ordering::{OrderedEventMeta, OrderingError, OrderingTracker};
 pub use policy::{DecisionError, DecisionToken, PolicyAuthority};
 pub use portable_path::{join_scoped, validate_portable_relative, PortablePathError};
 pub use production::{
-    is_production_safe, validate as validate_production_readiness, DeploymentMode,
-    ProductionReadiness, ReadinessViolation,
+    doctor as production_doctor, is_production_safe, validate as validate_production_readiness,
+    DeploymentMode, ProductionDoctorCheck, ProductionDoctorReport, ProductionReadiness,
+    ReadinessViolation,
 };
 pub use provider::{CapabilityEpoch, ProviderLifecycle, ProviderLifecycleError, ProviderState};
 pub use service_graph::{ServiceGraph, ServiceGraphError, ServiceNode};
