@@ -145,6 +145,13 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror             -fsanitize=address -fno-omit-frame-pointer             -I crates/tauron-ffi/include             crates/tauron-ffi/conformance/c/ffi_ownership_asan.c             -L target/debug             -Wl,-rpath,"$PWD/target/debug"             -ltauron_ffi             -o /tmp/tauron-ffi-asan
           LD_LIBRARY_PATH="$PWD/target/debug${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"             ASAN_OPTIONS=detect_leaks=1:halt_on_error=1             /tmp/tauron-ffi-asan
 
+      - name: Local Host UDS reference E2E（V4 A106）
+        if: runner.os == 'Linux'
+        run: cargo run -p tauron-host --example local_host_reference --locked
+
+      - name: Local Host broker chaos / peer-auth（V4 A108 local）
+        run: cargo test -p tauron-host --test v4_local_host_chaos --locked
+
       # 抓「只在某个 target 下才编译到的死代码 / 未用导入」。
       # 本仓库的历史缺陷类型之一是「有类型、有接口、有测试、没有入口」，
       # 编译全 target 是第一道筛子。

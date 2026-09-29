@@ -1,32 +1,59 @@
-//! Non-Tauri Local Host reference application (V4 A106).
+//! V4 A106 non-Tauri Local Host reference application.
 //!
-//! This deliberately depends only on tauron-host. Platform-specific endpoint creation and
-//! peer-credential collection live in adapters; the universal broker/authentication contract
-//! remains reusable by Electron/Qt/.NET/headless service bridges.
+//! Linux executes a real owner-only UDS + SO_PEERCRED + Broker HMAC + Universal Wire exchange.
+//! Other platforms compile honestly but do not claim an endpoint implementation yet.
 
-use tauron_host::{peer_proof, LocalHostBroker, PeerCredentialEvidence};
-
+#[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // In a real adapter this secret is created once and exposed only through the protected
-    // per-user endpoint bootstrap channel, never through an untrusted client payload.
-    let secret = b"reference-only-bootstrap-secret";
-    let mut broker = LocalHostBroker::new(secret.as_slice());
+    use std::fs;
+    use std::thread;
 
-    let lease = broker.acquire("reference-host", "local-reference-endpoint")?;
-    let peer = PeerCredentialEvidence {
-        platform_subject: "reference-user".to_string(),
-        endpoint_owner_verified: true,
+    use tauron_host::local_host_reference::{bind_endpoint, client_roundtrip, serve_one};
+    use tauron_host::{
+        decode_wire_json, encode_wire_json, LocalHostBroker, WireFrame, DEFAULT_MAX_WIRE_BYTES,
     };
 
-    let challenge = broker.challenge(&peer)?;
-    let proof =
-        peer_proof(secret, &peer.platform_subject, &challenge.nonce, challenge.owner_generation);
-    let authenticated = broker.verify(&peer, &challenge.challenge_id, &proof)?;
+    let root =
+        std::env::temp_dir().join(format!("tauron-local-host-reference-{}", std::process::id()));
+    let socket = root.join("tauron.sock");
+    if root.exists() {
+        fs::remove_dir_all(&root)?;
+    }
+    let listener = bind_endpoint(&socket)?;
+    let secret = b"tauron-a106-reference-secret".to_vec();
+    let server_secret = secret.clone();
 
-    assert_eq!(authenticated.owner_generation, lease.generation);
-    assert_eq!(authenticated.platform_subject, peer.platform_subject);
-    broker.release(&lease)?;
+    let server = thread::spawn(move || {
+        let mut broker = LocalHostBroker::new(server_secret);
+        broker.acquire("a106-reference-host", "linux-uds")?;
+        serve_one(&listener, &mut broker)
+    });
 
-    println!("local-host-reference: authenticated and cleanly released");
+    let request = encode_wire_json(
+        &WireFrame::new(
+            "a106.reference.ping/1",
+            1,
+            serde_json::json!({"consumer":"non-tauri-local-host"}),
+        ),
+        DEFAULT_MAX_WIRE_BYTES,
+    )?;
+    let response = client_roundtrip(&socket, &secret, &request)?;
+    let decoded: WireFrame<serde_json::Value> =
+        decode_wire_json(&response, DEFAULT_MAX_WIRE_BYTES)?;
+    if decoded.header.schema != "a106.reference.ping/1" {
+        return Err("reference wire schema drift".into());
+    }
+
+    server.join().map_err(|_| "reference server thread panicked")??;
+    fs::remove_file(&socket)?;
+    fs::remove_dir(&root)?;
+    println!("A106 Local Host reference E2E OK: UDS + SO_PEERCRED + peer proof + Universal Wire");
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!(
+        "A106 reference endpoint is currently implemented on Linux only;          this platform remains explicitly unsupported rather than falling back insecurely."
+    );
 }

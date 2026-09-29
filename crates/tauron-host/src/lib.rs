@@ -28,6 +28,7 @@ pub mod generation;
 pub mod health;
 pub mod lifecycle;
 pub mod local_host;
+pub mod local_host_reference;
 pub mod manifest;
 pub mod network_policy;
 pub mod ordering;
@@ -92,6 +93,9 @@ pub use health::{Degradation, HealthReport, Liveness, Readiness};
 pub use local_host::{
     peer_proof, AuthenticatedPeer, LocalHostBroker, LocalHostBrokerError, LocalHostLease,
     PeerChallenge, PeerCredentialEvidence,
+};
+pub use local_host_reference::{
+    reference_wire_roundtrip, LocalHostReferenceError, REFERENCE_CONTROL_MAX_BYTES,
 };
 pub use network_policy::{
     is_public_ip, AuthorizedUrl, DomainRule, NetworkEnforcement, NetworkPolicy, NetworkPolicyError,
