@@ -201,6 +201,10 @@ impl AdapterConfig {
             install_trust_configured,
             audit_for_admin_operations_available: self.admin_audit_available,
             writable_data_dir_available: self.recovery_data_dir.is_some(),
+            // AdapterConfig describes the substrate. The process runtime is attached later,
+            // once the concrete ProcSpawner (and therefore its sandbox descriptor) is known.
+            process_runtime_enabled: false,
+            hard_process_sandbox_available: false,
             mock_provider_enabled: self.mock_provider_enabled,
         }
     }
@@ -222,6 +226,37 @@ impl AdapterConfig {
         Err(HostError::new(
             ErrorCode::E_STATE_INVALID_TRANSITION,
             format!("production readiness rejected host startup: {detail}"),
+        ))
+    }
+
+    /// Re-run production readiness once the concrete process runtime is known.
+    ///
+    /// Substrate-only/headless hosts do not need a process sandbox. The moment a
+    /// `ProcSpawner` is attached, Production requires that exact spawner to report A97
+    /// `hard` enforcement. Development/Test keep compatibility behavior.
+    fn validate_process_runtime_for_start(
+        &self,
+        descriptor: &tauron_proc::ProcessSandboxDescriptor,
+    ) -> HostResult<()> {
+        let mut readiness = self.production_readiness();
+        readiness.process_runtime_enabled = true;
+        readiness.hard_process_sandbox_available = matches!(
+            descriptor.enforcement,
+            tauron_proc::ProcessSandboxEnforcement::Hard
+        );
+        let violations =
+            tauron_host::validate_production_readiness(self.deployment_mode, &readiness);
+        if violations.is_empty() {
+            return Ok(());
+        }
+        let detail = violations
+            .iter()
+            .map(|v| format!("{}: {}", v.code, v.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(HostError::new(
+            ErrorCode::E_STATE_INVALID_TRANSITION,
+            format!("production plugin-runtime readiness rejected startup: {detail}"),
         ))
     }
 
@@ -2664,6 +2699,11 @@ impl PluginRuntimeState {
         cfg: AdapterConfig,
         spawner: Arc<dyn ProcSpawner>,
     ) -> Self {
+        let sandbox_descriptor = spawner.sandbox_descriptor();
+        if let Err(error) = cfg.validate_process_runtime_for_start(&sandbox_descriptor) {
+            panic!("[tauron] {error}");
+        }
+
         let registry = Arc::new(Registry::new(cfg.registry.unwrap_or_default()));
         // 把租约回收接到进程执行器（P0-2 缺口一）：卸载/清除/崩溃换新都必须**真的**
         // 终止 sidecar，否则留下没人认领的孤儿进程。未注入时核心仍会摘表项，
@@ -2687,7 +2727,7 @@ impl PluginRuntimeState {
             );
         }
         let proc_runtime = Arc::new(ProcRuntime::new(spawner));
-        if substrate.process_sandbox.set(proc_runtime.sandbox_descriptor()).is_err() {
+        if substrate.process_sandbox.set(sandbox_descriptor).is_err() {
             eprintln!(
                 "[tauron] 底座已注入 process sandbox descriptor；本次插件运行时不会覆盖既有事实"
             );
@@ -4244,6 +4284,18 @@ pub fn cmd_runtime_spawn(
     profile: &RuntimeSpawnProfile,
 ) -> HostResult<RuntimeHandle> {
     guard("runtime_spawn", || {
+        if state.deployment_mode == tauron_host::DeploymentMode::Production
+            && !matches!(
+                state.proc_runtime.sandbox_descriptor().enforcement,
+                tauron_proc::ProcessSandboxEnforcement::Hard
+            )
+        {
+            return Err(HostError::new(
+                ErrorCode::E_STATE_INVALID_TRANSITION,
+                "production runtime spawn requires hard ProcessSandboxProvider enforcement",
+            ));
+        }
+
         let id = PluginId::new(plugin_id)?;
         // 条目快照在 `runtime` 锁**之外**取（锁序 `pending → streams → runtime`；
         // `entries` 不参与该链，先取完再进 runtime 域，绝不反向）。
@@ -13869,6 +13921,24 @@ mod v4_production_config_tests {
         assert!(error.message.contains("CALLER_IDENTITY_POLICY_REQUIRED"));
         assert!(error.message.contains("ADMIN_AUDIT_REQUIRED"));
         assert!(error.message.contains("DATA_DIR_REQUIRED"));
+    }
+
+    #[test]
+    fn production_process_runtime_rejects_the_default_unsupported_sandbox() {
+        let cfg =
+            AdapterConfig::default().with_deployment_mode(tauron_host::DeploymentMode::Production);
+        let descriptor = tauron_proc::ProcessSandboxDescriptor::unsupported("test");
+        let error = cfg
+            .validate_process_runtime_for_start(&descriptor)
+            .expect_err("production process runtime must require hard sandbox enforcement");
+        assert!(error.message.contains("PROCESS_SANDBOX_HARD_REQUIRED"));
+    }
+
+    #[test]
+    fn development_process_runtime_keeps_compatibility_with_unsupported_sandbox() {
+        let cfg = AdapterConfig::default();
+        let descriptor = tauron_proc::ProcessSandboxDescriptor::unsupported("test");
+        assert!(cfg.validate_process_runtime_for_start(&descriptor).is_ok());
     }
 
     #[test]

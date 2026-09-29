@@ -27,6 +27,10 @@ pub struct ProductionReadiness {
     pub install_trust_configured: bool,
     pub audit_for_admin_operations_available: bool,
     pub writable_data_dir_available: bool,
+    /// Whether this host instance actually installs the process-plugin runtime.
+    pub process_runtime_enabled: bool,
+    /// True only when the exact process runtime uses an A97 hard sandbox provider.
+    pub hard_process_sandbox_available: bool,
     pub mock_provider_enabled: bool,
 }
 
@@ -94,6 +98,12 @@ pub fn doctor(mode: DeploymentMode, input: &ProductionReadiness) -> ProductionDo
             message: "durable writable data directory is available",
         },
         ProductionDoctorCheck {
+            id: "process-sandbox",
+            pass: !input.process_runtime_enabled || input.hard_process_sandbox_available,
+            required_in_production: true,
+            message: "process runtime uses a hard OS sandbox when process plugins are enabled",
+        },
+        ProductionDoctorCheck {
             id: "no-mock-provider",
             pass: !input.mock_provider_enabled,
             required_in_production: true,
@@ -145,6 +155,12 @@ pub fn validate(mode: DeploymentMode, input: &ProductionReadiness) -> Vec<Readin
             message: "production requires a writable durable data directory",
         });
     }
+    if input.process_runtime_enabled && !input.hard_process_sandbox_available {
+        out.push(ReadinessViolation {
+            code: "PROCESS_SANDBOX_HARD_REQUIRED",
+            message: "production process runtime requires a hard ProcessSandboxProvider",
+        });
+    }
     if input.mock_provider_enabled {
         out.push(ReadinessViolation {
             code: "MOCK_PROVIDER_FORBIDDEN",
@@ -172,6 +188,8 @@ mod tests {
             install_trust_configured: true,
             audit_for_admin_operations_available: true,
             writable_data_dir_available: true,
+            process_runtime_enabled: true,
+            hard_process_sandbox_available: true,
             mock_provider_enabled: false,
         }
     }
@@ -191,6 +209,22 @@ mod tests {
         assert!(codes.contains(&"RECOVERY_DURABILITY_REQUIRED"));
         assert!(codes.contains(&"ADMIN_AUDIT_REQUIRED"));
         assert!(codes.contains(&"DATA_DIR_REQUIRED"));
+    }
+
+    #[test]
+    fn production_requires_hard_process_sandbox_only_when_process_runtime_is_enabled() {
+        let mut input = ready();
+        input.hard_process_sandbox_available = false;
+        let violations = validate(DeploymentMode::Production, &input);
+        assert!(violations.iter().any(|v| v.code == "PROCESS_SANDBOX_HARD_REQUIRED"));
+
+        input.process_runtime_enabled = false;
+        assert!(
+            validate(DeploymentMode::Production, &input)
+                .iter()
+                .all(|v| v.code != "PROCESS_SANDBOX_HARD_REQUIRED"),
+            "headless/substrate-only production must not require a process sandbox it does not use"
+        );
     }
 
     #[test]
