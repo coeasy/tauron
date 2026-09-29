@@ -245,13 +245,30 @@ jobs:
       - name: npm and crates.io versions must already exist
         run: node scripts/check-published-versions.mjs "${GITHUB_REF_NAME#v}"
 
+  release-evidence:
+    name: 生成 V4 Release Evidence
+    needs: version-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.23.2
+      - name: 生成版本/工具链/Target 证据
+        run: node scripts/generate-release-evidence.mjs --out=release-evidence
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-evidence
+          path: release-evidence/**
+          if-no-files-found: error
+
   # ══════════════════════════════════════════════════════════════════
   # 汇总发布：单点创建 Release，避免 4 个 matrix 分支并发写同一个
   # Release 造成的竞态。
   # ══════════════════════════════════════════════════════════════════
   release:
     name: 创建 GitHub Release
-    needs: [build, registry-check]
+    needs: [build, registry-check, release-evidence]
     if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.dry_run == false)
     runs-on: ubuntu-latest
     permissions:
@@ -356,3 +373,5 @@ jobs:
             artifacts/**/*.deb
             artifacts/**/*.rpm
             artifacts/**/*.AppImage
+            artifacts/**/tauron-release-evidence.json
+            artifacts/**/tauron-release-evidence.md
