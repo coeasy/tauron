@@ -94,7 +94,11 @@ impl LocalHostBroker {
         self.active.as_ref()
     }
 
-    pub fn acquire(&mut self, owner_id: &str, endpoint_id: &str) -> Result<LocalHostLease, LocalHostBrokerError> {
+    pub fn acquire(
+        &mut self,
+        owner_id: &str,
+        endpoint_id: &str,
+    ) -> Result<LocalHostLease, LocalHostBrokerError> {
         if let Some(active) = &self.active {
             return Err(LocalHostBrokerError::Busy { owner_id: active.owner_id.clone() });
         }
@@ -154,11 +158,7 @@ impl LocalHostBroker {
         if !evidence.endpoint_owner_verified || evidence.platform_subject.trim().is_empty() {
             return Err(LocalHostBrokerError::PeerCredentialRejected);
         }
-        let generation = self
-            .active
-            .as_ref()
-            .ok_or(LocalHostBrokerError::NoOwner)?
-            .generation;
+        let generation = self.active.as_ref().ok_or(LocalHostBrokerError::NoOwner)?.generation;
 
         while self.challenge_order.len() >= MAX_PENDING_CHALLENGES {
             if let Some(oldest) = self.challenge_order.pop_front() {
@@ -195,16 +195,16 @@ impl LocalHostBroker {
             .ok_or(LocalHostBrokerError::ChallengeUnavailable)?;
         self.challenge_order.retain(|id| id != challenge_id);
 
-        let active_generation = self
-            .active
-            .as_ref()
-            .ok_or(LocalHostBrokerError::NoOwner)?
-            .generation;
-        if record.generation != active_generation || record.peer_subject != evidence.platform_subject {
+        let active_generation =
+            self.active.as_ref().ok_or(LocalHostBrokerError::NoOwner)?.generation;
+        if record.generation != active_generation
+            || record.peer_subject != evidence.platform_subject
+        {
             return Err(LocalHostBrokerError::StaleLease);
         }
 
-        let mut mac = HmacSha256::new_from_slice(&self.secret).expect("HMAC accepts any key length");
+        let mut mac =
+            HmacSha256::new_from_slice(&self.secret).expect("HMAC accepts any key length");
         mac.update(&proof_message(&record.peer_subject, &record.nonce, record.generation));
         if mac.verify_slice(proof).is_err() {
             return Err(LocalHostBrokerError::InvalidProof);
@@ -274,7 +274,8 @@ mod tests {
         broker.acquire("host-1", "endpoint").unwrap();
         let ev = evidence("sid:user-a");
         let challenge = broker.challenge(&ev).unwrap();
-        let bad = peer_proof(b"other-secret", "sid:user-a", &challenge.nonce, challenge.owner_generation);
+        let bad =
+            peer_proof(b"other-secret", "sid:user-a", &challenge.nonce, challenge.owner_generation);
         assert_eq!(
             broker.verify(&ev, &challenge.challenge_id, &bad),
             Err(LocalHostBrokerError::InvalidProof)
