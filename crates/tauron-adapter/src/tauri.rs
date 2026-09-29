@@ -392,7 +392,10 @@ pub struct HostStreamWriteReq {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HostStreamGrantReq { pub stream_id: String, pub bytes: usize }
+pub struct HostStreamGrantReq {
+    pub stream_id: String,
+    pub bytes: usize,
+}
 
 /// `host_stream_close` 线格式：`{ req: { streamId, kind } }`。
 #[derive(Debug, Deserialize)]
@@ -426,7 +429,11 @@ pub fn wire_stream_write(
     )
 }
 
-pub fn wire_stream_grant(state: &CommandState, subscriber: &str, req: &HostStreamGrantReq) -> HostResult<crate::StreamCredit> {
+pub fn wire_stream_grant(
+    state: &CommandState,
+    subscriber: &str,
+    req: &HostStreamGrantReq,
+) -> HostResult<crate::StreamCredit> {
     crate::cmd_stream_grant(state, subscriber, &req.stream_id, req.bytes)
 }
 
@@ -727,7 +734,11 @@ pub fn host_stream_write(
 }
 
 #[tauri::command]
-pub fn host_stream_grant(state: State<'_, PluginRuntimeState>, window: TauriCallerSource, req: HostStreamGrantReq) -> Result<crate::StreamCredit, TauriError> {
+pub fn host_stream_grant(
+    state: State<'_, PluginRuntimeState>,
+    window: TauriCallerSource,
+    req: HostStreamGrantReq,
+) -> Result<crate::StreamCredit, TauriError> {
     let subscriber = subscriber_of(window.label()).map_err(to_tauri_err)?;
     wire_stream_grant(&state, &subscriber, &req).map_err(to_tauri_err)
 }

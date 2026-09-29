@@ -4104,7 +4104,12 @@ pub struct StreamCredit {
     pub credit_bytes: usize,
 }
 
-pub fn cmd_stream_grant(state: &PluginRuntimeState, subscriber: &str, stream_id: &str, bytes: usize) -> HostResult<StreamCredit> {
+pub fn cmd_stream_grant(
+    state: &PluginRuntimeState,
+    subscriber: &str,
+    stream_id: &str,
+    bytes: usize,
+) -> HostResult<StreamCredit> {
     guard("stream_grant", || {
         let credit_bytes = state.registry.stream_grant(stream_id, subscriber, bytes)?;
         Ok(StreamCredit { stream_id: stream_id.to_string(), credit_bytes })

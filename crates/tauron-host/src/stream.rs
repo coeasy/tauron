@@ -231,7 +231,8 @@ impl StreamRegistry {
                 format!("流 `{stream_id}` 属于插件 `{}`", handle.subscriber),
             ));
         }
-        handle.credit_bytes = handle.credit_bytes.saturating_add(bytes).min(MAX_STREAM_CREDIT_BYTES);
+        handle.credit_bytes =
+            handle.credit_bytes.saturating_add(bytes).min(MAX_STREAM_CREDIT_BYTES);
         Ok(handle.credit_bytes)
     }
 
@@ -275,10 +276,8 @@ impl StreamRegistry {
         args_raw: Option<Vec<u8>>,
     ) -> HostResult<StreamFrame> {
         let frame_bytes = if kind == StreamKind::Data {
-            let json_bytes = args_json
-                .as_ref()
-                .and_then(|v| serde_json::to_vec(v).ok())
-                .map_or(0, |v| v.len());
+            let json_bytes =
+                args_json.as_ref().and_then(|v| serde_json::to_vec(v).ok()).map_or(0, |v| v.len());
             STREAM_FRAME_OVERHEAD_BYTES
                 .saturating_add(json_bytes)
                 .saturating_add(args_raw.as_ref().map_or(0, Vec::len))
@@ -309,10 +308,15 @@ impl StreamRegistry {
             if frame_bytes > handle.credit_bytes {
                 return Err(HostError::new(
                     ErrorCode::E_STREAM_BACKPRESSURE,
-                    format!("流 `{stream_id}` credit 不足：需要 {frame_bytes} bytes，剩余 {} bytes", handle.credit_bytes),
+                    format!(
+                        "流 `{stream_id}` credit 不足：需要 {frame_bytes} bytes，剩余 {} bytes",
+                        handle.credit_bytes
+                    ),
                 ));
             }
-            if kind == StreamKind::Data { handle.credit_bytes -= frame_bytes; }
+            if kind == StreamKind::Data {
+                handle.credit_bytes -= frame_bytes;
+            }
             // seq 先占位再派发：载体失败不回滚（见模块文档）。
             handle.seq += 1;
             (handle.sink.clone(), handle.seq, kind.is_terminal())
@@ -503,7 +507,10 @@ mod tests {
         let err = reg.write(&id, "p1", None, Some(too_large)).unwrap_err();
         assert_eq!(err.code, ErrorCode::E_STREAM_BACKPRESSURE);
         assert!(sink.frames().is_empty());
-        assert_eq!(reg.grant(&id, "p1", DEFAULT_STREAM_CREDIT_BYTES).unwrap(), 2 * DEFAULT_STREAM_CREDIT_BYTES);
+        assert_eq!(
+            reg.grant(&id, "p1", DEFAULT_STREAM_CREDIT_BYTES).unwrap(),
+            2 * DEFAULT_STREAM_CREDIT_BYTES
+        );
         let f = reg.write(&id, "p1", Some(serde_json::json!({"ok": true})), None).unwrap();
         assert_eq!(f.seq, 1, "rejected frame must not consume seq");
     }

@@ -948,7 +948,12 @@ impl Registry {
         self.streams.lock().open(call_id, subscriber)
     }
 
-    pub fn stream_grant(&self, stream_id: &str, subscriber: &str, bytes: usize) -> HostResult<usize> {
+    pub fn stream_grant(
+        &self,
+        stream_id: &str,
+        subscriber: &str,
+        bytes: usize,
+    ) -> HostResult<usize> {
         self.streams.lock().grant(stream_id, subscriber, bytes)
     }
 
