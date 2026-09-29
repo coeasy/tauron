@@ -204,15 +204,9 @@ impl LocalHostBroker {
             return Err(LocalHostBrokerError::StaleLease);
         }
 
-        let expected = peer_proof(
-            &self.secret,
-            &record.peer_subject,
-            &record.nonce,
-            record.generation,
-        );
         let mut mac = HmacSha256::new_from_slice(&self.secret).expect("HMAC accepts any key length");
         mac.update(&proof_message(&record.peer_subject, &record.nonce, record.generation));
-        if mac.verify_slice(proof).is_err() || proof != expected {
+        if mac.verify_slice(proof).is_err() {
             return Err(LocalHostBrokerError::InvalidProof);
         }
 
