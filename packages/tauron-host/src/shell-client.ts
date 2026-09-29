@@ -25,10 +25,19 @@ export interface HostTargetSpec {
   cpuFeatures: string[];
 }
 
+export type CapabilityEnforcementLevel = 'hard' | 'partial' | 'unsupported';
+
+export interface CapabilityEnforcement {
+  domain: string;
+  level: CapabilityEnforcementLevel;
+  detail: string;
+}
+
 export interface HostCapabilities {
   families: string[];
   commands: string[];
   unsupported: Array<{ domain: string; reason: string }>;
+  enforcement: CapabilityEnforcement[];
   pluginRuntime: boolean;
   /** Host-produced target fact; never supplied by the client. */
   target: HostTargetSpec;
