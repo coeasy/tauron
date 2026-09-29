@@ -7493,8 +7493,9 @@ mod tests {
         let full = cmd_host_capabilities(&plugin_runtime).unwrap();
         assert!(full.plugin_runtime);
         #[cfg(feature = "plugin-install")]
-        let expected =
-            SUBSTRATE_COMMANDS.len() + PLUGIN_RUNTIME_COMMANDS.len() + PLUGIN_INSTALL_COMMANDS.len();
+        let expected = SUBSTRATE_COMMANDS.len()
+            + PLUGIN_RUNTIME_COMMANDS.len()
+            + PLUGIN_INSTALL_COMMANDS.len();
         #[cfg(not(feature = "plugin-install"))]
         let expected = SUBSTRATE_COMMANDS.len() + PLUGIN_RUNTIME_COMMANDS.len();
         assert_eq!(full.commands.len(), expected);
