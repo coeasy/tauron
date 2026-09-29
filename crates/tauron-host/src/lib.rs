@@ -35,6 +35,7 @@ pub mod policy;
 pub mod portable_path;
 pub mod production;
 pub mod provider;
+pub mod scoped_fs;
 pub mod registry;
 pub mod runtime;
 pub mod service_graph;
