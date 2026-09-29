@@ -7,7 +7,11 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { HOST_ERROR_CODES, RETRYABLE_HOST_ERROR_CODES } from './errors.js';
+import {
+  HOST_ERROR_CODES,
+  HOST_RETRY_CLASS,
+  RETRYABLE_HOST_ERROR_CODES,
+} from './errors.js';
 import { CAPABILITIES } from './capabilities.js';
 import { CHANNEL_KINDS, MAX_QUEUE, OVERFLOW_STREAK_LIMIT } from './channels.js';
 import { GRANT_SET_SCHEMA_VERSION, IDENTITY_LABEL_PREFIX, RISKS } from './grants.js';
@@ -63,12 +67,27 @@ describe('门禁：错误码线与 Rust ErrorCode 完全一致', () => {
     expect([...HOST_ERROR_CODES]).toEqual(rustCodes);
   });
 
-  it('可重试集合与 Rust retryable() 一致', () => {
-    const retryLine = [...src.matchAll(/^[\s]*matches!\(self,\s*(.+)\)\s*$/gm)]
-      .map((m) => m[1]!)
-      .find((s) => s.includes('Self::'))!;
-    const rustRetryable = [...retryLine.matchAll(/Self::(E_[A-Z_]+)/g)].map((m) => m[1]!);
-    expect([...RETRYABLE_HOST_ERROR_CODES]).toEqual(rustRetryable);
+  it('V4 RetryClass 与 Rust retry_class() 一致，自动重试集合默认为空', () => {
+    const start = src.indexOf('pub const fn retry_class');
+    const end = src.indexOf('/// Legacy wire compatibility', start);
+    const retryBlock = src.slice(start, end);
+    expect(start, 'Rust retry_class() missing').toBeGreaterThan(-1);
+
+    const explicit = new Map<string, string>();
+    for (const m of retryBlock.matchAll(/Self::(E_[A-Z_]+)\s*=>\s*RetryClass::(\w+)/g)) {
+      explicit.set(
+        m[1]!,
+        m[2]!
+          .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+          .toLowerCase(),
+      );
+    }
+    for (const code of rustCodes) {
+      expect(HOST_RETRY_CLASS[code as keyof typeof HOST_RETRY_CLASS], code).toBe(
+        explicit.get(code) ?? 'never',
+      );
+    }
+    expect(RETRYABLE_HOST_ERROR_CODES).toEqual([]);
   });
 });
 
@@ -347,14 +366,13 @@ describe('门禁 §8-19：配置化插件选择加载（PluginFilter）', () => 
     expect(entriesIdx).toBeGreaterThan(filterCheckIdx);
   });
 
-  it('E_PLUGIN_FILTERED 错误码存在且标记为可重试', () => {
+  it('E_PLUGIN_FILTERED 错误码存在且属于 manual retry', () => {
     expect(error).toContain('E_PLUGIN_FILTERED');
-    // 检查 retryable() 包含 E_PLUGIN_FILTERED
-    const retryableBlock = error.slice(
-      error.indexOf('pub const fn retryable'),
-      error.indexOf('pub const fn retryable') + 300,
+    const retryClassBlock = error.slice(
+      error.indexOf('pub const fn retry_class'),
+      error.indexOf('/// Legacy wire compatibility'),
     );
-    expect(retryableBlock).toContain('E_PLUGIN_FILTERED');
+    expect(retryClassBlock).toContain('Self::E_PLUGIN_FILTERED => RetryClass::Manual');
   });
 
   it('PluginFilter 从 lib.rs 导出', () => {
