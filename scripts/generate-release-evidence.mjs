@@ -98,7 +98,7 @@ if (checkOnly) {
 mkdirSync(OUT, { recursive: true });
 writeFileSync(join(OUT, 'release-evidence.json'), JSON.stringify(evidence, null, 2) + '\n');
 writeFileSync(
-  join(OUT, 'README.md'),
+  join(OUT, 'tauron-release-evidence.md'),
   [
     '# Tauron Release Evidence',
     '',
