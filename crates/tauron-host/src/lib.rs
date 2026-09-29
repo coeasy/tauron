@@ -21,6 +21,10 @@ pub mod call_state;
 pub mod config;
 pub mod durable;
 pub mod error;
+pub mod time_trust;
+pub mod ordering;
+pub mod health;
+pub mod fault;
 pub mod eventbus;
 pub mod execution;
 pub mod generation;
@@ -60,6 +64,13 @@ pub use wire::{
 };
 
 // V4 universal/industrial foundation exports.
+pub use fault::{FaultBoundary, FaultError, FaultRecord, FaultState};
+pub use health::{Degradation, HealthReport, Liveness, Readiness};
+pub use ordering::{OrderedEventMeta, OrderingError, OrderingTracker};
+pub use time_trust::{
+    require_unexpired, suspicious_if_skew_exceeds, SystemTimeProvider, TimeTrustError,
+    TimeTrustState, TrustedTime, TrustedTimeProvider,
+};
 pub use activation::{ActivationError, ActivationRecord, ContentIdentity};
 pub use admission::{
     AdmissionController, AdmissionError, CreditWindow, FairQueue, ResourceKind, ResourceLimit,
