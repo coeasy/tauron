@@ -5898,6 +5898,17 @@ pub fn cmd_recover_trial_enable(
             engine.register_plugin(id.as_str());
         }
         let phase_reconcile = reconcile_recovery_phase(state);
+
+        // Recovery safety policy takes precedence over action de-duplication. Once a plugin has
+        // exhausted its one-shot trial budget, a replay in the same incident must remain a hard
+        // E_PLUGIN_DISABLED rejection rather than being hidden as a de-duplicated success.
+        if state.recovery.lock().counter().trial_exhausted(id.as_str()) {
+            return Err(HostError::new(
+                ErrorCode::E_PLUGIN_DISABLED,
+                format!("插件 `{id}` 已试验失败，回落 disabled-by-safemode，不可再次试启"),
+            ));
+        }
+
         // 必须先取出结果再分支：`match state.recovery.lock().trial_enable(..)` 会让
         // 临时 guard 被临时值生命周期延长规则持有到整个 match 结束，于是错误分支里
         // 再次 `state.recovery.lock()` 就是自死锁（`parking_lot` 不重入，表现为
@@ -8803,7 +8814,10 @@ mod tests {
         let engine = state.recovery.lock();
         let effect_id_prefix = "registry:com.a:";
         let serialized = engine.to_json().to_string();
-        assert!(serialized.contains(effect_id_prefix), "effect ledger must be persisted in engine state");
+        assert!(
+            serialized.contains(effect_id_prefix),
+            "effect ledger must be persisted in engine state"
+        );
     }
 
     #[test]
