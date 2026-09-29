@@ -31,6 +31,8 @@ pub use spawner::{
     ProcessSandboxEnforcement, ProcessSandboxProvider, ProcessStatus, SpawnedProc,
     UnsupportedProcessSandboxProvider,
 };
+#[cfg(unix)]
+pub use spawner::UnixProcessGroupSandboxProvider;
 
 // ──────────────────────────────────────────────────────────────────────────
 // 配置类型
