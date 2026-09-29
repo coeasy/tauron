@@ -133,6 +133,9 @@ jobs:
       - name: 测试
         run: cargo test --workspace --locked
 
+      - name: V4 Host Conformance（transport-neutral）
+        run: cargo test -p tauron-host --test v4_host_conformance --locked
+
       # 抓「只在某个 target 下才编译到的死代码 / 未用导入」。
       # 本仓库的历史缺陷类型之一是「有类型、有接口、有测试、没有入口」，
       # 编译全 target 是第一道筛子。
