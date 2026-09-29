@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -105,12 +106,38 @@ jobs:
 
           exit $rc
 
+
+  # V4 A110: a tag/manual release is allowed only when the exact source SHA already has the full
+  # required CI matrix green. This closes the old "CI should have been green" convention.
+  source-ci-proof:
+    name: 验证同 SHA CI 证据
+    needs: version-check
+    runs-on: ubuntu-latest
+    outputs:
+      ci_run_id: ${{ steps.proof.outputs.ci_run_id }}
+      ci_run_url: ${{ steps.proof.outputs.ci_run_url }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.23.2
+      - id: proof
+        name: 同 SHA CI 必须成功且包含全部 required jobs/steps
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/verify-source-ci.mjs --out=release-evidence-input/source-ci-proof.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: source-ci-proof
+          path: release-evidence-input/source-ci-proof.json
+          if-no-files-found: error
+
   # ══════════════════════════════════════════════════════════════════
   # 桌面产物构建：windows / macOS(arm64 + x64) / linux
   # ══════════════════════════════════════════════════════════════════
   build:
     name: 构建 ${{ matrix.label }}
-    needs: version-check
+    needs: [version-check, source-ci-proof]
     runs-on: ${{ matrix.platform }}
     strategy:
       # 一个平台失败不取消其他平台：先拿到能拿的产物，再看日志。
@@ -133,11 +160,11 @@ jobs:
             args: '--bundles nsis'
             rust-targets: ''
           - label: macos-arm64
-            platform: macos-latest
+            platform: macos-15
             args: '--target aarch64-apple-darwin'
             rust-targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
           - label: macos-x64
-            platform: macos-latest
+            platform: macos-15-intel
             args: '--target x86_64-apple-darwin'
             rust-targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
 
@@ -247,15 +274,23 @@ jobs:
 
   release-evidence:
     name: 生成 V4 Release Evidence
-    needs: version-check
+    needs: [version-check, source-ci-proof, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.23.2
-      - name: 生成版本/工具链/Target 证据
-        run: node scripts/generate-release-evidence.mjs --out=release-evidence
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: source-ci-proof
+          path: release-evidence-input
+      - name: 生成版本/工具链/Target/同 SHA CI 证据
+        env:
+          TAURON_RELEASE_BUILD_MATRIX_PASSED: 'true'
+        run: |
+          node scripts/check-target-matrix.mjs --check
+          node scripts/generate-release-evidence.mjs             --ci-proof=release-evidence-input/source-ci-proof.json             --out=release-evidence
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-evidence
@@ -375,3 +410,5 @@ jobs:
             artifacts/**/*.AppImage
             artifacts/**/tauron-release-evidence.json
             artifacts/**/tauron-release-evidence.md
+            artifacts/**/*-report.json
+            artifacts/**/known-limitations.md

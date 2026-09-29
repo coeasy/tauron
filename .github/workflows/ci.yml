@@ -78,6 +78,9 @@ jobs:
       - name: Public Surface Ledger（V4 A105）
         run: node scripts/generate-public-surface-ledger.mjs --check
 
+      - name: Target Matrix Drift（V4 A99）
+        run: node scripts/check-target-matrix.mjs --check
+
       - name: Release Evidence 输入校验（V4 A110）
         run: node scripts/generate-release-evidence.mjs --check
 
@@ -101,6 +104,61 @@ jobs:
       # （本机解包实测结论）。脚本默认只校验不发布，真发布需显式 `--publish` + token。
       - name: 发布产物校验（npm 打包内容）
         run: pnpm publish:npm -- --check
+
+
+  # V4 A99: every official OS/arch row executes the same host-neutral conformance surface on a
+  # native runner. Tauri packaging is additionally exercised by release.yml on the same rows.
+  target-matrix:
+    name: Target Matrix (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x64
+            runner: ubuntu-22.04
+            rust-target: x86_64-unknown-linux-gnu
+            local-host: true
+          - label: windows-x64
+            runner: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            local-host: false
+          - label: macos-arm64
+            runner: macos-15
+            rust-target: aarch64-apple-darwin
+            local-host: false
+          - label: macos-x64
+            runner: macos-15-intel
+            rust-target: x86_64-apple-darwin
+            local-host: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Host conformance
+        run: cargo test -p tauron-host --test v4_host_conformance --locked
+
+      - name: Process runtime contract
+        run: cargo test -p tauron-proc --locked
+
+      - name: FFI ownership contract
+        run: cargo test -p tauron-ffi --locked
+
+      - name: WASM broker contract
+        run: cargo test -p tauron-wasm --locked
+
+      - name: Minimal substrate profile
+        run: cargo check -p tauron-adapter --no-default-features --locked
+
+      - name: Local broker chaos
+        run: cargo test -p tauron-host --test v4_local_host_chaos --locked
+
+      - name: Linux Local Host reference E2E
+        if: matrix.local-host == true
+        run: cargo run -p tauron-host --example local_host_reference --locked
 
   # ══════════════════════════════════════════════════════════════════
   # Rust 底座线：默认特性。
