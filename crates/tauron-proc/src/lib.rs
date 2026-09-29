@@ -26,13 +26,13 @@ pub mod error;
 pub mod spawner;
 
 pub use error::{ProcError, ProcResult};
+#[cfg(unix)]
+pub use spawner::UnixProcessGroupSandboxProvider;
 pub use spawner::{
     CommandSpawner, KillOutcome, ProcSpawner, ProcessFrameSink, ProcessSandboxDescriptor,
     ProcessSandboxEnforcement, ProcessSandboxProvider, ProcessStatus, SpawnedProc,
     UnsupportedProcessSandboxProvider,
 };
-#[cfg(unix)]
-pub use spawner::UnixProcessGroupSandboxProvider;
 
 // ──────────────────────────────────────────────────────────────────────────
 // 配置类型
