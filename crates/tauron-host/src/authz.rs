@@ -784,7 +784,7 @@ mod tests {
         for c in COMMANDS.iter().chain(ADMIN_COMMANDS.iter()) {
             assert!(!c.consumer.is_empty(), "{} 缺 consumer 登记", c.command);
         }
-        assert_eq!(COMMANDS.len(), 18, "§2.1 定稿 9 条 + R7 收口补登记 4 条 + 0.4-A1 跨主体调用 3 条 + 0.4 审计补登记 host_contributes_list 1 条 + 0.4-W3 贡献对账 1 条");
+        assert_eq!(COMMANDS.len(), 19, "既有 18 条插件命令 + V4 stream credit grant 1 条");
         // 主窗面包含注册表管理、sidecar 管理、资源诊断与 Event Approval Broker。
         assert_eq!(
             ADMIN_COMMANDS.len(),
@@ -793,13 +793,18 @@ mod tests {
         );
     }
 
-    /// R7 收口：这 4 条是 `HostClient` 实际调用、且此前**完全未登记**的命令。
+    /// R7/V4 收口：这些命令是 `HostClient` 实际调用、且此前**完全未登记**的命令。
     /// 逐条断言档位与命令名，防止有人把它们塞进 `ADMIN_COMMANDS`（那会让插件面
     /// 失去自档语义）或调换顺序（TS 侧镜像表按顺序逐条比对）。
     #[test]
     fn r7_backfilled_plugin_commands_are_self_tier_and_in_order() {
-        let backfilled =
-            ["host_events_drain", "host_stream_open", "host_stream_write", "host_stream_close"];
+        let backfilled = [
+            "host_events_drain",
+            "host_stream_open",
+            "host_stream_write",
+            "host_stream_grant",
+            "host_stream_close",
+        ];
         // 紧接 `host_registry_list` 之后，顺序固定。
         let start = COMMANDS
             .iter()

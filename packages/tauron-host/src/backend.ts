@@ -212,7 +212,10 @@ export class MockBackend implements Backend {
 
   private readonly channels = new Map<string, ChannelPort<StreamFrame>>();
   private readonly callChannels = new Map<string, string>();
-  private readonly streams = new Map<string, { callId: string; seq: number; closed: boolean; creditBytes: number }>();
+  private readonly streams = new Map<
+    string,
+    { callId: string; seq: number; closed: boolean; creditBytes: number }
+  >();
   private nextChannelId = 1;
   private nextStreamId = 1;
 
@@ -250,7 +253,12 @@ export class MockBackend implements Backend {
         throw new Error(`E_CALL_NOT_FOUND: 调用 \`${callId}\` 没有帧载体`);
       }
       const streamId = `st-mock-${this.nextStreamId++}`;
-      this.streams.set(streamId, { callId, seq: 0, closed: false, creditBytes: DEFAULT_STREAM_CREDIT_BYTES });
+      this.streams.set(streamId, {
+        callId,
+        seq: 0,
+        closed: false,
+        creditBytes: DEFAULT_STREAM_CREDIT_BYTES,
+      });
       return { value: { streamId, callId } };
     }
 
@@ -264,7 +272,8 @@ export class MockBackend implements Backend {
     }
     if (cmd === 'host_stream_grant') {
       const bytes = Number(req.bytes ?? 0);
-      if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Error('E_INVALID_MANIFEST: invalid credit');
+      if (!Number.isSafeInteger(bytes) || bytes < 0)
+        throw new Error('E_INVALID_MANIFEST: invalid credit');
       state.creditBytes = Math.min(MAX_STREAM_CREDIT_BYTES, state.creditBytes + bytes);
       return { value: { streamId, creditBytes: state.creditBytes } };
     }
@@ -275,10 +284,19 @@ export class MockBackend implements Backend {
       );
     }
     if (cmd === 'host_stream_write') {
-      const jsonBytes = req.argsJson === undefined ? 0 : new TextEncoder().encode(JSON.stringify(req.argsJson)).byteLength;
-      const rawBytes = req.argsRaw instanceof Uint8Array ? req.argsRaw.byteLength : Array.isArray(req.argsRaw) ? req.argsRaw.length : 0;
+      const jsonBytes =
+        req.argsJson === undefined
+          ? 0
+          : new TextEncoder().encode(JSON.stringify(req.argsJson)).byteLength;
+      const rawBytes =
+        req.argsRaw instanceof Uint8Array
+          ? req.argsRaw.byteLength
+          : Array.isArray(req.argsRaw)
+            ? req.argsRaw.length
+            : 0;
       const required = 32 + jsonBytes + rawBytes;
-      if (required > state.creditBytes) throw new Error(`E_STREAM_BACKPRESSURE: need ${required}, remain ${state.creditBytes}`);
+      if (required > state.creditBytes)
+        throw new Error(`E_STREAM_BACKPRESSURE: need ${required}, remain ${state.creditBytes}`);
       state.creditBytes -= required;
     }
     const frame: StreamFrame = {

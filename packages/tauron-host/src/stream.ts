@@ -13,7 +13,10 @@ export type StreamKind = 'data' | 'end' | 'error';
 export const STREAM_KINDS: readonly StreamKind[] = ['data', 'end', 'error'];
 export const DEFAULT_STREAM_CREDIT_BYTES = 64 * 1024;
 export const MAX_STREAM_CREDIT_BYTES = 16 * 1024 * 1024;
-export interface StreamCredit { streamId: string; creditBytes: number }
+export interface StreamCredit {
+  streamId: string;
+  creditBytes: number;
+}
 
 /** `end` / `error` 是终帧：发出后句柄失效。 */
 export function isTerminalKind(kind: StreamKind): boolean {
