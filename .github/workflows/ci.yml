@@ -65,7 +65,15 @@ jobs:
       # Prettier 风格，因此这是硬门禁——再出现差异就是新引入的未格式化文件。
       # 忽略清单见 .prettierignore（Markdown 有意排除：文档是人工排版的中文长文）。
       - name: 格式检查（Prettier）
-        run: pnpm format:check
+        shell: bash
+        run: |
+          if ! pnpm format:check; then
+            echo "::group::Prettier exact diff"
+            pnpm format
+            git diff -- .
+            echo "::endgroup::"
+            exit 1
+          fi
 
       - name: Public Surface Ledger（V4 A105）
         run: node scripts/generate-public-surface-ledger.mjs --check
