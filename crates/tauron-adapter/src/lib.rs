@@ -1575,8 +1575,7 @@ impl FsSink for StdFsSink {
     fn remove(&self, path: &tauron_host::ScopedPath) -> HostResult<()> {
         #[cfg(unix)]
         {
-            tauron_host::scoped_fs_remove_hard(path)
-                .map_err(|e| scoped_fs_error("remove", path, e))
+            tauron_host::scoped_fs_remove_hard(path).map_err(|e| scoped_fs_error("remove", path, e))
         }
         #[cfg(not(unix))]
         {
