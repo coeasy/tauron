@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const outArg = process.argv.find((arg) => arg.startsWith('--out='));
 const ciProofArg = process.argv.find((arg) => arg.startsWith('--ci-proof='));
+const performanceArg = process.argv.find((arg) => arg.startsWith('--performance-report='));
+const artifactSizeArg = process.argv.find((arg) => arg.startsWith('--artifact-size-report='));
 const OUT = resolve(ROOT, outArg?.slice('--out='.length) ?? 'release-evidence');
 const checkOnly = process.argv.includes('--check');
 
@@ -75,9 +77,27 @@ if (ciProofArg) {
 }
 
 const releaseBuildMatrixPassed = process.env.TAURON_RELEASE_BUILD_MATRIX_PASSED === 'true';
-if (!checkOnly && (!sourceCi || !releaseBuildMatrixPassed)) {
+let sourcePerformance = null;
+let releaseArtifactSizes = null;
+if (performanceArg) {
+  sourcePerformance = JSON.parse(
+    readFileSync(resolve(ROOT, performanceArg.slice('--performance-report='.length)), 'utf8'),
+  );
+}
+if (artifactSizeArg) {
+  releaseArtifactSizes = JSON.parse(
+    readFileSync(resolve(ROOT, artifactSizeArg.slice('--artifact-size-report='.length)), 'utf8'),
+  );
+}
+if (
+  !checkOnly &&
+  (!sourceCi ||
+    !releaseBuildMatrixPassed ||
+    sourcePerformance?.status !== 'passed' ||
+    releaseArtifactSizes?.status !== 'passed')
+) {
   throw new Error(
-    'real release evidence requires exact-SHA source CI proof and successful build matrix',
+    'real release evidence requires exact-SHA source CI, successful build matrix and passing performance/size reports',
   );
 }
 
@@ -85,7 +105,6 @@ const limitations = [
   'Remote Host transport is not implemented; A108 remote chaos remains open.',
   'The Local Host reference transport is implemented on Linux UDS/SO_PEERCRED only; Windows Named Pipe/SID and macOS peer-credential reference transports remain open.',
   'The built-in CommandSpawner honestly reports process sandbox enforcement as unsupported; Production rejects process-runtime startup unless a hard ProcessSandboxProvider is injected.',
-  'Performance/size release baselines are not yet a hard gate, so industrialGrade remains false.',
 ];
 
 const evidence = {
@@ -110,7 +129,7 @@ const evidence = {
   claims: {
     industrialGrade: false,
     reason:
-      'Performance/size gate and remaining Remote/non-Linux Local Host security conformance are still open.',
+      'Remote/non-Linux Local Host security conformance and a built-in hard process sandbox provider remain open.',
   },
   reportFiles: [
     'compatibility-report.json',
@@ -171,12 +190,12 @@ const security = {
 };
 
 const performance = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   sourceSha,
-  status: 'open-gate',
-  verified: false,
-  reason:
-    'No release-blocking RSS/CPU/startup/shutdown/artifact-size regression baseline is wired yet.',
+  status: 'passed',
+  verified: true,
+  sourceRuntimeAndBinary: sourcePerformance,
+  releaseArtifacts: releaseArtifactSizes,
 };
 
 writeFileSync(join(OUT, 'tauron-release-evidence.json'), JSON.stringify(evidence, null, 2) + '\n');

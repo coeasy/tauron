@@ -125,10 +125,17 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/verify-source-ci.mjs --out=release-evidence-input/source-ci-proof.json
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: performance-size-report
+          path: release-evidence-input/performance
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.proof.outputs.ci_run_id }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: source-ci-proof
-          path: release-evidence-input/source-ci-proof.json
+          path: release-evidence-input/**
           if-no-files-found: error
 
   # ══════════════════════════════════════════════════════════════════
@@ -284,12 +291,26 @@ jobs:
         with:
           name: source-ci-proof
           path: release-evidence-input
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: bundle-*
+          path: release-bundles
+          merge-multiple: false
+      - name: 最终安装包体积预算
+        run: |
+          node scripts/check-release-artifact-sizes.mjs \
+            --root=release-bundles \
+            --out=release-evidence-input/release-artifact-size-report.json
       - name: 生成版本/工具链/Target/同 SHA CI 证据
         env:
           TAURON_RELEASE_BUILD_MATRIX_PASSED: 'true'
         run: |
           node scripts/check-target-matrix.mjs --check
-          node scripts/generate-release-evidence.mjs             --ci-proof=release-evidence-input/source-ci-proof.json             --out=release-evidence
+          node scripts/generate-release-evidence.mjs \
+            --ci-proof=release-evidence-input/source-ci-proof.json \
+            --performance-report=release-evidence-input/performance/performance-size-report.json \
+            --artifact-size-report=release-evidence-input/release-artifact-size-report.json \
+            --out=release-evidence
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-evidence

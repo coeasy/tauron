@@ -59,6 +59,7 @@ const requiredJobs = [
   'cargo fmt --check',
   'cargo clippy',
   'cargo-deny（hard gate）',
+  'Performance / Size',
   'Target Matrix (linux-x64)',
   'Target Matrix (windows-x64)',
   'Target Matrix (macos-arm64)',
@@ -74,6 +75,7 @@ for (const name of requiredJobs) {
 }
 
 const requiredSteps = {
+  'Performance / Size': ['Runtime / binary budgets'],
   'Rust (default features)': [
     'V4 Host Conformance（transport-neutral）',
     'FFI Ownership / ASan（V4 A72/A107）',

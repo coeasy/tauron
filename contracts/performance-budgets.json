@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "wireRoundTrip": {
+    "iterations": 100000,
+    "maxElapsedMs": 10000
+  },
+  "process": {
+    "maxPeakRssKb": 262144
+  },
+  "binaries": {
+    "maxFfiCdylibBytes": 8388608,
+    "maxLocalHostReferenceBytes": 16777216
+  },
+  "releaseArtifacts": {
+    "maxPerFileBytes": 262144000,
+    "maxAggregateBytes": 838860800
+  }
+}
