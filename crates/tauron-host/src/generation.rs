@@ -36,11 +36,7 @@ pub enum GenerationError {
     #[error("unknown generation lease {0}")]
     UnknownLease(String),
     #[error("pack/cache entry is not tracked: {pack_id}@{version} generation {generation:?}")]
-    PackNotTracked {
-        pack_id: String,
-        version: String,
-        generation: Generation,
-    },
+    PackNotTracked { pack_id: String, version: String, generation: Generation },
     #[error("pack/cache lease ttl must be greater than zero")]
     InvalidLeaseTtl,
     #[error("pack/cache lease owner hostInstanceId must not be empty")]
@@ -115,7 +111,6 @@ impl GenerationRegistry {
         Ok(generation != active && self.leases_for(resource, generation) == 0)
     }
 }
-
 
 /* ──────────────────────────────────────────────────────────────────────────
  * V4 A89: cross-host PackLease / CacheLease authority.
@@ -287,20 +282,13 @@ impl PackLeaseRegistry {
     }
 
     pub fn live_lease_count(&self, key: &PackCacheKey, now_ms: u64) -> usize {
-        self.leases
-            .values()
-            .filter(|lease| lease.is_live_at(now_ms) && lease.key() == *key)
-            .count()
+        self.leases.values().filter(|lease| lease.is_live_at(now_ms) && lease.key() == *key).count()
     }
 
     /// V4 A89 single-source GC decision:
     ///
     /// `not active && not rollback-pinned && no live lease && not transaction-staged`.
-    pub fn gc_eligible(
-        &self,
-        key: &PackCacheKey,
-        now_ms: u64,
-    ) -> Result<bool, GenerationError> {
+    pub fn gc_eligible(&self, key: &PackCacheKey, now_ms: u64) -> Result<bool, GenerationError> {
         let state = self.entries.get(key).ok_or_else(|| GenerationError::PackNotTracked {
             pack_id: key.pack_id.clone(),
             version: key.version.clone(),
@@ -431,10 +419,7 @@ mod tests {
         assert!(leases.release(&lease.token));
         assert!(leases.retire_if_gc_eligible(&key, 5).unwrap());
         assert!(leases.state(&key).is_none());
-        assert!(matches!(
-            leases.gc_eligible(&key, 5),
-            Err(GenerationError::PackNotTracked { .. })
-        ));
+        assert!(matches!(leases.gc_eligible(&key, 5), Err(GenerationError::PackNotTracked { .. })));
     }
 
     #[test]
