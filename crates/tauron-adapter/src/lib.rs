@@ -6247,11 +6247,6 @@ fn fs_unavailable() -> UnsupportedBody {
     )
 }
 
-/// **路径归属校验**：canonicalize 后必须落在某个允许根目录之内。
-///
-/// 防路径穿越（`..`）与符号链接逃逸：目标不存在时 canonicalize 其父目录再拼文件名。
-/// 拒绝时返回 [`ErrorCode::E_AUTH_DENIED`]。
-
 /// V4 A95：把授权结果转换为“可信 root + portable relative path”。
 ///
 /// 预检查只用于选择 root；真正 read/write/stat 在 Unix 通过 openat/O_NOFOLLOW
