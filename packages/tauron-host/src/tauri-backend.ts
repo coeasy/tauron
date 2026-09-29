@@ -73,6 +73,9 @@ const FRAMEWORK_COMMANDS = [
   'host_events_subscribe',
   'host_events_unsubscribe',
   'host_events_drain',
+  'host_events_approve',
+  'host_events_revoke',
+  'host_events_approvals',
   'host_registry_list',
   'host_registry_admin',
   // 流式帧（R5/P0-1）：三命令成组——缺一条就会让某条流永远等不到终帧。
