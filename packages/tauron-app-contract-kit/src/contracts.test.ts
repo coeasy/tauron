@@ -10,7 +10,9 @@ import {
   MockBackend,
   HostClient,
   HOST_ERROR_CODES,
+  HOST_RETRY_CLASS,
   RETRYABLE_HOST_ERROR_CODES,
+  retryClassOf,
   normalizeError,
   HostException,
   isRetryable,
@@ -79,14 +81,12 @@ describe('契约 1：错误码全集', () => {
     expect(set.size).toBe(HOST_ERROR_CODES.length);
   });
 
-  it('可重试错误码恰好 3 个', () => {
-    expect(RETRYABLE_HOST_ERROR_CODES.length).toBe(3);
-    // 可重试集合是安全相关契约（决定框架层是否自动重试），逐项钉死。
-    expect([...RETRYABLE_HOST_ERROR_CODES]).toEqual([
-      'E_CALL_TIMEOUT',
-      'E_HOST_PANIC',
-      'E_PLUGIN_FILTERED',
-    ]);
+  it('V4 自动重试集合默认为空，风险重试由 RetryClass 明确区分', () => {
+    expect(RETRYABLE_HOST_ERROR_CODES).toEqual([]);
+    expect(HOST_RETRY_CLASS.E_HOST_PANIC).toBe('never');
+    expect(HOST_RETRY_CLASS.E_CALL_TIMEOUT).toBe('manual');
+    expect(HOST_RETRY_CLASS.E_PLUGIN_FILTERED).toBe('manual');
+    expect(HOST_RETRY_CLASS.E_LEASE_EXPIRED).toBe('after-reconnect');
   });
 
   it('RETRYABLE 都是 HOST_ERROR_CODES 的子集', () => {
@@ -95,10 +95,13 @@ describe('契约 1：错误码全集', () => {
     }
   });
 
-  it('isRetryable 正确判定', () => {
-    expect(isRetryable('E_CALL_TIMEOUT')).toBe(true);
-    expect(isRetryable('E_HOST_PANIC')).toBe(true);
-    expect(isRetryable('E_PLUGIN_FILTERED')).toBe(true);
+  it('isRetryable 只表示可自动重放；manual/after-reconnect 由 RetryClass 表达', () => {
+    expect(isRetryable('E_CALL_TIMEOUT')).toBe(false);
+    expect(isRetryable('E_HOST_PANIC')).toBe(false);
+    expect(isRetryable('E_PLUGIN_FILTERED')).toBe(false);
+    expect(isRetryable('E_LEASE_EXPIRED')).toBe(false);
+    expect(retryClassOf('E_CALL_TIMEOUT')).toBe('manual');
+    expect(retryClassOf('E_LEASE_EXPIRED')).toBe('after-reconnect');
     expect(isRetryable('E_AUTH_DENIED')).toBe(false);
     expect(isRetryable('E_UNKNOWN')).toBe(false);
     expect(isRetryable('E_NOT_A_CODE')).toBe(false);
@@ -130,7 +133,8 @@ describe('契约 2：错误规范化', () => {
       message: 'Plugin command failed: E_CALL_TIMEOUT - timed out',
     });
     expect(err.code).toBe('E_CALL_TIMEOUT');
-    expect(err.retryable).toBe(true);
+    expect(err.retryable).toBe(false);
+    expect(err.retryClass).toBe('manual');
   });
 
   it('Error 实例中的错误码', () => {
