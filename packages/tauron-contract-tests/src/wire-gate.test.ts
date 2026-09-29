@@ -1159,6 +1159,9 @@ describe('门禁：能力表（命令 → 档位）TS ↔ Rust 同构', () => {
         .map((c) => c.command)
         .sort(),
     ).toEqual([
+      'host_events_approvals',
+      'host_events_approve',
+      'host_events_revoke',
       'host_registry_admin',
       'host_registry_install',
       'host_registry_install_preview',
@@ -2780,8 +2783,11 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(cargo, 'adapter 未依赖 tauron-settings（孤儿 crate 未激活）').toMatch(/tauron-settings/);
     const lib = read('crates/tauron-adapter/src/lib.rs');
     expect(lib, 'settings 未走 SettingsStore').toMatch(/SettingsStore/);
-    expect(lib, 'settings_set 未调用 Store::set').toMatch(
-      /\.set\([\s\S]{0,200}HOST_SETTINGS_NAMESPACE/,
+    expect(lib, 'settings_set 未走 V4 deferred transaction 写入').toMatch(
+      /set_deferred\(HOST_SETTINGS_NAMESPACE,\s*HOST_SETTINGS_NAMESPACE/,
+    );
+    expect(lib, 'settings_set 未在持久化成功后发布 committed revision').toMatch(
+      /persist_settings_doc\(state\)[\s\S]{0,500}publish_committed_change\(event\)/,
     );
 
     // 断链回归（本轮实测）：`host_settings_adopt_legacy` / `host_settings_migrate`
