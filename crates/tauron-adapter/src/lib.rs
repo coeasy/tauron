@@ -7485,19 +7485,18 @@ mod tests {
         let substrate = SubstrateState::with_adapter_config(&AdapterConfig::default());
         let base = cmd_host_capabilities(&substrate).unwrap();
         assert!(!base.plugin_runtime);
-        // 57 = 原 39 + R9 五域 15（menu 3 / tray 3 / fs 6 / http 1 / updater 2）
-        //      + 品牌/主题接通 3（host_theme_list / get / set；brand 原已存在）。
-        assert_eq!(base.commands.len(), 57);
+        // 命令数量必须由唯一清单推导；新增 substrate 命令时不得再维护第二份魔法数字。
+        assert_eq!(base.commands.len(), SUBSTRATE_COMMANDS.len());
         assert!(base.commands.contains(&"host_capabilities".to_string()));
 
         let plugin_runtime = CommandState::new();
         let full = cmd_host_capabilities(&plugin_runtime).unwrap();
         assert!(full.plugin_runtime);
         #[cfg(feature = "plugin-install")]
-        let expected = 78 + PLUGIN_INSTALL_COMMANDS.len();
+        let expected =
+            SUBSTRATE_COMMANDS.len() + PLUGIN_RUNTIME_COMMANDS.len() + PLUGIN_INSTALL_COMMANDS.len();
         #[cfg(not(feature = "plugin-install"))]
-        // 78 = 60（0.4-A1 之前）+ R9 五域 15 + 品牌/主题接通 3。
-        let expected = 78;
+        let expected = SUBSTRATE_COMMANDS.len() + PLUGIN_RUNTIME_COMMANDS.len();
         assert_eq!(full.commands.len(), expected);
         assert_eq!(full.commands.iter().collect::<std::collections::HashSet<_>>().len(), expected);
         for domain in
