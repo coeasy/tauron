@@ -128,11 +128,11 @@ mod unix {
     fn open_parent(path: &ScopedPath) -> Result<(OwnedFd, &OsStr), ScopedFsError> {
         let parts = normal_components(path.relative())?;
         let root = open_root(path.root())?;
-        let mut dir: OwnedFd = rustix::fs::dup(&root)?;
+        let mut dir: OwnedFd = rustix::io::dup(&root).map_err(std::io::Error::from)?;
         for component in &parts[..parts.len() - 1] {
             dir = openat(
                 &dir,
-                component,
+                *component,
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::empty(),
             )
@@ -152,7 +152,7 @@ mod unix {
         .map_err(std::io::Error::from)?;
         let mut file = File::from(fd);
         let mut bytes = Vec::new();
-        let mut limited = file.by_ref().take(max_bytes.saturating_add(1));
+        let mut limited = std::io::Read::by_ref(&mut file).take(max_bytes.saturating_add(1));
         limited.read_to_end(&mut bytes)?;
         let truncated = bytes.len() as u64 > max_bytes;
         if truncated {
