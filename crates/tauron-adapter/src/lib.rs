@@ -1419,14 +1419,14 @@ pub trait FsSink: Send + Sync {
     fn read(&self, path: &tauron_host::ScopedPath, max_bytes: u64) -> HostResult<(Vec<u8>, bool)>;
     /// 写入文件（覆盖）。V4 A95：Unix 实现通过 openat/O_NOFOLLOW。
     fn write(&self, path: &tauron_host::ScopedPath, bytes: &[u8]) -> HostResult<u64>;
-    /// 列目录（当前仍是 partial enforcement，后续迁移到 directory handle）。
-    fn list(&self, path: &std::path::Path) -> HostResult<Vec<FsEntry>>;
+    /// 列目录。Unix 使用已打开 directory handle，不重新解释绝对路径。
+    fn list(&self, path: &tauron_host::ScopedPath) -> HostResult<Vec<FsEntry>>;
     /// 取元数据。V4 A95：最终对象必须通过 root-relative handle 打开。
     fn stat(&self, path: &tauron_host::ScopedPath) -> HostResult<FsStat>;
-    /// 建目录（当前仍是 partial enforcement，后续迁移到 mkdirat）。
-    fn mkdir(&self, path: &std::path::Path, recursive: bool) -> HostResult<()>;
-    /// 删除文件或（空）目录（当前仍是 partial enforcement，后续迁移到 unlinkat）。
-    fn remove(&self, path: &std::path::Path) -> HostResult<()>;
+    /// 建目录。Unix 使用 mkdirat；recursive 逐级 no-follow 打开/创建。
+    fn mkdir(&self, path: &tauron_host::ScopedPath, recursive: bool) -> HostResult<()>;
+    /// 删除文件或（空）目录。Unix 使用 statat(no-follow)+unlinkat。
+    fn remove(&self, path: &tauron_host::ScopedPath) -> HostResult<()>;
 }
 
 /// `std::fs` 的真实实现（**缺省**）。
@@ -1496,21 +1496,43 @@ impl FsSink for StdFsSink {
         }
     }
 
-    fn list(&self, path: &std::path::Path) -> HostResult<Vec<FsEntry>> {
-        let mut out = Vec::new();
-        for entry in std::fs::read_dir(path).map_err(|e| fs_io_error("list", path, e))? {
-            let entry = entry.map_err(|e| fs_io_error("list", path, e))?;
-            let meta = entry.metadata().map_err(|e| fs_io_error("list", path, e))?;
-            out.push(FsEntry {
-                name: entry.file_name().to_string_lossy().into_owned(),
-                path: entry.path().to_string_lossy().into_owned(),
-                is_dir: meta.is_dir(),
-                size: if meta.is_file() { meta.len() } else { 0 },
-            });
+    fn list(&self, path: &tauron_host::ScopedPath) -> HostResult<Vec<FsEntry>> {
+        #[cfg(unix)]
+        {
+            let base = path.display_path();
+            return tauron_host::scoped_fs_list_hard(path)
+                .map(|entries| {
+                    entries
+                        .into_iter()
+                        .map(|entry| FsEntry {
+                            path: base.join(&entry.name).to_string_lossy().into_owned(),
+                            name: entry.name,
+                            is_dir: entry.is_dir,
+                            size: entry.size,
+                        })
+                        .collect()
+                })
+                .map_err(|e| scoped_fs_error("list", path, e));
         }
-        // 稳定序（便于测试与前端 diff）：按名字排序。
-        out.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(out)
+        #[cfg(not(unix))]
+        {
+            let display = path.display_path();
+            let mut out = Vec::new();
+            for entry in
+                std::fs::read_dir(&display).map_err(|e| fs_io_error("list", &display, e))?
+            {
+                let entry = entry.map_err(|e| fs_io_error("list", &display, e))?;
+                let meta = entry.metadata().map_err(|e| fs_io_error("list", &display, e))?;
+                out.push(FsEntry {
+                    name: entry.file_name().to_string_lossy().into_owned(),
+                    path: entry.path().to_string_lossy().into_owned(),
+                    is_dir: meta.is_dir(),
+                    size: if meta.is_file() { meta.len() } else { 0 },
+                });
+            }
+            out.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(out)
+        }
     }
 
     fn stat(&self, path: &tauron_host::ScopedPath) -> HostResult<FsStat> {
@@ -1531,21 +1553,42 @@ impl FsSink for StdFsSink {
         })
     }
 
-    fn mkdir(&self, path: &std::path::Path, recursive: bool) -> HostResult<()> {
-        let result =
-            if recursive { std::fs::create_dir_all(path) } else { std::fs::create_dir(path) };
-        result.map_err(|e| fs_io_error("mkdir", path, e))
+    fn mkdir(&self, path: &tauron_host::ScopedPath, recursive: bool) -> HostResult<()> {
+        #[cfg(unix)]
+        {
+            return tauron_host::scoped_fs_mkdir_hard(path, recursive)
+                .map_err(|e| scoped_fs_error("mkdir", path, e));
+        }
+        #[cfg(not(unix))]
+        {
+            let display = path.display_path();
+            let result = if recursive {
+                std::fs::create_dir_all(&display)
+            } else {
+                std::fs::create_dir(&display)
+            };
+            result.map_err(|e| fs_io_error("mkdir", &display, e))
+        }
     }
 
-    fn remove(&self, path: &std::path::Path) -> HostResult<()> {
-        let meta = std::fs::symlink_metadata(path).map_err(|e| fs_io_error("remove", path, e))?;
-        let result = if meta.is_dir() {
-            // **只删空目录**：递归删除是高危动作，本域不提供（调用方须自底向上删）。
-            std::fs::remove_dir(path)
-        } else {
-            std::fs::remove_file(path)
-        };
-        result.map_err(|e| fs_io_error("remove", path, e))
+    fn remove(&self, path: &tauron_host::ScopedPath) -> HostResult<()> {
+        #[cfg(unix)]
+        {
+            return tauron_host::scoped_fs_remove_hard(path)
+                .map_err(|e| scoped_fs_error("remove", path, e));
+        }
+        #[cfg(not(unix))]
+        {
+            let display = path.display_path();
+            let meta =
+                std::fs::symlink_metadata(&display).map_err(|e| fs_io_error("remove", &display, e))?;
+            let result = if meta.is_dir() {
+                std::fs::remove_dir(&display)
+            } else {
+                std::fs::remove_file(&display)
+            };
+            result.map_err(|e| fs_io_error("remove", &display, e))
+        }
     }
 }
 
@@ -6207,56 +6250,52 @@ fn fs_unavailable() -> UnsupportedBody {
 ///
 /// 防路径穿越（`..`）与符号链接逃逸：目标不存在时 canonicalize 其父目录再拼文件名。
 /// 拒绝时返回 [`ErrorCode::E_AUTH_DENIED`]。
-fn resolve_within_roots(roots: &[PathBuf], raw: &str) -> HostResult<PathBuf> {
-    if raw.trim().is_empty() {
-        return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "fs 路径不能为空".to_string()));
-    }
-    let candidate = PathBuf::from(raw);
-    let canonical = if candidate.exists() {
-        candidate.canonicalize().map_err(|e| fs_io_error("canonicalize", &candidate, e))?
-    } else {
-        let parent = candidate.parent().filter(|p| !p.as_os_str().is_empty()).ok_or_else(|| {
-            HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("fs 路径 `{raw}` 没有父目录"))
-        })?;
-        let file_name = candidate.file_name().ok_or_else(|| {
-            HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("fs 路径 `{raw}` 没有文件名"))
-        })?;
-        parent.canonicalize().map_err(|e| fs_io_error("canonicalize", parent, e))?.join(file_name)
-    };
-    if roots.iter().any(|r| canonical.starts_with(r)) {
-        Ok(canonical)
-    } else {
-        Err(HostError::new(
-            ErrorCode::E_AUTH_DENIED,
-            format!("fs 路径 `{raw}` 不在宿主允许根目录内（拒绝路径穿越）"),
-        ))
-    }
-}
 
 /// V4 A95：把授权结果转换为“可信 root + portable relative path”。
 ///
 /// 预检查只用于选择 root；真正 read/write/stat 在 Unix 通过 openat/O_NOFOLLOW
 /// 沿同一 root handle 执行，因此 check/use 期间替换 symlink 仍会被拒绝。
 fn scoped_within_roots(roots: &[PathBuf], raw: &str) -> HostResult<tauron_host::ScopedPath> {
-    let resolved = resolve_within_roots(roots, raw)?;
-    let root = roots.iter().find(|root| resolved.starts_with(root)).ok_or_else(|| {
-        HostError::new(ErrorCode::E_AUTH_DENIED, format!("fs 路径 `{raw}` 未匹配任何可信 root"))
-    })?;
-    let relative = resolved.strip_prefix(root).map_err(|_| {
-        HostError::new(
+    let candidate = PathBuf::from(raw);
+    if !candidate.is_absolute() {
+        return Err(HostError::new(
             ErrorCode::E_AUTH_DENIED,
-            format!("fs 路径 `{raw}` 无法转换为 root-relative path"),
-        )
-    })?;
-    let relative = relative.to_str().ok_or_else(|| {
-        HostError::new(
-            ErrorCode::E_INVALID_MANIFEST,
-            format!("fs 路径 `{raw}` 含无法在线协议表达的非 UTF-8 组件"),
-        )
-    })?;
-    tauron_host::ScopedPath::new(root.clone(), relative).map_err(|error| {
-        HostError::new(ErrorCode::E_AUTH_DENIED, format!("fs scoped path 拒绝 `{raw}`: {error}"))
-    })
+            format!("fs 路径 `{raw}` 必须是允许 root 下的绝对路径"),
+        ));
+    }
+
+    for root in roots {
+        if !candidate.starts_with(root) {
+            continue;
+        }
+        let relative = candidate.strip_prefix(root).map_err(|_| {
+            HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                format!("fs 路径 `{raw}` 无法转换为 root-relative path"),
+            )
+        })?;
+        let relative = if relative.as_os_str().is_empty() {
+            "."
+        } else {
+            relative.to_str().ok_or_else(|| {
+                HostError::new(
+                    ErrorCode::E_INVALID_MANIFEST,
+                    format!("fs 路径 `{raw}` 含无法在线协议表达的非 UTF-8 组件"),
+                )
+            })?
+        };
+        return tauron_host::ScopedPath::new(root.clone(), relative).map_err(|error| {
+            HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                format!("fs scoped path 拒绝 `{raw}`: {error}"),
+            )
+        });
+    }
+
+    Err(HostError::new(
+        ErrorCode::E_AUTH_DENIED,
+        format!("fs 路径 `{raw}` 不在宿主允许 root 内"),
+    ))
 }
 
 /// `host_fs_read`：读取文本文件（允许根目录内；超限截断并如实标注）。
@@ -6331,8 +6370,8 @@ pub fn cmd_fs_list(state: &SubstrateState, path: &str) -> HostResult<ProviderRes
         if roots.is_empty() {
             return Ok(ProviderResult::Unsupported(fs_unavailable()));
         }
-        let resolved = resolve_within_roots(roots, path)?;
-        state.fs_sink.list(&resolved).map(ProviderResult::Value)
+        let scoped = scoped_within_roots(roots, path)?;
+        state.fs_sink.list(&scoped).map(ProviderResult::Value)
     })?
 }
 
@@ -6379,8 +6418,8 @@ pub fn cmd_fs_mkdir(
         if roots.is_empty() {
             return Ok(ProviderResult::Unsupported(fs_unavailable()));
         }
-        let resolved = resolve_within_roots(roots, path)?;
-        state.fs_sink.mkdir(&resolved, recursive)?;
+        let scoped = scoped_within_roots(roots, path)?;
+        state.fs_sink.mkdir(&scoped, recursive)?;
         Ok(ProviderResult::Value(()))
     })?
 }
@@ -6403,8 +6442,8 @@ pub fn cmd_fs_remove(state: &SubstrateState, path: &str) -> HostResult<ProviderR
         if roots.is_empty() {
             return Ok(ProviderResult::Unsupported(fs_unavailable()));
         }
-        let resolved = resolve_within_roots(roots, path)?;
-        state.fs_sink.remove(&resolved)?;
+        let scoped = scoped_within_roots(roots, path)?;
+        state.fs_sink.remove(&scoped)?;
         Ok(ProviderResult::Value(()))
     })?
 }
