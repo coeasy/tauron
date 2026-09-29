@@ -603,6 +603,16 @@ fn unsupported_body(reason: &str, fallback: Option<&str>) -> UnsupportedBody {
     }
 }
 
+/// Runtime enforcement strength for a capability domain.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CapabilityEnforcement {
+    pub domain: String,
+    /// Closed vocabulary: hard / partial / unsupported.
+    pub level: String,
+    pub detail: String,
+}
+
 /// 宿主当前实际装配的命令面与未实现能力。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -610,6 +620,8 @@ pub struct CapabilitiesBody {
     pub families: Vec<String>,
     pub commands: Vec<String>,
     pub unsupported: Vec<UnsupportedDomain>,
+    /// V4: machine-readable strength, not just available/unavailable.
+    pub enforcement: Vec<CapabilityEnforcement>,
     pub plugin_runtime: bool,
     /// V4 compile-time target fact used by ArtifactVariantResolver before any OS loader call.
     pub target: tauron_host::TargetSpec,
@@ -716,10 +728,58 @@ pub fn cmd_host_capabilities(state: &SubstrateState) -> HostResult<CapabilitiesB
                 .push(UnsupportedDomain { domain: domain.to_string(), reason: reason.to_string() });
         }
 
+        let fs_level = if state.fs_allowed_roots.is_empty() {
+            "unsupported"
+        } else {
+            match tauron_host::scoped_fs_enforcement() {
+                tauron_host::FsEnforcement::Hard => "hard",
+                tauron_host::FsEnforcement::Partial => "partial",
+                tauron_host::FsEnforcement::Unsupported => "unsupported",
+            }
+        };
+        let http_level = if !state.http_sink.native_supported() || state.http_policy.domains.is_empty()
+        {
+            "unsupported"
+        } else {
+            match state.http_sink.network_enforcement() {
+                tauron_host::NetworkEnforcement::RedirectAndDns => "hard",
+                tauron_host::NetworkEnforcement::UrlOnly => "partial",
+            }
+        };
+        let enforcement = vec![
+            CapabilityEnforcement {
+                domain: "fs".to_string(),
+                level: fs_level.to_string(),
+                detail: match fs_level {
+                    "hard" => "root-handle relative I/O with no-follow enforcement".to_string(),
+                    "partial" => {
+                        "platform fallback does not yet provide native reparse/junction handle validation"
+                            .to_string()
+                    }
+                    _ => "filesystem scope is not configured".to_string(),
+                },
+            },
+            CapabilityEnforcement {
+                domain: "http".to_string(),
+                level: http_level.to_string(),
+                detail: match http_level {
+                    "hard" => {
+                        "URL, redirect, DNS/private-network and credential-scope policy enforced"
+                            .to_string()
+                    }
+                    "partial" => {
+                        "provider does not prove redirect-and-DNS enforcement".to_string()
+                    }
+                    _ => "HTTP provider or network scope is not configured".to_string(),
+                },
+            },
+        ];
+
         Ok(CapabilitiesBody {
             families,
             commands: commands.into_iter().map(str::to_string).collect(),
             unsupported,
+            enforcement,
             plugin_runtime,
             target: tauron_host::current_target_spec(),
         })
