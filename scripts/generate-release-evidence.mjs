@@ -103,7 +103,7 @@ if (
 
 const limitations = [
   'The Local Host reference transport is implemented on Linux UDS/SO_PEERCRED, macOS UDS/getpeereid and Windows Named Pipe/SID.',
-  'The built-in CommandSpawner honestly reports process sandbox enforcement as unsupported; Production rejects process-runtime startup unless a hard ProcessSandboxProvider is injected.',
+  'The built-in CommandSpawner provides POSIX process-group tree containment on Unix/macOS (partial) and remains non-hard overall; Production rejects process-runtime startup unless a hard ProcessSandboxProvider is injected.',
 ];
 
 const evidence = {
@@ -128,7 +128,7 @@ const evidence = {
   claims: {
     industrialGrade: false,
     reason:
-      'The built-in CommandSpawner still reports process sandbox enforcement as unsupported; Production requires an injected hard ProcessSandboxProvider.',
+      'The built-in CommandSpawner remains non-hard overall: Unix/macOS process-tree containment is partial, while filesystem/network/syscall isolation and a Windows hard provider remain open. Production requires an injected hard ProcessSandboxProvider.',
   },
   reportFiles: [
     'compatibility-report.json',
