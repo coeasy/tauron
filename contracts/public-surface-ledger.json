@@ -4,9 +4,9 @@
   "note": "Generated V4 A105 ledger. Stable public commands may not exist without owner, producer, consumer, authorization, lifecycle, cleanup and test metadata.",
   "counts": {
     "substrate": 60,
-    "pluginRuntime": 21,
+    "pluginRuntime": 22,
     "pluginInstall": 2,
-    "total": 83
+    "total": 84
   },
   "entries": [
     {
@@ -894,6 +894,20 @@
     {
       "kind": "command",
       "symbol": "host_stream_close",
+      "family": "stream",
+      "set": "plugin-runtime",
+      "owner": "Plugin Runtime Plane",
+      "producer": "tauron-adapter canonical command surface",
+      "consumer": "@tauron/host / generated host binding",
+      "authorization": "Plugin/runtime identity + command policy",
+      "lifecycle": "owner-scoped; terminal state required",
+      "cleanup": "owner teardown / explicit terminal operation / application drain",
+      "test": "Rust unit + TypeScript wire-gate + CI command-surface drift gate",
+      "maturity": "stable"
+    },
+    {
+      "kind": "command",
+      "symbol": "host_stream_grant",
       "family": "stream",
       "set": "plugin-runtime",
       "owner": "Plugin Runtime Plane",
