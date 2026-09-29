@@ -84,7 +84,10 @@ pub use execution::{
     ExecutionError,
 };
 pub use fault::{FaultBoundary, FaultError, FaultRecord, FaultState};
-pub use generation::{Generation, GenerationError, GenerationHandle, GenerationRegistry};
+pub use generation::{
+    Generation, GenerationError, GenerationHandle, GenerationRegistry, PackCacheKey, PackGcState,
+    PackLease, PackLeaseRegistry,
+};
 pub use health::{Degradation, HealthReport, Liveness, Readiness};
 pub use local_host::{
     peer_proof, AuthenticatedPeer, LocalHostBroker, LocalHostBrokerError, LocalHostLease,
