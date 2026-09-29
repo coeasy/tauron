@@ -737,15 +737,15 @@ pub fn cmd_host_capabilities(state: &SubstrateState) -> HostResult<CapabilitiesB
                 tauron_host::FsEnforcement::Unsupported => "unsupported",
             }
         };
-        let http_level = if !state.http_sink.native_supported() || state.http_policy.domains.is_empty()
-        {
-            "unsupported"
-        } else {
-            match state.http_sink.network_enforcement() {
-                tauron_host::NetworkEnforcement::RedirectAndDns => "hard",
-                tauron_host::NetworkEnforcement::UrlOnly => "partial",
-            }
-        };
+        let http_level =
+            if !state.http_sink.native_supported() || state.http_policy.domains.is_empty() {
+                "unsupported"
+            } else {
+                match state.http_sink.network_enforcement() {
+                    tauron_host::NetworkEnforcement::RedirectAndDns => "hard",
+                    tauron_host::NetworkEnforcement::UrlOnly => "partial",
+                }
+            };
         let enforcement = vec![
             CapabilityEnforcement {
                 domain: "fs".to_string(),
