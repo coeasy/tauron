@@ -273,15 +273,14 @@ describe('门禁：应用层宿主错误码 TS ↔ Rust 一致', () => {
   it('V4 retryClass 一致，panic 不得自动重试', () => {
     const lookup = variantToCode();
     const retryBlock =
-      /pub const fn retry_class\(self\)[\s\S]*?\n    \}/.exec(hostErrorSrc)?.[0] ?? '';
+      /pub const fn retry_class\(self\)[\s\S]*?\n    \}/.exec(hostErrorSrc)?.[0] ??
+      '';
     expect(retryBlock, 'retry_class() must exist').not.toBe('');
     const rustClass = new Map<string, string>();
     for (const m of retryBlock.matchAll(/Self::(E_\w+)\s*=>\s*RetryClass::(\w+)/g)) {
       const code = lookup.get(m[1]!);
       expect(code, `variant ${m[1]} has no wire code`).toBeDefined();
-      const cls = m[2]!
-        .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
-        .toLowerCase();
+      const cls = m[2]!.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
       rustClass.set(code!, cls);
     }
     const registry = JSON.parse(read('contracts/error/error-codes.json')) as {
@@ -302,7 +301,8 @@ describe('门禁：应用层宿主错误码 TS ↔ Rust 一致', () => {
 
   it('HostError 必须以结构化 JSON 穿越 IPC（禁止 {:?} 文本转储）', () => {
     // 派生 Serialize：前端 normalizeError 分支 1 依赖 { code, message, retryable, retryClass }。
-    const derive = hostErrorSrc.match(/#\[derive\(([^)]*)\)\][\s\S]{0,160}?#\[error/)?.[1] ?? '';
+    const derive =
+      hostErrorSrc.match(/#\[derive\(([^)]*)\)\][\s\S]{0,160}?#\[error/)?.[1] ?? '';
     expect(derive, 'HostError 必须 derive(Serialize)').toContain('Serialize');
     expect(hostErrorSrc).toMatch(/pub struct HostError[\s\S]*?pub retry_class: RetryClass/);
     expect(hostErrorSrc).toMatch(/serde\(rename_all = "camelCase"\)/);
