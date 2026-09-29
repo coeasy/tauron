@@ -240,10 +240,8 @@ impl AdapterConfig {
     ) -> HostResult<()> {
         let mut readiness = self.production_readiness();
         readiness.process_runtime_enabled = true;
-        readiness.hard_process_sandbox_available = matches!(
-            descriptor.enforcement,
-            tauron_proc::ProcessSandboxEnforcement::Hard
-        );
+        readiness.hard_process_sandbox_available =
+            matches!(descriptor.enforcement, tauron_proc::ProcessSandboxEnforcement::Hard);
         let violations =
             tauron_host::validate_production_readiness(self.deployment_mode, &readiness);
         if violations.is_empty() {
