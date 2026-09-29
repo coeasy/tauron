@@ -25,6 +25,8 @@ fn production_ready() -> ProductionReadiness {
         install_trust_configured: false,
         audit_for_admin_operations_available: true,
         writable_data_dir_available: true,
+        process_runtime_enabled: false,
+        hard_process_sandbox_available: false,
         mock_provider_enabled: false,
     }
 }
