@@ -4944,9 +4944,7 @@ pub fn host_settings_adopt_legacy(
 ///
 /// 全有或全无：链路缺失或迁移结果过不了 schema 校验时用户层一个字节都不改，
 /// 返回 `E_INVALID_MANIFEST`（不新增错误码）。
-fn host_settings_migrate_transaction(
-    state: &SubstrateState,
-) -> HostResult<MigrationReceipt> {
+fn host_settings_migrate_transaction(state: &SubstrateState) -> HostResult<MigrationReceipt> {
     state
         .settings
         .lock()
@@ -10421,10 +10419,7 @@ mod tests {
             before,
             "durable commit failure must restore exact pre-migration state"
         );
-        assert_eq!(
-            host_settings_data_version(&state).as_deref(),
-            Some(HOST_SETTINGS_SCHEMA_V1)
-        );
+        assert_eq!(host_settings_data_version(&state).as_deref(), Some(HOST_SETTINGS_SCHEMA_V1));
     }
 
     #[test]
