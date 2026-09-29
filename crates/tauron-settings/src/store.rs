@@ -77,11 +77,7 @@ pub struct MigrationContract {
 }
 
 impl MigrationContract {
-    pub const fn new(
-        reversible: bool,
-        forward_compatible: bool,
-        requires_snapshot: bool,
-    ) -> Self {
+    pub const fn new(reversible: bool, forward_compatible: bool, requires_snapshot: bool) -> Self {
         Self { reversible, forward_compatible, requires_snapshot }
     }
 
@@ -1325,7 +1321,9 @@ mod tests {
         );
         let before = s.snapshot("p.app").unwrap();
         let err = s.migrate_transactional("p.app", "2.0.0").unwrap_err();
-        assert!(matches!(err, SettingsError::SchemaCompile(ref m) if m.contains("requiresSnapshot")));
+        assert!(
+            matches!(err, SettingsError::SchemaCompile(ref m) if m.contains("requiresSnapshot"))
+        );
         assert_eq!(s.snapshot("p.app").unwrap(), before, "拒绝路径必须零副作用");
     }
 
