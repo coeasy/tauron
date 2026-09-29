@@ -6385,7 +6385,7 @@ fn authorize_http_url(
             | tauron_host::NetworkPolicyError::InvalidDomainRule(_)
             | tauron_host::NetworkPolicyError::InvalidRedirectLimit => {
                 ErrorCode::E_INVALID_MANIFEST
-            },
+            }
             _ => ErrorCode::E_AUTH_DENIED,
         };
         HostError::new(code, format!("HTTP network policy denied request: {error}"))
