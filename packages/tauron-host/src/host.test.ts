@@ -278,7 +278,7 @@ describe('错误规范化', () => {
     });
   });
 
-  it('超时类错误可重试', async () => {
+  it('超时类错误只能人工重试，不自动重放', async () => {
     const client = new HostClient({
       backend: new MockBackend({
         capabilities: ALL_CAPS,
@@ -287,7 +287,11 @@ describe('错误规范化', () => {
     });
     await expect(
       client.pluginCall({ callId: 'c', method: 'm', kind: 'unary' }),
-    ).rejects.toMatchObject({ code: 'E_CALL_TIMEOUT', retryable: true });
+    ).rejects.toMatchObject({
+      code: 'E_CALL_TIMEOUT',
+      retryable: false,
+      retryClass: 'manual',
+    });
   });
 });
 
