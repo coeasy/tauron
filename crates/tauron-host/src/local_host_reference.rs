@@ -368,6 +368,11 @@ mod windows {
 
     const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
     const PIPE_CONNECT_TIMEOUT_MS: u32 = 5_000;
+    // Windows named-pipe impersonation is defined against the security context of the last
+    // message read by the server. This fixed pre-auth marker exists only to establish that
+    // kernel context; it carries no identity and is bounded before any allocation-heavy decode.
+    const WINDOWS_CLIENT_HELLO: &[u8] = b"TAURON_LOCAL_HELLO_V1";
+    const WINDOWS_CLIENT_HELLO_MAX_BYTES: usize = 64;
 
     fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
         value.encode_wide().chain(std::iter::once(0)).collect()
@@ -654,6 +659,15 @@ mod windows {
 
         let handle = listener.handle.raw();
         let result = (|| {
+            // ImpersonateNamedPipeClient uses the security context of the last message read.
+            // Read one fixed, tiny marker first; never trust this payload as identity.
+            let hello = read_packet(handle, WINDOWS_CLIENT_HELLO_MAX_BYTES)?;
+            if hello != WINDOWS_CLIENT_HELLO {
+                return Err(LocalHostReferenceError::Protocol(
+                    "invalid Windows Local Host pre-auth marker".into(),
+                ));
+            }
+
             let evidence = peer_evidence(handle)?;
             let challenge = broker.challenge(&evidence)?;
             let challenge_json = serde_json::to_vec(&challenge)
@@ -706,6 +720,14 @@ mod windows {
             )
         };
         let handle = OwnedHandle::new(handle)?;
+
+        // This marker is deliberately unauthenticated and contains no caller-supplied identity.
+        // The server reads it only so Windows can bind subsequent impersonation to this client.
+        write_packet(
+            handle.raw(),
+            WINDOWS_CLIENT_HELLO,
+            WINDOWS_CLIENT_HELLO_MAX_BYTES,
+        )?;
 
         let challenge_json = read_packet(handle.raw(), REFERENCE_CONTROL_MAX_BYTES)?;
         let challenge: PeerChallenge = serde_json::from_slice(&challenge_json)
