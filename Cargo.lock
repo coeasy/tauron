@@ -3502,6 +3502,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauron-ffi"
+version = "1.0.2"
+dependencies = [
+ "serde_json",
+ "tauron-host",
+]
+
+[[package]]
 name = "tauron-host"
 version = "1.0.2"
 dependencies = [

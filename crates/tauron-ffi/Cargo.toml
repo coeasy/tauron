@@ -1,0 +1,18 @@
+[package]
+name = "tauron-ffi"
+description = "Stable C ABI ownership boundary for Tauron Universal Wire consumers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+include = ["src/**", "include/**", "conformance/**", "README.md", "Cargo.toml"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde_json.workspace = true
+tauron-host.workspace = true

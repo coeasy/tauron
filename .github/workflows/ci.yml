@@ -136,6 +136,15 @@ jobs:
       - name: V4 Host Conformance（transport-neutral）
         run: cargo test -p tauron-host --test v4_host_conformance --locked
 
+      # V4 A72/A107: build the real cdylib, link a foreign C consumer, then exercise
+      # retain/release/buffer/error/shutdown ownership under AddressSanitizer.
+      - name: FFI Ownership / ASan（V4 A72/A107）
+        shell: bash
+        run: |
+          cargo build -p tauron-ffi --locked
+          cc -std=c11 -Wall -Wextra -Werror             -fsanitize=address -fno-omit-frame-pointer             -I crates/tauron-ffi/include             crates/tauron-ffi/conformance/c/ffi_ownership_asan.c             -L target/debug             -Wl,-rpath,"$PWD/target/debug"             -ltauron_ffi             -o /tmp/tauron-ffi-asan
+          LD_LIBRARY_PATH="$PWD/target/debug${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"             ASAN_OPTIONS=detect_leaks=1:halt_on_error=1             /tmp/tauron-ffi-asan
+
       # 抓「只在某个 target 下才编译到的死代码 / 未用导入」。
       # 本仓库的历史缺陷类型之一是「有类型、有接口、有测试、没有入口」，
       # 编译全 target 是第一道筛子。
