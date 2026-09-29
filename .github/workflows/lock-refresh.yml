@@ -1,0 +1,46 @@
+name: Temporary Cargo Lock Refresh
+
+on:
+  push:
+    branches:
+      - feature/v4-complete-implementation
+    paths:
+      - Cargo.toml
+      - crates/tauron-host/Cargo.toml
+      - .github/workflows/lock-refresh.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tauron-v4-lock-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: feature/v4-complete-implementation
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.0
+      - name: Resolve only the newly pinned TLS dependency graph
+        run: cargo metadata --format-version 1 > /dev/null
+      - name: Show lock delta
+        run: git diff -- Cargo.lock
+      - name: Commit generated Cargo.lock
+        shell: bash
+        run: |
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo.lock already current"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "chore(v4): refresh lockfile for Remote TLS reference"
+          git push origin HEAD:feature/v4-complete-implementation

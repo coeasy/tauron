@@ -57,6 +57,9 @@ sha2 = "0.10"
 hex = "0.4"
 # ── HMAC（§4.5 授予集防篡改签名）──────────────────────────────────
 hmac = "0.12"
+# ── Remote Host TLS reference（V4 A108；禁默认 aws-lc，固定 ring）──
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "=0.14.10", default-features = false, features = ["ring"] }
 # ── 测试 ─────────────────────────────────────────────────────────
 criterion = "0.5"
 proptest = "1"
