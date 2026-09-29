@@ -4,9 +4,7 @@
 //! peer-credential collection live in adapters; the universal broker/authentication contract
 //! remains reusable by Electron/Qt/.NET/headless service bridges.
 
-use tauron_host::{
-    peer_proof, LocalHostBroker, PeerCredentialEvidence,
-};
+use tauron_host::{peer_proof, LocalHostBroker, PeerCredentialEvidence};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // In a real adapter this secret is created once and exposed only through the protected
@@ -21,12 +19,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let challenge = broker.challenge(&peer)?;
-    let proof = peer_proof(
-        secret,
-        &peer.platform_subject,
-        &challenge.nonce,
-        challenge.owner_generation,
-    );
+    let proof =
+        peer_proof(secret, &peer.platform_subject, &challenge.nonce, challenge.owner_generation);
     let authenticated = broker.verify(&peer, &challenge.challenge_id, &proof)?;
 
     assert_eq!(authenticated.owner_generation, lease.generation);
