@@ -1580,8 +1580,8 @@ impl FsSink for StdFsSink {
         #[cfg(not(unix))]
         {
             let display = path.display_path();
-            let meta =
-                std::fs::symlink_metadata(&display).map_err(|e| fs_io_error("remove", &display, e))?;
+            let meta = std::fs::symlink_metadata(&display)
+                .map_err(|e| fs_io_error("remove", &display, e))?;
             let result = if meta.is_dir() {
                 std::fs::remove_dir(&display)
             } else {
@@ -6292,10 +6292,7 @@ fn scoped_within_roots(roots: &[PathBuf], raw: &str) -> HostResult<tauron_host::
         });
     }
 
-    Err(HostError::new(
-        ErrorCode::E_AUTH_DENIED,
-        format!("fs 路径 `{raw}` 不在宿主允许 root 内"),
-    ))
+    Err(HostError::new(ErrorCode::E_AUTH_DENIED, format!("fs 路径 `{raw}` 不在宿主允许 root 内")))
 }
 
 /// `host_fs_read`：读取文本文件（允许根目录内；超限截断并如实标注）。
