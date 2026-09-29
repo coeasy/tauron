@@ -372,6 +372,7 @@ mod windows {
     // message read by the server. This fixed pre-auth marker exists only to establish that
     // kernel context; it carries no identity and is bounded before any allocation-heavy decode.
     const WINDOWS_CLIENT_HELLO: &[u8] = b"TAURON_LOCAL_HELLO_V1";
+    const WINDOWS_CLIENT_DONE: &[u8] = b"TAURON_LOCAL_DONE_V1";
     const WINDOWS_CLIENT_HELLO_MAX_BYTES: usize = 64;
 
     fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
@@ -687,7 +688,18 @@ mod windows {
 
             let request = read_packet(handle, DEFAULT_MAX_WIRE_BYTES)?;
             let response = reference_wire_roundtrip(&request)?;
-            write_packet(handle, &response, DEFAULT_MAX_WIRE_BYTES)
+            write_packet(handle, &response, DEFAULT_MAX_WIRE_BYTES)?;
+
+            // Do not disconnect immediately after WriteFile. Named-pipe disconnect can race a
+            // client that has not consumed the response yet. Require one fixed completion ACK so
+            // the server only tears down after the client proved the full response was read.
+            let done = read_packet(handle, WINDOWS_CLIENT_HELLO_MAX_BYTES)?;
+            if done != WINDOWS_CLIENT_DONE {
+                return Err(LocalHostReferenceError::Protocol(
+                    "invalid Windows Local Host completion marker".into(),
+                ));
+            }
+            Ok(())
         })();
 
         // SAFETY: handle is the connected server pipe; disconnection does not close the handle.
@@ -723,11 +735,7 @@ mod windows {
 
         // This marker is deliberately unauthenticated and contains no caller-supplied identity.
         // The server reads it only so Windows can bind subsequent impersonation to this client.
-        write_packet(
-            handle.raw(),
-            WINDOWS_CLIENT_HELLO,
-            WINDOWS_CLIENT_HELLO_MAX_BYTES,
-        )?;
+        write_packet(handle.raw(), WINDOWS_CLIENT_HELLO, WINDOWS_CLIENT_HELLO_MAX_BYTES)?;
 
         let challenge_json = read_packet(handle.raw(), REFERENCE_CONTROL_MAX_BYTES)?;
         let challenge: PeerChallenge = serde_json::from_slice(&challenge_json)
@@ -745,7 +753,13 @@ mod windows {
         }
 
         write_packet(handle.raw(), request, DEFAULT_MAX_WIRE_BYTES)?;
-        read_packet(handle.raw(), DEFAULT_MAX_WIRE_BYTES)
+        let response = read_packet(handle.raw(), DEFAULT_MAX_WIRE_BYTES)?;
+        write_packet(
+            handle.raw(),
+            WINDOWS_CLIENT_DONE,
+            WINDOWS_CLIENT_HELLO_MAX_BYTES,
+        )?;
+        Ok(response)
     }
 }
 
