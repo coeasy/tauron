@@ -1415,17 +1415,18 @@ pub struct FsWriteResult {
 /// **没有"进程内降级实现"**：`std::fs` 就是真实行为；"不可用"体现为允许根为空时
 /// 命令层的 `UnsupportedBody`（如实，不伪造）。可注入假实现用于单测。
 pub trait FsSink: Send + Sync {
-    /// 读取文件（至多 `max_bytes`）。
-    fn read(&self, path: &std::path::Path, max_bytes: u64) -> HostResult<(Vec<u8>, bool)>;
-    /// 写入文件（覆盖）。
-    fn write(&self, path: &std::path::Path, bytes: &[u8]) -> HostResult<u64>;
-    /// 列目录。
+    /// 读取文件（至多 `max_bytes`）。V4 A95：安全关键 I/O 接收 root-scoped handle path。
+    fn read(&self, path: &tauron_host::ScopedPath, max_bytes: u64)
+        -> HostResult<(Vec<u8>, bool)>;
+    /// 写入文件（覆盖）。V4 A95：Unix 实现通过 openat/O_NOFOLLOW。
+    fn write(&self, path: &tauron_host::ScopedPath, bytes: &[u8]) -> HostResult<u64>;
+    /// 列目录（当前仍是 partial enforcement，后续迁移到 directory handle）。
     fn list(&self, path: &std::path::Path) -> HostResult<Vec<FsEntry>>;
-    /// 取元数据。
-    fn stat(&self, path: &std::path::Path) -> HostResult<FsStat>;
-    /// 建目录。
+    /// 取元数据。V4 A95：最终对象必须通过 root-relative handle 打开。
+    fn stat(&self, path: &tauron_host::ScopedPath) -> HostResult<FsStat>;
+    /// 建目录（当前仍是 partial enforcement，后续迁移到 mkdirat）。
     fn mkdir(&self, path: &std::path::Path, recursive: bool) -> HostResult<()>;
-    /// 删除文件或（空）目录。
+    /// 删除文件或（空）目录（当前仍是 partial enforcement，后续迁移到 unlinkat）。
     fn remove(&self, path: &std::path::Path) -> HostResult<()>;
 }
 
@@ -1447,24 +1448,56 @@ fn fs_io_error(op: &str, path: &std::path::Path, e: std::io::Error) -> HostError
     )
 }
 
+fn scoped_fs_error(op: &str, path: &tauron_host::ScopedPath, e: tauron_host::ScopedFsError) -> HostError {
+    HostError::new(
+        ErrorCode::E_STATE_INVALID_TRANSITION,
+        format!(
+            "scoped filesystem `{op}` failed（{}）：{e}",
+            path.display_path().display()
+        ),
+    )
+}
+
 impl FsSink for StdFsSink {
-    fn read(&self, path: &std::path::Path, max_bytes: u64) -> HostResult<(Vec<u8>, bool)> {
-        use std::io::Read;
-        let file = std::fs::File::open(path).map_err(|e| fs_io_error("read", path, e))?;
-        let mut buf = Vec::new();
-        // 多读 1 字节用于判定"是否被截断"。
-        let mut limited = file.take(max_bytes.saturating_add(1));
-        limited.read_to_end(&mut buf).map_err(|e| fs_io_error("read", path, e))?;
-        let truncated = buf.len() as u64 > max_bytes;
-        if truncated {
-            buf.truncate(max_bytes as usize);
+    fn read(
+        &self,
+        path: &tauron_host::ScopedPath,
+        max_bytes: u64,
+    ) -> HostResult<(Vec<u8>, bool)> {
+        #[cfg(unix)]
+        {
+            return tauron_host::scoped_fs_read_hard(path, max_bytes)
+                .map_err(|e| scoped_fs_error("read", path, e));
         }
-        Ok((buf, truncated))
+        #[cfg(not(unix))]
+        {
+            let display = path.display_path();
+            use std::io::Read;
+            let file =
+                std::fs::File::open(&display).map_err(|e| fs_io_error("read", &display, e))?;
+            let mut buf = Vec::new();
+            let mut limited = file.take(max_bytes.saturating_add(1));
+            limited.read_to_end(&mut buf).map_err(|e| fs_io_error("read", &display, e))?;
+            let truncated = buf.len() as u64 > max_bytes;
+            if truncated {
+                buf.truncate(max_bytes as usize);
+            }
+            Ok((buf, truncated))
+        }
     }
 
-    fn write(&self, path: &std::path::Path, bytes: &[u8]) -> HostResult<u64> {
-        std::fs::write(path, bytes).map_err(|e| fs_io_error("write", path, e))?;
-        Ok(bytes.len() as u64)
+    fn write(&self, path: &tauron_host::ScopedPath, bytes: &[u8]) -> HostResult<u64> {
+        #[cfg(unix)]
+        {
+            return tauron_host::scoped_fs_write_hard(path, bytes)
+                .map_err(|e| scoped_fs_error("write", path, e));
+        }
+        #[cfg(not(unix))]
+        {
+            let display = path.display_path();
+            std::fs::write(&display, bytes).map_err(|e| fs_io_error("write", &display, e))?;
+            Ok(bytes.len() as u64)
+        }
     }
 
     fn list(&self, path: &std::path::Path) -> HostResult<Vec<FsEntry>> {
@@ -1484,10 +1517,17 @@ impl FsSink for StdFsSink {
         Ok(out)
     }
 
-    fn stat(&self, path: &std::path::Path) -> HostResult<FsStat> {
-        let meta = std::fs::metadata(path).map_err(|e| fs_io_error("stat", path, e))?;
+    fn stat(&self, path: &tauron_host::ScopedPath) -> HostResult<FsStat> {
+        #[cfg(unix)]
+        let meta = tauron_host::scoped_fs_stat_hard(path)
+            .map_err(|e| scoped_fs_error("stat", path, e))?;
+        #[cfg(not(unix))]
+        let meta = {
+            let display = path.display_path();
+            std::fs::symlink_metadata(&display).map_err(|e| fs_io_error("stat", &display, e))?
+        };
         Ok(FsStat {
-            path: path.to_string_lossy().into_owned(),
+            path: path.display_path().to_string_lossy().into_owned(),
             is_dir: meta.is_dir(),
             is_file: meta.is_file(),
             size: if meta.is_file() { meta.len() } else { 0 },
@@ -6197,6 +6237,39 @@ fn resolve_within_roots(roots: &[PathBuf], raw: &str) -> HostResult<PathBuf> {
     }
 }
 
+/// V4 A95：把授权结果转换为“可信 root + portable relative path”。
+///
+/// 预检查只用于选择 root；真正 read/write/stat 在 Unix 通过 openat/O_NOFOLLOW
+/// 沿同一 root handle 执行，因此 check/use 期间替换 symlink 仍会被拒绝。
+fn scoped_within_roots(roots: &[PathBuf], raw: &str) -> HostResult<tauron_host::ScopedPath> {
+    let resolved = resolve_within_roots(roots, raw)?;
+    let root = roots.iter().find(|root| resolved.starts_with(root)).ok_or_else(|| {
+        HostError::new(
+            ErrorCode::E_AUTH_DENIED,
+            format!("fs 路径 `{raw}` 未匹配任何可信 root"),
+        )
+    })?;
+    let relative = resolved.strip_prefix(root).map_err(|_| {
+        HostError::new(
+            ErrorCode::E_AUTH_DENIED,
+            format!("fs 路径 `{raw}` 无法转换为 root-relative path"),
+        )
+    })?;
+    let relative = relative.to_str().ok_or_else(|| {
+        HostError::new(
+            ErrorCode::E_INVALID_MANIFEST,
+            format!("fs 路径 `{raw}` 含无法在线协议表达的非 UTF-8 组件"),
+        )
+    })?;
+    tauron_host::ScopedPath::new(root.clone(), relative).map_err(|error| {
+        HostError::new(
+            ErrorCode::E_AUTH_DENIED,
+            format!("fs scoped path 拒绝 `{raw}`: {error}"),
+        )
+    })
+}
+
+
 /// `host_fs_read`：读取文本文件（允许根目录内；超限截断并如实标注）。
 pub fn cmd_fs_read(
     state: &SubstrateState,
@@ -6208,11 +6281,11 @@ pub fn cmd_fs_read(
         if roots.is_empty() {
             return Ok(ProviderResult::Unsupported(fs_unavailable()));
         }
-        let resolved = resolve_within_roots(roots, path)?;
+        let scoped = scoped_within_roots(roots, path)?;
         let limit = max_bytes.unwrap_or(FS_MAX_READ_BYTES).min(FS_MAX_READ_BYTES);
-        let (bytes, truncated) = state.fs_sink.read(&resolved, limit)?;
+        let (bytes, truncated) = state.fs_sink.read(&scoped, limit)?;
         Ok(ProviderResult::Value(FsReadResult {
-            path: resolved.to_string_lossy().into_owned(),
+            path: scoped.display_path().to_string_lossy().into_owned(),
             text: String::from_utf8_lossy(&bytes).into_owned(),
             bytes: bytes.len() as u64,
             truncated,
@@ -6242,10 +6315,10 @@ pub fn cmd_fs_write(
         if roots.is_empty() {
             return Ok(ProviderResult::Unsupported(fs_unavailable()));
         }
-        let resolved = resolve_within_roots(roots, path)?;
-        let bytes = state.fs_sink.write(&resolved, text.as_bytes())?;
+        let scoped = scoped_within_roots(roots, path)?;
+        let bytes = state.fs_sink.write(&scoped, text.as_bytes())?;
         Ok(ProviderResult::Value(FsWriteResult {
-            path: resolved.to_string_lossy().into_owned(),
+            path: scoped.display_path().to_string_lossy().into_owned(),
             bytes,
         }))
     })?
@@ -6291,8 +6364,8 @@ pub fn cmd_fs_stat(state: &SubstrateState, path: &str) -> HostResult<ProviderRes
         if roots.is_empty() {
             return Ok(ProviderResult::Unsupported(fs_unavailable()));
         }
-        let resolved = resolve_within_roots(roots, path)?;
-        state.fs_sink.stat(&resolved).map(ProviderResult::Value)
+        let scoped = scoped_within_roots(roots, path)?;
+        state.fs_sink.stat(&scoped).map(ProviderResult::Value)
     })?
 }
 
