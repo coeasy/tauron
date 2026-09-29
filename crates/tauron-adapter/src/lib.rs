@@ -731,6 +731,26 @@ pub fn cmd_host_capabilities(state: &SubstrateState) -> HostResult<CapabilitiesB
                 .push(UnsupportedDomain { domain: domain.to_string(), reason: reason.to_string() });
         }
 
+        let process_sandbox = state.process_sandbox.get().cloned();
+        let (process_sandbox_level, process_sandbox_detail) = if !plugin_runtime {
+            ("unsupported", "plugin runtime is not installed".to_string())
+        } else {
+            let descriptor = process_sandbox.unwrap_or_else(|| {
+                tauron_proc::ProcessSandboxDescriptor::unsupported(
+                    "plugin runtime did not publish a process sandbox descriptor",
+                )
+            });
+            (descriptor.enforcement.as_str(), descriptor.detail)
+        };
+        if plugin_runtime && process_sandbox_level != "unsupported" {
+            families.push("process-sandbox".to_string());
+        } else {
+            unsupported.push(UnsupportedDomain {
+                domain: "process-sandbox".to_string(),
+                reason: process_sandbox_detail.clone(),
+            });
+        }
+
         let fs_level = if state.fs_allowed_roots.is_empty() {
             "unsupported"
         } else {
@@ -775,6 +795,11 @@ pub fn cmd_host_capabilities(state: &SubstrateState) -> HostResult<CapabilitiesB
                     }
                     _ => "HTTP provider or network scope is not configured".to_string(),
                 },
+            },
+            CapabilityEnforcement {
+                domain: "process-sandbox".to_string(),
+                level: process_sandbox_level.to_string(),
+                detail: process_sandbox_detail,
             },
         ];
 
@@ -2100,6 +2125,10 @@ pub struct SubstrateState {
     /// 交给插件运行时——普通字段无法在事后注入，会让底座命令读到「没注入写回口」的
     /// 副本，对账静默失效。
     pub plugin_flags: Arc<std::sync::OnceLock<Arc<dyn PluginFlagSink>>>,
+    /// V4 A97 process sandbox descriptor supplied by the installed plugin runtime.
+    /// Bottom-only hosts keep this unset; multi-plugin hosts inject it from the same ProcSpawner
+    /// that performs spawn, so capability reporting cannot drift from the execution path.
+    pub process_sandbox: Arc<std::sync::OnceLock<tauron_proc::ProcessSandboxDescriptor>>,
     /// **窗口能力**（R8 §1）：平台部分的可替换实现。
     ///
     /// 与 [`Self::plugin_flags`] 的 `OnceLock` **不同**，这里是普通 `pub` 字段：
@@ -2272,6 +2301,11 @@ impl ProcRuntime {
     /// 启动面（生产 = `std::process::Command`）。
     pub fn spawner(&self) -> &Arc<dyn ProcSpawner> {
         &self.spawner
+    }
+
+    /// V4 A97 sandbox enforcement from the exact spawner used for process execution.
+    pub fn sandbox_descriptor(&self) -> tauron_proc::ProcessSandboxDescriptor {
+        self.spawner.sandbox_descriptor()
     }
 
     /// 崩溃预算（窗口秒数 + 窗口内允许的崩溃次数上限）。
@@ -2558,6 +2592,7 @@ impl SubstrateState {
             })),
             subscription_groups: Arc::new(Mutex::new(std::collections::HashMap::new())),
             plugin_flags: Arc::new(std::sync::OnceLock::new()),
+            process_sandbox: Arc::new(std::sync::OnceLock::new()),
             // R8：三类平台能力的**降级缺省**。宿主（`tauri.rs`）在装配时替换为
             // Tauri 实现；不替换 = 进程内留痕 / 取消 / 无 OS 注册（如实降级）。
             window_sink: Arc::new(MemoryWindowSink::new()),
@@ -2652,6 +2687,11 @@ impl PluginRuntimeState {
             );
         }
         let proc_runtime = Arc::new(ProcRuntime::new(spawner));
+        if substrate.process_sandbox.set(proc_runtime.sandbox_descriptor()).is_err() {
+            eprintln!(
+                "[tauron] 底座已注入 process sandbox descriptor；本次插件运行时不会覆盖既有事实"
+            );
+        }
         let deliveries = Self::default_deliveries(&substrate, &registry, &proc_runtime);
         Self {
             substrate,

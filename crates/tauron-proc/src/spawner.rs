@@ -56,6 +56,87 @@ pub enum ProcessStatus {
     Unknown,
 }
 
+
+impl ProcessStatus {
+    pub fn is_proven_alive(self) -> bool {
+        matches!(self, ProcessStatus::Alive)
+    }
+}
+
+/// V4 A97 machine-readable process isolation strength.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProcessSandboxEnforcement {
+    Unsupported,
+    Partial,
+    Hard,
+}
+
+impl ProcessSandboxEnforcement {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported",
+            Self::Partial => "partial",
+            Self::Hard => "hard",
+        }
+    }
+}
+
+/// Honest process sandbox capability descriptor.
+///
+/// A provider must not claim `Hard` unless process-tree containment and all declared security
+/// dimensions are enforced by the OS primitive it installs before exec.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessSandboxDescriptor {
+    pub enforcement: ProcessSandboxEnforcement,
+    pub process_tree_containment: bool,
+    pub filesystem_isolation: bool,
+    pub network_isolation: bool,
+    pub syscall_isolation: bool,
+    pub detail: String,
+}
+
+impl ProcessSandboxDescriptor {
+    pub fn unsupported(detail: impl Into<String>) -> Self {
+        Self {
+            enforcement: ProcessSandboxEnforcement::Unsupported,
+            process_tree_containment: false,
+            filesystem_isolation: false,
+            network_isolation: false,
+            syscall_isolation: false,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// OS-specific sandbox provider SPI.
+///
+/// `configure` is called after spawn-config validation but before `Command::spawn`. Returning an
+/// error is fail-closed: no child is created. The default Tauron provider is intentionally
+/// unsupported and leaves the command unchanged; therefore capability reporting never confuses
+/// "can spawn a child" with "child is sandboxed".
+pub trait ProcessSandboxProvider: Send + Sync {
+    fn descriptor(&self) -> ProcessSandboxDescriptor;
+    fn configure(&self, command: &mut Command, cfg: &SpawnConfig) -> ProcResult<()>;
+}
+
+/// Compatibility provider used by the built-in CommandSpawner until an OS sandbox is installed.
+#[derive(Debug, Default)]
+pub struct UnsupportedProcessSandboxProvider;
+
+impl ProcessSandboxProvider for UnsupportedProcessSandboxProvider {
+    fn descriptor(&self) -> ProcessSandboxDescriptor {
+        ProcessSandboxDescriptor::unsupported(
+            "direct child process only; no process-group/job-object containment, filesystem/network namespace, or syscall sandbox",
+        )
+    }
+
+    fn configure(&self, _command: &mut Command, _cfg: &SpawnConfig) -> ProcResult<()> {
+        Ok(())
+    }
+}
+
 /// 进程启动器（可注入）。
 ///
 /// **契约**：`spawn` 返回 `Ok` 即表示操作系统层面**真的**有一个进程在跑，
@@ -63,6 +144,11 @@ pub enum ProcessStatus {
 /// 返回 `Err`，**不得**返回一个假 pid（那会让租约指向不存在的进程，而
 /// `runtime_health` 会把它报成崩溃，故障点被彻底演没）。
 pub trait ProcSpawner: Send + Sync {
+    /// Honest sandbox capability. Legacy/custom spawners default to unsupported.
+    fn sandbox_descriptor(&self) -> ProcessSandboxDescriptor {
+        ProcessSandboxDescriptor::unsupported("spawner did not provide a ProcessSandboxProvider")
+    }
+
     /// 启动 sidecar。
     fn spawn(&self, cfg: &SpawnConfig) -> ProcResult<SpawnedProc>;
 
@@ -294,7 +380,6 @@ impl SinkTable {
 ///   进程，本仓测试明确不起真进程。无需进程的路径（未知 pid / 已退出）有测试。
 /// - 进程组/作业对象、`kill` 树（孙进程不随父进程一起死）、空闲超时 kill 均**未实现**：
 ///   终止只覆盖直接子进程。
-#[derive(Default)]
 pub struct CommandSpawner {
     /// pid → `Child`。持有句柄是 `try_wait` 的前提（否则只能靠平台 API 探测，
     /// 那会引入平台分支与 unsafe）。stdin/stdout 已在 `spawn` 时 `take` 出去，
@@ -309,6 +394,19 @@ pub struct CommandSpawner {
     stdin_writers: Arc<Mutex<HashMap<u32, Arc<Mutex<ChildStdin>>>>>,
     /// 帧接收器 + 关闭标记（同一把锁，见 [`SinkTable`]）。
     sinks: Arc<Mutex<SinkTable>>,
+    /// V4 A97 sandbox provider invoked before every OS spawn.
+    sandbox_provider: Arc<dyn ProcessSandboxProvider>,
+}
+
+impl Default for CommandSpawner {
+    fn default() -> Self {
+        Self {
+            children: Arc::new(Mutex::new(HashMap::new())),
+            stdin_writers: Arc::new(Mutex::new(HashMap::new())),
+            sinks: Arc::new(Mutex::new(SinkTable::default())),
+            sandbox_provider: Arc::new(UnsupportedProcessSandboxProvider),
+        }
+    }
 }
 
 /// 单帧字节上限（1.0-W7）。超过即判定为协议违规并断开读线程——
@@ -328,6 +426,15 @@ impl CommandSpawner {
         Self::default()
     }
 
+    /// Inject an OS-specific V4 A97 sandbox provider.
+    pub fn with_sandbox_provider(provider: Arc<dyn ProcessSandboxProvider>) -> Self {
+        Self { sandbox_provider: provider, ..Self::default() }
+    }
+
+    pub fn sandbox_descriptor(&self) -> ProcessSandboxDescriptor {
+        self.sandbox_provider.descriptor()
+    }
+
     /// 当前被本启动器跟踪的进程数（诊断/测试）。
     pub fn tracked(&self) -> usize {
         self.children.lock().len()
@@ -345,12 +452,17 @@ impl CommandSpawner {
 }
 
 impl ProcSpawner for CommandSpawner {
+    fn sandbox_descriptor(&self) -> ProcessSandboxDescriptor {
+        self.sandbox_provider.descriptor()
+    }
+
     fn spawn(&self, cfg: &SpawnConfig) -> ProcResult<SpawnedProc> {
         // spawn 前校验（§4.7 硬约束）：路径 / 签名 / sha256 / ABI 任一不合格
         // 都**不得**启动。校验在启动之前，因此不合格的配置连 syscall 都到不了。
         validate_spawn_config(cfg)?;
 
-        let mut child = Command::new(&cfg.binary_path)
+        let mut command = Command::new(&cfg.binary_path);
+        command
             .args(&cfg.args)
             .envs(&cfg.env)
             // stderr 承载日志（§4.7：日志走 stderr），继承宿主 stderr 即可，
@@ -360,7 +472,13 @@ impl ProcSpawner for CommandSpawner {
             // 经 stdout 回帧。stdout 由下方读线程**持续排空**，否则 sidecar 写满
             // 管道缓冲区会被阻塞死（比丢弃更糟）。
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
+            .stdout(Stdio::piped());
+
+        // V4 A97: sandbox policy is applied before the exec boundary. Provider errors are
+        // fail-closed and therefore cannot leave a partially tracked child process.
+        self.sandbox_provider.configure(&mut command, cfg)?;
+
+        let mut child = command
             .spawn()
             .map_err(|e| ProcError::SpawnFailed(format!("启动 `{}` 失败：{e}", cfg.binary_path)))?;
 
@@ -603,6 +721,51 @@ mod tests {
             binary_hash: "a".repeat(64),
             abi: AbiFingerprint::now("1.98.0", "iface-hash"),
         }
+    }
+
+
+    struct RejectingSandbox {
+        configured: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ProcessSandboxProvider for RejectingSandbox {
+        fn descriptor(&self) -> ProcessSandboxDescriptor {
+            ProcessSandboxDescriptor {
+                enforcement: ProcessSandboxEnforcement::Hard,
+                process_tree_containment: true,
+                filesystem_isolation: true,
+                network_isolation: true,
+                syscall_isolation: true,
+                detail: "test hard sandbox".into(),
+            }
+        }
+
+        fn configure(&self, _command: &mut Command, _cfg: &SpawnConfig) -> ProcResult<()> {
+            self.configured.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProcError::InvalidSpawnConfig("sandbox rejected before exec".into()))
+        }
+    }
+
+    #[test]
+    fn sandbox_provider_runs_before_os_spawn_and_fails_closed() {
+        let configured = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let spawner = CommandSpawner::with_sandbox_provider(Arc::new(RejectingSandbox {
+            configured: configured.clone(),
+        }));
+        let cfg = cfg_with_path("definitely-not-a-real-binary");
+        let err = spawner.spawn(&cfg).unwrap_err();
+        assert!(matches!(err, ProcError::InvalidSpawnConfig(ref m) if m.contains("sandbox")));
+        assert_eq!(configured.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(spawner.tracked(), 0, "sandbox rejection occurs before child creation");
+        assert_eq!(spawner.sandbox_descriptor().enforcement, ProcessSandboxEnforcement::Hard);
+    }
+
+    #[test]
+    fn built_in_command_spawner_reports_sandbox_unsupported_honestly() {
+        let d = CommandSpawner::new().sandbox_descriptor();
+        assert_eq!(d.enforcement, ProcessSandboxEnforcement::Unsupported);
+        assert!(!d.process_tree_containment);
+        assert!(d.detail.contains("direct child"));
     }
 
     /// 配置不合格时**必须**在启动之前被挡下：不产生进程、不留下句柄。

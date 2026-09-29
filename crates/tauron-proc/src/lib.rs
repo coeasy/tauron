@@ -27,7 +27,9 @@ pub mod spawner;
 
 pub use error::{ProcError, ProcResult};
 pub use spawner::{
-    CommandSpawner, KillOutcome, ProcSpawner, ProcessFrameSink, ProcessStatus, SpawnedProc,
+    CommandSpawner, KillOutcome, ProcSpawner, ProcessFrameSink, ProcessSandboxDescriptor,
+    ProcessSandboxEnforcement, ProcessSandboxProvider, ProcessStatus, SpawnedProc,
+    UnsupportedProcessSandboxProvider,
 };
 
 // ──────────────────────────────────────────────────────────────────────────
