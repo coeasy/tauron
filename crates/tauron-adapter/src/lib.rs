@@ -6259,7 +6259,6 @@ fn scoped_within_roots(roots: &[PathBuf], raw: &str) -> HostResult<tauron_host::
     })
 }
 
-
 /// `host_fs_read`：读取文本文件（允许根目录内；超限截断并如实标注）。
 pub fn cmd_fs_read(
     state: &SubstrateState,
