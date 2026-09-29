@@ -81,6 +81,7 @@ const requiredSteps = {
     'FFI Ownership / ASan（V4 A72/A107）',
     'Local Host UDS reference E2E（V4 A106）',
     'Local Host broker chaos / peer-auth（V4 A108 local）',
+    'Remote Host session/replay/rate-limit chaos（V4 A108 remote contract）',
   ],
   TypeScript: [
     'Public Surface Ledger（V4 A105）',

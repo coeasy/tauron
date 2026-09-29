@@ -37,6 +37,7 @@ pub mod portable_path;
 pub mod production;
 pub mod provider;
 pub mod registry;
+pub mod remote_host;
 pub mod runtime;
 pub mod scoped_fs;
 pub mod service_graph;
@@ -61,6 +62,10 @@ pub use manifest::{
     SUPPORTED_PLATFORMS,
 };
 pub use registry::{PendingCall, PluginEntry, PluginFilter, Registry, RegistryConfig};
+pub use remote_host::{
+    RemoteAuthnCredential, RemoteHostConfig, RemoteHostError, RemoteHostSecurity,
+    RemotePrincipal, RemoteSessionSnapshot, RemoteSessionState, RemoteTransportEvidence,
+};
 pub use runtime::{LeaseReaper, ReapOutcome, ReapStats, RuntimeHandle, RuntimeLease, RuntimeTable};
 pub use wire::{
     decode_json as decode_wire_json, encode_json as encode_wire_json, WireError, WireExtensions,

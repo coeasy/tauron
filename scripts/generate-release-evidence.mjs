@@ -102,7 +102,7 @@ if (
 }
 
 const limitations = [
-  'Remote Host transport is not implemented; A108 remote chaos remains open.',
+  'Remote Host security/session/replay/rate-limit contract and chaos gate are implemented, but the official TLS network reference adapter is still open.',
   'The Local Host reference transport is implemented on Linux UDS/SO_PEERCRED, macOS UDS/getpeereid and Windows Named Pipe/SID.',
   'The built-in CommandSpawner honestly reports process sandbox enforcement as unsupported; Production rejects process-runtime startup unless a hard ProcessSandboxProvider is injected.',
 ];
@@ -129,7 +129,7 @@ const evidence = {
   claims: {
     industrialGrade: false,
     reason:
-      'Remote Host security conformance and a built-in hard process sandbox provider remain open.',
+      'The official Remote TLS reference adapter and a built-in hard process sandbox provider remain open.',
   },
   reportFiles: [
     'compatibility-report.json',
@@ -183,6 +183,7 @@ const security = {
     'FFI Ownership / ASan',
     'Local Host UDS peer-auth E2E',
     'Local Host broker chaos / replay rejection',
+    'Remote Host session/replay/rate-limit chaos contract',
     'Production process-sandbox fail-closed tests inside workspace Rust tests',
   ],
   status: 'passed-with-known-limitations',
