@@ -56,7 +56,6 @@ pub enum ProcessStatus {
     Unknown,
 }
 
-
 impl ProcessStatus {
     pub fn is_proven_alive(self) -> bool {
         matches!(self, ProcessStatus::Alive)
@@ -722,7 +721,6 @@ mod tests {
             abi: AbiFingerprint::now("1.98.0", "iface-hash"),
         }
     }
-
 
     struct RejectingSandbox {
         configured: Arc<std::sync::atomic::AtomicUsize>,
