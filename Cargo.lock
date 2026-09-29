@@ -3507,6 +3507,7 @@ version = "1.0.2"
 dependencies = [
  "chrono",
  "hex",
+ "hmac",
  "parking_lot",
  "proptest",
  "semver",
