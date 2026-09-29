@@ -327,7 +327,7 @@ impl RemoteHostSecurity {
         now_ms: u64,
     ) -> Result<RemoteSessionSnapshot, RemoteHostError> {
         transport.validate()?;
-        self.cleanup(now_ms);
+        self.cleanup_sessions(now_ms);
 
         if self
             .sessions
@@ -344,15 +344,22 @@ impl RemoteHostSecurity {
             return Err(RemoteHostError::SessionCapacity);
         }
 
+        let expired = self
+            .credentials
+            .get(credential_token)
+            .map(|record| now_ms >= record.expires_at_ms)
+            .ok_or(RemoteHostError::CredentialUnavailable)?;
+        if expired {
+            self.credentials.remove(credential_token);
+            return Err(RemoteHostError::CredentialExpired);
+        }
+
         let record = self
             .credentials
             .get_mut(credential_token)
             .ok_or(RemoteHostError::CredentialUnavailable)?;
         if record.consumed || record.epoch != self.credential_epoch {
             return Err(RemoteHostError::CredentialUnavailable);
-        }
-        if now_ms >= record.expires_at_ms {
-            return Err(RemoteHostError::CredentialExpired);
         }
         if audience != record.audience || audience != self.config.audience {
             return Err(RemoteHostError::AudienceMismatch);
@@ -539,6 +546,10 @@ impl RemoteHostSecurity {
     pub fn cleanup(&mut self, now_ms: u64) {
         self.credentials
             .retain(|_, credential| !credential.consumed && now_ms < credential.expires_at_ms);
+        self.cleanup_sessions(now_ms);
+    }
+
+    fn cleanup_sessions(&mut self, now_ms: u64) {
         let ids: Vec<String> = self.sessions.keys().cloned().collect();
         for id in ids {
             let _ = self.expire_session_if_needed(&id, now_ms);
