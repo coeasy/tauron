@@ -66,7 +66,7 @@ impl DomainRule {
         if pattern == "*." || pattern.contains("..") {
             return Err(NetworkPolicyError::InvalidDomainRule(self.pattern.clone()));
         }
-        if self.ports.iter().any(|port| *port == 0) {
+        if self.ports.contains(&0) {
             return Err(NetworkPolicyError::InvalidDomainRule(self.pattern.clone()));
         }
         Ok(())
