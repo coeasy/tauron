@@ -39,10 +39,6 @@ pub mod target;
 pub mod wire;
 
 pub use authz::{AuthTier, CommandAuth, ADMIN_COMMANDS, COMMANDS};
-pub use wire::{
-    decode_json as decode_wire_json, encode_json as encode_wire_json, WireError, WireExtensions,
-    WireFrame, WireHeader, DEFAULT_MAX_WIRE_BYTES, JSON_V1_CODEC, WIRE_VERSION_V1,
-};
 pub use config::{ClientConfig, RegistryConfigOverride};
 pub use error::{guard, ErrorCode, HostError, HostResult, RetryClass};
 pub use eventbus::{
@@ -58,6 +54,10 @@ pub use manifest::{
 };
 pub use registry::{PendingCall, PluginEntry, PluginFilter, Registry, RegistryConfig};
 pub use runtime::{LeaseReaper, ReapOutcome, ReapStats, RuntimeHandle, RuntimeLease, RuntimeTable};
+pub use wire::{
+    decode_json as decode_wire_json, encode_json as encode_wire_json, WireError, WireExtensions,
+    WireFrame, WireHeader, DEFAULT_MAX_WIRE_BYTES, JSON_V1_CODEC, WIRE_VERSION_V1,
+};
 
 // V4 universal/industrial foundation exports.
 pub use activation::{ActivationError, ActivationRecord, ContentIdentity};
