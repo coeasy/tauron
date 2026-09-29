@@ -6383,7 +6383,9 @@ fn authorize_http_url(
             | tauron_host::NetworkPolicyError::HostMissing
             | tauron_host::NetworkPolicyError::PortMissing(_)
             | tauron_host::NetworkPolicyError::InvalidDomainRule(_)
-            | tauron_host::NetworkPolicyError::InvalidRedirectLimit => ErrorCode::E_INVALID_MANIFEST,
+            | tauron_host::NetworkPolicyError::InvalidRedirectLimit => {
+                ErrorCode::E_INVALID_MANIFEST
+            },
             _ => ErrorCode::E_AUTH_DENIED,
         };
         HostError::new(code, format!("HTTP network policy denied request: {error}"))
@@ -13042,10 +13044,7 @@ mod tests {
 
             // V4 默认 fail-closed：即使 URL 语法合法，没有 domain scope 也不能发请求。
             let denied = CommandState::new();
-            assert_eq!(
-                cmd_http_request(&denied, &ok).unwrap_err().code,
-                ErrorCode::E_AUTH_DENIED
-            );
+            assert_eq!(cmd_http_request(&denied, &ok).unwrap_err().code, ErrorCode::E_AUTH_DENIED);
 
             let cfg = AdapterConfig::default().with_http_policy(
                 tauron_host::NetworkPolicy::public_https(vec![tauron_host::DomainRule::exact(
@@ -13069,10 +13068,7 @@ mod tests {
                 cmd_http_request(&scoped, &bad_url).unwrap_err().code,
                 ErrorCode::E_INVALID_MANIFEST
             );
-            let outside = HttpRequestSpec {
-                url: "https://other.example.net".into(),
-                ..ok.clone()
-            };
+            let outside = HttpRequestSpec { url: "https://other.example.net".into(), ..ok.clone() };
             assert_eq!(
                 cmd_http_request(&scoped, &outside).unwrap_err().code,
                 ErrorCode::E_AUTH_DENIED
