@@ -290,6 +290,24 @@ pub static ADMIN_COMMANDS: &[CommandAuth] = &[
         consumer: "宿主 UI 主窗（资源配额诊断）",
         description: "读取全局与逐插件资源配额占用",
     },
+    CommandAuth {
+        command: "host_events_approve",
+        tier: AuthTier::Privileged,
+        consumer: "宿主 UI 主窗（事件权限审批）",
+        description: "批准某插件订阅一个私有 EventBus topic",
+    },
+    CommandAuth {
+        command: "host_events_revoke",
+        tier: AuthTier::Privileged,
+        consumer: "宿主 UI 主窗（事件权限审批）",
+        description: "撤销某插件订阅一个私有 EventBus topic 的审批",
+    },
+    CommandAuth {
+        command: "host_events_approvals",
+        tier: AuthTier::Privileged,
+        consumer: "宿主 UI 主窗（事件权限审批）",
+        description: "读取当前 EventBus 私有 topic 审批事实",
+    },
 ];
 
 /// 管理操作枚举（D15 定稿）。
@@ -761,11 +779,11 @@ mod tests {
             assert!(!c.consumer.is_empty(), "{} 缺 consumer 登记", c.command);
         }
         assert_eq!(COMMANDS.len(), 18, "§2.1 定稿 9 条 + R7 收口补登记 4 条 + 0.4-A1 跨主体调用 3 条 + 0.4 审计补登记 host_contributes_list 1 条 + 0.4-W3 贡献对账 1 条");
-        // 主窗面包含注册表管理、sidecar 管理与 M8 配额诊断四条特权命令。
+        // 主窗面包含注册表管理、sidecar 管理、资源诊断与 Event Approval Broker。
         assert_eq!(
             ADMIN_COMMANDS.len(),
-            4,
-            "核心注册的主窗特权命令 4 条；adapter 可按 feature 扩展"
+            7,
+            "核心注册的主窗特权命令 7 条；adapter 可按 feature 扩展"
         );
     }
 
@@ -814,6 +832,9 @@ mod tests {
         assert_eq!(resolve("host_runtime_spawn").unwrap().tier, AuthTier::Privileged);
         assert_eq!(resolve("host_runtime_health").unwrap().tier, AuthTier::Privileged);
         assert_eq!(resolve("host_resource_stats").unwrap().tier, AuthTier::Privileged);
+        for command in ["host_events_approve", "host_events_revoke", "host_events_approvals"] {
+            assert_eq!(resolve(command).unwrap().tier, AuthTier::Privileged, "{command}");
+        }
     }
 
     #[test]
