@@ -300,8 +300,7 @@ describe('门禁：应用层宿主错误码 TS ↔ Rust 一致', () => {
 
   it('HostError 必须以结构化 JSON 穿越 IPC（禁止 {:?} 文本转储）', () => {
     // 派生 Serialize：前端 normalizeError 分支 1 依赖 { code, message, retryable, retryClass }。
-    const derive =
-      hostErrorSrc.match(/#\[derive\(([^)]*)\)\][\s\S]{0,160}?#\[error/)?.[1] ?? '';
+    const derive = hostErrorSrc.match(/#\[derive\(([^)]*)\)\][\s\S]{0,160}?#\[error/)?.[1] ?? '';
     expect(derive, 'HostError 必须 derive(Serialize)').toContain('Serialize');
     expect(hostErrorSrc).toMatch(/pub struct HostError[\s\S]*?pub retry_class: RetryClass/);
     expect(hostErrorSrc).toMatch(/serde\(rename_all = "camelCase"\)/);
