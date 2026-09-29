@@ -103,7 +103,7 @@ if (
 
 const limitations = [
   'The Local Host reference transport is implemented on Linux UDS/SO_PEERCRED, macOS UDS/getpeereid and Windows Named Pipe/SID.',
-  'The built-in CommandSpawner provides POSIX process-group tree containment on Unix/macOS (partial) and remains non-hard overall; Production rejects process-runtime startup unless a hard ProcessSandboxProvider is injected.',
+  'The built-in CommandSpawner provides real process-tree containment on all desktop targets: POSIX process groups on Unix/macOS and KILL_ON_JOB_CLOSE Job Objects on Windows. It remains partial because filesystem/network/syscall isolation is not built in and Windows attachment occurs immediately after spawn rather than race-free suspended creation; Production therefore still requires an injected hard ProcessSandboxProvider.',
 ];
 
 const evidence = {
@@ -128,7 +128,7 @@ const evidence = {
   claims: {
     industrialGrade: false,
     reason:
-      'The built-in CommandSpawner remains non-hard overall: Unix/macOS process-tree containment is partial, while filesystem/network/syscall isolation and a Windows hard provider remain open. Production requires an injected hard ProcessSandboxProvider.',
+      'The built-in CommandSpawner now contains process trees on Unix/macOS and Windows, but remains non-hard overall because filesystem/network/syscall isolation is open and Windows Job assignment is post-spawn. Production requires an injected hard ProcessSandboxProvider.',
   },
   reportFiles: [
     'compatibility-report.json',

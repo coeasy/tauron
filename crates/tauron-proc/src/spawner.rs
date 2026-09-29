@@ -119,6 +119,15 @@ pub trait ProcessSandboxProvider: Send + Sync {
     fn descriptor(&self) -> ProcessSandboxDescriptor;
     fn configure(&self, command: &mut Command, cfg: &SpawnConfig) -> ProcResult<()>;
 
+    /// Attach the just-created child to the provider-owned containment primitive.
+    ///
+    /// Called immediately after `Command::spawn` and before the child is inserted into Tauron's
+    /// runtime tables. Failure is fail-closed: CommandSpawner kills/waits the direct child and
+    /// reports spawn failure, so a half-contained runtime can never become visible as Running.
+    fn attach_spawned(&self, _child: &Child) -> ProcResult<()> {
+        Ok(())
+    }
+
     /// Terminate the provider-owned process tree for `pid`.
     ///
     /// `Ok(true)` means the containment primitive accepted the termination request; the caller
@@ -196,12 +205,148 @@ impl ProcessSandboxProvider for UnixProcessGroupSandboxProvider {
     }
 }
 
+/// Windows built-in process-tree containment using a per-runtime Job Object.
+///
+/// The Job Object is configured with KILL_ON_JOB_CLOSE and the spawned process is attached
+/// immediately after `Command::spawn`. Closing the sole Job handle therefore terminates the
+/// process and all descendants that remain in the job. This is still `Partial`: the standard
+/// library does not expose CREATE_SUSPENDED + primary-thread resume, so a tiny post-spawn attach
+/// race remains, and Job Objects do not provide filesystem/network/syscall isolation.
+#[cfg(windows)]
+#[derive(Default)]
+pub struct WindowsJobObjectSandboxProvider {
+    /// pid -> sole owned Job Object HANDLE encoded as usize so the provider stays Send + Sync.
+    jobs: Mutex<HashMap<u32, usize>>,
+}
+
+#[cfg(windows)]
+impl ProcessSandboxProvider for WindowsJobObjectSandboxProvider {
+    fn descriptor(&self) -> ProcessSandboxDescriptor {
+        ProcessSandboxDescriptor {
+            enforcement: ProcessSandboxEnforcement::Partial,
+            process_tree_containment: true,
+            filesystem_isolation: false,
+            network_isolation: false,
+            syscall_isolation: false,
+            detail: "Windows Job Object KILL_ON_JOB_CLOSE process-tree containment; post-spawn attach race and filesystem/network/syscall isolation remain".into(),
+        }
+    }
+
+    fn configure(&self, _command: &mut Command, _cfg: &SpawnConfig) -> ProcResult<()> {
+        Ok(())
+    }
+
+    fn attach_spawned(&self, child: &Child) -> ProcResult<()> {
+        use std::mem::size_of;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        // SAFETY: null security/name requests an unnamed Job Object with default security.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() || job == INVALID_HANDLE_VALUE {
+            return Err(ProcError::SpawnFailed(format!(
+                "CreateJobObjectW failed for pid {}: {}",
+                child.id(),
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: info points to the exact structure required by JobObjectExtendedLimitInformation.
+        let configured = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: job is a live handle owned by this function.
+            unsafe {
+                CloseHandle(job);
+            }
+            return Err(ProcError::SpawnFailed(format!(
+                "SetInformationJobObject failed for pid {}: {error}",
+                child.id()
+            )));
+        }
+
+        // SAFETY: Child owns a live process HANDLE until it is waited/dropped; Job assignment does
+        // not transfer ownership of that process handle.
+        let assigned = unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as _) };
+        if assigned == 0 {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: job is a live handle owned by this function.
+            unsafe {
+                CloseHandle(job);
+            }
+            return Err(ProcError::SpawnFailed(format!(
+                "AssignProcessToJobObject failed for pid {}: {error}",
+                child.id()
+            )));
+        }
+
+        if let Some(previous) = self.jobs.lock().insert(child.id(), job as usize) {
+            // Defensive PID-reuse cleanup. A live previous job must never outlive replacement.
+            // SAFETY: previous was minted by CreateJobObjectW and removed from the ownership map.
+            unsafe {
+                CloseHandle(previous as _);
+            }
+        }
+        Ok(())
+    }
+
+    fn terminate_tree(&self, pid: u32) -> ProcResult<bool> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+
+        let Some(raw) = self.jobs.lock().remove(&pid) else {
+            return Ok(false);
+        };
+        // KILL_ON_JOB_CLOSE makes closing our sole Job handle the tree-termination primitive.
+        // SAFETY: raw was minted by CreateJobObjectW and removed exactly once from the map.
+        let closed = unsafe { CloseHandle(raw as _) };
+        if closed == 0 {
+            return Err(ProcError::ProcessTerminated(format!(
+                "CloseHandle(JobObject) failed for pid {pid}: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsJobObjectSandboxProvider {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        for (_, raw) in self.jobs.get_mut().drain() {
+            // KILL_ON_JOB_CLOSE ensures provider teardown cannot orphan descendants.
+            // SAFETY: each raw handle is uniquely owned by the drained map entry.
+            unsafe {
+                CloseHandle(raw as _);
+            }
+        }
+    }
+}
+
 fn default_process_sandbox_provider() -> Arc<dyn ProcessSandboxProvider> {
     #[cfg(unix)]
     {
         Arc::new(UnixProcessGroupSandboxProvider)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        Arc::new(WindowsJobObjectSandboxProvider::default())
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         Arc::new(UnsupportedProcessSandboxProvider)
     }
@@ -448,9 +593,10 @@ impl SinkTable {
 ///   退出路径（卸载回收 / 进程退出）都会先走 `kill`，因此这条只覆盖异常路径。
 /// - `kill` 的**正路**（真的杀掉一个活进程）在测试里未验证：验证它必须真的起一个
 ///   进程，本仓测试明确不起真进程。无需进程的路径（未知 pid / 已退出）有测试。
-/// - Unix/macOS 默认 provider 已用独立 POSIX process group 覆盖进程树终止；Windows
-///   默认 provider 仍为 unsupported，且所有平台的 filesystem/network/syscall 隔离仍
-///   未内建，因此默认 capability 最多是 partial、Production 仍 fail-closed。
+/// - Unix/macOS 默认 provider 用独立 POSIX process group，Windows 默认 provider 用
+///   KILL_ON_JOB_CLOSE Job Object；三桌面平台都已有真实 process-tree containment。
+///   但 filesystem/network/syscall 隔离仍未内建，Windows 还有 post-spawn attach
+///   race，因此默认 capability 仍最多是 partial、Production 仍 fail-closed。
 pub struct CommandSpawner {
     /// pid → `Child`。持有句柄是 `try_wait` 的前提（否则只能靠平台 API 探测，
     /// 那会引入平台分支与 unsafe）。stdin/stdout 已在 `spawn` 时 `take` 出去，
@@ -554,6 +700,14 @@ impl ProcSpawner for CommandSpawner {
         let mut child = command
             .spawn()
             .map_err(|e| ProcError::SpawnFailed(format!("启动 `{}` 失败：{e}", cfg.binary_path)))?;
+
+        // V4 A97: post-spawn containment attachment must complete before this process is visible
+        // in any Tauron runtime table. A failed Job/cgroup/container attach is fail-closed.
+        if let Err(error) = self.sandbox_provider.attach_spawned(&child) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
 
         let pid = child.id();
         // 取出 stdin 写句柄（宿主写帧用）与 stdout（交给读线程排空）。
@@ -680,20 +834,28 @@ impl ProcSpawner for CommandSpawner {
     }
 
     fn status(&self, pid: u32) -> ProcessStatus {
-        let mut children = self.children.lock();
-        match children.get_mut(&pid) {
-            Some(child) => match child.try_wait() {
-                Ok(Some(_status)) => {
-                    children.remove(&pid);
-                    ProcessStatus::Exited
-                }
-                Ok(None) => ProcessStatus::Alive,
-                // A broken/invalid handle is not proof of life and not proof of death.
-                Err(_) => ProcessStatus::Unknown,
-            },
-            // Not tracked by this spawner: ownership/liveness is unknown.
-            None => ProcessStatus::Unknown,
+        let status = {
+            let mut children = self.children.lock();
+            match children.get_mut(&pid) {
+                Some(child) => match child.try_wait() {
+                    Ok(Some(_status)) => {
+                        children.remove(&pid);
+                        ProcessStatus::Exited
+                    }
+                    Ok(None) => ProcessStatus::Alive,
+                    // A broken/invalid handle is not proof of life and not proof of death.
+                    Err(_) => ProcessStatus::Unknown,
+                },
+                // Not tracked by this spawner: ownership/liveness is unknown.
+                None => ProcessStatus::Unknown,
+            }
+        };
+        if status == ProcessStatus::Exited {
+            // Parent exit is also a containment lifecycle boundary. Descendants must not survive
+            // merely because status() observed the direct child before the stdout EOF thread did.
+            let _ = self.sandbox_provider.terminate_tree(pid);
         }
+        status
     }
 
     fn is_alive(&self, pid: u32) -> bool {
@@ -856,6 +1018,35 @@ mod tests {
         assert!(!descriptor.filesystem_isolation);
         assert!(!descriptor.network_isolation);
         assert!(!descriptor.syscall_isolation);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_default_provider_reports_partial_job_object_containment() {
+        let spawner = CommandSpawner::new();
+        let descriptor = spawner.sandbox_descriptor();
+        assert_eq!(descriptor.enforcement, ProcessSandboxEnforcement::Partial);
+        assert!(descriptor.process_tree_containment);
+        assert!(!descriptor.filesystem_isolation);
+        assert!(!descriptor.network_isolation);
+        assert!(!descriptor.syscall_isolation);
+        assert!(descriptor.detail.contains("Job Object"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_object_attaches_and_tree_kill_is_exercised_on_real_process() {
+        let spawner = CommandSpawner::new();
+        let mut cfg = cfg_with_path("cmd.exe");
+        // cmd launches ping.exe as a child, so the Job Object contains a real descendant tree.
+        cfg.args = vec![
+            "/C".into(),
+            "ping -n 30 127.0.0.1 >NUL".into(),
+        ];
+        let spawned = spawner.spawn(&cfg).expect("spawn real Windows Job Object fixture");
+        assert_eq!(spawner.status(spawned.pid), ProcessStatus::Alive);
+        assert_eq!(spawner.kill(spawned.pid).unwrap(), KillOutcome::Terminated);
+        assert_eq!(spawner.status(spawned.pid), ProcessStatus::Unknown);
     }
 
     #[cfg(unix)]

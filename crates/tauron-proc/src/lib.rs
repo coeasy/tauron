@@ -28,6 +28,8 @@ pub mod spawner;
 pub use error::{ProcError, ProcResult};
 #[cfg(unix)]
 pub use spawner::UnixProcessGroupSandboxProvider;
+#[cfg(windows)]
+pub use spawner::WindowsJobObjectSandboxProvider;
 pub use spawner::{
     CommandSpawner, KillOutcome, ProcSpawner, ProcessFrameSink, ProcessSandboxDescriptor,
     ProcessSandboxEnforcement, ProcessSandboxProvider, ProcessStatus, SpawnedProc,
