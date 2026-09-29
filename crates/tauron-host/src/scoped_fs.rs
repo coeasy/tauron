@@ -8,7 +8,7 @@
 //! object relative to the already-open parent directory. Windows remains explicitly Partial until
 //! the platform adapter validates reparse/junction targets through native handles.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -98,9 +98,7 @@ mod unix {
     use std::os::fd::OwnedFd;
     use std::path::{Component, Path};
 
-    use rustix::fs::{
-        mkdirat, openat, statat, unlinkat, AtFlags, Dir, FileType, Mode, OFlags,
-    };
+    use rustix::fs::{mkdirat, openat, statat, unlinkat, AtFlags, Dir, FileType, Mode, OFlags};
     use rustix::io::Errno;
 
     use super::{ScopedDirEntry, ScopedFsError, ScopedPath};
@@ -226,8 +224,8 @@ mod unix {
                 continue;
             }
             let dirfd = dir.fd().map_err(std::io::Error::from)?;
-            let stat = statat(dirfd, name, AtFlags::SYMLINK_NOFOLLOW)
-                .map_err(std::io::Error::from)?;
+            let stat =
+                statat(dirfd, name, AtFlags::SYMLINK_NOFOLLOW).map_err(std::io::Error::from)?;
             let kind = FileType::from_raw_mode(stat.st_mode);
             out.push(ScopedDirEntry {
                 name: String::from_utf8_lossy(name.to_bytes()).into_owned(),
@@ -280,8 +278,8 @@ mod unix {
 
     pub fn remove(path: &ScopedPath) -> Result<(), ScopedFsError> {
         let (parent, name) = open_parent(path)?;
-        let stat = statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW)
-            .map_err(std::io::Error::from)?;
+        let stat =
+            statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(std::io::Error::from)?;
         let kind = FileType::from_raw_mode(stat.st_mode);
         let flags = if kind.is_dir() { AtFlags::REMOVEDIR } else { AtFlags::empty() };
         unlinkat(&parent, name, flags).map_err(std::io::Error::from)?;
