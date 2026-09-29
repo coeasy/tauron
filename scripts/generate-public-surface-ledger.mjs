@@ -29,10 +29,11 @@ function classify(command, set) {
   const stateful = /events_|settings_|registry_|stream_|runtime_|contributes_|recover_|window_create|call_/.test(
     command,
   );
-  const maturity =
-    /host_market_(download|install)/.test(command) ? 'deprecated' :
-    /install_preview/.test(command) ? 'beta' :
-    'stable';
+  const maturity = /host_market_(download|install)/.test(command)
+    ? 'deprecated'
+    : /install_preview/.test(command)
+      ? 'beta'
+      : 'stable';
 
   return {
     kind: 'command',
@@ -61,12 +62,23 @@ const entries = [
   ...install.map((c) => classify(c, 'plugin-install')),
 ].sort((a, b) => a.symbol.localeCompare(b.symbol));
 
-const duplicates = entries.filter((entry, i) => entries.findIndex((x) => x.symbol === entry.symbol) !== i);
+const duplicates = entries.filter(
+  (entry, i) => entries.findIndex((x) => x.symbol === entry.symbol) !== i,
+);
 if (duplicates.length) {
   throw new Error(`Duplicate public commands: ${duplicates.map((x) => x.symbol).join(', ')}`);
 }
 
-const required = ['owner', 'producer', 'consumer', 'authorization', 'lifecycle', 'cleanup', 'test', 'maturity'];
+const required = [
+  'owner',
+  'producer',
+  'consumer',
+  'authorization',
+  'lifecycle',
+  'cleanup',
+  'test',
+  'maturity',
+];
 for (const entry of entries) {
   for (const field of required) {
     if (!entry[field] || String(entry[field]).trim() === '') {
@@ -93,7 +105,9 @@ const rendered = JSON.stringify(ledger, null, 2) + '\n';
 if (process.argv.includes('--check')) {
   const current = readFileSync(OUTPUT, 'utf8');
   if (current !== rendered) {
-    console.error('PublicSurfaceLedger drift detected. Run: node scripts/generate-public-surface-ledger.mjs');
+    console.error(
+      'PublicSurfaceLedger drift detected. Run: node scripts/generate-public-surface-ledger.mjs',
+    );
     process.exit(1);
   }
   console.log(`PublicSurfaceLedger OK: ${entries.length} public commands, no orphan metadata.`);
