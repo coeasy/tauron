@@ -22,7 +22,9 @@ const release = read('.github/workflows/release.yml');
 
 const cargoVersion = /^version\s*=\s*"([^"]+)"/m.exec(cargo)?.[1];
 if (!cargoVersion || cargoVersion !== pkg.version) {
-  throw new Error(`workspace version drift: Cargo=${cargoVersion ?? 'missing'} package=${pkg.version}`);
+  throw new Error(
+    `workspace version drift: Cargo=${cargoVersion ?? 'missing'} package=${pkg.version}`,
+  );
 }
 
 const rustVersion =
@@ -76,8 +78,7 @@ const evidence = {
   targetMatrix: targetLabels,
   claims: {
     industrialGrade: false,
-    note:
-      'Evidence collection is implemented; the industrial-grade claim remains false until every required V4 conformance, failure-injection, performance, security and release gate is green.',
+    note: 'Evidence collection is implemented; the industrial-grade claim remains false until every required V4 conformance, failure-injection, performance, security and release gate is green.',
   },
   requiredReports: [
     'compatibility-report',
@@ -96,10 +97,7 @@ if (checkOnly) {
 }
 
 mkdirSync(OUT, { recursive: true });
-writeFileSync(
-  join(OUT, 'tauron-release-evidence.json'),
-  JSON.stringify(evidence, null, 2) + '\n',
-);
+writeFileSync(join(OUT, 'tauron-release-evidence.json'), JSON.stringify(evidence, null, 2) + '\n');
 writeFileSync(
   join(OUT, 'tauron-release-evidence.md'),
   [
