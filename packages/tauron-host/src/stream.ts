@@ -11,6 +11,9 @@ export type StreamKind = 'data' | 'end' | 'error';
 
 /** 合法帧种类（运行时校验用；未知取值一律拒绝，不做兜底）。 */
 export const STREAM_KINDS: readonly StreamKind[] = ['data', 'end', 'error'];
+export const DEFAULT_STREAM_CREDIT_BYTES = 64 * 1024;
+export const MAX_STREAM_CREDIT_BYTES = 16 * 1024 * 1024;
+export interface StreamCredit { streamId: string; creditBytes: number }
 
 /** `end` / `error` 是终帧：发出后句柄失效。 */
 export function isTerminalKind(kind: StreamKind): boolean {
@@ -69,6 +72,7 @@ export interface StreamHandle {
   ready: Promise<string>;
   /** 写一帧；流已关闭则立即失败（不静默丢弃）。 */
   write: (frame: StreamWriteInput) => Promise<StreamFrame>;
+  grant: (bytes: number) => Promise<StreamCredit>;
   /** 关流（幂等）。关不掉的句柄最终由调用回收兜底。 */
   close: () => void;
 }

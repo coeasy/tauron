@@ -948,6 +948,14 @@ impl Registry {
         self.streams.lock().open(call_id, subscriber)
     }
 
+    pub fn stream_grant(&self, stream_id: &str, subscriber: &str, bytes: usize) -> HostResult<usize> {
+        self.streams.lock().grant(stream_id, subscriber, bytes)
+    }
+
+    pub fn stream_credit_remaining(&self, stream_id: &str) -> Option<usize> {
+        self.streams.lock().credit_remaining(stream_id)
+    }
+
     /// 写一帧 `data`（`host_stream_write`），`seq` 由宿主铸。
     pub fn stream_write(
         &self,

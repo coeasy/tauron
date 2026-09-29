@@ -867,6 +867,7 @@ pub const PLUGIN_RUNTIME_COMMANDS: &[&str] = &[
     "host_recover_trial_enable",
     "host_stream_open",
     "host_stream_write",
+    "host_stream_grant",
     "host_stream_close",
     "host_runtime_spawn",
     "host_runtime_health",
@@ -4093,6 +4094,20 @@ pub fn cmd_stream_write(
 ) -> HostResult<StreamFrame> {
     guard("stream_write", || {
         state.registry.stream_write(stream_id, subscriber, args_json, args_raw)
+    })?
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamCredit {
+    pub stream_id: String,
+    pub credit_bytes: usize,
+}
+
+pub fn cmd_stream_grant(state: &PluginRuntimeState, subscriber: &str, stream_id: &str, bytes: usize) -> HostResult<StreamCredit> {
+    guard("stream_grant", || {
+        let credit_bytes = state.registry.stream_grant(stream_id, subscriber, bytes)?;
+        Ok(StreamCredit { stream_id: stream_id.to_string(), credit_bytes })
     })?
 }
 

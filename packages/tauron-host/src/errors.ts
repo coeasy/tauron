@@ -5,7 +5,7 @@
 // 这里**不**定义任何 Tauri 依赖；所有错误对象都可被 JSON 序列化。
 // ──────────────────────────────────────────────────────────────────────────
 
-/** 线上错误码全集（与 Rust `ErrorCode` 枚举同序，共 20 个）。 */
+/** 线上错误码全集（与 Rust `ErrorCode` 枚举同序）。 */
 export const HOST_ERROR_CODES = [
   'E_HOST_PANIC',
   'E_UNKNOWN_PLUGIN',
@@ -68,6 +68,7 @@ export const HOST_ERROR_CODES = [
    * 确定性故障，不可重试。
    */
   'E_CONTRIBUTES_DRIFT',
+  'E_STREAM_BACKPRESSURE',
 ] as const;
 
 export type HostErrorCode = (typeof HOST_ERROR_CODES)[number];
@@ -98,6 +99,7 @@ export const HOST_RETRY_CLASS: Readonly<Record<HostErrorCode, RetryClass>> = Obj
   E_STREAM_FULL: 'never',
   E_CALL_ALREADY_SETTLED: 'never',
   E_CONTRIBUTES_DRIFT: 'never',
+  E_STREAM_BACKPRESSURE: 'manual',
 });
 
 /**

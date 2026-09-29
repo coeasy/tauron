@@ -7,7 +7,7 @@
 // MockBackend **仅供契约测试**，不作为 Web 交付（§4.9 关键约束）。
 // ──────────────────────────────────────────────────────────────────────────
 
-import { parseStreamKind } from './stream.js';
+import { DEFAULT_STREAM_CREDIT_BYTES, MAX_STREAM_CREDIT_BYTES, parseStreamKind } from './stream.js';
 import type { StreamFrame, StreamKind } from './stream.js';
 
 /**
@@ -212,7 +212,7 @@ export class MockBackend implements Backend {
 
   private readonly channels = new Map<string, ChannelPort<StreamFrame>>();
   private readonly callChannels = new Map<string, string>();
-  private readonly streams = new Map<string, { callId: string; seq: number; closed: boolean }>();
+  private readonly streams = new Map<string, { callId: string; seq: number; closed: boolean; creditBytes: number }>();
   private nextChannelId = 1;
   private nextStreamId = 1;
 
@@ -250,7 +250,7 @@ export class MockBackend implements Backend {
         throw new Error(`E_CALL_NOT_FOUND: 调用 \`${callId}\` 没有帧载体`);
       }
       const streamId = `st-mock-${this.nextStreamId++}`;
-      this.streams.set(streamId, { callId, seq: 0, closed: false });
+      this.streams.set(streamId, { callId, seq: 0, closed: false, creditBytes: DEFAULT_STREAM_CREDIT_BYTES });
       return { value: { streamId, callId } };
     }
 
@@ -262,11 +262,24 @@ export class MockBackend implements Backend {
     if (state.closed) {
       throw new Error(`E_CALL_NOT_FOUND: 流 \`${streamId}\` 已终结（终帧后句柄失效）`);
     }
+    if (cmd === 'host_stream_grant') {
+      const bytes = Number(req.bytes ?? 0);
+      if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Error('E_INVALID_MANIFEST: invalid credit');
+      state.creditBytes = Math.min(MAX_STREAM_CREDIT_BYTES, state.creditBytes + bytes);
+      return { value: { streamId, creditBytes: state.creditBytes } };
+    }
     const kind = cmd === 'host_stream_close' ? parseStreamKind(req.kind) : 'data';
     if (cmd === 'host_stream_close' && (kind === null || kind === 'data')) {
       throw new Error(
         `E_INVALID_MANIFEST: 关流只接受终帧种类（end/error），收到 \`${String(req.kind)}\``,
       );
+    }
+    if (cmd === 'host_stream_write') {
+      const jsonBytes = req.argsJson === undefined ? 0 : new TextEncoder().encode(JSON.stringify(req.argsJson)).byteLength;
+      const rawBytes = req.argsRaw instanceof Uint8Array ? req.argsRaw.byteLength : Array.isArray(req.argsRaw) ? req.argsRaw.length : 0;
+      const required = 32 + jsonBytes + rawBytes;
+      if (required > state.creditBytes) throw new Error(`E_STREAM_BACKPRESSURE: need ${required}, remain ${state.creditBytes}`);
+      state.creditBytes -= required;
     }
     const frame: StreamFrame = {
       seq: ++state.seq,

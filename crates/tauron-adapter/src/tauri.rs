@@ -390,6 +390,10 @@ pub struct HostStreamWriteReq {
     pub args_raw: Option<Vec<u8>>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostStreamGrantReq { pub stream_id: String, pub bytes: usize }
+
 /// `host_stream_close` 线格式：`{ req: { streamId, kind } }`。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -420,6 +424,10 @@ pub fn wire_stream_write(
         req.args_json.clone(),
         req.args_raw.clone(),
     )
+}
+
+pub fn wire_stream_grant(state: &CommandState, subscriber: &str, req: &HostStreamGrantReq) -> HostResult<crate::StreamCredit> {
+    crate::cmd_stream_grant(state, subscriber, &req.stream_id, req.bytes)
 }
 
 /// `host_stream_close` 线格式 → 核心。
@@ -716,6 +724,12 @@ pub fn host_stream_write(
 ) -> Result<StreamFrame, TauriError> {
     let subscriber = subscriber_of(window.label()).map_err(to_tauri_err)?;
     wire_stream_write(&state, &subscriber, &req).map_err(to_tauri_err)
+}
+
+#[tauri::command]
+pub fn host_stream_grant(state: State<'_, PluginRuntimeState>, window: TauriCallerSource, req: HostStreamGrantReq) -> Result<crate::StreamCredit, TauriError> {
+    let subscriber = subscriber_of(window.label()).map_err(to_tauri_err)?;
+    wire_stream_grant(&state, &subscriber, &req).map_err(to_tauri_err)
 }
 
 /// `host_stream_close`：发终帧并使句柄失效（self 档）。
@@ -2972,6 +2986,7 @@ macro_rules! tauron_plugin_handler {
             // （缺 close）或无法开流（缺 open），因此由门禁锁死「三缺一即失败」。
             $crate::tauri::host_stream_open,
             $crate::tauri::host_stream_write,
+            $crate::tauri::host_stream_grant,
             $crate::tauri::host_stream_close,
             // 进程插件运行时（P0-2）：**成对**注册——只有 spawn 没有 health 就
             // 无法发现 sidecar 崩溃（崩溃检测是轮询式的），只有 health 没有

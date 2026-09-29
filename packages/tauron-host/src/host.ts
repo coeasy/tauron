@@ -19,7 +19,7 @@ import type {
   Subscription,
   TopicDescriptor,
 } from './events.js';
-import type { StreamFrame, StreamHandle, StreamKind, StreamWriteInput } from './stream.js';
+import type { StreamCredit, StreamFrame, StreamHandle, StreamKind, StreamWriteInput } from './stream.js';
 import type { PluginReportableEvent } from './lifecycle.js';
 
 /** 插件 → 自己 C/D 后端的调用请求。 */
@@ -236,6 +236,11 @@ export class HostClient {
     // `ready` 本身仍然 reject（`write()` 依赖它拿到真实失败原因）。
     void ready.catch(() => {});
 
+    const grant = (bytes: number): Promise<StreamCredit> => {
+      if (!Number.isSafeInteger(bytes) || bytes < 0) return Promise.reject(new TypeError('grant bytes must be a non-negative safe integer'));
+      return ready.then((id) => this.call<StreamCredit>('host_stream_grant', { req: { streamId: id, bytes } }));
+    };
+
     const write = (frame: StreamWriteInput): Promise<StreamFrame> => {
       if (closeRequested) {
         return Promise.reject(new Error('openStreamHandle: 流已关闭，不得再写帧'));
@@ -251,7 +256,7 @@ export class HostClient {
       );
     };
 
-    return { ready, write, close };
+    return { ready, write, grant, close };
   }
 
   /**
@@ -268,6 +273,11 @@ export class HostClient {
         ...(frame.argsRaw !== undefined ? { argsRaw: frame.argsRaw } : {}),
       },
     });
+  }
+
+  async grantStream(streamId: string, bytes: number): Promise<StreamCredit> {
+    if (!Number.isSafeInteger(bytes) || bytes < 0) throw new TypeError('grant bytes must be a non-negative safe integer');
+    return this.call<StreamCredit>('host_stream_grant', { req: { streamId, bytes } });
   }
 
   /** 传输无关的原始请求入口（{@link toHostRpc} 的 `request` 落地于此）。 */

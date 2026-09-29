@@ -95,6 +95,9 @@ pub enum ErrorCode {
     /// **不是** `E_INVALID_MANIFEST`：manifest 本身合法（`Contributes::validate` 已过），
     /// 不一致发生在**运行期注册**与声明之间——是"没做到"，不是"写错了"。
     E_CONTRIBUTES_DRIFT,
+    /// Stream producer exhausted its receiver-granted byte window.
+    /// The rejected frame is not delivered and does not consume a sequence number.
+    E_STREAM_BACKPRESSURE,
 }
 
 /// V4 retry semantics. A boolean cannot safely express panic/transaction/reconnect behavior.
@@ -121,6 +124,7 @@ impl ErrorCode {
             Self::E_CALL_TIMEOUT => RetryClass::Manual,
             Self::E_PLUGIN_FILTERED => RetryClass::Manual,
             Self::E_LEASE_EXPIRED => RetryClass::AfterReconnect,
+            Self::E_STREAM_BACKPRESSURE => RetryClass::Manual,
             _ => RetryClass::Never,
         }
     }
@@ -161,6 +165,7 @@ impl fmt::Display for ErrorCode {
             Self::E_STREAM_FULL => write!(f, "E_STREAM_FULL"),
             Self::E_CALL_ALREADY_SETTLED => write!(f, "E_CALL_ALREADY_SETTLED"),
             Self::E_CONTRIBUTES_DRIFT => write!(f, "E_CONTRIBUTES_DRIFT"),
+            Self::E_STREAM_BACKPRESSURE => write!(f, "E_STREAM_BACKPRESSURE"),
         }
     }
 }

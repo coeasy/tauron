@@ -165,6 +165,12 @@ pub static COMMANDS: &[CommandAuth] = &[
         description: "写一帧（self 档，seq 由宿主铸）",
     },
     CommandAuth {
+        command: "host_stream_grant",
+        tier: AuthTier::Self_,
+        consumer: "plugin-sdk（流接收方 credit 补充）",
+        description: "补充有界 byte credit（self 档）",
+    },
+    CommandAuth {
         command: "host_stream_close",
         tier: AuthTier::Self_,
         consumer: "plugin-sdk（流式收尾）",
