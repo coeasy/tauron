@@ -67,6 +67,12 @@ jobs:
       - name: 格式检查（Prettier）
         run: pnpm format:check
 
+      - name: Public Surface Ledger（V4 A105）
+        run: node scripts/generate-public-surface-ledger.mjs --check
+
+      - name: Release Evidence 输入校验（V4 A110）
+        run: node scripts/generate-release-evidence.mjs --check
+
       - name: 测试（第 3 步）
         run: pnpm -r --no-bail test
 
