@@ -21,15 +21,14 @@ pub mod call_state;
 pub mod config;
 pub mod durable;
 pub mod error;
-pub mod time_trust;
-pub mod ordering;
-pub mod health;
-pub mod fault;
 pub mod eventbus;
 pub mod execution;
+pub mod fault;
 pub mod generation;
+pub mod health;
 pub mod lifecycle;
 pub mod manifest;
+pub mod ordering;
 pub mod policy;
 pub mod portable_path;
 pub mod production;
@@ -40,6 +39,7 @@ pub mod service_graph;
 pub mod storage;
 pub mod stream;
 pub mod target;
+pub mod time_trust;
 pub mod wire;
 
 pub use authz::{AuthTier, CommandAuth, ADMIN_COMMANDS, COMMANDS};
@@ -64,13 +64,6 @@ pub use wire::{
 };
 
 // V4 universal/industrial foundation exports.
-pub use fault::{FaultBoundary, FaultError, FaultRecord, FaultState};
-pub use health::{Degradation, HealthReport, Liveness, Readiness};
-pub use ordering::{OrderedEventMeta, OrderingError, OrderingTracker};
-pub use time_trust::{
-    require_unexpired, suspicious_if_skew_exceeds, SystemTimeProvider, TimeTrustError,
-    TimeTrustState, TrustedTime, TrustedTimeProvider,
-};
 pub use activation::{ActivationError, ActivationRecord, ContentIdentity};
 pub use admission::{
     AdmissionController, AdmissionError, CreditWindow, FairQueue, ResourceKind, ResourceLimit,
@@ -87,7 +80,10 @@ pub use execution::{
     current_domain, in_domain, require_domain, ExecutionDomain, ExecutionDomainGuard,
     ExecutionError,
 };
+pub use fault::{FaultBoundary, FaultError, FaultRecord, FaultState};
 pub use generation::{Generation, GenerationError, GenerationHandle, GenerationRegistry};
+pub use health::{Degradation, HealthReport, Liveness, Readiness};
+pub use ordering::{OrderedEventMeta, OrderingError, OrderingTracker};
 pub use policy::{DecisionError, DecisionToken, PolicyAuthority};
 pub use portable_path::{join_scoped, validate_portable_relative, PortablePathError};
 pub use production::{
@@ -100,4 +96,8 @@ pub use storage::{SingleWriterLease, StorageNamespace, WriterLeaseError, WriterL
 pub use target::{
     current_target_spec, resolve_best as resolve_best_target, TargetAbi, TargetArch, TargetOs,
     TargetSpec,
+};
+pub use time_trust::{
+    require_unexpired, suspicious_if_skew_exceeds, SystemTimeProvider, TimeTrustError,
+    TimeTrustState, TrustedTime, TrustedTimeProvider,
 };
