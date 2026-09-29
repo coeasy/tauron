@@ -47,9 +47,7 @@ const failures = files
       `${file.path} ${file.bytes}B > per-file budget ${budgets.releaseArtifacts.maxPerFileBytes}B`,
   );
 if (aggregateBytes > budgets.releaseArtifacts.maxAggregateBytes) {
-  failures.push(
-    `aggregate ${aggregateBytes}B > ${budgets.releaseArtifacts.maxAggregateBytes}B`,
-  );
+  failures.push(`aggregate ${aggregateBytes}B > ${budgets.releaseArtifacts.maxAggregateBytes}B`);
 }
 
 const report = {
@@ -64,7 +62,5 @@ const report = {
 };
 mkdirSync(dirname(out), { recursive: true });
 writeFileSync(out, JSON.stringify(report, null, 2) + '\n');
-console.log(
-  `RELEASE_ARTIFACT_SIZE_METRICS files=${files.length} aggregateBytes=${aggregateBytes}`,
-);
+console.log(`RELEASE_ARTIFACT_SIZE_METRICS files=${files.length} aggregateBytes=${aggregateBytes}`);
 if (failures.length) throw new Error(`release artifact size gate failed: ${failures.join('; ')}`);
