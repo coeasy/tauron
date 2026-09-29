@@ -7,11 +7,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import {
-  HOST_ERROR_CODES,
-  HOST_RETRY_CLASS,
-  RETRYABLE_HOST_ERROR_CODES,
-} from './errors.js';
+import { HOST_ERROR_CODES, HOST_RETRY_CLASS, RETRYABLE_HOST_ERROR_CODES } from './errors.js';
 import { CAPABILITIES } from './capabilities.js';
 import { CHANNEL_KINDS, MAX_QUEUE, OVERFLOW_STREAK_LIMIT } from './channels.js';
 import { GRANT_SET_SCHEMA_VERSION, IDENTITY_LABEL_PREFIX, RISKS } from './grants.js';
@@ -75,12 +71,7 @@ describe('门禁：错误码线与 Rust ErrorCode 完全一致', () => {
 
     const explicit = new Map<string, string>();
     for (const m of retryBlock.matchAll(/Self::(E_[A-Z_]+)\s*=>\s*RetryClass::(\w+)/g)) {
-      explicit.set(
-        m[1]!,
-        m[2]!
-          .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
-          .toLowerCase(),
-      );
+      explicit.set(m[1]!, m[2]!.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase());
     }
     for (const code of rustCodes) {
       expect(HOST_RETRY_CLASS[code as keyof typeof HOST_RETRY_CLASS], code).toBe(
