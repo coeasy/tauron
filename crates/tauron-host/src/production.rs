@@ -38,7 +38,6 @@ pub struct ReadinessViolation {
     pub message: &'static str,
 }
 
-
 /// Machine-readable production self-test result (V4 A109).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
