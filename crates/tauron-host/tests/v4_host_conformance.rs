@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use tauron_host::{
     decode_wire_json, encode_wire_json, peer_proof, production_doctor, Degradation, DeploymentMode,
-    HealthReport, LocalHostBroker, Liveness, OrderedEventMeta, OrderingError, OrderingTracker,
+    HealthReport, Liveness, LocalHostBroker, OrderedEventMeta, OrderingError, OrderingTracker,
     PeerCredentialEvidence, ProductionReadiness, Readiness, WireFrame, DEFAULT_MAX_WIRE_BYTES,
 };
 
@@ -33,8 +33,7 @@ fn production_ready() -> ProductionReadiness {
 fn conform_wire_round_trip_and_unknown_field_rejection() {
     let frame = WireFrame::new("conformance.ping/1", 9, Ping { value: "pong".into() });
     let bytes = encode_wire_json(&frame, DEFAULT_MAX_WIRE_BYTES).unwrap();
-    let decoded: WireFrame<Ping> =
-        decode_wire_json(&bytes, DEFAULT_MAX_WIRE_BYTES).unwrap();
+    let decoded: WireFrame<Ping> = decode_wire_json(&bytes, DEFAULT_MAX_WIRE_BYTES).unwrap();
     assert_eq!(decoded, frame);
 
     let bad = br#"{"header":{"wireVersion":1,"codec":"json-v1","schema":"conformance.ping/1","generation":9},"payload":{"value":"pong"},"unexpected":true}"#;
@@ -51,12 +50,8 @@ fn conform_local_host_peer_auth_is_one_time_and_owner_scoped() {
         endpoint_owner_verified: true,
     };
     let challenge = broker.challenge(&peer).unwrap();
-    let proof = peer_proof(
-        secret,
-        &peer.platform_subject,
-        &challenge.nonce,
-        challenge.owner_generation,
-    );
+    let proof =
+        peer_proof(secret, &peer.platform_subject, &challenge.nonce, challenge.owner_generation);
     let authenticated = broker.verify(&peer, &challenge.challenge_id, &proof).unwrap();
     assert_eq!(authenticated.owner_generation, lease.generation);
     assert!(broker.verify(&peer, &challenge.challenge_id, &proof).is_err());
@@ -104,10 +99,7 @@ fn conform_ordering_detects_duplicate_gap_and_revision_regression() {
     assert!(matches!(tracker.observe(&gap), Err(OrderingError::Gap { .. })));
 
     let duplicate = OrderedEventMeta { sequence: 1, ..first.clone() };
-    assert!(matches!(
-        tracker.observe(&duplicate),
-        Err(OrderingError::Duplicate { .. })
-    ));
+    assert!(matches!(tracker.observe(&duplicate), Err(OrderingError::Duplicate { .. })));
 
     let regressed = OrderedEventMeta {
         event_id: "evt-2".into(),
