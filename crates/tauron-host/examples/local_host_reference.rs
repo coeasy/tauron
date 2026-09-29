@@ -83,14 +83,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         DEFAULT_MAX_WIRE_BYTES,
     )?;
-    let response = client_roundtrip(&pipe, &secret, &request)?;
+    let client_result = client_roundtrip(&pipe, &secret, &request);
+    let server_result = server.join().map_err(|_| "reference server thread panicked")?;
+    let response = match (client_result, server_result) {
+        (Ok(response), Ok(())) => response,
+        (Err(client), Err(server)) => {
+            return Err(format!("client failed: {client}; server failed: {server}").into());
+        }
+        (Err(client), Ok(())) => return Err(format!("client failed: {client}").into()),
+        (Ok(_), Err(server)) => return Err(format!("server failed: {server}").into()),
+    };
     let decoded: WireFrame<serde_json::Value> =
         decode_wire_json(&response, DEFAULT_MAX_WIRE_BYTES)?;
     if decoded.header.schema != "a106.reference.ping/1" {
         return Err("reference wire schema drift".into());
     }
-
-    server.join().map_err(|_| "reference server thread panicked")??;
     println!("A106 Local Host reference E2E OK: Named Pipe + SID + peer proof + Universal Wire");
     Ok(())
 }

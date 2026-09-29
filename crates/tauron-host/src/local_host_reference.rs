@@ -491,9 +491,11 @@ mod windows {
         }
         let _revert = RevertImpersonation;
         let mut token = null_mut();
-        // OpenAsSelf=FALSE means the client impersonation context is queried.
+        // OpenAsSelf=TRUE keeps the token being opened as the client's impersonation token,
+        // while performing the access check with the server process security context. Using
+        // FALSE can make the impersonated client unable to open its own executive token object.
         // SAFETY: current thread is impersonating the connected client.
-        let ok = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 0, &mut token) };
+        let ok = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut token) };
         if ok == 0 {
             return Err(std::io::Error::last_os_error().into());
         }
@@ -708,7 +710,8 @@ mod windows {
         let challenge_json = read_packet(handle.raw(), REFERENCE_CONTROL_MAX_BYTES)?;
         let challenge: PeerChallenge = serde_json::from_slice(&challenge_json)
             .map_err(|e| LocalHostReferenceError::Protocol(e.to_string()))?;
-        let subject = current_client_subject();
+        // Authentication must never fall back to a synthetic subject if SID lookup fails.
+        let subject = format!("windows:sid={}", current_process_sid()?);
         let proof =
             peer_proof(bootstrap_secret, &subject, &challenge.nonce, challenge.owner_generation);
         write_packet(handle.raw(), &proof, REFERENCE_CONTROL_MAX_BYTES)?;
