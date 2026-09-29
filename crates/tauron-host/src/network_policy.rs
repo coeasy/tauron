@@ -152,7 +152,8 @@ impl NetworkPolicy {
         if raw.trim().is_empty() {
             return Err(NetworkPolicyError::EmptyUrl);
         }
-        let url = Url::parse(raw).map_err(|error| NetworkPolicyError::InvalidUrl(error.to_string()))?;
+        let url =
+            Url::parse(raw).map_err(|error| NetworkPolicyError::InvalidUrl(error.to_string()))?;
         let scheme = url.scheme().to_ascii_lowercase();
         match scheme.as_str() {
             "https" => {}
@@ -232,10 +233,7 @@ impl NetworkPolicy {
         request_has_credentials: bool,
     ) -> Result<RedirectAuthorization, NetworkPolicyError> {
         if hop == 0 || hop > self.max_redirects {
-            return Err(NetworkPolicyError::RedirectLimitExceeded {
-                hop,
-                max: self.max_redirects,
-            });
+            return Err(NetworkPolicyError::RedirectLimitExceeded { hop, max: self.max_redirects });
         }
         let target = self.authorize_url(to)?;
         let same_origin = from.origin == target.origin;
@@ -393,13 +391,9 @@ mod tests {
             DomainRule::exact("cdn.example.com"),
         ]);
         let from = p.authorize_url("https://api.example.com/a").unwrap();
-        let same = p
-            .authorize_redirect(&from, "https://api.example.com/b", 1, true)
-            .unwrap();
+        let same = p.authorize_redirect(&from, "https://api.example.com/b", 1, true).unwrap();
         assert!(same.forward_credentials);
-        let cross = p
-            .authorize_redirect(&from, "https://cdn.example.com/b", 2, true)
-            .unwrap();
+        let cross = p.authorize_redirect(&from, "https://cdn.example.com/b", 2, true).unwrap();
         assert!(!cross.forward_credentials);
         assert!(matches!(
             p.authorize_redirect(&from, "https://evil.example.net/", 3, false),
