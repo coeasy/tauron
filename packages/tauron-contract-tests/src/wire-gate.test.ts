@@ -1351,15 +1351,15 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
     // report 与 trial_enable 两条写路径都必须调用对账。
     expect(lib).toMatch(/fn cmd_recover_report[\s\S]{0,4000}reconcile_recovery_phase\(state\)/);
     expect(lib).toMatch(
-      /fn cmd_recover_trial_enable[\s\S]{0,4000}reconcile_recovery_phase\(state\)/,
+      /fn cmd_recover_trial_enable[\s\S]{0,9000}reconcile_recovery_phase\(state\)/,
     );
     // trial_enable 走 D28 `TrialEnable`（清标记 + 记独立试验预算 +
     // trialFromSafemode 置位，供插件自报错误时按 D28 回落）。改回
     // SafemodeExit = 注册表不记预算、D28 回落不可达——必须同时让本门变红。
-    expect(lib).toMatch(/fn cmd_recover_trial_enable[\s\S]{0,4000}Event::TrialEnable/);
-    expect(lib).not.toMatch(/fn cmd_recover_trial_enable[\s\S]{0,4000}Event::SafemodeExit/);
+    expect(lib).toMatch(/fn cmd_recover_trial_enable[\s\S]{0,9000}Event::TrialEnable/);
+    expect(lib).not.toMatch(/fn cmd_recover_trial_enable[\s\S]{0,9000}Event::SafemodeExit/);
     // 试启结果必须回传前置对账（诊断 + TS RecoveryTrialResult 契约字段）。
-    expect(lib).toMatch(/fn cmd_recover_trial_enable[\s\S]{0,6000}result\["phaseReconcile"\]/);
+    expect(lib).toMatch(/fn cmd_recover_trial_enable[\s\S]{0,10000}result\["phaseReconcile"\]/);
   });
 });
 
@@ -2188,10 +2188,10 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       ).toBe(false);
     }
     // 差值必须**恰好**等于插件域命令数：少减=白拿，多减=底座宿主漏功能。
-    // 23 = 19（0.4-A1 之前）+ host_call_plugin / host_call_result / host_call_take
-    //      + host_contributes_reconcile（0.4-W3）。
+    // 24 = 19（0.4-A1 之前）+ host_call_plugin / host_call_result / host_call_take
+    //      + host_contributes_reconcile（0.4-W3）+ host_stream_grant（V4 A79）。
     const pluginOnly = full.filter((c) => PLUGIN_DOMAIN.test(c));
-    expect(pluginOnly.length, '插件域命令数量异常').toBe(23);
+    expect(pluginOnly.length, '插件域命令数量异常').toBe(24);
     expect(full.length - substrate.length).toBe(pluginOnly.length);
 
     // ③ 两组集合都必须经 origin 门（收窄命令面不得绕过 R4-D2）。
@@ -3104,7 +3104,8 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // 16 → 17（M8）；可选 plugin-install feature 另外增加 install + preview 两条主窗命令。
     // 17 → 20（0.4-A1：跨主体调用三命令 host_call_plugin/result/take 入插件域）。
     // 20 → 21（0.4-W3：host_contributes_reconcile 入插件域）。
-    const PLUGIN_RUNTIME_DOMAIN_SIZE = 21;
+    // 21 → 22（V4 A79：host_stream_grant 入插件域）。
+    const PLUGIN_RUNTIME_DOMAIN_SIZE = 22;
     const notInSub = [...inPlug].filter((c) => !inSub.has(c));
     expect(
       [...inSub].filter((c) => !inPlug.has(c)),

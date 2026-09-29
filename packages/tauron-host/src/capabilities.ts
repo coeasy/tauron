@@ -152,6 +152,12 @@ export const CAPABILITIES: readonly Capability[] = [
     description: '向已开流写入一帧（self 档）',
   },
   {
+    command: 'host_stream_grant',
+    tier: 'self',
+    consumer: 'plugin',
+    description: '接收方为流补充有界 byte credit（V4 A79；self 档）',
+  },
+  {
     command: 'host_stream_close',
     tier: 'self',
     consumer: 'plugin',

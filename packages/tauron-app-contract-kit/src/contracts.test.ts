@@ -67,6 +67,8 @@ describe('契约 1：错误码全集', () => {
       'E_CALL_ALREADY_SETTLED',
       // 0.4-W3：贡献声明与注册不一致（枚举末尾，只能追加）。
       'E_CONTRIBUTES_DRIFT',
+      // V4 A79：慢消费者导致接收方 credit 耗尽；需显式 grant 后再重试。
+      'E_STREAM_BACKPRESSURE',
     ]);
   });
 
