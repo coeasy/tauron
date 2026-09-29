@@ -3780,6 +3780,7 @@ name = "tauron-proc"
 version = "1.0.2"
 dependencies = [
  "chrono",
+ "libc",
  "parking_lot",
  "serde",
  "serde_json",
