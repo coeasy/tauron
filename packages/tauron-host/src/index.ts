@@ -103,6 +103,9 @@ export type {
   UpdaterCheckOutcome,
   UpdaterStatus,
   ThemeContribute,
+  CapabilityEnforcement,
+  CapabilityEnforcementLevel,
+  HostCapabilities,
 } from './shell-client.js';
 
 export { ShellController } from './shell-controller.js';
