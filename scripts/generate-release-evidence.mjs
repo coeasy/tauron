@@ -76,7 +76,9 @@ if (ciProofArg) {
 
 const releaseBuildMatrixPassed = process.env.TAURON_RELEASE_BUILD_MATRIX_PASSED === 'true';
 if (!checkOnly && (!sourceCi || !releaseBuildMatrixPassed)) {
-  throw new Error('real release evidence requires exact-SHA source CI proof and successful build matrix');
+  throw new Error(
+    'real release evidence requires exact-SHA source CI proof and successful build matrix',
+  );
 }
 
 const limitations = [
@@ -107,7 +109,8 @@ const evidence = {
   releaseBuildMatrixPassed,
   claims: {
     industrialGrade: false,
-    reason: 'Performance/size gate and remaining Remote/non-Linux Local Host security conformance are still open.',
+    reason:
+      'Performance/size gate and remaining Remote/non-Linux Local Host security conformance are still open.',
   },
   reportFiles: [
     'compatibility-report.json',
@@ -172,14 +175,21 @@ const performance = {
   sourceSha,
   status: 'open-gate',
   verified: false,
-  reason: 'No release-blocking RSS/CPU/startup/shutdown/artifact-size regression baseline is wired yet.',
+  reason:
+    'No release-blocking RSS/CPU/startup/shutdown/artifact-size regression baseline is wired yet.',
 };
 
 writeFileSync(join(OUT, 'tauron-release-evidence.json'), JSON.stringify(evidence, null, 2) + '\n');
-writeFileSync(join(OUT, 'compatibility-report.json'), JSON.stringify(compatibility, null, 2) + '\n');
+writeFileSync(
+  join(OUT, 'compatibility-report.json'),
+  JSON.stringify(compatibility, null, 2) + '\n',
+);
 writeFileSync(join(OUT, 'conformance-report.json'), JSON.stringify(conformance, null, 2) + '\n');
 writeFileSync(join(OUT, 'security-report.json'), JSON.stringify(security, null, 2) + '\n');
-writeFileSync(join(OUT, 'performance-size-report.json'), JSON.stringify(performance, null, 2) + '\n');
+writeFileSync(
+  join(OUT, 'performance-size-report.json'),
+  JSON.stringify(performance, null, 2) + '\n',
+);
 writeFileSync(
   join(OUT, 'known-limitations.md'),
   ['# Known Limitations', '', ...limitations.map((x) => `- ${x}`), ''].join('\n'),

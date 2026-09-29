@@ -106,7 +106,6 @@ jobs:
 
           exit $rc
 
-
   # V4 A110: a tag/manual release is allowed only when the exact source SHA already has the full
   # required CI matrix green. This closes the old "CI should have been green" convention.
   source-ci-proof:

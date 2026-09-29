@@ -74,6 +74,4 @@ for (const label of releaseRows.keys()) {
   }
 }
 
-console.log(
-  `Target Matrix OK: ${matrix.rows.map((r) => `${r.label}@${r.runner}`).join(', ')}`,
-);
+console.log(`Target Matrix OK: ${matrix.rows.map((r) => `${r.label}@${r.runner}`).join(', ')}`);
