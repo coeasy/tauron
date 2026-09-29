@@ -1,15 +1,17 @@
 //! Non-Tauri Local Host reference transport helpers (V4 A106).
 //!
 //! The canonical broker/authentication rules live in `local_host`. This module supplies the
-//! first real transport consumer: Linux Unix Domain Sockets protected by owner-only filesystem
-//! permissions plus kernel-derived `SO_PEERCRED` evidence. The wire payload is the same
-//! `WireFrame<json-v1>` used by every other transport.
+//! first real transport consumer: owner-only Unix Domain Sockets on Linux/macOS. Peer identity is
+//! derived from the kernel (Linux `SO_PEERCRED`; macOS `getpeereid`) before the shared Broker
+//! challenge/HMAC check. The wire payload is the same `WireFrame<json-v1>` used by every other
+//! transport.
 //!
 //! Honest support boundary:
-//! - Linux: reference endpoint + peer credential derivation are implemented.
-//! - Other OSes: the transport-specific reference endpoint is not implemented here yet.
-//! - Remote transport is out of scope; A108 remote chaos must remain open until a real Remote
-//!   Host transport exists.
+//! - Linux: UDS + SO_PEERCRED is implemented and executed in required CI.
+//! - macOS: UDS + getpeereid is implemented and executed on arm64 + Intel required CI.
+//! - Windows Named Pipe/SID remains open.
+//! - Remote transport is out of scope; A108 remote chaos remains open until a real Remote Host
+//!   transport exists.
 
 use serde_json::Value;
 use thiserror::Error;
@@ -44,11 +46,13 @@ pub fn reference_wire_roundtrip(bytes: &[u8]) -> Result<Vec<u8>, LocalHostRefere
     Ok(encode_wire_json(&frame, DEFAULT_MAX_WIRE_BYTES)?)
 }
 
-#[cfg(target_os = "linux")]
-mod linux {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix {
+    #[cfg(target_os = "linux")]
     use std::ffi::c_void;
     use std::fs;
     use std::io::{Read, Write};
+    #[cfg(target_os = "linux")]
     use std::mem::{size_of, MaybeUninit};
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
@@ -97,7 +101,7 @@ mod linux {
         Ok(bytes)
     }
 
-    /// Bind a protected Linux UDS endpoint.
+    /// Bind a protected Linux/macOS UDS endpoint.
     ///
     /// Parent directory is forced to 0700 and the socket node to 0600. Existing socket paths are
     /// never silently unlinked: stale endpoint takeover must first be proven through LocalHostBroker.
@@ -124,6 +128,7 @@ mod linux {
     }
 
     /// Derive peer identity from the kernel, never from a client payload.
+    #[cfg(target_os = "linux")]
     pub fn peer_evidence(
         stream: &UnixStream,
     ) -> Result<PeerCredentialEvidence, LocalHostReferenceError> {
@@ -157,15 +162,47 @@ mod linux {
         })
     }
 
+    /// macOS peer identity is derived with getpeereid(3), which asks the kernel for the effective
+    /// UID/GID of the process at the other end of the connected Unix socket.
+    #[cfg(target_os = "macos")]
+    pub fn peer_evidence(
+        stream: &UnixStream,
+    ) -> Result<PeerCredentialEvidence, LocalHostReferenceError> {
+        let mut uid: libc::uid_t = 0;
+        let mut gid: libc::gid_t = 0;
+        // SAFETY: uid/gid point to writable storage and stream owns a live connected descriptor.
+        let rc = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: geteuid has no preconditions.
+        let server_uid = unsafe { libc::geteuid() };
+        Ok(PeerCredentialEvidence {
+            platform_subject: format!("macos:uid={uid}:gid={gid}"),
+            endpoint_owner_verified: uid == server_uid,
+        })
+    }
+
     /// Subject used by a Linux client when calculating its HMAC proof.
     ///
     /// This value is not trusted by the server; the server independently derives the exact subject
     /// from SO_PEERCRED and Broker::verify compares it with the challenge record.
+    #[cfg(target_os = "linux")]
     pub fn current_client_subject() -> String {
         // SAFETY: getuid/getpid have no preconditions.
         let uid = unsafe { libc::getuid() };
         let pid = unsafe { libc::getpid() };
         format!("linux:uid={uid}:pid={pid}")
+    }
+
+    /// Subject used by the macOS reference client. The server derives the same effective
+    /// UID/GID independently through getpeereid; this payload is not itself trusted.
+    #[cfg(target_os = "macos")]
+    pub fn current_client_subject() -> String {
+        // SAFETY: geteuid/getegid have no preconditions.
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        format!("macos:uid={uid}:gid={gid}")
     }
 
     /// Serve one authenticated request/response exchange on an already protected listener.
@@ -252,7 +289,7 @@ mod linux {
             let server_secret = secret.clone();
             let server = thread::spawn(move || {
                 let mut broker = LocalHostBroker::new(server_secret);
-                broker.acquire("reference-host", "linux-uds").unwrap();
+                broker.acquire("reference-host", "unix-uds").unwrap();
                 serve_one(&listener, &mut broker)
             });
 
@@ -276,7 +313,7 @@ mod linux {
             let listener = bind_endpoint(&socket).unwrap();
             let server = thread::spawn(move || {
                 let mut broker = LocalHostBroker::new(b"correct-secret");
-                broker.acquire("reference-host", "linux-uds").unwrap();
+                broker.acquire("reference-host", "unix-uds").unwrap();
                 serve_one(&listener, &mut broker)
             });
 
@@ -290,12 +327,10 @@ mod linux {
     }
 }
 
-#[cfg(target_os = "linux")]
-pub use linux::{
-    bind_endpoint, client_roundtrip, current_client_subject, peer_evidence, serve_one,
-};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use unix::{bind_endpoint, client_roundtrip, current_client_subject, peer_evidence, serve_one};
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn current_client_subject() -> String {
     "unsupported-platform".to_string()
 }

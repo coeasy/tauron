@@ -103,7 +103,7 @@ if (
 
 const limitations = [
   'Remote Host transport is not implemented; A108 remote chaos remains open.',
-  'The Local Host reference transport is implemented on Linux UDS/SO_PEERCRED only; Windows Named Pipe/SID and macOS peer-credential reference transports remain open.',
+  'The Local Host reference transport is implemented on Linux UDS/SO_PEERCRED and macOS UDS/getpeereid; Windows Named Pipe/SID remains open.',
   'The built-in CommandSpawner honestly reports process sandbox enforcement as unsupported; Production rejects process-runtime startup unless a hard ProcessSandboxProvider is injected.',
 ];
 
@@ -129,7 +129,7 @@ const evidence = {
   claims: {
     industrialGrade: false,
     reason:
-      'Remote/non-Linux Local Host security conformance and a built-in hard process sandbox provider remain open.',
+      'Remote Host, Windows Local Host security conformance and a built-in hard process sandbox provider remain open.',
   },
   reportFiles: [
     'compatibility-report.json',

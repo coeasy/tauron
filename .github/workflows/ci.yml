@@ -125,11 +125,11 @@ jobs:
           - label: macos-arm64
             runner: macos-15
             rust-target: aarch64-apple-darwin
-            local-host: false
+            local-host: true
           - label: macos-x64
             runner: macos-15-intel
             rust-target: x86_64-apple-darwin
-            local-host: false
+            local-host: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -155,7 +155,7 @@ jobs:
       - name: Local broker chaos
         run: cargo test -p tauron-host --test v4_local_host_chaos --locked
 
-      - name: Linux Local Host reference E2E
+      - name: Local Host reference E2E
         if: matrix.local-host == true
         run: cargo run -p tauron-host --example local_host_reference --locked
 

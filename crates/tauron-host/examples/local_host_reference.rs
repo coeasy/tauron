@@ -1,9 +1,9 @@
 //! V4 A106 non-Tauri Local Host reference application.
 //!
-//! Linux executes a real owner-only UDS + SO_PEERCRED + Broker HMAC + Universal Wire exchange.
-//! Other platforms compile honestly but do not claim an endpoint implementation yet.
+//! Linux/macOS execute a real owner-only UDS + kernel peer credentials + Broker HMAC +
+//! Universal Wire exchange. Windows compiles honestly but does not claim a Named Pipe endpoint yet.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::fs;
     use std::thread;
@@ -25,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let server = thread::spawn(move || {
         let mut broker = LocalHostBroker::new(server_secret);
-        broker.acquire("a106-reference-host", "linux-uds")?;
+        broker.acquire("a106-reference-host", "unix-uds")?;
         serve_one(&listener, &mut broker)
     });
 
@@ -47,13 +47,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     server.join().map_err(|_| "reference server thread panicked")??;
     fs::remove_file(&socket)?;
     fs::remove_dir(&root)?;
-    println!("A106 Local Host reference E2E OK: UDS + SO_PEERCRED + peer proof + Universal Wire");
+    println!(
+        "A106 Local Host reference E2E OK: UDS + kernel peer credentials + peer proof + Universal Wire"
+    );
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn main() {
     eprintln!(
-        "A106 reference endpoint is currently implemented on Linux only;          this platform remains explicitly unsupported rather than falling back insecurely."
+        "A106 reference endpoint is currently implemented on Linux/macOS only;          this platform remains explicitly unsupported rather than falling back insecurely."
     );
 }

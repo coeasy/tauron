@@ -35,7 +35,7 @@
       "coverage": "native-execution",
       "profiles": ["substrate", "ffi", "extension", "tauri-desktop"],
       "runtimes": ["process", "wasm-broker"],
-      "localHostReference": "unsupported",
+      "localHostReference": "macos-uds-getpeereid",
       "releaseArtifact": true
     },
     {
@@ -47,7 +47,7 @@
       "coverage": "native-execution",
       "profiles": ["substrate", "ffi", "extension", "tauri-desktop"],
       "runtimes": ["process", "wasm-broker"],
-      "localHostReference": "unsupported",
+      "localHostReference": "macos-uds-getpeereid",
       "releaseArtifact": true
     }
   ]
