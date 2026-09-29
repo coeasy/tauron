@@ -31,7 +31,7 @@ for (const row of matrix.rows) {
       throw new Error(`${row.label} does not cover required profile ${profile}`);
     }
   }
-  for (const runtime of ['process', 'wasm-broker']) {
+  for (const runtime of ['process', 'wasm-broker', 'remote-tls']) {
     if (!row.runtimes?.includes(runtime)) {
       throw new Error(`${row.label} does not cover required runtime ${runtime}`);
     }

@@ -159,6 +159,9 @@ jobs:
         if: matrix.local-host == true
         run: cargo run -p tauron-host --example local_host_reference --locked
 
+      - name: Remote TLS reference E2E
+        run: cargo run -p tauron-host --example remote_host_tls_reference --locked
+
   # ══════════════════════════════════════════════════════════════════
   # Rust 底座线：默认特性。
   # `tauri` 在 tauron-shell / tauron-adapter 里都是 **optional**，默认构建
@@ -211,6 +214,9 @@ jobs:
 
       - name: Remote Host session/replay/rate-limit chaos（V4 A108 remote contract）
         run: cargo test -p tauron-host --test v4_remote_host_chaos --locked
+
+      - name: Remote Host rustls TLS1.3 reference E2E（V4 A106/A108）
+        run: cargo run -p tauron-host --example remote_host_tls_reference --locked
 
       # 抓「只在某个 target 下才编译到的死代码 / 未用导入」。
       # 本仓库的历史缺陷类型之一是「有类型、有接口、有测试、没有入口」，

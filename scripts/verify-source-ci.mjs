@@ -82,6 +82,7 @@ const requiredSteps = {
     'Local Host UDS reference E2E（V4 A106）',
     'Local Host broker chaos / peer-auth（V4 A108 local）',
     'Remote Host session/replay/rate-limit chaos（V4 A108 remote contract）',
+    'Remote Host rustls TLS1.3 reference E2E（V4 A106/A108）',
   ],
   TypeScript: [
     'Public Surface Ledger（V4 A105）',

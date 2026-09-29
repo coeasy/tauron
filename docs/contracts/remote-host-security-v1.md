@@ -18,11 +18,15 @@ Implemented now:
 - canonical Universal Wire handling after security checks;
 - malformed wire still consumes sequence and releases inflight accounting.
 
-Current boundary:
+Concrete reference transport:
 
-`RemoteTransportEvidence` is trusted evidence from a concrete transport adapter. The official
-Remote TLS network reference adapter is still open. Until that adapter establishes TLS itself,
-Tauron must not claim that the complete Remote Host transport is finished.
+- `tauron-host::remote_host_reference` is the official TCP/rustls reference adapter;
+- both server and client configurations are TLS1.3-only;
+- the client verifies the server certificate chain and server name through rustls;
+- the server mints `RemoteTransportEvidence::tls13` only after the real TLS handshake completes;
+- one-time credential, audience/origin binding, replay/rate/inflight checks and Universal Wire are
+  still enforced by `RemoteHostSecurity`;
+- `examples/remote_host_tls_reference.rs` is executed in the native target matrix.
 
-No JSON field such as `tls=true`, `userId` or `pluginId` may be converted directly into trusted
-transport evidence or Principal identity.
+`RemoteTransportEvidence` remains a trusted adapter-only value. No JSON field such as `tls=true`,
+`userId` or `pluginId` may be converted directly into transport evidence or Principal identity.

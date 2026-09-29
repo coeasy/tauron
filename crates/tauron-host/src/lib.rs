@@ -38,6 +38,7 @@ pub mod production;
 pub mod provider;
 pub mod registry;
 pub mod remote_host;
+pub mod remote_host_reference;
 pub mod runtime;
 pub mod scoped_fs;
 pub mod service_graph;
@@ -65,6 +66,11 @@ pub use registry::{PendingCall, PluginEntry, PluginFilter, Registry, RegistryCon
 pub use remote_host::{
     RemoteAuthnCredential, RemoteHostConfig, RemoteHostError, RemoteHostSecurity, RemotePrincipal,
     RemoteSessionSnapshot, RemoteSessionState, RemoteTransportEvidence,
+};
+pub use remote_host_reference::{
+    client_roundtrip_tls, serve_one_tls, tls13_client_config, tls13_server_config,
+    RemoteTlsReferenceError, RemoteTlsRequest, RemoteTlsServerObservation,
+    REMOTE_TLS_MAX_MESSAGE_BYTES,
 };
 pub use runtime::{LeaseReaper, ReapOutcome, ReapStats, RuntimeHandle, RuntimeLease, RuntimeTable};
 pub use wire::{
