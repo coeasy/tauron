@@ -754,11 +754,7 @@ mod windows {
 
         write_packet(handle.raw(), request, DEFAULT_MAX_WIRE_BYTES)?;
         let response = read_packet(handle.raw(), DEFAULT_MAX_WIRE_BYTES)?;
-        write_packet(
-            handle.raw(),
-            WINDOWS_CLIENT_DONE,
-            WINDOWS_CLIENT_HELLO_MAX_BYTES,
-        )?;
+        write_packet(handle.raw(), WINDOWS_CLIENT_DONE, WINDOWS_CLIENT_HELLO_MAX_BYTES)?;
         Ok(response)
     }
 }
