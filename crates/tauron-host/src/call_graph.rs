@@ -78,14 +78,12 @@ impl CallGraph {
         } else {
             1
         };
-        if depth > self.max_hops {
-            return Err(CallGraphError::HopLimitExceeded { depth, limit: self.max_hops });
-        }
-
         if self.reentrancy == ReentrancyPolicy::DenySamePlugin && caller == callee {
             return Err(CallGraphError::ReentrantCall(caller));
         }
 
+        // Classify graph-safety violations before the generic hop budget so callers get the
+        // actionable terminal cause when a request is both cyclic and too deep.
         let mut cursor = parent.map(str::to_string);
         while let Some(id) = cursor {
             let ancestor =
@@ -94,6 +92,10 @@ impl CallGraph {
                 return Err(CallGraphError::CycleDetected(callee));
             }
             cursor = ancestor.parent.clone();
+        }
+
+        if depth > self.max_hops {
+            return Err(CallGraphError::HopLimitExceeded { depth, limit: self.max_hops });
         }
 
         self.active.insert(
