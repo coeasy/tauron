@@ -142,7 +142,10 @@ export async function runHostConformance(
     }
 
     const capabilities = await adapter.invoke<HostCapabilitySnapshot>('host_capabilities');
-    if (!Array.isArray(capabilities.commands) || !capabilities.commands.includes('host_capabilities')) {
+    if (
+      !Array.isArray(capabilities.commands) ||
+      !capabilities.commands.includes('host_capabilities')
+    ) {
       fail('capabilities', 'host_capabilities is missing from its own command surface');
     } else if (!Array.isArray(capabilities.enforcement)) {
       fail('capabilities', 'V4 enforcement facts are missing');
@@ -214,7 +217,11 @@ export async function runHostConformance(
 }
 
 export function formatHostConformanceReport(report: HostConformanceReport): string {
-  const lines = [`tauron conform host — ${report.host}`, '========================================', ''];
+  const lines = [
+    `tauron conform host — ${report.host}`,
+    '========================================',
+    '',
+  ];
   for (const check of report.checks) {
     lines.push(`${check.status === 'pass' ? '✓' : '✗'} ${check.name}: ${check.message}`);
   }
@@ -243,13 +250,8 @@ export async function loadHostConformanceAdapter(
   const absolute = resolve(cwd, modulePath);
   const loaded = (await import(pathToFileURL(absolute).href)) as Record<string, unknown>;
   const exported =
-    loaded.createTauronHostConformanceAdapter ??
-    loaded.hostConformanceAdapter ??
-    loaded.default;
-  const candidate =
-    typeof exported === 'function'
-      ? await (exported as () => unknown)()
-      : exported;
+    loaded.createTauronHostConformanceAdapter ?? loaded.hostConformanceAdapter ?? loaded.default;
+  const candidate = typeof exported === 'function' ? await (exported as () => unknown)() : exported;
   if (!isAdapter(candidate)) {
     throw new Error(
       'Conformance module must export createTauronHostConformanceAdapter(), hostConformanceAdapter, or a default HostConformanceAdapter.',
