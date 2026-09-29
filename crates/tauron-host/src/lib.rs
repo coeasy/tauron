@@ -63,8 +63,8 @@ pub use manifest::{
 };
 pub use registry::{PendingCall, PluginEntry, PluginFilter, Registry, RegistryConfig};
 pub use remote_host::{
-    RemoteAuthnCredential, RemoteHostConfig, RemoteHostError, RemoteHostSecurity,
-    RemotePrincipal, RemoteSessionSnapshot, RemoteSessionState, RemoteTransportEvidence,
+    RemoteAuthnCredential, RemoteHostConfig, RemoteHostError, RemoteHostSecurity, RemotePrincipal,
+    RemoteSessionSnapshot, RemoteSessionState, RemoteTransportEvidence,
 };
 pub use runtime::{LeaseReaper, ReapOutcome, ReapStats, RuntimeHandle, RuntimeLease, RuntimeTable};
 pub use wire::{

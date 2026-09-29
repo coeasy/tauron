@@ -434,10 +434,7 @@ impl RemoteHostSecurity {
     ) -> Result<RemoteSessionSnapshot, RemoteHostError> {
         transport.validate()?;
         self.expire_session_if_needed(session_id, now_ms)?;
-        let session = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or(RemoteHostError::SessionNotFound)?;
+        let session = self.sessions.get_mut(session_id).ok_or(RemoteHostError::SessionNotFound)?;
         if session.snapshot.state != RemoteSessionState::Suspended {
             return Err(RemoteHostError::SessionNotActive);
         }
@@ -455,10 +452,7 @@ impl RemoteHostSecurity {
     }
 
     pub fn close(&mut self, session_id: &str) -> Result<(), RemoteHostError> {
-        let session = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or(RemoteHostError::SessionNotFound)?;
+        let session = self.sessions.get_mut(session_id).ok_or(RemoteHostError::SessionNotFound)?;
         session.snapshot.state = RemoteSessionState::Closed;
         session.snapshot.inflight = 0;
         Ok(())
@@ -476,20 +470,14 @@ impl RemoteHostSecurity {
         now_ms: u64,
     ) -> Result<RemotePrincipal, RemoteHostError> {
         self.expire_session_if_needed(session_id, now_ms)?;
-        let session = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or(RemoteHostError::SessionNotFound)?;
+        let session = self.sessions.get_mut(session_id).ok_or(RemoteHostError::SessionNotFound)?;
         if session.snapshot.state != RemoteSessionState::Active {
             return Err(RemoteHostError::SessionNotActive);
         }
 
         let expected = session.snapshot.last_sequence.saturating_add(1);
         if sequence != expected {
-            return Err(RemoteHostError::SequenceMismatch {
-                expected,
-                actual: sequence,
-            });
+            return Err(RemoteHostError::SequenceMismatch { expected, actual: sequence });
         }
         if nonce.is_empty()
             || nonce.len() > MAX_NONCE_BYTES
@@ -520,10 +508,7 @@ impl RemoteHostSecurity {
     }
 
     pub fn finish_request(&mut self, session_id: &str, now_ms: u64) -> Result<(), RemoteHostError> {
-        let session = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or(RemoteHostError::SessionNotFound)?;
+        let session = self.sessions.get_mut(session_id).ok_or(RemoteHostError::SessionNotFound)?;
         session.snapshot.inflight = session.snapshot.inflight.saturating_sub(1);
         session.snapshot.last_activity_ms = now_ms;
         Ok(())
@@ -580,9 +565,7 @@ impl RemoteHostSecurity {
         now_ms: u64,
     ) -> Result<&mut RemoteSession, RemoteHostError> {
         self.expire_session_if_needed(session_id, now_ms)?;
-        self.sessions
-            .get_mut(session_id)
-            .ok_or(RemoteHostError::SessionNotFound)
+        self.sessions.get_mut(session_id).ok_or(RemoteHostError::SessionNotFound)
     }
 
     fn expire_session_if_needed(
@@ -590,10 +573,7 @@ impl RemoteHostSecurity {
         session_id: &str,
         now_ms: u64,
     ) -> Result<(), RemoteHostError> {
-        let session = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or(RemoteHostError::SessionNotFound)?;
+        let session = self.sessions.get_mut(session_id).ok_or(RemoteHostError::SessionNotFound)?;
         if matches!(
             session.snapshot.state,
             RemoteSessionState::Closed | RemoteSessionState::Expired
@@ -607,9 +587,10 @@ impl RemoteHostSecurity {
             && now_ms.saturating_sub(session.snapshot.last_activity_ms)
                 >= self.config.idle_timeout_ms;
         let resume_expired = session.snapshot.state == RemoteSessionState::Suspended
-            && session.snapshot.suspended_at_ms.is_some_and(|at| {
-                now_ms.saturating_sub(at) > self.config.resume_window_ms
-            });
+            && session
+                .snapshot
+                .suspended_at_ms
+                .is_some_and(|at| now_ms.saturating_sub(at) > self.config.resume_window_ms);
 
         if absolute_expired || active_idle_expired || resume_expired {
             session.snapshot.state = RemoteSessionState::Expired;

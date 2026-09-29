@@ -57,13 +57,7 @@ fn open(security: &mut RemoteHostSecurity, now_ms: u64) -> tauron_host::RemoteSe
 fn credential_and_transport_checks_are_fail_closed() {
     let mut security = security();
     let credential = security
-        .issue_credential(
-            "user-1",
-            "https://app.example",
-            "oidc",
-            BTreeMap::new(),
-            0,
-        )
+        .issue_credential("user-1", "https://app.example", "oidc", BTreeMap::new(), 0)
         .unwrap();
 
     assert_eq!(
@@ -84,13 +78,7 @@ fn credential_and_transport_checks_are_fail_closed() {
         tls_protocol: "none".into(),
     };
     assert!(matches!(
-        security.open_session(
-            &credential.token,
-            "tauron-chaos",
-            "https://app.example",
-            plain,
-            1,
-        ),
+        security.open_session(&credential.token, "tauron-chaos", "https://app.example", plain, 1,),
         Err(RemoteHostError::TransportRejected(_))
     ));
 
@@ -132,17 +120,11 @@ fn replay_gap_nonce_rate_and_inflight_are_bounded() {
 
     assert_eq!(
         security.begin_request(&session.session_id, 2, "replay", 4),
-        Err(RemoteHostError::SequenceMismatch {
-            expected: 3,
-            actual: 2,
-        })
+        Err(RemoteHostError::SequenceMismatch { expected: 3, actual: 2 })
     );
     assert_eq!(
         security.begin_request(&session.session_id, 4, "gap", 4),
-        Err(RemoteHostError::SequenceMismatch {
-            expected: 3,
-            actual: 4,
-        })
+        Err(RemoteHostError::SequenceMismatch { expected: 3, actual: 4 })
     );
     assert_eq!(
         security.begin_request(&session.session_id, 3, "n1", 4),
@@ -167,12 +149,7 @@ fn suspend_resume_rotates_token_and_expires() {
     security.suspend(&session.session_id, 10).unwrap();
 
     assert_eq!(
-        security.resume(
-            &session.session_id,
-            "wrong",
-            RemoteTransportEvidence::tls13("tls-2"),
-            20,
-        ),
+        security.resume(&session.session_id, "wrong", RemoteTransportEvidence::tls13("tls-2"), 20,),
         Err(RemoteHostError::ResumeTokenMismatch)
     );
 
@@ -205,13 +182,7 @@ fn rotation_quota_and_at_most_once_wire_are_enforced() {
     let session = open(&mut security, 0);
 
     let second = security
-        .issue_credential(
-            "user-1",
-            "https://app.example",
-            "oidc",
-            BTreeMap::new(),
-            1,
-        )
+        .issue_credential("user-1", "https://app.example", "oidc", BTreeMap::new(), 1)
         .unwrap();
     assert_eq!(
         security.open_session(
@@ -236,21 +207,12 @@ fn rotation_quota_and_at_most_once_wire_are_enforced() {
         security.handle_wire(&session.session_id, 1, "wire-2", 4, &bytes),
         Err(RemoteHostError::SequenceMismatch { .. })
     ));
-    assert!(!security
-        .handle_wire(&session.session_id, 2, "wire-2", 4, &bytes)
-        .unwrap()
-        .is_empty());
+    assert!(!security.handle_wire(&session.session_id, 2, "wire-2", 4, &bytes).unwrap().is_empty());
 
     security.close(&session.session_id).unwrap();
     security.cleanup(5);
     let credential = security
-        .issue_credential(
-            "user-2",
-            "https://app.example",
-            "oidc",
-            BTreeMap::new(),
-            5,
-        )
+        .issue_credential("user-2", "https://app.example", "oidc", BTreeMap::new(), 5)
         .unwrap();
     security.rotate_credentials();
     assert_eq!(
