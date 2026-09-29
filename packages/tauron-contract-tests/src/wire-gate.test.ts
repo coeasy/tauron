@@ -1115,16 +1115,16 @@ function rustAuthTable(): Map<string, string> {
 }
 
 describe('门禁：能力表（命令 → 档位）TS ↔ Rust 同构', () => {
-  it('命令集合一致（插件面 18 条 + 主窗特权 6 条）', () => {
+  it('命令集合一致（插件面 19 条 + 主窗特权命令）', () => {
     const rust = rustAuthTable();
     const ts = new Map(CAPABILITIES.map((c) => [c.command, c.tier]));
     // 不写死总数（会随命令面增长而漂移）：只钉住两表**逐条相等**与结构比例。
     expect(ts.size, 'TS CAPABILITIES 条目数').toBe(rust.size);
     expect([...ts.keys()].sort(), '命令集合').toEqual([...rust.keys()].sort());
     const pluginFace = CAPABILITIES.filter((c) => c.tier !== 'privileged');
-    // 18 = 13（0.4-A1 之前）+ 跨主体调用 3 条 + 0.4 审计补登记 host_contributes_list
-    // + 0.4-W3 扩展点对账 host_contributes_reconcile。
-    expect(pluginFace.length, '插件面（self + scoped-read）命令数').toBe(18);
+    // 19 = 13（0.4-A1 之前）+ 跨主体调用 3 条 + 0.4 审计补登记 host_contributes_list
+    // + 0.4-W3 扩展点对账 host_contributes_reconcile + V4 A79 host_stream_grant。
+    expect(pluginFace.length, '插件面（self + scoped-read）命令数').toBe(19);
     expect(
       CAPABILITIES.filter((c) => c.consumer === 'plugin')
         .map((c) => c.command)
