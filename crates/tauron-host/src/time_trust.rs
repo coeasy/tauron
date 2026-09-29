@@ -44,10 +44,7 @@ impl SystemTimeProvider {
 
 impl TrustedTimeProvider for SystemTimeProvider {
     fn trusted_time(&self) -> TrustedTime {
-        TrustedTime {
-            now: SystemTime::now(),
-            state: self.state,
-        }
+        TrustedTime { now: SystemTime::now(), state: self.state }
     }
 }
 
@@ -99,10 +96,7 @@ mod tests {
     #[test]
     fn suspicious_clock_does_not_bypass_expiry() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
-        let provider = Fixed(TrustedTime {
-            now,
-            state: TimeTrustState::Suspicious,
-        });
+        let provider = Fixed(TrustedTime { now, state: TimeTrustState::Suspicious });
         assert_eq!(
             require_unexpired(&provider, now + Duration::from_secs(60)),
             Err(TimeTrustError::Untrusted(TimeTrustState::Suspicious))
@@ -112,10 +106,7 @@ mod tests {
     #[test]
     fn trusted_clock_enforces_expiry() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
-        let provider = Fixed(TrustedTime {
-            now,
-            state: TimeTrustState::Trusted,
-        });
+        let provider = Fixed(TrustedTime { now, state: TimeTrustState::Trusted });
         assert_eq!(
             require_unexpired(&provider, now - Duration::from_secs(1)),
             Err(TimeTrustError::Expired)
