@@ -1039,10 +1039,7 @@ mod tests {
         let spawner = CommandSpawner::new();
         let mut cfg = cfg_with_path("cmd.exe");
         // cmd launches ping.exe as a child, so the Job Object contains a real descendant tree.
-        cfg.args = vec![
-            "/C".into(),
-            "ping -n 30 127.0.0.1 >NUL".into(),
-        ];
+        cfg.args = vec!["/C".into(), "ping -n 30 127.0.0.1 >NUL".into()];
         let spawned = spawner.spawn(&cfg).expect("spawn real Windows Job Object fixture");
         assert_eq!(spawner.status(spawned.pid), ProcessStatus::Alive);
         assert_eq!(spawner.kill(spawned.pid).unwrap(), KillOutcome::Terminated);
