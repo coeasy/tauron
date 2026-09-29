@@ -119,7 +119,10 @@ fn failure(status: TauronStatus, message: impl Into<String>) -> TauronResult {
     TauronResult {
         status: status.code(),
         buffer: TauronBuffer::empty(),
-        error: TauronError { code: status.code(), message: owned_buffer(message.into().into_bytes()) },
+        error: TauronError {
+            code: status.code(),
+            message: owned_buffer(message.into().into_bytes()),
+        },
     }
 }
 
