@@ -824,10 +824,7 @@ pub fn host_runtime_health(
     let caller = window.caller().map_err(to_tauri_err)?;
     if let Some(generation) = generation {
         // V4 A90: reject a stale generation before health probing can mutate crash accounting.
-        state
-            .registry
-            .runtime_lease_versioned(&lease, generation)
-            .map_err(to_tauri_err)?;
+        state.registry.runtime_lease_versioned(&lease, generation).map_err(to_tauri_err)?;
     }
     crate::cmd_runtime_health_as(&caller, &state, &lease).map_err(to_tauri_err)
 }
