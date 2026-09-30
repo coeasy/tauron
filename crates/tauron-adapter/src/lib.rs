@@ -193,12 +193,9 @@ impl AdapterConfig {
         let install_trust_configured = true;
 
         #[cfg(feature = "plugin-install")]
-        let trusted_time_available = self
-            .trusted_time_provider
-            .as_ref()
-            .is_some_and(|provider| {
-                provider.trusted_time().state == tauron_host::TimeTrustState::Trusted
-            });
+        let trusted_time_available = self.trusted_time_provider.as_ref().is_some_and(|provider| {
+            provider.trusted_time().state == tauron_host::TimeTrustState::Trusted
+        });
         #[cfg(not(feature = "plugin-install"))]
         let trusted_time_available = true;
 
@@ -8609,17 +8606,14 @@ mod tests {
                 acl_signing_key: Some(vec![0x5a; 32]),
                 ..AdapterConfig::default()
             }
-            .with_trusted_time_provider(Arc::new(tauron_host::SystemTimeProvider::new(
-                tauron_host::TimeTrustState::Suspicious,
-            ))),
+            .with_trusted_time_provider(Arc::new(
+                tauron_host::SystemTimeProvider::new(tauron_host::TimeTrustState::Suspicious),
+            )),
         );
 
-        let err = cmd_registry_install_preview_as(
-            &Caller::MainWindow,
-            &state,
-            package.to_str().unwrap(),
-        )
-        .unwrap_err();
+        let err =
+            cmd_registry_install_preview_as(&Caller::MainWindow, &state, package.to_str().unwrap())
+                .unwrap_err();
         assert_eq!(err.code, ErrorCode::E_INSTALL_FAILED);
         assert!(err.message.contains("时间不可受信"), "{}", err.message);
         assert!(!install_root.join("com.install.time").exists());

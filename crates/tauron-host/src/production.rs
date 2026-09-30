@@ -154,7 +154,8 @@ pub fn validate(mode: DeploymentMode, input: &ProductionReadiness) -> Vec<Readin
     if input.install_feature_enabled && !input.trusted_time_available {
         out.push(ReadinessViolation {
             code: "TRUSTED_TIME_REQUIRED",
-            message: "plugin install is enabled but no currently trusted time provider is available",
+            message:
+                "plugin install is enabled but no currently trusted time provider is available",
         });
     }
     if !input.audit_for_admin_operations_available {
