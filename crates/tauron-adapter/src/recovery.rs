@@ -208,46 +208,44 @@ impl RecoveryStore {
         let path = dir.join(RECOVERY_FILE);
         let mut load_error: Option<String> = None;
         let (mut engine, previous_in_flight, persisted_context, source) = match fs::read(&path) {
-                Ok(bytes) => match parse_durable_or_legacy(&bytes) {
-                    Ok((engine, in_flight, last_context, generation)) => {
-                        self.generation = generation;
-                        (engine, in_flight, last_context, LoadSource::Restored)
-                    }
-                    Err(err) => {
-                        let quarantine = quarantine_corrupt(&path);
-                        load_error = Some(match quarantine {
-                            Ok(path) => format!(
-                                "恢复标记文件完整性校验失败：{err}；已隔离到 {}",
-                                path.display()
-                            ),
-                            Err(qerr) => format!(
-                                "恢复标记文件完整性校验失败：{err}；隔离失败：{qerr}"
-                            ),
-                        });
-                        (
-                            RecoveryEngine::new(required_plugins.clone()),
-                            true,
-                            Vec::new(),
-                            LoadSource::Corrupt,
-                        )
-                    }
-                },
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            Ok(bytes) => match parse_durable_or_legacy(&bytes) {
+                Ok((engine, in_flight, last_context, generation)) => {
+                    self.generation = generation;
+                    (engine, in_flight, last_context, LoadSource::Restored)
+                }
+                Err(err) => {
+                    let quarantine = quarantine_corrupt(&path);
+                    load_error = Some(match quarantine {
+                        Ok(path) => format!(
+                            "恢复标记文件完整性校验失败：{err}；已隔离到 {}",
+                            path.display()
+                        ),
+                        Err(qerr) => format!("恢复标记文件完整性校验失败：{err}；隔离失败：{qerr}"),
+                    });
+                    (
+                        RecoveryEngine::new(required_plugins.clone()),
+                        true,
+                        Vec::new(),
+                        LoadSource::Corrupt,
+                    )
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+                RecoveryEngine::new(required_plugins.clone()),
+                false,
+                Vec::new(),
+                LoadSource::Fresh,
+            ),
+            Err(e) => {
+                load_error = Some(format!("恢复标记文件读取失败：{e}"));
+                (
                     RecoveryEngine::new(required_plugins.clone()),
                     false,
                     Vec::new(),
                     LoadSource::Fresh,
-                ),
-                Err(e) => {
-                    load_error = Some(format!("恢复标记文件读取失败：{e}"));
-                    (
-                        RecoveryEngine::new(required_plugins.clone()),
-                        false,
-                        Vec::new(),
-                        LoadSource::Fresh,
-                    )
-                }
-            };
+                )
+            }
+        };
 
         // 先播种上一轮的历史，再记本次失败——顺序反了本轮那条就会把历史挤掉。
         engine.set_context(persisted_context);
@@ -768,11 +766,7 @@ mod tests {
         assert!(text.contains("\"lastContext\""), "落盘内容：{text}");
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["payload"]["lastContext"].as_array().unwrap().len(), 2);
-        assert_eq!(
-            v["payload"]["lastContext"],
-            v["payload"]["engine"]["context"],
-            "两份必须同源"
-        );
+        assert_eq!(v["payload"]["lastContext"], v["payload"]["engine"]["context"], "两份必须同源");
     }
 
     #[test]
