@@ -12241,6 +12241,8 @@ mod tests {
             frame["callId"], call.call_id,
             "帧上的 callId 必须与 pending 表一致（回帧据此关联）"
         );
+        assert_eq!(call.runtime_generation, Some(handle.generation));
+        assert_eq!(frame["runtimeGeneration"], serde_json::json!(handle.generation.0));
 
         // 回帧侧：模拟 sidecar 写回结果帧 → sink 结算。
         let sink = fake.sink_of(handle.pid).expect("spawn 后必须已登记 stdout 帧接收器");
@@ -12255,6 +12257,57 @@ mod tests {
         let settled = state.registry.peek_call(&call.call_id).expect("调用应仍在表里");
         assert_eq!(settled.state, tauron_host::registry::CallState::Settled);
         assert_eq!(settled.result, Some(serde_json::json!({ "done": true })));
+    }
+
+    #[test]
+    fn process_reply_from_old_generation_cannot_settle_call_after_runtime_replacement() {
+        let (state, fake) = process_state("com.example.gen", Some("svc"));
+        enabled_process_plugin(&state, "com.example.gen");
+        let first = cmd_runtime_spawn(&state, "com.example.gen", &valid_profile()).unwrap();
+
+        let res = cmd_call_plugin(
+            &state,
+            "main",
+            "com.example.gen",
+            "doThing",
+            serde_json::json!({ "x": 1 }),
+        )
+        .unwrap();
+        let call = match res {
+            ProviderResult::Value(call) => call,
+            ProviderResult::Unsupported(body) => panic!("unexpected unsupported: {}", body.reason),
+        };
+        assert_eq!(call.runtime_generation, Some(first.generation));
+        let old_sink = fake.sink_of(first.pid).expect("first runtime sink");
+
+        // Replace the runtime generation while the old call is still pending.
+        state.registry.runtime_mark_crashed(&first.lease).unwrap();
+        let second = cmd_runtime_spawn(&state, "com.example.gen", &valid_profile()).unwrap();
+        assert!(second.generation > first.generation);
+
+        let reply = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": call.seq,
+            "callId": call.call_id,
+            "result": { "stale": true },
+        });
+        let bytes = serde_json::to_vec(&reply).unwrap();
+
+        // A late frame from the old pid is rejected.
+        old_sink.on_frame(first.pid, &bytes);
+        assert_eq!(
+            state.registry.peek_call(&call.call_id).unwrap().state,
+            tauron_host::registry::CallState::Pending
+        );
+
+        // The new runtime cannot steal the old call either: generation mismatch still rejects it.
+        let new_sink = fake.sink_of(second.pid).expect("second runtime sink");
+        new_sink.on_frame(second.pid, &bytes);
+        assert_eq!(
+            state.registry.peek_call(&call.call_id).unwrap().state,
+            tauron_host::registry::CallState::Pending
+        );
+        state.registry.call_cancel(&call.call_id).unwrap();
     }
 
     /// 「非 Process 插件被拒」：结构化失败码 + **启动面一次都不许被调用** + 无租约。

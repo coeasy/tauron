@@ -19,10 +19,11 @@
 use crate::admission::{AdmissionController, AdmissionError, ResourceKind, ResourceLimit};
 use crate::call_delivery::CallOutcome;
 use crate::call_graph::{CallGraph, CallGraphError};
+use crate::generation::Generation;
 use crate::call_state::{AtomicCallState, CallTerminalState};
 use crate::error::{ErrorCode, HostError, HostResult};
 use crate::lifecycle::{transition, Event, PluginState, State, TransitionOutcome};
-use crate::manifest::{PermissionIndex, PluginId, PluginIdentity, PluginManifest};
+use crate::manifest::{PermissionIndex, PluginId, PluginIdentity, PluginManifest, PluginType};
 use crate::runtime::{RuntimeHandle, RuntimeLease, RuntimeTable};
 use crate::stream::{StreamFrame, StreamKind, StreamRegistry, StreamSink};
 use parking_lot::{Mutex, RwLock};
@@ -221,6 +222,10 @@ pub struct PendingCall {
     /// 1-based bounded synchronous hop count.
     #[serde(rename = "hopCount")]
     pub hop_count: u16,
+    /// V4 A88 generation of the target process runtime captured when the call was accepted.
+    /// Non-process calls, or process calls accepted before a runtime exists, keep this empty.
+    #[serde(rename = "runtimeGeneration", skip_serializing_if = "Option::is_none")]
+    pub runtime_generation: Option<Generation>,
     /// 调用状态：等待执行方回填 / 已结算。
     pub state: CallState,
     /// V4 terminal arbiter shared by every clone. Exactly one completion/cancel/timeout/failure wins.
@@ -271,6 +276,7 @@ impl PendingCall {
             root_call_id,
             parent_call_id: None,
             hop_count: 1,
+            runtime_generation: None,
             state: CallState::Pending,
             terminal: Arc::new(AtomicCallState::new()),
             admission_token: None,
@@ -799,6 +805,11 @@ impl Registry {
         call.root_call_id = root_call_id;
         call.parent_call_id = parent_call_id.map(str::to_string);
         call.hop_count = hop_count;
+        call.runtime_generation = if entry.manifest.plugin_type == PluginType::Process {
+            self.runtime.lock().live_handle_of_plugin(target).map(|handle| handle.generation)
+        } else {
+            None
+        };
         call.admission_token = Some(admission_token.clone());
 
         let mut pending = self.pending.lock();
@@ -1047,8 +1058,12 @@ impl Registry {
     }
 
     /// 目标插件当前**存活**的进程 pid（进程插件投递用，A3）；无存活租约返回 `None`。
+    pub fn live_runtime_handle_of(&self, plugin_id: &str) -> Option<RuntimeHandle> {
+        self.runtime.lock().live_handle_of_plugin(plugin_id)
+    }
+
     pub fn live_pid_of(&self, plugin_id: &str) -> Option<u32> {
-        self.runtime.lock().live_handle_of_plugin(plugin_id).map(|h| h.pid)
+        self.live_runtime_handle_of(plugin_id).map(|handle| handle.pid)
     }
 
     /// 只读取回一次 pending call 的快照（结算/取件前的授权判定用，不改状态）。

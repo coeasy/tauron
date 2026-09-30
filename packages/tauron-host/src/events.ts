@@ -95,6 +95,8 @@ export interface PendingCallInfo {
   parentCallId?: string;
   /** V4 A77 1-based bounded synchronous hop count. */
   hopCount?: number;
+  /** V4 A88 process runtime generation captured when the call was accepted. */
+  runtimeGeneration?: number;
   /**
    * 结算状态（0.4-A1）：`pending` = 已登记等待执行方回填；`settled` = 结果已在此。
    * 只有两态——宿主不区分「执行中」（那是执行方的私事），TTL 兜底回收。
