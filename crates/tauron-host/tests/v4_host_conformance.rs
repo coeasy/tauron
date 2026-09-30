@@ -26,6 +26,7 @@ fn production_ready() -> ProductionReadiness {
         recovery_explicitly_unsupported: false,
         install_feature_enabled: false,
         install_trust_configured: false,
+        trusted_time_available: false,
         audit_for_admin_operations_available: true,
         writable_data_dir_available: true,
         process_runtime_enabled: false,
