@@ -2795,9 +2795,7 @@ mod tests {
         let (second, _) = r.runtime_ensure_lease(&id, || Ok(12)).unwrap();
         assert!(second.generation > first.generation);
         assert_eq!(
-            r.runtime_lease_versioned(&second.lease, first.generation.0)
-                .unwrap_err()
-                .code,
+            r.runtime_lease_versioned(&second.lease, first.generation.0).unwrap_err().code,
             ErrorCode::E_LEASE_EXPIRED
         );
         assert!(r.runtime_lease_versioned(&second.lease, second.generation.0).is_ok());
