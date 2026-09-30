@@ -2536,6 +2536,8 @@ pub struct RuntimeHealth {
     /// 命令会再牵动能力表/授权档位/TS 镜像一整套面。要按插件看回收情况目前做不到
     /// （表里只留全局计数），如实标注。
     pub reap: ReapStats,
+    /// V4 A103 canonical liveness/readiness/degradation report.
+    pub health: tauron_host::HealthReport,
 }
 
 /// 进程插件运行时：可注入启动面 + 崩溃窗口计数。
@@ -4824,6 +4826,38 @@ fn refuse_exhausted_crash_budget(
 /// 返回里带**全局**的租约回收留痕（`reap`）：终止失败的痕迹必须能被宿主 UI 看到，
 /// 否则"不静默吞"只是写在注释里。挂在 health 上而不是新开命令，是为了不再牵动
 /// 能力表/授权档位/TS 镜像（`RuntimeHealth` 本就是这条命令的既有返回）。
+fn runtime_health_report(
+    status: tauron_proc::ProcessStatus,
+    lifecycle: Option<tauron_host::lifecycle::State>,
+    crashes: u32,
+) -> tauron_host::HealthReport {
+    match status {
+        tauron_proc::ProcessStatus::Alive => match lifecycle {
+            Some(tauron_host::lifecycle::State::Running) => {
+                if crashes == 0 {
+                    tauron_host::HealthReport::ready()
+                } else {
+                    tauron_host::HealthReport::degraded(format!(
+                        "runtime is ready but has {crashes} recent crash(es) in its budget window"
+                    ))
+                }
+            }
+            Some(state) => tauron_host::HealthReport::alive_but_not_ready(format!(
+                "process is alive but plugin lifecycle is {state}"
+            )),
+            None => tauron_host::HealthReport::alive_but_not_ready(
+                "process is alive but plugin registry entry is missing",
+            ),
+        },
+        tauron_proc::ProcessStatus::Exited => {
+            tauron_host::HealthReport::dead("sidecar process has exited")
+        }
+        tauron_proc::ProcessStatus::Unknown => tauron_host::HealthReport::unknown(
+            "sidecar liveness could not be proven by the process provider",
+        ),
+    }
+}
+
 pub fn cmd_runtime_health(state: &PluginRuntimeState, lease: &str) -> HostResult<RuntimeHealth> {
     guard("runtime_health", || {
         let entry = state.registry.runtime_lease(lease)?;
@@ -4839,13 +4873,21 @@ pub fn cmd_runtime_health(state: &PluginRuntimeState, lease: &str) -> HostResult
             deliver_runtime_crash(state, &entry.plugin_id);
         }
 
+        let crashes = state.proc_runtime.crash_count(&entry.plugin_id);
+        let lifecycle = PluginId::new(&entry.plugin_id)
+            .ok()
+            .and_then(|id| state.registry.find(&id))
+            .map(|plugin| plugin.state.state);
+        let health = runtime_health_report(status, lifecycle, crashes);
+
         Ok(RuntimeHealth {
             alive,
             status,
             pid: entry.pid,
-            crashes: state.proc_runtime.crash_count(&entry.plugin_id),
+            crashes,
             consecutive_failures: state.recovery.lock().counter().consecutive_failures,
             reap: state.registry.runtime_reap_stats(),
+            health,
         })
     })?
 }
@@ -12787,6 +12829,8 @@ mod tests {
         let health = cmd_runtime_health(&state, &handle.lease).unwrap();
         assert_eq!(health.pid, handle.pid);
         assert!(health.alive, "fake 未标记死亡 → 必须报存活");
+        assert_eq!(health.health, tauron_host::HealthReport::ready());
+        assert!(health.health.can_accept_work());
         assert_eq!(health.crashes, 0);
         assert_eq!(health.consecutive_failures, 0);
         assert_eq!(
@@ -12902,6 +12946,28 @@ mod tests {
         assert_ne!(err.code, ErrorCode::E_CALL_NOT_FOUND, "租约边界必须与 pending call 边界分开");
     }
 
+    #[test]
+    fn alive_process_is_not_ready_when_plugin_lifecycle_is_not_running() {
+        let (state, _fake) = process_state("com.proc", Some("sidecar.exe"));
+        let id = PluginId::new("com.proc").unwrap();
+        enabled_process_plugin(&state, "com.proc");
+        let handle = cmd_runtime_spawn(&state, "com.proc", &valid_profile()).unwrap();
+        assert_eq!(
+            state.registry.find(&id).unwrap().state.state,
+            tauron_host::lifecycle::State::Running
+        );
+
+        // Simulate a control-plane transition away from RUNNING while the process probe still
+        // reports Alive. A103 requires this to be explicitly not-ready, not capability-full.
+        state.registry.report_event(&id, Event::RuntimeCrash).unwrap();
+        let health = cmd_runtime_health(&state, &handle.lease).unwrap();
+        assert!(health.alive, "process provider still proves the pid alive");
+        assert_eq!(health.health.liveness, tauron_host::Liveness::Alive);
+        assert_eq!(health.health.readiness, tauron_host::Readiness::NotReady);
+        assert_eq!(health.health.degradation, tauron_host::Degradation::Degraded);
+        assert!(!health.health.can_accept_work());
+    }
+
     /// 崩溃：投递 `RuntimeCrash`（状态机真的吃了它）+ `consecutiveFailures` +1
     /// + `CrashTracker` 记一次，且**重复轮询不得重复计数**。
     #[test]
@@ -12921,6 +12987,9 @@ mod tests {
 
         let health = cmd_runtime_health(&state, &handle.lease).unwrap();
         assert!(!health.alive, "被标记死亡的 pid 必须报不存活");
+        assert_eq!(health.health.liveness, tauron_host::Liveness::Dead);
+        assert_eq!(health.health.readiness, tauron_host::Readiness::NotReady);
+        assert!(!health.health.can_accept_work());
         assert_eq!(health.crashes, 1, "崩溃必须记进 CrashTracker");
         assert_eq!(
             health.consecutive_failures, 1,
@@ -13030,6 +13099,7 @@ mod tests {
                 failures: 1,
                 last_error: Some("拒绝访问".to_string()),
             },
+            health: tauron_host::HealthReport::dead("sidecar process has exited"),
         };
         let v = serde_json::to_value(&h).unwrap();
         assert_eq!(
@@ -13046,6 +13116,12 @@ mod tests {
                     "alreadyGone": 1,
                     "failures": 1,
                     "lastError": "拒绝访问"
+                },
+                "health": {
+                    "liveness": "dead",
+                    "readiness": "not-ready",
+                    "degradation": "degraded",
+                    "diagnostics": ["sidecar process has exited"]
                 }
             })
         );

@@ -1329,6 +1329,10 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
     const ts = read('packages/tauron-host/src/shell-client.ts');
     expect(ts).toMatch(/phaseName: string/);
     expect(ts).toMatch(/consecutiveFailures: number/);
+    expect(ts).toMatch(/health: HealthReport/);
+    expect(ts).toMatch(/liveness: 'alive' \| 'dead' \| 'unknown'/);
+    expect(ts).toMatch(/readiness: 'ready' \| 'not-ready'/);
+    expect(ts).toMatch(/degradation: 'full' \| 'degraded'/);
     expect(ts).toMatch(/disabledPlugins: DisabledPlugin\[\]/);
     expect(ts).toMatch(/requiredPlugins: string\[\]/);
     expect(ts).toMatch(/loadSource: LoadSource/);

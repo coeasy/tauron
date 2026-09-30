@@ -564,6 +564,13 @@ export interface ReapStats {
   lastError: string | null;
 }
 
+export interface HealthReport {
+  liveness: 'alive' | 'dead' | 'unknown';
+  readiness: 'ready' | 'not-ready';
+  degradation: 'full' | 'degraded';
+  diagnostics: string[];
+}
+
 /** sidecar 健康快照（`host_runtime_health`）。 */
 export interface RuntimeHealth {
   /** Proven alive only; false also covers the explicit unknown state. */
@@ -577,6 +584,8 @@ export interface RuntimeHealth {
   consecutiveFailures: number;
   /** 租约回收统计（全局；与上两个计数都不是一回事）。 */
   reap: ReapStats;
+  /** V4 A103 canonical liveness/readiness/degradation report. */
+  health: HealthReport;
 }
 
 /** 主窗资源配额快照（`host_resource_stats`）。 */

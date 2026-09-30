@@ -65,6 +65,24 @@ impl HealthReport {
             diagnostics: vec![reason.into()],
         }
     }
+
+    pub fn dead(reason: impl Into<String>) -> Self {
+        Self {
+            liveness: Liveness::Dead,
+            readiness: Readiness::NotReady,
+            degradation: Degradation::Degraded,
+            diagnostics: vec![reason.into()],
+        }
+    }
+
+    pub fn unknown(reason: impl Into<String>) -> Self {
+        Self {
+            liveness: Liveness::Unknown,
+            readiness: Readiness::NotReady,
+            degradation: Degradation::Degraded,
+            diagnostics: vec![reason.into()],
+        }
+    }
 }
 
 #[cfg(test)]
