@@ -88,6 +88,10 @@
     {
       "code": "E_STREAM_BACKPRESSURE",
       "retryClass": "manual"
+    },
+    {
+      "code": "E_CALL_CYCLE",
+      "retryClass": "never"
     }
   ]
 }

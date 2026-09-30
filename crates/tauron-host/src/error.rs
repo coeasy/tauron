@@ -98,6 +98,8 @@ pub enum ErrorCode {
     /// Stream producer exhausted its receiver-granted byte window.
     /// The rejected frame is not delivered and does not consume a sequence number.
     E_STREAM_BACKPRESSURE,
+    /// Synchronous call graph would cycle, re-enter a principal, or exceed the bounded hop budget.
+    E_CALL_CYCLE,
 }
 
 /// V4 retry semantics. A boolean cannot safely express panic/transaction/reconnect behavior.
@@ -125,6 +127,7 @@ impl ErrorCode {
             Self::E_PLUGIN_FILTERED => RetryClass::Manual,
             Self::E_LEASE_EXPIRED => RetryClass::AfterReconnect,
             Self::E_STREAM_BACKPRESSURE => RetryClass::Manual,
+            Self::E_CALL_CYCLE => RetryClass::Never,
             _ => RetryClass::Never,
         }
     }
@@ -166,6 +169,7 @@ impl fmt::Display for ErrorCode {
             Self::E_CALL_ALREADY_SETTLED => write!(f, "E_CALL_ALREADY_SETTLED"),
             Self::E_CONTRIBUTES_DRIFT => write!(f, "E_CONTRIBUTES_DRIFT"),
             Self::E_STREAM_BACKPRESSURE => write!(f, "E_STREAM_BACKPRESSURE"),
+            Self::E_CALL_CYCLE => write!(f, "E_CALL_CYCLE"),
         }
     }
 }

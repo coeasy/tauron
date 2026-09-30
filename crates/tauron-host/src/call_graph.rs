@@ -78,7 +78,10 @@ impl CallGraph {
         } else {
             1
         };
-        if self.reentrancy == ReentrancyPolicy::DenySamePlugin && caller == callee {
+        if parent.is_some()
+            && self.reentrancy == ReentrancyPolicy::DenySamePlugin
+            && caller == callee
+        {
             return Err(CallGraphError::ReentrantCall(caller));
         }
 
@@ -176,6 +179,8 @@ mod tests {
     #[test]
     fn direct_self_reentry_is_rejected_without_blocking_normal_delegation() {
         let mut graph = CallGraph::default();
+        graph.begin("root-self", None, "a", "a").unwrap();
+        graph.end("root-self");
         graph.begin("c1", None, "host", "a").unwrap();
         graph.begin("c2", Some("c1"), "a", "b").unwrap();
         assert!(matches!(

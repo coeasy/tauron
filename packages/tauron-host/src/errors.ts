@@ -69,6 +69,7 @@ export const HOST_ERROR_CODES = [
    */
   'E_CONTRIBUTES_DRIFT',
   'E_STREAM_BACKPRESSURE',
+  'E_CALL_CYCLE',
 ] as const;
 
 export type HostErrorCode = (typeof HOST_ERROR_CODES)[number];
@@ -100,6 +101,7 @@ export const HOST_RETRY_CLASS: Readonly<Record<HostErrorCode, RetryClass>> = Obj
   E_CALL_ALREADY_SETTLED: 'never',
   E_CONTRIBUTES_DRIFT: 'never',
   E_STREAM_BACKPRESSURE: 'manual',
+  E_CALL_CYCLE: 'never',
 });
 
 /**

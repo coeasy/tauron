@@ -4037,9 +4037,38 @@ pub fn cmd_call_plugin(
     cmd: &str,
     args: serde_json::Value,
 ) -> HostResult<ProviderResult<PendingCall>> {
+    cmd_call_plugin_with_parent(state, caller, target, cmd, args, None)
+}
+
+/// V4 A77 contextual cross-principal call. Legacy callers omit parent_call_id and become roots.
+pub fn cmd_call_plugin_with_parent(
+    state: &PluginRuntimeState,
+    caller: &str,
+    target: &str,
+    cmd: &str,
+    args: serde_json::Value,
+    parent_call_id: Option<&str>,
+) -> HostResult<ProviderResult<PendingCall>> {
     guard("call_plugin", || {
-        let call = state.registry.call_begin_cross(caller, target, caller, cmd, args)?;
-        state.deliver_call(&call)
+        let call = state.registry.call_begin_cross_with_parent(
+            caller,
+            target,
+            caller,
+            cmd,
+            args,
+            parent_call_id,
+        )?;
+        match state.deliver_call(&call) {
+            Ok(ProviderResult::Value(value)) => Ok(ProviderResult::Value(value)),
+            Ok(ProviderResult::Unsupported(body)) => {
+                let _ = state.registry.call_cancel(&call.call_id);
+                Ok(ProviderResult::Unsupported(body))
+            }
+            Err(error) => {
+                let _ = state.registry.call_cancel(&call.call_id);
+                Err(error)
+            }
+        }
     })?
 }
 

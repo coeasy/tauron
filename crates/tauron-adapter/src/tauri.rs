@@ -157,6 +157,9 @@ pub struct HostCallPluginReq {
     /// JSON 载荷（→ 核心 `args`）。
     #[serde(default)]
     pub args_json: Option<serde_json::Value>,
+    /// V4 A77 parent request when this call delegates while handling another call.
+    #[serde(default)]
+    pub parent_call_id: Option<String>,
 }
 
 /// `host_call_result` 的 `req` 载荷（执行方回填结果，0.4-A1）。
@@ -654,12 +657,13 @@ pub fn host_call_plugin(
             )));
         }
     };
-    crate::cmd_call_plugin(
+    crate::cmd_call_plugin_with_parent(
         &state,
         &caller,
         &req.target,
         &req.method,
         req.args_json.unwrap_or(serde_json::Value::Null),
+        req.parent_call_id.as_deref(),
     )
     .map_err(to_tauri_err)
 }

@@ -1018,12 +1018,18 @@ export class ShellClient {
    *
    * 结果用 {@link ShellClient.callTakeResult} 取件（一次性语义）。
    */
-  async callPlugin(target: string, method: string, argsJson?: JsonValue): Promise<PendingCallInfo> {
+  async callPlugin(
+    target: string,
+    method: string,
+    argsJson?: JsonValue,
+    parentCallId?: string,
+  ): Promise<PendingCallInfo> {
     return this.call<PendingCallInfo>('host_call_plugin', {
       req: {
         target,
         method,
         ...(argsJson !== undefined ? { argsJson } : {}),
+        ...(parentCallId !== undefined ? { parentCallId } : {}),
       },
     });
   }

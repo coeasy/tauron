@@ -17,6 +17,7 @@
 //! （`pending → streams → runtime → active_order`）。
 
 use crate::call_delivery::CallOutcome;
+use crate::call_graph::{CallGraph, CallGraphError};
 use crate::call_state::{AtomicCallState, CallTerminalState};
 use crate::error::{ErrorCode, HostError, HostResult};
 use crate::lifecycle::{transition, Event, PluginState, State, TransitionOutcome};
@@ -206,6 +207,15 @@ pub struct PendingCall {
     pub caller: String,
     /// 执行主体：插件 id。`self` 档调用时等于 `plugin_id`。
     pub target: String,
+    /// Root request in the synchronous call graph. For top-level calls this equals call_id.
+    #[serde(rename = "rootCallId")]
+    pub root_call_id: String,
+    /// Parent request when this call was initiated while handling another call.
+    #[serde(rename = "parentCallId", skip_serializing_if = "Option::is_none")]
+    pub parent_call_id: Option<String>,
+    /// 1-based bounded synchronous hop count.
+    #[serde(rename = "hopCount")]
+    pub hop_count: u16,
     /// 调用状态：等待执行方回填 / 已结算。
     pub state: CallState,
     /// V4 terminal arbiter shared by every clone. Exactly one completion/cancel/timeout/failure wins.
@@ -242,6 +252,7 @@ impl PendingCall {
         created_at: Instant,
         expires_at: Instant,
     ) -> Self {
+        let root_call_id = call_id.clone();
         Self {
             call_id,
             plugin_id,
@@ -249,6 +260,9 @@ impl PendingCall {
             args,
             caller,
             target,
+            root_call_id,
+            parent_call_id: None,
+            hop_count: 1,
             state: CallState::Pending,
             terminal: Arc::new(AtomicCallState::new()),
             result: None,
@@ -314,6 +328,8 @@ pub struct Registry {
     config: RegistryConfig,
     entries: RwLock<HashMap<PluginId, PluginEntry>>,
     pending: Mutex<HashMap<String, PendingCall>>,
+    /// V4 A77 synchronous call graph. Cleaned on settle/cancel/timeout/teardown.
+    call_graph: Mutex<CallGraph>,
     /// 流句柄表 + 调用帧载体表（R5）。
     streams: Mutex<StreamRegistry>,
     /// 进程插件运行时租约表（P0-2）：`plugin_id ↔ lease ↔ pid`。
@@ -328,12 +344,17 @@ pub struct Registry {
     next_token: AtomicU64,
 }
 
+fn call_graph_error(error: CallGraphError) -> HostError {
+    HostError::new(ErrorCode::E_CALL_CYCLE, format!("V4 call graph rejected request: {error}"))
+}
+
 impl Registry {
     pub fn new(config: RegistryConfig) -> Self {
         Self {
             config,
             entries: RwLock::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
+            call_graph: Mutex::new(CallGraph::default()),
             streams: Mutex::new(StreamRegistry::new()),
             runtime: Mutex::new(RuntimeTable::new()),
             active_order: Mutex::new(Vec::new()),
@@ -636,6 +657,20 @@ impl Registry {
         cmd: &str,
         args: serde_json::Value,
     ) -> HostResult<PendingCall> {
+        self.call_begin_cross_with_parent(caller, target, quota_owner, cmd, args, None)
+    }
+
+    /// V4 A77 contextual cross-principal call. Parentage is accepted only when the caller is
+    /// the current target of the parent call, preventing guessed call IDs from forging ancestry.
+    pub fn call_begin_cross_with_parent(
+        &self,
+        caller: &str,
+        target: &str,
+        quota_owner: &str,
+        cmd: &str,
+        args: serde_json::Value,
+        parent_call_id: Option<&str>,
+    ) -> HostResult<PendingCall> {
         let entry = self.require(&PluginId::new(target).map_err(|_| {
             HostError::new(
                 ErrorCode::E_UNKNOWN_PLUGIN,
@@ -651,18 +686,12 @@ impl Registry {
         if cmd.trim().is_empty() {
             return Err(HostError::new(ErrorCode::E_AUTH_DENIED, "调用命令为空"));
         }
+
         let mut pending = self.pending.lock();
         let plugin_pending = pending.values().filter(|call| call.plugin_id == quota_owner).count();
         if pending.len() >= self.config.max_pending_calls
             || plugin_pending >= MAX_PENDING_PER_PLUGIN
         {
-            // 表满时先做 TTL GC：僵尸条目（前端已超时却从未 callEnd 的调用）
-            // 不得永久占用容量位——否则一次永久挂起累积起来就会把表占满，
-            // 使后续所有调用永久 `E_CALL_PENDING_FULL`（ADR-04 的挂起会累积）。
-            //
-            // 只在**满时**驱逐：稳态（表未满）不做 GC，保证 `call_status` 对
-            // 过期条目仍报 `E_CALL_TIMEOUT` 而非 `E_CALL_NOT_FOUND`——
-            // 两者可重试性不同（前者可重试），语义不能塌缩。
             drop(pending);
             self.gc_expired();
             pending = self.pending.lock();
@@ -680,10 +709,37 @@ impl Registry {
                 ),
             ));
         }
-        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
+
+        let parent_root = if let Some(parent_id) = parent_call_id {
+            let parent = pending.get(parent_id).ok_or_else(|| {
+                HostError::new(
+                    ErrorCode::E_CALL_CYCLE,
+                    format!("parent call `{parent_id}` 不存在或已结束"),
+                )
+            })?;
+            if parent.target != caller {
+                return Err(HostError::new(
+                    ErrorCode::E_AUTH_DENIED,
+                    format!("caller `{caller}` 不是 parent call `{parent_id}` 的执行主体"),
+                ));
+            }
+            Some(parent.root_call_id.clone())
+        } else {
+            None
+        };
+        drop(pending);
+
         let call_id = Uuid::new_v4().to_string();
+        let hop_count = self
+            .call_graph
+            .lock()
+            .begin(&call_id, parent_call_id, caller, target)
+            .map_err(call_graph_error)?;
+        let root_call_id = parent_root.unwrap_or_else(|| call_id.clone());
+
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let now = Instant::now();
-        let call = PendingCall::new(
+        let mut call = PendingCall::new(
             call_id.clone(),
             quota_owner.to_string(),
             cmd.to_string(),
@@ -694,6 +750,22 @@ impl Registry {
             now,
             now + self.config.pending_ttl,
         );
+        call.root_call_id = root_call_id;
+        call.parent_call_id = parent_call_id.map(str::to_string);
+        call.hop_count = hop_count;
+
+        let mut pending = self.pending.lock();
+        let plugin_pending = pending.values().filter(|item| item.plugin_id == quota_owner).count();
+        if pending.len() >= self.config.max_pending_calls
+            || plugin_pending >= MAX_PENDING_PER_PLUGIN
+        {
+            drop(pending);
+            self.call_graph.lock().end(&call_id);
+            return Err(HostError::new(
+                ErrorCode::E_CALL_PENDING_FULL,
+                "pending call 容量在并发受理期间达到上限",
+            ));
+        }
         pending.insert(call_id, call.clone());
         Ok(call)
     }
@@ -746,6 +818,7 @@ impl Registry {
             let call = pending.remove(call_id).expect("checked pending call exists");
             let _ = call.terminal.try_finish(CallTerminalState::TimedOut);
             drop(pending);
+            self.call_graph.lock().end(call_id);
             self.streams.lock().close_for_call(
                 call_id,
                 StreamKind::Error,
@@ -771,6 +844,7 @@ impl Registry {
             ));
         }
         drop(pending);
+        self.call_graph.lock().end(call_id);
         self.streams.lock().close_for_call(call_id, terminal, reason);
         Ok(call)
     }
@@ -778,23 +852,27 @@ impl Registry {
     /// **窗口关闭清理**（ADR-04）：一次清空该插件的全部 pending 条目。
     /// 不清理会导致 JS 侧 `invoke()` 永久挂起。返回清除数量。
     pub fn call_end_all(&self, id: &PluginId) -> usize {
-        let removed = {
+        let removed_ids = {
             let mut pending = self.pending.lock();
-            let before = pending.len();
-            pending.retain(|_, c| {
-                if c.plugin_id == id.as_str() {
-                    let _ = c.terminal.try_finish(CallTerminalState::Failed);
-                    false
-                } else {
-                    true
+            let ids: Vec<String> = pending
+                .iter()
+                .filter(|(_, call)| {
+                    call.plugin_id == id.as_str()
+                        || call.caller == id.as_str()
+                        || call.target == id.as_str()
+                })
+                .map(|(call_id, _)| call_id.clone())
+                .collect();
+            for call_id in &ids {
+                if let Some(call) = pending.remove(call_id) {
+                    let _ = call.terminal.try_finish(CallTerminalState::Failed);
                 }
-            });
-            before - pending.len()
+            }
+            ids
         };
-        // 同一订阅者的流整组回收（补 `error` 终帧 + 原因）：窗口没了，接收方
-        // 也就不用再等了——不补的话那些流会永远挂在「等 next frame」上。
+        self.call_graph.lock().clear_principal(id.as_str());
         self.streams.lock().close_for_subscriber(id.as_str());
-        removed
+        removed_ids.len()
     }
 
     /// TTL GC：回收全部过期条目。返回回收数量（计划 §4.1：必须有 TTL GC）。
@@ -814,6 +892,12 @@ impl Registry {
             }
             ids
         };
+        {
+            let mut graph = self.call_graph.lock();
+            for call_id in &expired {
+                graph.end(call_id);
+            }
+        }
         let mut streams = self.streams.lock();
         for call_id in &expired {
             streams.close_for_call(
@@ -849,7 +933,10 @@ impl Registry {
         call.state = CallState::Settled;
         call.result = outcome.result;
         call.error_code = outcome.error_code;
-        Ok(call.clone())
+        let settled = call.clone();
+        drop(pending);
+        self.call_graph.lock().end(call_id);
+        Ok(settled)
     }
 
     /// 取走一次结算结果（0.4-A1 的回执取件步骤）。
@@ -1682,6 +1769,73 @@ mod tests {
         r.call_begin(&id, "b", serde_json::json!({})).unwrap();
         let e = r.call_begin(&id, "c", serde_json::json!({})).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_CALL_PENDING_FULL);
+    }
+
+    #[test]
+    fn contextual_cross_call_rejects_cycles_and_spoofed_parentage() {
+        let r = Registry::default();
+        let a = r.install(&index(), manifest("com.example.a", None)).unwrap();
+        let b = r.install(&index(), manifest("com.example.b", None)).unwrap();
+        enable(&r, &a);
+        enable(&r, &b);
+
+        let root = r
+            .call_begin_cross("main", a.as_str(), "main", "root", serde_json::json!({}))
+            .unwrap();
+        assert_eq!(root.root_call_id, root.call_id);
+        assert_eq!(root.hop_count, 1);
+
+        let child = r
+            .call_begin_cross_with_parent(
+                a.as_str(),
+                b.as_str(),
+                a.as_str(),
+                "delegate",
+                serde_json::json!({}),
+                Some(&root.call_id),
+            )
+            .unwrap();
+        assert_eq!(child.root_call_id, root.call_id);
+        assert_eq!(child.parent_call_id.as_deref(), Some(root.call_id.as_str()));
+        assert_eq!(child.hop_count, 2);
+
+        let cycle = r
+            .call_begin_cross_with_parent(
+                b.as_str(),
+                a.as_str(),
+                b.as_str(),
+                "cycle",
+                serde_json::json!({}),
+                Some(&child.call_id),
+            )
+            .unwrap_err();
+        assert_eq!(cycle.code, ErrorCode::E_CALL_CYCLE);
+
+        let spoof = r
+            .call_begin_cross_with_parent(
+                b.as_str(),
+                a.as_str(),
+                b.as_str(),
+                "spoof",
+                serde_json::json!({}),
+                Some(&root.call_id),
+            )
+            .unwrap_err();
+        assert_eq!(spoof.code, ErrorCode::E_AUTH_DENIED);
+
+        r.settle_call(&child.call_id, CallOutcome::success(serde_json::json!("ok")))
+            .unwrap();
+        let missing_parent = r
+            .call_begin_cross_with_parent(
+                b.as_str(),
+                a.as_str(),
+                b.as_str(),
+                "late",
+                serde_json::json!({}),
+                Some(&child.call_id),
+            )
+            .unwrap_err();
+        assert_eq!(missing_parent.code, ErrorCode::E_CALL_CYCLE);
     }
 
     #[test]
