@@ -94,8 +94,9 @@ pub fn hmac_sha256_hex(bytes: &[u8], key: &[u8]) -> HostResult<String> {
     if key.is_empty() {
         return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "HMAC 密钥不可为空"));
     }
-    let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|e| HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("HMAC 密钥无效：{e}")))?;
+    let mut mac = HmacSha256::new_from_slice(key).map_err(|e| {
+        HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("HMAC 密钥无效：{e}"))
+    })?;
     mac.update(bytes);
     Ok(hex::encode(mac.finalize().into_bytes()))
 }

@@ -421,15 +421,11 @@ struct SignedPluginUiActivation {
 
 #[cfg(feature = "plugin-install")]
 fn plugin_ui_activation_resource(manifest: &PluginManifest) -> HostResult<String> {
-    let ui = manifest
-        .entry
-        .ui
-        .as_deref()
-        .ok_or_else(|| HostError::new(ErrorCode::E_INVALID_MANIFEST, "JS 插件未声明 entry.ui"))?;
-    Ok(format!(
-        "plugin:{}@{}:ui:{}",
-        manifest.id, manifest.version, ui
-    ))
+    let ui =
+        manifest.entry.ui.as_deref().ok_or_else(|| {
+            HostError::new(ErrorCode::E_INVALID_MANIFEST, "JS 插件未声明 entry.ui")
+        })?;
+    Ok(format!("plugin:{}@{}:ui:{}", manifest.id, manifest.version, ui))
 }
 
 #[cfg(feature = "plugin-install")]
@@ -470,17 +466,11 @@ fn write_plugin_ui_activation(
         )
     })?;
     let path = plugin_dir.join(PLUGIN_UI_ACTIVATION_FILE);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|error| {
+    let mut file =
+        std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|error| {
             HostError::new(
                 ErrorCode::E_INSTALL_FAILED,
-                format!(
-                    "创建插件 UI activation metadata 失败 {}: {error}",
-                    path.display()
-                ),
+                format!("创建插件 UI activation metadata 失败 {}: {error}", path.display()),
             )
         })?;
     use std::io::Write as _;
@@ -515,10 +505,7 @@ fn verify_plugin_ui_activation(
     let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
         HostError::new(
             ErrorCode::E_INSTALL_FAILED,
-            format!(
-                "插件 UI 缺少 activation metadata {}: {error}",
-                path.display()
-            ),
+            format!("插件 UI 缺少 activation metadata {}: {error}", path.display()),
         )
     })?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -560,10 +547,7 @@ fn verify_plugin_ui_activation(
         ));
     }
     let bytes = std::fs::read(entry).map_err(|error| {
-        HostError::new(
-            ErrorCode::E_INSTALL_FAILED,
-            format!("读取插件 UI 内容失败：{error}"),
-        )
+        HostError::new(ErrorCode::E_INSTALL_FAILED, format!("读取插件 UI 内容失败：{error}"))
     })?;
     signed.record.verify_bytes(&bytes).map_err(|error| {
         HostError::new(
@@ -8556,11 +8540,9 @@ mod tests {
         assert!(std::path::Path::new(&installed.install_path).join("src/index.js").is_file());
         assert!(std::path::Path::new(&installed.install_path).join("index.html").is_file());
         assert!(install_root.join(".acl/com.install.e2e.acl.json").is_file());
-        assert!(
-            std::path::Path::new(&installed.install_path)
-                .join(PLUGIN_UI_ACTIVATION_FILE)
-                .is_file()
-        );
+        assert!(std::path::Path::new(&installed.install_path)
+            .join(PLUGIN_UI_ACTIVATION_FILE)
+            .is_file());
 
         cmd_registry_admin_as(
             &Caller::MainWindow,
