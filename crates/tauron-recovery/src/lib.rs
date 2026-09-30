@@ -566,6 +566,31 @@ impl RecoveryEngine {
         Ok(())
     }
 
+    /// Roll back a staged trial-enable only when no later recovery fact replaced it.
+    ///
+    /// The adapter stages the engine state before touching the external registry. If that
+    /// external transition is rejected, it must restore the pre-action state. The compare step
+    /// is critical: a concurrent failure may already have changed the plugin to
+    /// `DisabledBySafemode`; blindly restoring the old state would erase that newer fact.
+    pub fn rollback_trial_enable_if_unchanged(
+        &mut self,
+        plugin_id: &str,
+        previous: Option<PluginState>,
+    ) -> bool {
+        if self.plugin_states.get(plugin_id).copied() != Some(PluginState::TrialEnable) {
+            return false;
+        }
+        match previous {
+            Some(state) => {
+                self.plugin_states.insert(plugin_id.to_string(), state);
+            }
+            None => {
+                self.plugin_states.remove(plugin_id);
+            }
+        }
+        true
+    }
+
     /// 记录试验启用的插件启动失败。
     ///
     /// 回落到 `disabled-by-safemode`，不累入全局计数器。
@@ -990,6 +1015,28 @@ mod tests {
     }
 
     // ── 幂等恢复动作 ────────────────────────────────────────────────
+
+    #[test]
+    fn trial_enable_rollback_restores_only_when_staged_state_is_unchanged() {
+        let mut e = engine_with_plugins();
+        e.record_boot_failure(None);
+        e.record_boot_failure(None);
+        assert_eq!(e.phase(), BootPhase::Safemode);
+
+        let previous = e.plugin_state("p.audio");
+        e.trial_enable("p.audio").unwrap();
+        assert!(e.rollback_trial_enable_if_unchanged("p.audio", previous));
+        assert_eq!(e.plugin_state("p.audio"), previous);
+
+        let previous_video = e.plugin_state("p.video");
+        e.trial_enable("p.video").unwrap();
+        e.record_trial_failure("p.video");
+        assert!(
+            !e.rollback_trial_enable_if_unchanged("p.video", previous_video),
+            "a newer failure state must win over rollback"
+        );
+        assert_eq!(e.plugin_state("p.video"), Some(PluginState::DisabledBySafemode));
+    }
 
     #[test]
     fn idempotency_key_format() {

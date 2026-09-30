@@ -6501,6 +6501,7 @@ pub fn cmd_recover_trial_enable(
             return Ok(result);
         }
 
+        let previous_plugin_state = state.recovery.lock().plugin_state(id.as_str());
         let trial = state.recovery.lock().trial_enable(id.as_str());
         match trial {
             Ok(()) => {}
@@ -6531,39 +6532,66 @@ pub fn cmd_recover_trial_enable(
         // 试启成功后让注册表状态机跟着走 D28 试启迁移（§4.14：引擎负责判，
         // 状态机负责执行）。外部副作用成功后才写 EffectRecord + commit action；
         // 拒绝则 abort，允许同一 incident 的下一次显式请求安全重放。
-        let (engine_action, effect_committed) =
+        // Apply the external registry effect. A TransitionOutcome with `illegal=true` is a
+        // rejection even though report_event itself returned Ok; treating it as committed would
+        // persist an EffectRecord for an effect that never happened.
+        let registry_effect: HostResult<(String, bool)> =
             if let Some(out) = state.registry.find(&id).map(|e| e.state.state) {
                 use tauron_host::lifecycle::State;
                 if out == State::Enabled || out == State::Running {
-                    ("alreadyEnabled".to_string(), true)
+                    // Desired external state already exists; the recovery action is satisfied,
+                    // but this invocation did not create a new external effect.
+                    Ok(("alreadyEnabled".to_string(), false))
                 } else {
                     match state.registry.report_event(&id, Event::TrialEnable) {
-                        Ok(o) => (format!("trialEnable:{}", o.to.as_str()), true),
-                        Err(_) => ("trialEnable:rejected".to_string(), false),
+                        Ok(o) if !o.illegal => {
+                            Ok((format!("trialEnable:{}", o.to.as_str()), true))
+                        }
+                        Ok(o) => Err(HostError::new(
+                            ErrorCode::E_STATE_INVALID_TRANSITION,
+                            format!(
+                                "恢复试启被注册表状态机拒绝：{} -> {}",
+                                o.from.as_str(),
+                                o.to.as_str()
+                            ),
+                        )),
+                        Err(error) => Err(error),
                     }
                 }
             } else {
-                ("notInRegistry".to_string(), true)
+                // Engine-only recovery remains supported for a plugin that is not yet in the
+                // runtime registry. There is no external effect to record in that case.
+                Ok(("notInRegistry".to_string(), false))
             };
+
+        let (engine_action, external_effect_applied) = match registry_effect {
+            Ok(result) => result,
+            Err(error) => {
+                {
+                    let mut engine = state.recovery.lock();
+                    engine.rollback_trial_enable_if_unchanged(id.as_str(), previous_plugin_state);
+                    engine.abort_recovery();
+                }
+                persist_recovery_engine(state);
+                return Err(error);
+            }
+        };
 
         {
             let mut engine = state.recovery.lock();
-            if effect_committed {
+            if external_effect_applied {
                 engine.record_effect(EffectRecord {
                     effect_id: format!("registry:{}:{}", id.as_str(), action.idempotency_key),
                     action_key: action.idempotency_key.clone(),
                     ts: recovery::now_ms(),
                 });
-                engine.complete_recovery();
-            } else {
-                engine.abort_recovery();
             }
+            engine.complete_recovery();
         }
 
         // Persist the action/effect ledger together with the recovery engine. This keeps
         // deduplication valid across process restart, not only inside one in-memory session.
-        let snapshot = state.recovery.lock().to_json();
-        state.recovery_store.lock().save_json(&snapshot);
+        persist_recovery_engine(state);
 
         let payload = recovery_boot_payload(state);
         let mut result = payload.clone();
@@ -9475,6 +9503,44 @@ mod tests {
         assert!(
             serialized.contains(effect_id_prefix),
             "effect ledger must be persisted in engine state"
+        );
+    }
+
+    #[test]
+    fn recovery_trial_enable_rolls_back_engine_when_registry_rejects_trial() {
+        let state = CommandState::new();
+        let id = PluginId::new("com.a").unwrap();
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
+
+        // Exhaust only the registry-side D28 trial budget. Do not report this failure through
+        // the recovery adapter; the engine intentionally still has an unused trial budget.
+        let entered = state.registry.report_event(&id, Event::SafemodeEnter).unwrap();
+        assert!(!entered.illegal);
+        let trial = state.registry.report_event(&id, Event::TrialEnable).unwrap();
+        assert!(!trial.illegal);
+        let failed = state.registry.report_event(&id, Event::ErrorRetryable).unwrap();
+        assert!(!failed.illegal);
+
+        // Independently move the recovery engine into safemode. Reconcile sees the registry
+        // already disabled-by-safemode, so the next TrialEnable reaches the registry budget gate.
+        for _ in 0..2 {
+            cmd_recover_report(&state, "failure", None).unwrap();
+        }
+        assert_eq!(
+            state.recovery.lock().plugin_state("com.a"),
+            Some(RecoveryPluginState::DisabledBySafemode)
+        );
+
+        let err = cmd_recover_trial_enable(&state, "com.a").unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_STATE_INVALID_TRANSITION);
+        assert_eq!(
+            state.recovery.lock().plugin_state("com.a"),
+            Some(RecoveryPluginState::DisabledBySafemode),
+            "registry rejection must roll the staged engine TrialEnable back"
+        );
+        assert!(
+            !state.recovery.lock().is_recovery_in_progress(),
+            "rejected recovery action must not leave the executor stuck in-progress"
         );
     }
 
