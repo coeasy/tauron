@@ -2100,6 +2100,10 @@ pub struct SubstrateState {
     /// Reverse topological order for deterministic shutdown.
     pub service_shutdown_order: Arc<Vec<String>>,
     pub bus: Arc<Mutex<EventBus>>,
+    /// V4 A87: process-wide durable-state writer lease. When a data directory is configured,
+    /// exactly one Host process may own recovery/settings writes for that directory at a time.
+    /// Clones share the same lease handle; dropping the last SubstrateState releases the OS lock.
+    pub storage_writer_lease: Option<Arc<tauron_host::PersistentWriterLease>>,
     /// 宿主设置文档（R7-2：`tauron-settings` 的 [`SettingsStore`]，激活孤儿 crate）。
     ///
     /// **不再是裸 `HashMap`**：键的合法性、值的类型、以及跨 schema 版本的迁移
@@ -2572,6 +2576,28 @@ impl SubstrateState {
 
         let notify_store = NotifyStore::new(512).expect("NotifyStore::new(512) should succeed");
 
+        // V4 A87: the same durable data directory is the canonical owner for recovery + settings.
+        // Acquire a real OS-backed writer lease before reading or mutating any persistent state.
+        // A second process therefore fails at construction instead of racing on JSON/marker files.
+        let storage_writer_lease = cfg.recovery_data_dir.as_ref().map(|dir| {
+            let namespace = tauron_host::StorageNamespace {
+                tenant: "local".into(),
+                application: "tauron-substrate".into(),
+                principal: "durable-state".into(),
+            };
+            let owner = format!("pid:{}", std::process::id());
+            Arc::new(
+                tauron_host::PersistentWriterLease::acquire(
+                    &dir.join(".tauron-locks"),
+                    namespace,
+                    &owner,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("[tauron] durable-state single-writer lease rejected startup: {error}")
+                }),
+            )
+        });
+
         let mut store = match cfg.recovery_data_dir.clone() {
             Some(dir) => RecoveryStore::new(dir),
             None => RecoveryStore::disabled(),
@@ -2609,6 +2635,7 @@ impl SubstrateState {
             service_startup_order: Arc::new(service_startup_order),
             service_shutdown_order: Arc::new(service_shutdown_order),
             bus: Arc::new(Mutex::new(EventBus::default())),
+            storage_writer_lease,
             settings: Arc::new(Mutex::new(settings)),
             settings_write_lock: Arc::new(Mutex::new(())),
             settings_path,
@@ -11347,6 +11374,27 @@ mod tests {
         // 未被过滤的插件照常装上（证明拦住它的是过滤器，不是别的原因）。
         let ok = serde_json::to_string(&test_manifest("com.allowed")).unwrap();
         assert!(install_plugin_from_json(&state, &ok).is_ok());
+    }
+
+    #[test]
+    fn durable_data_dir_has_exactly_one_process_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = AdapterConfig {
+            recovery_data_dir: Some(dir.path().to_path_buf()),
+            ..AdapterConfig::default()
+        };
+
+        let first = SubstrateState::with_adapter_config(&cfg);
+        assert!(first.storage_writer_lease.is_some());
+
+        let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            SubstrateState::with_adapter_config(&cfg)
+        }));
+        assert!(second.is_err(), "same durable data dir must reject a second writer");
+
+        drop(first);
+        let third = SubstrateState::with_adapter_config(&cfg);
+        assert!(third.storage_writer_lease.is_some(), "lease must recover after owner drop");
     }
 
     #[test]
