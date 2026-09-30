@@ -132,12 +132,14 @@ impl AdmissionController {
         count
     }
 
-    /// Internal accounting snapshot used by owning subsystems to verify reservation lifecycle.
+    /// Internal accounting snapshot used by owning subsystem tests to verify reservation lifecycle.
+    #[cfg(test)]
     pub(crate) fn usage(&self, kind: ResourceKind) -> (u64, u64) {
         let usage = self.global.get(&kind).copied().unwrap_or_default();
         (usage.count, usage.bytes)
     }
 
+    #[cfg(test)]
     pub(crate) fn principal_usage(&self, principal: &str, kind: ResourceKind) -> (u64, u64) {
         let usage =
             self.principals.get(&(principal.to_string(), kind)).copied().unwrap_or_default();

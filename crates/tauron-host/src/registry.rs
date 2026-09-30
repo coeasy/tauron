@@ -773,10 +773,7 @@ impl Registry {
             .map_err(call_admission_error)?;
 
         let call_id = Uuid::new_v4().to_string();
-        let hop_count = match self
-            .call_graph
-            .lock()
-            .begin(&call_id, parent_call_id, caller, target)
+        let hop_count = match self.call_graph.lock().begin(&call_id, parent_call_id, caller, target)
         {
             Ok(depth) => depth,
             Err(error) => {
@@ -1940,9 +1937,7 @@ mod tests {
         let id = r.install(&index(), manifest("com.example.a", None)).unwrap();
         enable(&r, &id);
 
-        let call = r
-            .call_begin(&id, "work", serde_json::json!({ "payload": "abc" }))
-            .unwrap();
+        let call = r.call_begin(&id, "work", serde_json::json!({ "payload": "abc" })).unwrap();
         let (global_count, global_bytes) = r.call_admission_usage();
         let (owner_count, owner_bytes) = r.call_admission_usage_for(id.as_str());
         assert_eq!((global_count, owner_count), (1, 1));
