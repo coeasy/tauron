@@ -11,6 +11,8 @@ use uuid::Uuid;
 pub struct DecisionToken {
     pub principal: String,
     pub operation: String,
+    /// Concrete resource/scope the decision applies to. "*" is the legacy unscoped form.
+    pub scope: String,
     pub policy_epoch: u64,
     pub grant_version: u64,
     pub nonce: String,
@@ -18,7 +20,7 @@ pub struct DecisionToken {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DecisionError {
-    #[error("decision token principal/operation mismatch")]
+    #[error("decision token principal/operation/scope mismatch")]
     ScopeMismatch,
     #[error("decision token policy epoch is stale: token={token}, current={current}")]
     StalePolicy { token: u64, current: u64 },
@@ -58,9 +60,14 @@ impl PolicyAuthority {
     }
 
     pub fn decide(&self, principal: &str, operation: &str) -> DecisionToken {
+        self.decide_scoped(principal, operation, "*")
+    }
+
+    pub fn decide_scoped(&self, principal: &str, operation: &str, scope: &str) -> DecisionToken {
         DecisionToken {
             principal: principal.to_string(),
             operation: operation.to_string(),
+            scope: scope.to_string(),
             policy_epoch: self.policy_epoch,
             grant_version: self.grant_version(principal),
             nonce: Uuid::new_v4().to_string(),
@@ -73,7 +80,17 @@ impl PolicyAuthority {
         principal: &str,
         operation: &str,
     ) -> Result<(), DecisionError> {
-        if token.principal != principal || token.operation != operation {
+        self.validate_scoped(token, principal, operation, &token.scope)
+    }
+
+    pub fn validate_scoped(
+        &self,
+        token: &DecisionToken,
+        principal: &str,
+        operation: &str,
+        scope: &str,
+    ) -> Result<(), DecisionError> {
+        if token.principal != principal || token.operation != operation || token.scope != scope {
             return Err(DecisionError::ScopeMismatch);
         }
         if token.policy_epoch != self.policy_epoch {
@@ -113,6 +130,17 @@ mod tests {
             a.validate(&policy_token, "p1", "fs.read"),
             Err(DecisionError::StalePolicy { .. })
         ));
+    }
+
+    #[test]
+    fn scoped_token_cannot_be_replayed_for_other_resource() {
+        let a = PolicyAuthority::new();
+        let token = a.decide_scoped("p1", "events.subscribe.private", "topic:a");
+        assert_eq!(
+            a.validate_scoped(&token, "p1", "events.subscribe.private", "topic:b"),
+            Err(DecisionError::ScopeMismatch)
+        );
+        a.validate_scoped(&token, "p1", "events.subscribe.private", "topic:a").unwrap();
     }
 
     #[test]

@@ -29,6 +29,7 @@ use serde_json::Value;
 use crate::call_graph::{EventCausation, DEFAULT_MAX_CAUSATION_DEPTH};
 use crate::error::{ErrorCode, HostError, HostResult};
 use crate::manifest::EventDecl;
+use crate::policy::{DecisionError, PolicyAuthority};
 
 /// 单插件队列上限（计划 §4.4 关键约束）。
 pub const MAX_QUEUE: usize = 1000;
@@ -338,12 +339,22 @@ fn frame_with_causation(
 
 type QueueKey = (String, ChannelKind);
 
+const PRIVATE_SUBSCRIBE_OPERATION: &str = "events.subscribe.private";
+
+fn policy_decision_error(error: DecisionError) -> HostError {
+    HostError::new(
+        ErrorCode::E_AUTH_DENIED,
+        format!("event subscription authorization became stale before commit: {error}"),
+    )
+}
+
 /// 事件总线。
 ///
 /// 全部内部状态用锁保护，可被多窗口并发调用。
 ///
-/// **锁顺序（规范顺序，任何路径都不得反序持有）**：
-/// `stats` → `topics` → `subs` → `topic_subscribers` → `approvals` → `queues`。
+/// **锁顺序**：普通索引路径保持 `subs → topic_subscribers`；V4 A81 私有订阅提交
+/// 使用授权事务 `approvals (outer) → policy (short) → subs → topic_subscribers`。
+/// 没有任何路径在持有 `subs/topic_subscribers` 时再获取 `approvals`，因此不会形成环。
 ///
 /// 反序持有会构成死锁环。历史缺陷（已修）：
 /// - `subscribe` 曾先取 `topic_subscribers` 再取 `subs`，与 `publish` 的
@@ -360,6 +371,8 @@ pub struct EventBus {
     subs: Mutex<HashMap<String, SubMeta>>,
     topic_subscribers: Mutex<HashMap<String, Vec<String>>>,
     approvals: Mutex<HashMap<(String, String), ()>>,
+    /// V4 A81 grant-version authority for runtime approval/revoke decisions.
+    policy: Mutex<PolicyAuthority>,
     queues: Mutex<HashMap<QueueKey, Queue>>,
     stats: Mutex<BusStats>,
     next_token: std::sync::atomic::AtomicU64,
@@ -373,6 +386,7 @@ impl Default for EventBus {
             subs: Mutex::default(),
             topic_subscribers: Mutex::default(),
             approvals: Mutex::default(),
+            policy: Mutex::new(PolicyAuthority::new()),
             queues: Mutex::default(),
             stats: Mutex::default(),
             next_token: std::sync::atomic::AtomicU64::new(1),
@@ -423,7 +437,10 @@ impl EventBus {
     ///
     /// 这里只维护 EventBus 的最小授权事实；谁有权批准由 adapter/Policy 边界判定。
     pub fn approve(&self, subscriber: &str, topic: &str) {
-        self.approvals.lock().insert((subscriber.to_string(), topic.to_string()), ());
+        let mut approvals = self.approvals.lock();
+        if approvals.insert((subscriber.to_string(), topic.to_string()), ()).is_none() {
+            self.policy.lock().bump_grant(subscriber);
+        }
     }
 
     /// 撤销一条审批（幂等）。返回本次是否真的删除了记录。
@@ -431,7 +448,12 @@ impl EventBus {
     /// 撤销只阻止**后续新订阅**；既有订阅必须由管理面显式退订或在主体销毁时
     /// 级联回收。这样授权事实与订阅资源的生命周期不会在本层暗中混为一谈。
     pub fn revoke(&self, subscriber: &str, topic: &str) -> bool {
-        self.approvals.lock().remove(&(subscriber.to_string(), topic.to_string())).is_some()
+        let mut approvals = self.approvals.lock();
+        let removed = approvals.remove(&(subscriber.to_string(), topic.to_string())).is_some();
+        if removed {
+            self.policy.lock().bump_grant(subscriber);
+        }
+        removed
     }
 
     /// 稳定顺序列出全部审批，供宿主管理面审计/展示。
@@ -473,31 +495,40 @@ impl EventBus {
             )
         })?;
 
-        // 授权判定：`is_approved` 内部取 `approvals` 锁，**不嵌套**其他锁；
-        // 紧随其后的 `stats` 也在前者的守卫释放之后才取。
-        //
-        // 关于声明锁序（`stats → topics → subs → topic_subscribers → approvals →
-        // queues`）：该顺序约束的是**嵌套持有**——反序嵌套会构成死锁环。
-        // 本处是**先后**而非嵌套（`allowed` 求值完毕、approvals 守卫已释放，
-        // 才取 `stats` 计数），因此不构成任何环。**刻意不改成嵌套**：把 `stats`
-        // 提到 `is_approved` 之前会让二者真正嵌套，反而新增死锁面。
-        let allowed =
-            meta.publisher == subscriber || meta.is_public || self.is_approved(subscriber, topic);
-        if !allowed {
-            self.stats.lock().rejected_subscribes += 1;
-            return Err(HostError::new(
-                ErrorCode::E_AUTH_DENIED,
-                format!(
-                    "插件 `{subscriber}` 无权订阅私有 topic `{topic}`（声明者 `{}`，需标 public: true）",
-                    meta.publisher
-                ),
-            ));
-        }
+        // Public/self subscriptions are non-revocable at this layer. Private cross-principal
+        // subscriptions keep the approval lock until the subscription indices are committed.
+        // revoke() takes the same outer lock before bumping GrantVersion, so a stale approval
+        // cannot pass revalidation and then race into the table after revocation.
+        let private_approval = if meta.publisher == subscriber || meta.is_public {
+            None
+        } else {
+            let approvals = self.approvals.lock();
+            if !approvals.contains_key(&(subscriber.to_string(), topic.to_string())) {
+                drop(approvals);
+                self.stats.lock().rejected_subscribes += 1;
+                return Err(HostError::new(
+                    ErrorCode::E_AUTH_DENIED,
+                    format!(
+                        "插件 `{subscriber}` 无权订阅私有 topic `{topic}`（声明者 `{}`，需显式审批）",
+                        meta.publisher
+                    ),
+                ));
+            }
+            let decision =
+                self.policy.lock().decide_scoped(subscriber, PRIVATE_SUBSCRIBE_OPERATION, topic);
+            Some((approvals, decision))
+        };
 
         // 幂等：同 subscriber × window × topic 已存在则复用 token。
         // 上限检查放在幂等**之后**：已达上限时，重复订阅（复用同一 token）
         // 仍必须成功，否则持续重复调用的插件会突然开始失败。
         let token = {
+            if let Some((_, decision)) = private_approval.as_ref() {
+                self.policy
+                    .lock()
+                    .validate_scoped(decision, subscriber, PRIVATE_SUBSCRIBE_OPERATION, topic)
+                    .map_err(policy_decision_error)?;
+            }
             let mut s = self.subs.lock();
             if let Some(existing) = s
                 .values()
@@ -982,6 +1013,47 @@ mod tests {
     }
 
     #[test]
+    fn revoke_invalidates_private_subscription_decision_token() {
+        let b = bus(16);
+        b.approve("com.b", "plugin:com.a:private");
+        let token = b.policy.lock().decide_scoped(
+            "com.b",
+            PRIVATE_SUBSCRIBE_OPERATION,
+            "plugin:com.a:private",
+        );
+        b.policy
+            .lock()
+            .validate_scoped(
+                &token,
+                "com.b",
+                PRIVATE_SUBSCRIBE_OPERATION,
+                "plugin:com.a:private",
+            )
+            .unwrap();
+
+        assert!(b.revoke("com.b", "plugin:com.a:private"));
+        assert!(matches!(
+            b.policy.lock().validate_scoped(
+                &token,
+                "com.b",
+                PRIVATE_SUBSCRIBE_OPERATION,
+                "plugin:com.a:private"
+            ),
+            Err(DecisionError::StaleGrant { .. })
+        ));
+        assert!(!b.revoke("com.b", "plugin:com.a:private"));
+    }
+
+    #[test]
+    fn duplicate_approve_does_not_churn_grant_version() {
+        let b = bus(16);
+        b.approve("com.b", "plugin:com.a:private");
+        let version = b.policy.lock().grant_version("com.b");
+        b.approve("com.b", "plugin:com.a:private");
+        assert_eq!(b.policy.lock().grant_version("com.b"), version);
+    }
+
+    #[test]
     fn approved_private_topic_is_subscribable() {
         let b = bus(16);
         declare(&b, "com.a", "plugin:com.a:private", false);
@@ -1359,8 +1431,7 @@ mod tests {
 
         assert!(
             subs_lock < subs_insert && subs_insert < reverse_index,
-            "锁序反转：subscribe 必须先取 subs（规范顺序 stats → topics → subs → \
-             topic_subscribers → approvals → queues）"
+            "锁序反转：订阅索引提交必须保持 subs → topic_subscribers；私有授权事务的 approvals 是外层锁"
         );
     }
 
