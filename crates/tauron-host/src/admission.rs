@@ -131,6 +131,18 @@ impl AdmissionController {
         }
         count
     }
+
+    /// Internal accounting snapshot used by owning subsystems to verify reservation lifecycle.
+    pub(crate) fn usage(&self, kind: ResourceKind) -> (u64, u64) {
+        let usage = self.global.get(&kind).copied().unwrap_or_default();
+        (usage.count, usage.bytes)
+    }
+
+    pub(crate) fn principal_usage(&self, principal: &str, kind: ResourceKind) -> (u64, u64) {
+        let usage =
+            self.principals.get(&(principal.to_string(), kind)).copied().unwrap_or_default();
+        (usage.count, usage.bytes)
+    }
 }
 
 /// Receiver-driven credits. A sender may not emit more units than the consumer has granted.
@@ -234,6 +246,26 @@ mod tests {
         ));
         assert!(a.release(&p1));
         assert!(a.release(&p2));
+    }
+
+    #[test]
+    fn usage_tracks_and_releases_reservations() {
+        let mut a = AdmissionController::default();
+        a.set_limit(
+            ResourceKind::Calls,
+            ResourceLimit {
+                global_count: 4,
+                per_principal_count: 2,
+                global_bytes: 1_000,
+                per_principal_bytes: 500,
+            },
+        );
+        let token = a.admit("p1", ResourceKind::Calls, 1, 123).unwrap();
+        assert_eq!(a.usage(ResourceKind::Calls), (1, 123));
+        assert_eq!(a.principal_usage("p1", ResourceKind::Calls), (1, 123));
+        assert!(a.release(&token));
+        assert_eq!(a.usage(ResourceKind::Calls), (0, 0));
+        assert_eq!(a.principal_usage("p1", ResourceKind::Calls), (0, 0));
     }
 
     #[test]
