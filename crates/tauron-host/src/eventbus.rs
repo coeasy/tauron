@@ -26,6 +26,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::call_graph::{EventCausation, DEFAULT_MAX_CAUSATION_DEPTH};
 use crate::error::{ErrorCode, HostError, HostResult};
 use crate::manifest::EventDecl;
 
@@ -267,6 +268,75 @@ pub struct Frame {
     /// 单调递增序号（跨通道独立）。
     pub seq: u64,
     pub payload: Value,
+    /// V4 A78 unique event identifier for this emitted frame.
+    pub event_id: String,
+    /// V4 A78 stable root causation identifier across an event chain.
+    pub causation_id: String,
+    /// V4 A78 1-based event hop in the causation chain.
+    pub event_hop: u16,
+    /// V4 A78 hard depth budget enforced by the Host.
+    pub max_causation_depth: u16,
+}
+
+fn root_event_causation(event_id: &str) -> EventCausation {
+    EventCausation::root(event_id, DEFAULT_MAX_CAUSATION_DEPTH)
+        .child(event_id)
+        .expect("root event depth is always within the default causation budget")
+}
+
+fn next_event_causation(
+    parent: Option<&EventCausation>,
+    event_id: &str,
+) -> HostResult<EventCausation> {
+    let Some(parent) = parent else {
+        return Ok(root_event_causation(event_id));
+    };
+    let parent_event_id = parent.parent_id.as_deref().unwrap_or_default();
+    if parent.root_id.trim().is_empty() || parent_event_id.trim().is_empty() {
+        return Err(HostError::new(
+            ErrorCode::E_EVENT_CAUSATION_LIMIT,
+            "event causation context is missing causationId/eventId",
+        ));
+    }
+    let budget = parent.budget.clamp(1, DEFAULT_MAX_CAUSATION_DEPTH);
+    if parent.depth == 0 || parent.depth > budget {
+        return Err(HostError::new(
+            ErrorCode::E_EVENT_CAUSATION_LIMIT,
+            format!(
+                "event causation context has invalid depth {}/{}",
+                parent.depth, budget
+            ),
+        ));
+    }
+    let sanitized = EventCausation {
+        root_id: parent.root_id.clone(),
+        parent_id: Some(parent_event_id.to_string()),
+        depth: parent.depth,
+        budget,
+    };
+    sanitized.child(event_id).map_err(|error| {
+        HostError::new(
+            ErrorCode::E_EVENT_CAUSATION_LIMIT,
+            format!("event causation budget rejected publish: {error}"),
+        )
+    })
+}
+
+fn frame_with_causation(
+    topic: &str,
+    seq: u64,
+    payload: Value,
+    causation: &EventCausation,
+) -> Frame {
+    Frame {
+        topic: topic.to_string(),
+        seq,
+        payload,
+        event_id: causation.parent_id.clone().unwrap_or_else(|| causation.root_id.clone()),
+        causation_id: causation.root_id.clone(),
+        event_hop: causation.depth,
+        max_causation_depth: causation.budget,
+    }
 }
 
 type QueueKey = (String, ChannelKind);
@@ -508,19 +578,27 @@ impl EventBus {
         payload: Value,
         kind: ChannelKind,
     ) -> PublishResult {
+        let event_id = uuid::Uuid::new_v4().to_string();
+        let causation = root_event_causation(&event_id);
+        self.publish_with_causation(publisher, topic, payload, kind, &causation)
+    }
+
+    fn publish_with_causation(
+        &self,
+        publisher: &str,
+        topic: &str,
+        payload: Value,
+        kind: ChannelKind,
+        causation: &EventCausation,
+    ) -> PublishResult {
         self.stats.lock().publishes += 1;
 
-        // **锁序**：`topics` 读锁必须在取 `stats` 之前释放。写成 `match
-        // self.topics.read().get(...)` 时读锁临时量会活到整个 match 结束，
-        // 于是出现 `topics → stats` 的反序持有；先 cloned() 到独立语句，
-        // 读锁在语句末尾即释放（文档顺序：stats → topics）。
         let meta = self.topics.read().get(topic).cloned();
         let Some(meta) = meta else {
             self.stats.lock().undeclared_publishes += 1;
             return PublishResult { dropped: true, ..Default::default() };
         };
         if meta.publisher != publisher {
-            // 发布者越界：不是该 topic 的声明者（R8：以声明元数据判定，不解析 topic 前缀）。
             self.stats.lock().undeclared_publishes += 1;
             return PublishResult { dropped: true, ..Default::default() };
         }
@@ -536,7 +614,6 @@ impl EventBus {
         for token in tokens {
             let subscriber = match self.subs.lock().get(&token).map(|m| m.subscriber.clone()) {
                 Some(s) => s,
-                // 悬挂订阅：token 在反向索引里但已退订。清理它。
                 None => {
                     if let Some(list) = self.topic_subscribers.lock().get_mut(topic) {
                         list.retain(|t| t != &token);
@@ -550,7 +627,10 @@ impl EventBus {
                 let mut qs = self.queues.lock();
                 let q = qs.entry(key.clone()).or_insert_with(|| Queue::new(self.capacity));
                 let seq = q.frames.len() as u64;
-                q.enqueue(kind, Frame { topic: topic.to_string(), seq, payload: payload.clone() })
+                q.enqueue(
+                    kind,
+                    frame_with_causation(topic, seq, payload.clone(), causation),
+                )
             };
             match result {
                 EnqueueResult::Queued => delivered += 1,
@@ -573,7 +653,21 @@ impl EventBus {
         topic: &str,
         payload: Value,
     ) -> HostResult<PublishResult> {
-        let res = self.publish(publisher, topic, payload, ChannelKind::Request);
+        self.publish_request_with_causation(publisher, topic, payload, None)
+    }
+
+    /// V4 A78 reliable event publish with an optional parent causation context.
+    pub fn publish_request_with_causation(
+        &self,
+        publisher: &str,
+        topic: &str,
+        payload: Value,
+        parent: Option<&EventCausation>,
+    ) -> HostResult<PublishResult> {
+        let event_id = uuid::Uuid::new_v4().to_string();
+        let causation = next_event_causation(parent, &event_id)?;
+        let res =
+            self.publish_with_causation(publisher, topic, payload, ChannelKind::Request, &causation);
         if res.overflow > 0 {
             return Err(HostError::new(
                 ErrorCode::E_CALL_PENDING_FULL,
@@ -604,8 +698,12 @@ impl EventBus {
         let key = (target.to_string(), ChannelKind::Request);
         let q = qs.entry(key).or_insert_with(|| Queue::new(self.capacity));
         let seq = q.frames.len() as u64;
-        let result =
-            q.enqueue(ChannelKind::Request, Frame { topic: topic.to_string(), seq, payload });
+        let event_id = uuid::Uuid::new_v4().to_string();
+        let causation = root_event_causation(&event_id);
+        let result = q.enqueue(
+            ChannelKind::Request,
+            frame_with_causation(topic, seq, payload, &causation),
+        );
         match result {
             EnqueueResult::Queued | EnqueueResult::QueuedWithOverflow => Ok(1),
             EnqueueResult::Full | EnqueueResult::DroppedCircuitOpen => Err(HostError::new(
@@ -1086,6 +1184,57 @@ mod tests {
     }
 
     // ── 三类通道语义分离 ─────────────────────────────────────────
+
+    #[test]
+    fn event_causation_is_propagated_and_depth_is_bounded() {
+        let b = EventBus::default();
+        b.declare_topics(
+            "com.a",
+            &[EventDecl { topic: "plugin:com.a:x".into(), public: true }],
+        )
+        .unwrap();
+        b.subscribe("com.b", "w", "plugin:com.a:x").unwrap();
+
+        b.publish_request_with_causation("com.a", "plugin:com.a:x", Value::from(1), None)
+            .unwrap();
+        let first = b.drain("com.b", ChannelKind::Request).unwrap().remove(0);
+        assert_eq!(first.event_hop, 1);
+        assert_eq!(first.causation_id, first.event_id);
+
+        let parent = EventCausation {
+            root_id: first.causation_id.clone(),
+            parent_id: Some(first.event_id.clone()),
+            depth: first.event_hop,
+            budget: 2,
+        };
+        b.publish_request_with_causation(
+            "com.a",
+            "plugin:com.a:x",
+            Value::from(2),
+            Some(&parent),
+        )
+        .unwrap();
+        let second = b.drain("com.b", ChannelKind::Request).unwrap().remove(0);
+        assert_eq!(second.causation_id, first.causation_id);
+        assert_eq!(second.event_hop, 2);
+
+        let exhausted = EventCausation {
+            root_id: second.causation_id.clone(),
+            parent_id: Some(second.event_id.clone()),
+            depth: second.event_hop,
+            budget: 2,
+        };
+        let err = b
+            .publish_request_with_causation(
+                "com.a",
+                "plugin:com.a:x",
+                Value::from(3),
+                Some(&exhausted),
+            )
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_EVENT_CAUSATION_LIMIT);
+        assert!(b.drain("com.b", ChannelKind::Request).unwrap().is_empty());
+    }
 
     #[test]
     fn three_channels_have_separate_queues() {
