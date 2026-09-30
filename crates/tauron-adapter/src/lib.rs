@@ -607,11 +607,7 @@ fn verify_plugin_ui_activation(
             "插件 activation metadata HMAC 不匹配；拒绝加载可能被篡改的内容",
         ));
     }
-    if signed
-        .records
-        .iter()
-        .any(|record| record.generation != tauron_host::Generation::INITIAL)
-    {
+    if signed.records.iter().any(|record| record.generation != tauron_host::Generation::INITIAL) {
         return Err(HostError::new(
             ErrorCode::E_INSTALL_FAILED,
             "插件 activation generation 与已安装版本不匹配",
