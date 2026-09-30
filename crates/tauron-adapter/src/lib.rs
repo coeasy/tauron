@@ -414,18 +414,93 @@ const PLUGIN_UI_ACTIVATION_FILE: &str = ".tauron-ui-activation.json";
 #[cfg(feature = "plugin-install")]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SignedPluginUiActivation {
-    record: tauron_host::ActivationRecord,
+struct SignedPluginActivation {
+    records: Vec<tauron_host::ActivationRecord>,
     hmac_sha256: String,
 }
 
 #[cfg(feature = "plugin-install")]
-fn plugin_ui_activation_resource(manifest: &PluginManifest) -> HostResult<String> {
-    let ui =
-        manifest.entry.ui.as_deref().ok_or_else(|| {
-            HostError::new(ErrorCode::E_INVALID_MANIFEST, "JS 插件未声明 entry.ui")
+fn plugin_asset_activation_resource(manifest: &PluginManifest, relative: &str) -> String {
+    format!("plugin:{}@{}:asset:{}", manifest.id, manifest.version, relative)
+}
+
+#[cfg(feature = "plugin-install")]
+fn collect_plugin_activation_records(
+    plugin_dir: &std::path::Path,
+    manifest: &PluginManifest,
+) -> HostResult<Vec<tauron_host::ActivationRecord>> {
+    let mut files = Vec::<(String, std::path::PathBuf)>::new();
+    let mut dirs = vec![plugin_dir.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)
+            .map_err(|error| {
+                HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("枚举插件激活目录失败 {}: {error}", dir.display()),
+                )
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("读取插件激活目录项失败：{error}"),
+                )
+            })?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("读取插件激活文件元数据失败 {}: {error}", path.display()),
+                )
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("插件激活内容包含符号链接，拒绝激活：{}", path.display()),
+                ));
+            }
+            if metadata.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                return Err(HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("插件激活内容不是普通文件：{}", path.display()),
+                ));
+            }
+            let relative = path.strip_prefix(plugin_dir).map_err(|error| {
+                HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("插件激活路径无法归一化：{error}"),
+                )
+            })?;
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            if relative == PLUGIN_UI_ACTIVATION_FILE {
+                continue;
+            }
+            files.push((relative, path));
+        }
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut records = Vec::with_capacity(files.len());
+    for (relative, path) in files {
+        let bytes = std::fs::read(&path).map_err(|error| {
+            HostError::new(
+                ErrorCode::E_INSTALL_FAILED,
+                format!("读取插件激活内容失败 {}: {error}", path.display()),
+            )
         })?;
-    Ok(format!("plugin:{}@{}:ui:{}", manifest.id, manifest.version, ui))
+        records.push(tauron_host::ActivationRecord {
+            resource: plugin_asset_activation_resource(manifest, &relative),
+            generation: tauron_host::Generation::INITIAL,
+            content: tauron_host::ContentIdentity::from_bytes(&bytes),
+        });
+    }
+    Ok(records)
 }
 
 #[cfg(feature = "plugin-install")]
@@ -434,35 +509,30 @@ fn write_plugin_ui_activation(
     manifest: &PluginManifest,
     key: &[u8],
 ) -> HostResult<()> {
-    let Some(relative) = manifest.entry.ui.as_deref() else {
+    if manifest.entry.ui.is_none() {
         return Ok(());
-    };
-    let entry = plugin_dir.join(relative);
-    let bytes = std::fs::read(&entry).map_err(|error| {
+    }
+    let records = collect_plugin_activation_records(plugin_dir, manifest)?;
+    if records.is_empty() {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "插件 activation record 为空；拒绝提交安装",
+        ));
+    }
+    let record_bytes = serde_json::to_vec(&records).map_err(|error| {
         HostError::new(
             ErrorCode::E_INSTALL_FAILED,
-            format!("读取待激活插件 UI 失败 {}: {error}", entry.display()),
+            format!("序列化插件 activation records 失败：{error}"),
         )
     })?;
-    let record = tauron_host::ActivationRecord {
-        resource: plugin_ui_activation_resource(manifest)?,
-        generation: tauron_host::Generation::INITIAL,
-        content: tauron_host::ContentIdentity::from_bytes(&bytes),
-    };
-    let record_bytes = serde_json::to_vec(&record).map_err(|error| {
-        HostError::new(
-            ErrorCode::E_INSTALL_FAILED,
-            format!("序列化插件 UI activation record 失败：{error}"),
-        )
-    })?;
-    let signed = SignedPluginUiActivation {
+    let signed = SignedPluginActivation {
         hmac_sha256: tauron_acl::hmac_sha256_hex(&record_bytes, key)?,
-        record,
+        records,
     };
     let encoded = serde_json::to_vec_pretty(&signed).map_err(|error| {
         HostError::new(
             ErrorCode::E_INSTALL_FAILED,
-            format!("序列化插件 UI activation metadata 失败：{error}"),
+            format!("序列化插件 activation metadata 失败：{error}"),
         )
     })?;
     let path = plugin_dir.join(PLUGIN_UI_ACTIVATION_FILE);
@@ -470,20 +540,20 @@ fn write_plugin_ui_activation(
         std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|error| {
             HostError::new(
                 ErrorCode::E_INSTALL_FAILED,
-                format!("创建插件 UI activation metadata 失败 {}: {error}", path.display()),
+                format!("创建插件 activation metadata 失败 {}: {error}", path.display()),
             )
         })?;
     use std::io::Write as _;
     file.write_all(&encoded).map_err(|error| {
         HostError::new(
             ErrorCode::E_INSTALL_FAILED,
-            format!("写入插件 UI activation metadata 失败：{error}"),
+            format!("写入插件 activation metadata 失败：{error}"),
         )
     })?;
     file.sync_all().map_err(|error| {
         HostError::new(
             ErrorCode::E_INSTALL_FAILED,
-            format!("同步插件 UI activation metadata 失败：{error}"),
+            format!("同步插件 activation metadata 失败：{error}"),
         )
     })
 }
@@ -493,7 +563,6 @@ fn verify_plugin_ui_activation(
     config: &InstallRuntimeConfig,
     manifest: &PluginManifest,
     plugin_dir: &std::path::Path,
-    entry: &std::path::Path,
 ) -> HostResult<()> {
     let key = config.acl_signing_key.as_deref().filter(|key| key.len() >= 32).ok_or_else(|| {
         HostError::new(
@@ -505,56 +574,57 @@ fn verify_plugin_ui_activation(
     let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
         HostError::new(
             ErrorCode::E_INSTALL_FAILED,
-            format!("插件 UI 缺少 activation metadata {}: {error}", path.display()),
+            format!("插件缺少 activation metadata {}: {error}", path.display()),
         )
     })?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(HostError::new(
             ErrorCode::E_INSTALL_FAILED,
-            "插件 UI activation metadata 不是安全的普通文件",
+            "插件 activation metadata 不是安全的普通文件",
         ));
     }
     let encoded = std::fs::read(&path).map_err(|error| {
         HostError::new(
             ErrorCode::E_INSTALL_FAILED,
-            format!("读取插件 UI activation metadata 失败：{error}"),
+            format!("读取插件 activation metadata 失败：{error}"),
         )
     })?;
-    let signed: SignedPluginUiActivation = serde_json::from_slice(&encoded).map_err(|error| {
+    let signed: SignedPluginActivation = serde_json::from_slice(&encoded).map_err(|error| {
         HostError::new(
             ErrorCode::E_INSTALL_FAILED,
-            format!("解析插件 UI activation metadata 失败：{error}"),
+            format!("解析插件 activation metadata 失败：{error}"),
         )
     })?;
-    let record_bytes = serde_json::to_vec(&signed.record).map_err(|error| {
+    let record_bytes = serde_json::to_vec(&signed.records).map_err(|error| {
         HostError::new(
             ErrorCode::E_INSTALL_FAILED,
-            format!("序列化插件 UI activation record 失败：{error}"),
+            format!("序列化插件 activation records 失败：{error}"),
         )
     })?;
     if !tauron_acl::hmac_sha256_matches(&record_bytes, &signed.hmac_sha256, key)? {
         return Err(HostError::new(
             ErrorCode::E_INSTALL_FAILED,
-            "插件 UI activation metadata HMAC 不匹配；拒绝加载可能被篡改的内容",
+            "插件 activation metadata HMAC 不匹配；拒绝加载可能被篡改的内容",
         ));
     }
-    if signed.record.resource != plugin_ui_activation_resource(manifest)?
-        || signed.record.generation != tauron_host::Generation::INITIAL
+    if signed
+        .records
+        .iter()
+        .any(|record| record.generation != tauron_host::Generation::INITIAL)
     {
         return Err(HostError::new(
             ErrorCode::E_INSTALL_FAILED,
-            "插件 UI activation record 与当前插件身份/版本/入口不匹配",
+            "插件 activation generation 与已安装版本不匹配",
         ));
     }
-    let bytes = std::fs::read(entry).map_err(|error| {
-        HostError::new(ErrorCode::E_INSTALL_FAILED, format!("读取插件 UI 内容失败：{error}"))
-    })?;
-    signed.record.verify_bytes(&bytes).map_err(|error| {
-        HostError::new(
+    let current = collect_plugin_activation_records(plugin_dir, manifest)?;
+    if current != signed.records {
+        return Err(HostError::new(
             ErrorCode::E_INSTALL_FAILED,
-            format!("插件 UI activation integrity 校验失败：{error}"),
-        )
-    })
+            "插件 activation integrity 校验失败：安装后的文件集合或内容已变化",
+        ));
+    }
+    Ok(())
 }
 
 /// Validated filesystem location for an installed JS plugin's entry page.
@@ -620,7 +690,7 @@ pub fn installed_plugin_ui(
             "插件 UI 文件越出安装目录或不是普通文件",
         ));
     }
-    verify_plugin_ui_activation(config, &registered.manifest, &root, &entry)?;
+    verify_plugin_ui_activation(config, &registered.manifest, &root)?;
     Ok(InstalledPluginUi { plugin_id: plugin_id.to_string(), entry })
 }
 
@@ -8599,6 +8669,17 @@ mod tests {
 
         assert!(installed_plugin_ui(&state, "com.install.integrity").is_ok());
         let plugin_dir = install_root.join("com.install.integrity");
+
+        // Referenced JS is part of the activation set even though the window entry is index.html.
+        let js_path = plugin_dir.join("src/index.js");
+        let original_js = std::fs::read(&js_path).unwrap();
+        std::fs::write(&js_path, b"export const activate = () => 'tampered';").unwrap();
+        let js_error = installed_plugin_ui(&state, "com.install.integrity").unwrap_err();
+        assert_eq!(js_error.code, ErrorCode::E_INSTALL_FAILED);
+        assert!(js_error.message.contains("integrity"));
+        std::fs::write(&js_path, original_js).unwrap();
+        assert!(installed_plugin_ui(&state, "com.install.integrity").is_ok());
+
         let ui_path = plugin_dir.join("index.html");
         let tampered = b"<!doctype html><html><body>tampered</body></html>";
         std::fs::write(&ui_path, tampered).unwrap();
@@ -8606,18 +8687,59 @@ mod tests {
         assert_eq!(content_error.code, ErrorCode::E_INSTALL_FAILED);
         assert!(content_error.message.contains("integrity"));
 
-        // Even if an attacker edits the digest metadata to match the tampered bytes, the HMAC
-        // is bound to the original record and cannot be forged without the host secret.
+        // Even if an attacker edits the matching digest record, the HMAC covers the complete
+        // ordered activation set and cannot be forged without the host secret.
         let activation_path = plugin_dir.join(PLUGIN_UI_ACTIVATION_FILE);
         let mut activation: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&activation_path).unwrap()).unwrap();
-        activation["record"]["content"]["sha256"] =
-            serde_json::json!(hex::encode(Sha256::digest(tampered)));
-        activation["record"]["content"]["size"] = serde_json::json!(tampered.len() as u64);
+        let records = activation["records"].as_array_mut().unwrap();
+        let ui_record = records
+            .iter_mut()
+            .find(|record| {
+                record["resource"]
+                    .as_str()
+                    .is_some_and(|resource| resource.ends_with(":asset:index.html"))
+            })
+            .expect("index.html activation record");
+        ui_record["content"]["sha256"] = serde_json::json!(hex::encode(Sha256::digest(tampered)));
+        ui_record["content"]["size"] = serde_json::json!(tampered.len() as u64);
         std::fs::write(&activation_path, serde_json::to_vec_pretty(&activation).unwrap()).unwrap();
         let metadata_error = installed_plugin_ui(&state, "com.install.integrity").unwrap_err();
         assert_eq!(metadata_error.code, ErrorCode::E_INSTALL_FAILED);
         assert!(metadata_error.message.contains("HMAC"));
+    }
+
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn installed_plugin_ui_rejects_injected_files_after_activation() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("plugins");
+        let (package, verifying_key) = signed_install_fixture(dir.path(), "com.install.injected");
+        let state = install_state(install_root.clone(), &verifying_key);
+        cmd_registry_install_as(
+            &Caller::MainWindow,
+            &state,
+            package.to_str().unwrap(),
+            &["store:allow-get".into()],
+        )
+        .unwrap();
+        cmd_registry_admin_as(
+            &Caller::MainWindow,
+            &state,
+            "com.install.injected",
+            RegistryAdminOp::Enable,
+        )
+        .unwrap();
+        assert!(installed_plugin_ui(&state, "com.install.injected").is_ok());
+
+        std::fs::write(
+            install_root.join("com.install.injected/injected.js"),
+            b"window.pwned = true;",
+        )
+        .unwrap();
+        let error = installed_plugin_ui(&state, "com.install.injected").unwrap_err();
+        assert_eq!(error.code, ErrorCode::E_INSTALL_FAILED);
+        assert!(error.message.contains("integrity"));
     }
 
     #[cfg(feature = "plugin-install")]
