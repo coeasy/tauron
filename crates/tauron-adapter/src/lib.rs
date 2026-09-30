@@ -2121,6 +2121,9 @@ pub struct SubstrateState {
     pub settings_write_lock: Arc<Mutex<()>>,
     /// 设置文档的落盘位置（`None` = 纯内存，重启即丢）。
     pub settings_path: Option<std::path::PathBuf>,
+    /// V4 A93 durable generation for host-settings.json. Serialized settings mutations already
+    /// hold settings_write_lock, so this counter advances exactly once after each successful rename.
+    pub settings_generation: Arc<Mutex<u64>>,
     /// **只写不读**的兼容通知日志（R8 之前的 `host_notify` 产物）。
     ///
     /// ⚠️ **接入状态：没有任何命令返回它**——`host_notify` 返回 `void`，
@@ -2618,15 +2621,28 @@ impl SubstrateState {
         // 设置落盘：与恢复标记共用数据目录。读不回来（首次启动 / 文件损坏）时
         // 保留空文档并**如实记录**——不静默吞掉，也不因为一个坏文件拒绝启动。
         let settings_path = cfg.recovery_data_dir.as_ref().map(|d| d.join(HOST_SETTINGS_FILE));
+        let mut settings_generation = 0;
         if let Some(path) = settings_path.as_ref() {
             match load_settings_doc(path) {
-                Ok(Some(entries)) => settings.restore(&entries),
+                Ok(Some((entries, generation))) => {
+                    settings.restore(&entries);
+                    settings_generation = generation;
+                }
                 Ok(None) => {}
-                Err(e) => eprintln!(
-                    "[tauron] 设置文档 {} 读回失败，本轮以空文档启动：{}",
-                    path.display(),
-                    e.message
-                ),
+                Err(e) => {
+                    if cfg.deployment_mode == tauron_host::DeploymentMode::Production {
+                        panic!(
+                            "[tauron] production settings durable-state validation failed for {}: {}",
+                            path.display(),
+                            e.message
+                        );
+                    }
+                    eprintln!(
+                        "[tauron] 设置文档 {} 完整性失败，本轮以空文档降级启动：{}",
+                        path.display(),
+                        e.message
+                    );
+                }
             }
         }
 
@@ -2639,6 +2655,7 @@ impl SubstrateState {
             settings: Arc::new(Mutex::new(settings)),
             settings_write_lock: Arc::new(Mutex::new(())),
             settings_path,
+            settings_generation: Arc::new(Mutex::new(settings_generation)),
             notifications: Arc::new(Mutex::new(Vec::new())),
             notify_store: Arc::new(Mutex::new(notify_store)),
             notify_sink: Arc::new(std::sync::OnceLock::new()),
@@ -4867,6 +4884,7 @@ pub const HOST_SETTINGS_SCHEMA_V1: &str = "1.0.0";
 
 /// 设置文档的落盘文件名（放在宿主数据目录下，与恢复标记同目录）。
 pub const HOST_SETTINGS_FILE: &str = "host-settings.json";
+const HOST_SETTINGS_DURABLE_SCHEMA: &str = "tauron.host-settings/2";
 
 /// 从磁盘读回设置文档。
 ///
@@ -4874,9 +4892,9 @@ pub const HOST_SETTINGS_FILE: &str = "host-settings.json";
 /// 或解析不了（**不静默当成空文档**——那会让用户以为设置还在，其实被清了）。
 fn load_settings_doc(
     path: &std::path::Path,
-) -> HostResult<Option<Vec<(String, tauron_settings::PluginState)>>> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
+) -> HostResult<Option<(Vec<(String, tauron_settings::PluginState)>, u64)>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
             return Err(HostError::new(
@@ -4885,11 +4903,41 @@ fn load_settings_doc(
             ));
         }
     };
-    let entries: Vec<(String, tauron_settings::PluginState)> = serde_json::from_str(&text)
-        .map_err(|e| {
-            HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("设置文档 JSON 解析失败：{e}"))
-        })?;
-    Ok(Some(entries))
+
+    match tauron_host::decode_durable::<Vec<(String, tauron_settings::PluginState)>>(&bytes) {
+        Ok(envelope) => {
+            if envelope.schema != HOST_SETTINGS_DURABLE_SCHEMA {
+                return Err(HostError::new(
+                    ErrorCode::E_INVALID_MANIFEST,
+                    format!("设置文档 durable schema 不支持：{}", envelope.schema),
+                ));
+            }
+            Ok(Some((envelope.payload, envelope.generation)))
+        }
+        Err(durable_error) => {
+            // One-way legacy reader: pre-V4 files were a raw Vec<(namespace, PluginState)>.
+            // A corrupted V4 envelope cannot accidentally validate as this shape.
+            match serde_json::from_slice::<Vec<(String, tauron_settings::PluginState)>>(&bytes) {
+                Ok(entries) => Ok(Some((entries, 0))),
+                Err(legacy_error) => {
+                    let quarantined = path.with_extension(format!(
+                        "json.corrupt-{}",
+                        crate::recovery::now_ms()
+                    ));
+                    let quarantine_note = match std::fs::rename(path, &quarantined) {
+                        Ok(()) => format!("；已隔离到 {}", quarantined.display()),
+                        Err(error) => format!("；隔离失败：{error}"),
+                    };
+                    Err(HostError::new(
+                        ErrorCode::E_INVALID_MANIFEST,
+                        format!(
+                            "设置文档完整性校验失败：durable={durable_error}; legacy={legacy_error}{quarantine_note}"
+                        ),
+                    ))
+                }
+            }
+        }
+    }
 }
 
 /// 把设置文档写回磁盘（原子写：先写临时文件再 rename）。
@@ -4898,12 +4946,26 @@ fn load_settings_doc(
 /// 这里返回 `Err`，由 [`cmd_settings_set`] 冒泡给前端——不静默吞掉。
 fn persist_settings_doc(state: &SubstrateState) -> HostResult<()> {
     let Some(path) = state.settings_path.as_ref() else {
-        // 未配置数据目录（测试 / 底座-only 宿主）：纯内存，不是错误。
         return Ok(());
     };
     let entries = state.settings.lock().snapshot_all();
-    let json = serde_json::to_string_pretty(&entries).map_err(|e| {
-        HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("设置文档序列化失败：{e}"))
+    let next_generation = state.settings_generation.lock().saturating_add(1);
+    let envelope = tauron_host::DurableEnvelope::seal(
+        HOST_SETTINGS_DURABLE_SCHEMA,
+        next_generation,
+        entries,
+    )
+    .map_err(|e| {
+        HostError::new(
+            ErrorCode::E_INVALID_MANIFEST,
+            format!("设置文档 durable envelope 构造失败：{e}"),
+        )
+    })?;
+    let bytes = tauron_host::encode_durable(&envelope).map_err(|e| {
+        HostError::new(
+            ErrorCode::E_INVALID_MANIFEST,
+            format!("设置文档 durable envelope 编码失败：{e}"),
+        )
     })?;
 
     if let Some(dir) = path.parent() {
@@ -4914,13 +4976,23 @@ fn persist_settings_doc(state: &SubstrateState) -> HostResult<()> {
             )
         })?;
     }
-    // 原子写：临时文件 + rename，避免写到一半断电留下半截 JSON
-    //（下次启动会因解析失败而丢掉**全部**设置）。
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json.as_bytes()).map_err(|e| {
+    let mut file = std::fs::File::create(&tmp).map_err(|e| {
         HostError::new(
             ErrorCode::E_INVALID_MANIFEST,
             format!("设置文档写入失败 {}：{e}", tmp.display()),
+        )
+    })?;
+    std::io::Write::write_all(&mut file, &bytes).map_err(|e| {
+        HostError::new(
+            ErrorCode::E_INVALID_MANIFEST,
+            format!("设置文档写入失败 {}：{e}", tmp.display()),
+        )
+    })?;
+    file.sync_all().map_err(|e| {
+        HostError::new(
+            ErrorCode::E_INVALID_MANIFEST,
+            format!("设置文档同步失败 {}：{e}", tmp.display()),
         )
     })?;
     std::fs::rename(&tmp, path).map_err(|e| {
@@ -4929,6 +5001,7 @@ fn persist_settings_doc(state: &SubstrateState) -> HostResult<()> {
             format!("设置文档落位失败 {}：{e}", path.display()),
         )
     })?;
+    *state.settings_generation.lock() = next_generation;
     Ok(())
 }
 
@@ -10516,9 +10589,11 @@ mod tests {
     #[test]
     fn settings_migration_persist_failure_restores_v1_data_and_version() {
         let t = tempfile::tempdir().unwrap();
-        let blocker = t.path().join("not-a-directory");
-        std::fs::write(&blocker, b"file blocks create_dir_all").unwrap();
-        let state = CommandState::with_adapter_config(recovery_cfg(&blocker));
+        let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+        // A87 now validates/locks the data directory at construction. Inject the persistence
+        // failure at the settings temp-file boundary instead, so this test still targets A101
+        // rollback rather than failing earlier in storage ownership setup.
+        std::fs::create_dir(t.path().join("host-settings.json.tmp")).unwrap();
 
         // Use the non-persisting core adoption path so the failure is injected specifically at
         // migration commit, not while staging the legacy document.
@@ -10537,6 +10612,31 @@ mod tests {
             "durable commit failure must restore exact pre-migration state"
         );
         assert_eq!(host_settings_data_version(&state).as_deref(), Some(HOST_SETTINGS_SCHEMA_V1));
+    }
+
+    #[test]
+    fn settings_durable_envelope_detects_tamper_and_quarantines_file() {
+        let t = tempfile::tempdir().unwrap();
+        {
+            let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+            cmd_settings_set(&state, "secure", serde_json::json!("value")).unwrap();
+        }
+        let path = t.path().join(HOST_SETTINGS_FILE);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["payload"][0][1]["user"] = serde_json::json!({"secure": "tampered"});
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        // Development degrades to an empty in-memory document but must quarantine the corrupt
+        // persistent copy instead of treating it as a valid first-run state.
+        let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+        assert_eq!(cmd_settings_get(&state, "secure").unwrap(), serde_json::Value::Null);
+        assert!(
+            std::fs::read_dir(t.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().contains("host-settings.json.corrupt-"))
+        );
     }
 
     #[test]
