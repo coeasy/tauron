@@ -2124,6 +2124,9 @@ pub struct SubstrateState {
     /// V4 A93 durable generation for host-settings.json. Serialized settings mutations already
     /// hold settings_write_lock, so this counter advances exactly once after each successful rename.
     pub settings_generation: Arc<Mutex<u64>>,
+    /// V4 A91: settings-engine panic containment. Once faulted, ordinary settings work is
+    /// rejected until the main-window migration/reconcile path proves a durable rebuild.
+    settings_fault: Arc<Mutex<tauron_host::FaultBoundary>>,
     /// **只写不读**的兼容通知日志（R8 之前的 `host_notify` 产物）。
     ///
     /// ⚠️ **接入状态：没有任何命令返回它**——`host_notify` 返回 `void`，
@@ -2656,6 +2659,7 @@ impl SubstrateState {
             settings_write_lock: Arc::new(Mutex::new(())),
             settings_path,
             settings_generation: Arc::new(Mutex::new(settings_generation)),
+            settings_fault: Arc::new(Mutex::new(tauron_host::FaultBoundary::new("settings"))),
             notifications: Arc::new(Mutex::new(Vec::new())),
             notify_store: Arc::new(Mutex::new(notify_store)),
             notify_sink: Arc::new(std::sync::OnceLock::new()),
@@ -4701,6 +4705,13 @@ pub fn cmd_resource_stats(state: &PluginRuntimeState) -> HostResult<serde_json::
                 "streamsLimit": tauron_host::stream::MAX_STREAMS_PER_PLUGIN,
                 "subscriptionsLimit": tauron_host::eventbus::MAX_SUBSCRIPTIONS_PER_PLUGIN,
                 "plugins": plugin_rows
+            },
+            "faults": {
+                "settings": {
+                    "state": state.settings_fault.lock().state(),
+                    "generation": state.settings_fault.lock().generation(),
+                    "lastFault": state.settings_fault.lock().last_fault().cloned()
+                }
             }
         }))
     })?
@@ -5137,6 +5148,85 @@ fn settings_to_host_error(e: SettingsError) -> HostError {
     HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("设置被拒：{e}"))
 }
 
+fn settings_fault_to_host_error(error: tauron_host::FaultError) -> HostError {
+    HostError::new(
+        ErrorCode::E_HOST_PANIC,
+        format!(
+            "settings fault boundary rejected work: {error}; main window must run host_settings_migrate to reconcile"
+        ),
+    )
+}
+
+fn run_settings_boundary<T>(
+    state: &SubstrateState,
+    operation: &str,
+    f: impl FnOnce() -> HostResult<T>,
+) -> HostResult<T> {
+    match state.settings_fault.lock().run(operation, f) {
+        Ok(result) => result,
+        Err(error) => Err(settings_fault_to_host_error(error)),
+    }
+}
+
+/// V4 A91 deterministic repair path for the Settings Engine.
+///
+/// A panic may have happened after an in-memory mutation. The only state we trust for recovery is
+/// the durable envelope protected by the existing checksum/generation contract. If persistence is
+/// disabled, consistency cannot be proven, so the boundary remains quarantined instead of
+/// pretending recovery succeeded.
+fn reconcile_settings_boundary(state: &SubstrateState) -> HostResult<()> {
+    {
+        let mut boundary = state.settings_fault.lock();
+        if boundary.state() == tauron_host::FaultState::Ready {
+            return Ok(());
+        }
+        boundary.begin_reconcile().map_err(settings_fault_to_host_error)?;
+    }
+
+    let attempt = guard("settings_reconcile", || -> HostResult<()> {
+        let _write = state.settings_write_lock.lock();
+        let path = state.settings_path.as_ref().ok_or_else(|| {
+            HostError::new(
+                ErrorCode::E_HOST_PANIC,
+                "settings boundary cannot be reconciled without durable state".to_string(),
+            )
+        })?;
+
+        let mut rebuilt = SettingsStore::new();
+        install_host_settings_schema(&mut rebuilt);
+        let generation = match load_settings_doc(path)? {
+            Some((entries, generation)) => {
+                rebuilt.restore(&entries);
+                generation
+            }
+            None => 0,
+        };
+
+        *state.settings.lock() = rebuilt;
+        *state.settings_generation.lock() = generation;
+        Ok(())
+    });
+
+    let result = match attempt {
+        Ok(result) => result,
+        Err(error) => Err(error),
+    };
+    let mut boundary = state.settings_fault.lock();
+    match result {
+        Ok(()) => {
+            boundary.reconcile_succeeded();
+            Ok(())
+        }
+        Err(error) => {
+            boundary.reconcile_failed();
+            Err(HostError::new(
+                ErrorCode::E_HOST_PANIC,
+                format!("settings fault reconcile failed and boundary was quarantined: {error}"),
+            ))
+        }
+    }
+}
+
 /// **接手一份旧版（v1）宿主设置文档**（R7-2：settings 可迁移）。
 ///
 /// 用途：宿主从磁盘读到的旧版配置走这里进 Store。写入用户层并把**数据版本**
@@ -5196,13 +5286,13 @@ pub fn host_settings_revision(state: &SubstrateState) -> u64 {
 /// **线形不变**（前端契约）：入参 `key: string`，返回任意 JSON；未写过的键
 /// 返回 `Null`（不是报错）。读路径不校验 schema——缺键不是错误。
 pub fn cmd_settings_get(state: &SubstrateState, key: &str) -> HostResult<serde_json::Value> {
-    guard("settings_get", || {
+    run_settings_boundary(state, "settings_get", || {
         let path = settings_path(key);
         let store = state.settings.lock();
         let value =
             store.get_key(HOST_SETTINGS_NAMESPACE, &path).map_err(settings_to_host_error)?;
         Ok(value.unwrap_or(serde_json::Value::Null))
-    })?
+    })
 }
 
 /// `host_settings_set`：写入设置。
@@ -5215,7 +5305,7 @@ pub fn cmd_settings_set(
     key: &str,
     value: serde_json::Value,
 ) -> HostResult<()> {
-    guard("settings_set", || {
+    run_settings_boundary(state, "settings_set", || {
         if key.trim().is_empty() {
             return Err(HostError::new(
                 ErrorCode::E_INVALID_MANIFEST,
@@ -5244,7 +5334,7 @@ pub fn cmd_settings_set(
         // Watchers only observe a revision after durable persistence succeeded.
         state.settings.lock().publish_committed_change(event);
         Ok(())
-    })?
+    })
 }
 
 /// `host_settings_adopt_legacy`：把宿主磁盘上读到的旧版设置文档交给 Store。
@@ -5257,7 +5347,7 @@ pub fn cmd_settings_set(
 /// 非对象文档返回 `E_INVALID_MANIFEST`（不静默退化成空文档）。写入后数据版本
 /// 标注为 [`HOST_SETTINGS_SCHEMA_V1`]，[`cmd_settings_migrate`] 才知道起点。
 pub fn cmd_settings_adopt_legacy(state: &SubstrateState, doc: serde_json::Value) -> HostResult<()> {
-    guard("settings_adopt_legacy", || {
+    run_settings_boundary(state, "settings_adopt_legacy", || {
         let _write = state.settings_write_lock.lock();
         let before = state.settings.lock().snapshot_all();
         host_settings_adopt_legacy(state, doc)?;
@@ -5266,7 +5356,7 @@ pub fn cmd_settings_adopt_legacy(state: &SubstrateState, doc: serde_json::Value)
             return Err(error);
         }
         Ok(())
-    })?
+    })
 }
 
 /// `host_settings_adopt_legacy` 的**带身份判定**版本（wire 层转调的就是它）。
@@ -5294,7 +5384,8 @@ pub fn cmd_settings_adopt_legacy_as(
 /// 编译与用户数据改写，一旦 panic 必须是 `E_HOST_PANIC` 而不是把 panic  unwind
 /// 穿过 IPC 边界。
 pub fn cmd_settings_migrate(state: &SubstrateState) -> HostResult<usize> {
-    guard("settings_migrate", || {
+    reconcile_settings_boundary(state)?;
+    run_settings_boundary(state, "settings_migrate", || {
         let _write = state.settings_write_lock.lock();
         let receipt = host_settings_migrate_transaction(state)?;
         let steps = receipt.steps();
@@ -5305,7 +5396,7 @@ pub fn cmd_settings_migrate(state: &SubstrateState) -> HostResult<usize> {
             }
         }
         Ok(steps)
-    })?
+    })
 }
 
 /// `host_settings_migrate` 的**带身份判定**版本（wire 层转调的就是它）。
@@ -10511,6 +10602,39 @@ mod tests {
     // ────────────────────────────────────────────────────────────
 
     #[test]
+    fn settings_fault_boundary_blocks_work_and_migrate_reconciles_from_durable_state() {
+        let t = tempfile::tempdir().unwrap();
+        let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+        cmd_settings_set(&state, "plugin:p.theme", serde_json::json!("dark")).unwrap();
+
+        let fault = state.settings_fault.lock().run("forced-test-panic", || panic!("boom"));
+        assert!(matches!(fault, Err(tauron_host::FaultError::Panicked { .. })));
+        assert_eq!(state.settings_fault.lock().state(), tauron_host::FaultState::Faulted);
+        assert_eq!(
+            cmd_settings_get(&state, "plugin:p.theme").unwrap_err().code,
+            ErrorCode::E_HOST_PANIC
+        );
+
+        // Existing main-window migrate command is the repair/reconcile surface; it rebuilds the
+        // settings engine from the durable envelope before allowing ordinary work again.
+        assert_eq!(cmd_settings_migrate_as(&Caller::MainWindow, &state).unwrap(), 0);
+        assert_eq!(state.settings_fault.lock().state(), tauron_host::FaultState::Ready);
+        assert_eq!(
+            cmd_settings_get(&state, "plugin:p.theme").unwrap(),
+            serde_json::json!("dark")
+        );
+    }
+
+    #[test]
+    fn settings_fault_without_durable_state_is_quarantined_not_faked_ready() {
+        let state = CommandState::new();
+        let _ = state.settings_fault.lock().run("forced-test-panic", || panic!("boom"));
+        let err = cmd_settings_migrate(&state).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_HOST_PANIC);
+        assert_eq!(state.settings_fault.lock().state(), tauron_host::FaultState::Quarantined);
+    }
+
+    #[test]
     fn settings_are_backed_by_a_store_with_a_registered_schema() {
         // 裸 HashMap 过不了这三条：没有注册表、没有数据版本、没有迁移步。
         let state = CommandState::new();
@@ -11381,6 +11505,8 @@ mod tests {
         assert_eq!(snapshot["global"]["subscriptions"]["used"], 1);
         assert_eq!(snapshot["global"]["notifications"]["used"], 1);
         assert_eq!(snapshot["global"]["notifications"]["evictedTotal"], 0);
+        assert_eq!(snapshot["faults"]["settings"]["state"], "ready");
+        assert!(snapshot["faults"]["settings"]["generation"].as_u64().unwrap() >= 1);
         assert_eq!(snapshot["perPlugin"]["plugins"][0]["pluginId"], "p.stats");
         assert_eq!(snapshot["perPlugin"]["plugins"][0]["pendingCalls"], 1);
         assert_eq!(snapshot["perPlugin"]["plugins"][0]["streams"], 1);

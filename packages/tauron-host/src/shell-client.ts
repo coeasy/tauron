@@ -600,6 +600,19 @@ export interface ResourceStats {
       notificationEvictions: number;
     }>;
   };
+  /** V4 A91 subsystem fault-boundary diagnostics. */
+  faults: {
+    settings: {
+      state: 'ready' | 'faulted' | 'reconciling' | 'quarantined';
+      generation: number;
+      lastFault: {
+        boundary: string;
+        operation: string;
+        message: string;
+        generation: number;
+      } | null;
+    };
+  };
 }
 
 /**
