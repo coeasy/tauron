@@ -12948,24 +12948,23 @@ mod tests {
 
     #[test]
     fn alive_process_is_not_ready_when_plugin_lifecycle_is_not_running() {
-        let (state, _fake) = process_state("com.proc", Some("sidecar.exe"));
-        let id = PluginId::new("com.proc").unwrap();
-        enabled_process_plugin(&state, "com.proc");
-        let handle = cmd_runtime_spawn(&state, "com.proc", &valid_profile()).unwrap();
-        assert_eq!(
-            state.registry.find(&id).unwrap().state.state,
-            tauron_host::lifecycle::State::Running
+        // RuntimeCrash intentionally revokes the runtime lease, so it cannot model the distinct
+        // A103 state "process probe is still Alive while control-plane lifecycle is not Running".
+        // Lock that mapping directly here; command-level ready/dead tests below still prove
+        // cmd_runtime_health routes real probe + lifecycle facts through this helper.
+        let health = runtime_health_report(
+            tauron_proc::ProcessStatus::Alive,
+            Some(tauron_host::lifecycle::State::Enabled),
+            0,
         );
-
-        // Simulate a control-plane transition away from RUNNING while the process probe still
-        // reports Alive. A103 requires this to be explicitly not-ready, not capability-full.
-        state.registry.report_event(&id, Event::RuntimeCrash).unwrap();
-        let health = cmd_runtime_health(&state, &handle.lease).unwrap();
-        assert!(health.alive, "process provider still proves the pid alive");
-        assert_eq!(health.health.liveness, tauron_host::Liveness::Alive);
-        assert_eq!(health.health.readiness, tauron_host::Readiness::NotReady);
-        assert_eq!(health.health.degradation, tauron_host::Degradation::Degraded);
-        assert!(!health.health.can_accept_work());
+        assert_eq!(health.liveness, tauron_host::Liveness::Alive);
+        assert_eq!(health.readiness, tauron_host::Readiness::NotReady);
+        assert_eq!(health.degradation, tauron_host::Degradation::Degraded);
+        assert!(!health.can_accept_work());
+        assert!(
+            health.diagnostics.iter().any(|line| line.contains("ENABLED")),
+            "diagnostics must expose the lifecycle fact that blocks readiness"
+        );
     }
 
     /// 崩溃：投递 `RuntimeCrash`（状态机真的吃了它）+ `consecutiveFailures` +1
