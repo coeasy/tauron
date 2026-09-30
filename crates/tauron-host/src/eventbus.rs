@@ -656,8 +656,7 @@ impl EventBus {
 
         let state_revision = if kind == ChannelKind::State {
             let mut revisions = self.state_revisions.lock();
-            let revision =
-                revisions.entry((publisher.to_string(), topic.to_string())).or_insert(0);
+            let revision = revisions.entry((publisher.to_string(), topic.to_string())).or_insert(0);
             *revision = revision.saturating_add(1);
             Some(*revision)
         } else {
@@ -780,8 +779,10 @@ impl EventBus {
         let mut qs = self.queues.lock();
         let key = (target.to_string(), ChannelKind::Request);
         let q = qs.entry(key).or_insert_with(|| Queue::new(self.capacity));
-        let result =
-            q.enqueue(ChannelKind::Request, frame_with_causation(topic, payload, &causation, &ordered));
+        let result = q.enqueue(
+            ChannelKind::Request,
+            frame_with_causation(topic, payload, &causation, &ordered),
+        );
         if matches!(result, EnqueueResult::Full) {
             debug_assert!(
                 ordering.rollback_last(&ordered),
@@ -1006,7 +1007,10 @@ mod tests {
         let first_b = b.drain("com.b", ChannelKind::Event).unwrap().remove(0);
         let first_c = b.drain("com.c", ChannelKind::Event).unwrap().remove(0);
         assert_eq!((first_b.seq, first_c.seq), (1, 1));
-        assert_eq!((&first_b.sender, &first_b.receiver), (&"com.a".to_string(), &"com.b".to_string()));
+        assert_eq!(
+            (&first_b.sender, &first_b.receiver),
+            (&"com.a".to_string(), &"com.b".to_string())
+        );
 
         b.publish("com.a", "plugin:com.a:x", Value::from(2), ChannelKind::Event);
         let second_b = b.drain("com.b", ChannelKind::Event).unwrap().remove(0);
