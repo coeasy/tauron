@@ -808,7 +808,7 @@ pub fn host_runtime_spawn(
     crate::cmd_runtime_spawn_as(&caller, &state, &plugin_id, &profile).map_err(to_tauri_err)
 }
 
-/// `host_runtime_health`：按 lease 查询进程健康（线格式 `{ lease }`）。
+/// `host_runtime_health`：按 lease 查询进程健康（V4 线格式 `{ lease, generation? }`）。
 ///
 /// 未知 / 失效租约 → `E_LEASE_EXPIRED`（租约语义，不是 `E_CALL_NOT_FOUND`）。
 ///
@@ -819,8 +819,16 @@ pub fn host_runtime_health(
     state: State<'_, PluginRuntimeState>,
     window: TauriCallerSource,
     lease: String,
+    generation: Option<u64>,
 ) -> Result<RuntimeHealth, TauriError> {
     let caller = window.caller().map_err(to_tauri_err)?;
+    if let Some(generation) = generation {
+        // V4 A90: reject a stale generation before health probing can mutate crash accounting.
+        state
+            .registry
+            .runtime_lease_versioned(&lease, generation)
+            .map_err(to_tauri_err)?;
+    }
     crate::cmd_runtime_health_as(&caller, &state, &lease).map_err(to_tauri_err)
 }
 

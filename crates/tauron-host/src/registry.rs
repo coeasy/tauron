@@ -1255,6 +1255,25 @@ impl Registry {
         })
     }
 
+    /// V4 A90 versioned runtime lookup. A valid opaque lease with an old generation is still stale.
+    pub fn runtime_lease_versioned(
+        &self,
+        lease: &str,
+        generation: u64,
+    ) -> HostResult<RuntimeLease> {
+        self.runtime
+            .lock()
+            .get_versioned(lease, crate::generation::Generation(generation))
+            .ok_or_else(|| {
+                HostError::new(
+                    ErrorCode::E_LEASE_EXPIRED,
+                    format!(
+                        "运行时句柄 `{lease}` generation={generation} 已失效或不是当前 generation；需要重新 spawn"
+                    ),
+                )
+            })
+    }
+
     /// 确保某插件有运行时租约：**已有活租约则原样返回既有 lease（幂等）**，
     /// 否则在**同一把 `runtime` 锁内**调用 `start_pid` 并登记。
     ///
@@ -2763,6 +2782,25 @@ mod tests {
         assert_eq!(err.code, ErrorCode::E_INSTALL_FAILED);
         assert_eq!(r.runtime_len(), 0, "启动失败绝不得留下租约");
         assert!(r.runtime_handle_of(&id).is_none());
+    }
+
+    #[test]
+    fn versioned_runtime_lookup_rejects_old_generation() {
+        let r = Registry::default();
+        let id = r.install(&index(), manifest("com.example.proc", None)).unwrap();
+        let (first, _) = r.runtime_ensure_lease(&id, || Ok(11)).unwrap();
+        assert!(r.runtime_lease_versioned(&first.lease, first.generation.0).is_ok());
+
+        r.runtime_mark_crashed(&first.lease).unwrap();
+        let (second, _) = r.runtime_ensure_lease(&id, || Ok(12)).unwrap();
+        assert!(second.generation > first.generation);
+        assert_eq!(
+            r.runtime_lease_versioned(&second.lease, first.generation.0)
+                .unwrap_err()
+                .code,
+            ErrorCode::E_LEASE_EXPIRED
+        );
+        assert!(r.runtime_lease_versioned(&second.lease, second.generation.0).is_ok());
     }
 
     #[test]

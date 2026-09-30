@@ -542,6 +542,8 @@ export interface RuntimeSpawnProfile {
 export interface RuntimeHandle {
   pid: number;
   lease: string;
+  /** V4 A88/A90 runtime generation bound to this lease. */
+  generation: number;
 }
 
 /**
@@ -998,8 +1000,17 @@ export class ShellClient {
    * 未知或失效租约 → `E_LEASE_EXPIRED`（租约语义：下一步是重新 spawn，
    * 而不是放弃一次 pending 调用）。
    */
-  async runtimeHealth(lease: string): Promise<RuntimeHealth> {
-    return this.call<RuntimeHealth>('host_runtime_health', { lease });
+  async runtimeHealth(
+    leaseOrHandle: string | RuntimeHandle,
+    generation?: number,
+  ): Promise<RuntimeHealth> {
+    const lease = typeof leaseOrHandle === 'string' ? leaseOrHandle : leaseOrHandle.lease;
+    const observedGeneration =
+      typeof leaseOrHandle === 'string' ? generation : leaseOrHandle.generation;
+    return this.call<RuntimeHealth>('host_runtime_health', {
+      lease,
+      ...(observedGeneration !== undefined ? { generation: observedGeneration } : {}),
+    });
   }
 
   /** 主窗配额诊断：列出全局占用与逐插件资源计数。 */
