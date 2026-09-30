@@ -1224,12 +1224,28 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
   it('事件总线帧 Frame ↔ TS EventFrame 逐字段一致', () => {
     const frame = rustStruct('crates/tauron-host/src/eventbus.rs', 'Frame');
     expect(frame.camelCase, 'Frame 必须 rename_all = "camelCase"').toBe(true);
-    expect([...frame.fields].sort()).toEqual(['payload', 'seq', 'topic']);
+    expect([...frame.fields].sort()).toEqual([
+      'causation_id',
+      'event_hop',
+      'event_id',
+      'max_causation_depth',
+      'payload',
+      'seq',
+      'topic',
+    ]);
     const ts = read('packages/tauron-host/src/events.ts');
     const m = /export interface EventFrame \{([\s\S]*?)\n\}/.exec(ts);
     expect(m, 'TS EventFrame 必须存在').not.toBeNull();
     const tsFields = [...m![1]!.matchAll(/^\s{2}(\w+)[?]*:/gm)].map((x) => x[1]!);
-    expect(tsFields.sort()).toEqual(['payload', 'seq', 'topic']);
+    expect(tsFields.sort()).toEqual([
+      'causationId',
+      'eventHop',
+      'eventId',
+      'maxCausationDepth',
+      'payload',
+      'seq',
+      'topic',
+    ]);
     // drain 的返回类型必须是 EventFrame（不是流式 CallFrame）
     const host = read('packages/tauron-host/src/host.ts');
     expect(host).toMatch(/eventsDrain\([^)]*\): Promise<EventFrame\[\]>/);
