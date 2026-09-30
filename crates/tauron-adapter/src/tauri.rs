@@ -195,12 +195,24 @@ pub struct HostLifecycleEvt {
     pub reason: Option<String>,
 }
 
+/// V4 A78 event causation context carried by a consumed parent frame.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostEventCausation {
+    pub event_id: String,
+    pub causation_id: String,
+    pub event_hop: u16,
+    pub max_causation_depth: u16,
+}
+
 /// `host_events_publish` 的 `evt` 载荷。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostEventPublish {
     pub topic: String,
     pub payload: serde_json::Value,
+    #[serde(default)]
+    pub causation: Option<HostEventCausation>,
 }
 
 /// `host_events_subscribe` 的选择器（与 TS `EventSelector` 同形）。
@@ -478,7 +490,19 @@ pub fn wire_events_publish(
     publisher: &str,
     evt: &HostEventPublish,
 ) -> HostResult<PublishResult> {
-    crate::cmd_events_publish(state, publisher, &evt.topic, evt.payload.clone())
+    let causation = evt.causation.as_ref().map(|ctx| tauron_host::EventCausation {
+        root_id: ctx.causation_id.clone(),
+        parent_id: Some(ctx.event_id.clone()),
+        depth: ctx.event_hop,
+        budget: ctx.max_causation_depth,
+    });
+    crate::cmd_events_publish_with_causation(
+        state,
+        publisher,
+        &evt.topic,
+        evt.payload.clone(),
+        causation.as_ref(),
+    )
 }
 
 /// `host_events_subscribe` 线格式 → 核心（多选择器 = 分组订阅）。
@@ -3417,6 +3441,24 @@ mod wire_tests {
         .unwrap();
         assert_eq!(evt.topic, "com.example.x.ready");
         assert_eq!(evt.payload, serde_json::json!({ "ok": true }));
+        assert!(evt.causation.is_none());
+
+        let chained: HostEventPublish = serde_json::from_value(serde_json::json!({
+            "topic": "com.example.x.ready",
+            "payload": { "ok": true },
+            "causation": {
+                "eventId": "evt-parent",
+                "causationId": "evt-root",
+                "eventHop": 3,
+                "maxCausationDepth": 8
+            }
+        }))
+        .unwrap();
+        let causation = chained.causation.unwrap();
+        assert_eq!(causation.event_id, "evt-parent");
+        assert_eq!(causation.causation_id, "evt-root");
+        assert_eq!(causation.event_hop, 3);
+        assert_eq!(causation.max_causation_depth, 8);
     }
 
     #[test]
