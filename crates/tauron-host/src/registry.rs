@@ -1779,9 +1779,8 @@ mod tests {
         enable(&r, &a);
         enable(&r, &b);
 
-        let root = r
-            .call_begin_cross("main", a.as_str(), "main", "root", serde_json::json!({}))
-            .unwrap();
+        let root =
+            r.call_begin_cross("main", a.as_str(), "main", "root", serde_json::json!({})).unwrap();
         assert_eq!(root.root_call_id, root.call_id);
         assert_eq!(root.hop_count, 1);
 
@@ -1823,8 +1822,11 @@ mod tests {
             .unwrap_err();
         assert_eq!(spoof.code, ErrorCode::E_AUTH_DENIED);
 
-        r.settle_call(&child.call_id, CallOutcome::success(serde_json::json!("ok")))
-            .unwrap();
+        r.settle_call(
+            &child.call_id,
+            CallOutcome { ok: true, result: Some(serde_json::json!("ok")), error_code: None },
+        )
+        .unwrap();
         let missing_parent = r
             .call_begin_cross_with_parent(
                 b.as_str(),
