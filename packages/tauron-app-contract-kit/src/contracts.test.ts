@@ -71,6 +71,8 @@ describe('契约 1：错误码全集', () => {
       'E_STREAM_BACKPRESSURE',
       // V4 A77：同步调用图检测到环、重入或 hop 上限。
       'E_CALL_CYCLE',
+      // V4 A78：事件因果链超过 maxCausationDepth。
+      'E_EVENT_CAUSATION_LIMIT',
     ]);
   });
 
