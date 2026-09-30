@@ -302,10 +302,7 @@ fn next_event_causation(
     if parent.depth == 0 || parent.depth > budget {
         return Err(HostError::new(
             ErrorCode::E_EVENT_CAUSATION_LIMIT,
-            format!(
-                "event causation context has invalid depth {}/{}",
-                parent.depth, budget
-            ),
+            format!("event causation context has invalid depth {}/{}", parent.depth, budget),
         ));
     }
     let sanitized = EventCausation {
@@ -627,10 +624,7 @@ impl EventBus {
                 let mut qs = self.queues.lock();
                 let q = qs.entry(key.clone()).or_insert_with(|| Queue::new(self.capacity));
                 let seq = q.frames.len() as u64;
-                q.enqueue(
-                    kind,
-                    frame_with_causation(topic, seq, payload.clone(), causation),
-                )
+                q.enqueue(kind, frame_with_causation(topic, seq, payload.clone(), causation))
             };
             match result {
                 EnqueueResult::Queued => delivered += 1,
@@ -666,8 +660,13 @@ impl EventBus {
     ) -> HostResult<PublishResult> {
         let event_id = uuid::Uuid::new_v4().to_string();
         let causation = next_event_causation(parent, &event_id)?;
-        let res =
-            self.publish_with_causation(publisher, topic, payload, ChannelKind::Request, &causation);
+        let res = self.publish_with_causation(
+            publisher,
+            topic,
+            payload,
+            ChannelKind::Request,
+            &causation,
+        );
         if res.overflow > 0 {
             return Err(HostError::new(
                 ErrorCode::E_CALL_PENDING_FULL,
@@ -700,10 +699,8 @@ impl EventBus {
         let seq = q.frames.len() as u64;
         let event_id = uuid::Uuid::new_v4().to_string();
         let causation = root_event_causation(&event_id);
-        let result = q.enqueue(
-            ChannelKind::Request,
-            frame_with_causation(topic, seq, payload, &causation),
-        );
+        let result =
+            q.enqueue(ChannelKind::Request, frame_with_causation(topic, seq, payload, &causation));
         match result {
             EnqueueResult::Queued | EnqueueResult::QueuedWithOverflow => Ok(1),
             EnqueueResult::Full | EnqueueResult::DroppedCircuitOpen => Err(HostError::new(
@@ -1188,15 +1185,11 @@ mod tests {
     #[test]
     fn event_causation_is_propagated_and_depth_is_bounded() {
         let b = EventBus::default();
-        b.declare_topics(
-            "com.a",
-            &[EventDecl { topic: "plugin:com.a:x".into(), public: true }],
-        )
-        .unwrap();
+        b.declare_topics("com.a", &[EventDecl { topic: "plugin:com.a:x".into(), public: true }])
+            .unwrap();
         b.subscribe("com.b", "w", "plugin:com.a:x").unwrap();
 
-        b.publish_request_with_causation("com.a", "plugin:com.a:x", Value::from(1), None)
-            .unwrap();
+        b.publish_request_with_causation("com.a", "plugin:com.a:x", Value::from(1), None).unwrap();
         let first = b.drain("com.b", ChannelKind::Request).unwrap().remove(0);
         assert_eq!(first.event_hop, 1);
         assert_eq!(first.causation_id, first.event_id);
@@ -1207,13 +1200,8 @@ mod tests {
             depth: first.event_hop,
             budget: 2,
         };
-        b.publish_request_with_causation(
-            "com.a",
-            "plugin:com.a:x",
-            Value::from(2),
-            Some(&parent),
-        )
-        .unwrap();
+        b.publish_request_with_causation("com.a", "plugin:com.a:x", Value::from(2), Some(&parent))
+            .unwrap();
         let second = b.drain("com.b", ChannelKind::Request).unwrap().remove(0);
         assert_eq!(second.causation_id, first.causation_id);
         assert_eq!(second.event_hop, 2);
