@@ -363,6 +363,53 @@ describe('契约 5：HostClient 行为', () => {
     expect(result).toEqual({ delivered: 2, dropped: false });
   });
 
+  it('eventsPublish 透传 V4 A78 parent causation context', async () => {
+    const backend = new MockBackend({
+      capabilities: ['host_events_publish'],
+      cases: [
+        {
+          cmd: 'host_events_publish',
+          args: {
+            evt: {
+              topic: 'plugin:p1.child',
+              payload: { n: 2 },
+              causation: {
+                eventId: 'evt-parent',
+                causationId: 'evt-root',
+                eventHop: 2,
+                maxCausationDepth: 8,
+              },
+            },
+          },
+          result: { delivered: 1, dropped: false },
+        },
+      ],
+    });
+    const client = new HostClient({ backend });
+    await client.eventsPublish({
+      topic: 'plugin:p1.child',
+      payload: { n: 2 },
+      causation: {
+        eventId: 'evt-parent',
+        causationId: 'evt-root',
+        eventHop: 2,
+        maxCausationDepth: 8,
+      },
+    });
+    expect(backend.invocations.at(-1)?.args).toEqual({
+      evt: {
+        topic: 'plugin:p1.child',
+        payload: { n: 2 },
+        causation: {
+          eventId: 'evt-parent',
+          causationId: 'evt-root',
+          eventHop: 2,
+          maxCausationDepth: 8,
+        },
+      },
+    });
+  });
+
   it('eventsSubscribe 返回订阅信息', async () => {
     const backend = new MockBackend({
       capabilities: ['host_events_subscribe'],
