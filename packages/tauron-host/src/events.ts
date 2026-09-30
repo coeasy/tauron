@@ -48,6 +48,14 @@ export interface EventFrame {
   seq: number;
   /** JSON 载荷。 */
   payload: JsonValue;
+  /** V4 A78 event id. Always present on V4 hosts; optional for N-1 source compatibility. */
+  eventId?: string;
+  /** V4 A78 root causation id shared by the full event chain. */
+  causationId?: string;
+  /** V4 A78 1-based event hop. */
+  eventHop?: number;
+  /** V4 A78 Host-enforced maximum causation depth. */
+  maxCausationDepth?: number;
 }
 
 // R5 收敛：此前的 `CallFrame`（`kind: 'response'|'progress'|'cancel'`，
