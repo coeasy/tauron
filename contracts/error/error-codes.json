@@ -92,6 +92,10 @@
     {
       "code": "E_CALL_CYCLE",
       "retryClass": "never"
+    },
+    {
+      "code": "E_EVENT_CAUSATION_LIMIT",
+      "retryClass": "never"
     }
   ]
 }
