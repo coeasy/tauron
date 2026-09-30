@@ -511,11 +511,7 @@ impl ModuleCache {
         self.cache.get(&key)
     }
 
-    pub fn get_generation(
-        &self,
-        plugin_id: &str,
-        generation: Generation,
-    ) -> Option<&CachedModule> {
+    pub fn get_generation(&self, plugin_id: &str, generation: Generation) -> Option<&CachedModule> {
         self.cache
             .iter()
             .find(|(key, _)| key.pack_id == plugin_id && key.generation == generation)
@@ -604,9 +600,7 @@ impl ModuleCache {
         );
         self.cache.insert(key.clone(), module);
         self.order.push(key.clone());
-        authority
-            .activate_staged(&key)
-            .map_err(|e| Self::authority_error(&plugin_id, e))?;
+        authority.activate_staged(&key).map_err(|e| Self::authority_error(&plugin_id, e))?;
 
         for candidate in eviction {
             if authority
@@ -669,9 +663,7 @@ impl ModuleCache {
             reason: "generation is not tracked".to_string(),
         })?;
         state.rollback_pinned = pinned;
-        authority
-            .set_state(key, state)
-            .map_err(|e| Self::authority_error(&key.pack_id, e))
+        authority.set_state(key, state).map_err(|e| Self::authority_error(&key.pack_id, e))
     }
 
     /// Deactivate the lineage, then delete only generations the shared authority allows to GC.
@@ -1080,7 +1072,7 @@ mod tests {
     }
 
     #[test]
-    fn test_module_cache_evict() {
+    fn test_module_cache_evict_only_after_old_entry_is_inactive() {
         let config = ModuleCacheConfig { max_cached_modules: 1, cache_ttl_secs: 3600 };
         let mut cache = ModuleCache::new(config);
 
@@ -1098,10 +1090,18 @@ mod tests {
         };
 
         cache.insert(module1).unwrap();
-        cache.insert(module2).unwrap(); // 应驱逐 module1
+        assert!(
+            matches!(
+                cache.insert(module2.clone()),
+                Err(WasmError::ModuleCacheFull { .. })
+            ),
+            "A89 forbids LRU from deleting an active generation"
+        );
 
+        cache.pack_lease_registry().lock().deactivate("plugin.a");
+        cache.insert(module2).unwrap();
         assert_eq!(cache.cache_count(), 1);
-        assert!(cache.get("plugin.a").is_none());
+        assert_eq!(cache.generation_count("plugin.a"), 0);
         assert!(cache.get("plugin.b").is_some());
     }
 

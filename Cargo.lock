@@ -3857,6 +3857,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "tauron-host",
  "thiserror 2.0.21",
 ]
 

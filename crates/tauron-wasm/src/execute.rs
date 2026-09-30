@@ -486,14 +486,21 @@ mod tests {
     }
 
     #[test]
-    fn test_load_module_evict() {
+    fn test_load_module_capacity_never_evicts_active_generation() {
         let mut engine = WasmEngine::default_engine();
-        // 默认 max_cached_modules = 32，加载 33 个模块
-        for i in 0..33 {
-            engine.load_module(&format!("plugin.{}", i), &format!("hash{}", i), 1024).unwrap();
+        for i in 0..32 {
+            engine.load_module(&format!("plugin.{i}"), &format!("hash{i}"), 1024).unwrap();
         }
-        // 缓存应被驱逐到 32 个
+        assert!(matches!(
+            engine.load_module("plugin.32", "hash32", 1024),
+            Err(WasmError::ModuleCacheFull { .. })
+        ));
+
+        engine.cache().pack_lease_registry().lock().deactivate("plugin.0");
+        engine.load_module("plugin.32", "hash32", 1024).unwrap();
         assert_eq!(engine.cache_count(), 32);
+        assert_eq!(engine.cache().generation_count("plugin.0"), 0);
+        assert!(engine.cache().get("plugin.32").is_some());
     }
 
     // ── 执行测试 ──
@@ -512,10 +519,7 @@ mod tests {
 
         engine.execute(&config, "main", "{}").unwrap();
         assert_eq!(authority.lock().lease_count(), 0);
-        assert_eq!(
-            authority.lock().active_key(&config.plugin_id).unwrap().version,
-            "hash123"
-        );
+        assert_eq!(authority.lock().active_key(&config.plugin_id).unwrap().version, "hash123");
     }
 
     #[test]
