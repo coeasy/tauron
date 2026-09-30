@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use tauron_host::{
     decode_wire_json, encode_wire_json, peer_proof, production_doctor, Degradation, DeploymentMode,
     HealthReport, Liveness, LocalHostBroker, OrderedEventMeta, OrderingError, OrderingTracker,
-    PeerCredentialEvidence, PersistentWriterLease, ProductionReadiness, Readiness, StorageNamespace,
-    WireFrame, WriterLeaseError, DEFAULT_MAX_WIRE_BYTES,
+    PeerCredentialEvidence, PersistentWriterLease, ProductionReadiness, Readiness,
+    StorageNamespace, WireFrame, WriterLeaseError, DEFAULT_MAX_WIRE_BYTES,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,7 +118,6 @@ fn conform_ordering_detects_duplicate_gap_and_revision_regression() {
     ));
 }
 
-
 fn storage_namespace() -> StorageNamespace {
     StorageNamespace {
         tenant: "default".into(),
@@ -152,8 +151,7 @@ fn storage_lease_child_probe() {
 #[test]
 fn conform_storage_single_writer_uses_cross_process_file_lock() {
     let root = tempfile::tempdir().unwrap();
-    let first =
-        PersistentWriterLease::acquire(root.path(), storage_namespace(), "host-a").unwrap();
+    let first = PersistentWriterLease::acquire(root.path(), storage_namespace(), "host-a").unwrap();
     let first_epoch = first.lease().epoch;
 
     let current_exe = std::env::current_exe().unwrap();

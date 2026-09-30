@@ -207,8 +207,7 @@ impl RecoveryStore {
 
         let path = dir.join(RECOVERY_FILE);
         let mut load_error: Option<String> = None;
-        let (mut engine, previous_in_flight, persisted_context, source) =
-            match fs::read(&path) {
+        let (mut engine, previous_in_flight, persisted_context, source) = match fs::read(&path) {
                 Ok(bytes) => match parse_durable_or_legacy(&bytes) {
                     Ok((engine, in_flight, last_context, generation)) => {
                         self.generation = generation;
@@ -305,12 +304,8 @@ impl RecoveryStore {
             last_context: self.last_context.clone(),
             engine: engine.clone(),
         };
-        let bytes = match DurableEnvelope::seal(
-            RECOVERY_DURABLE_SCHEMA,
-            next_generation,
-            payload,
-        )
-        .and_then(|envelope| encode_durable(&envelope))
+        let bytes = match DurableEnvelope::seal(RECOVERY_DURABLE_SCHEMA, next_generation, payload)
+            .and_then(|envelope| encode_durable(&envelope))
         {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -358,8 +353,7 @@ fn parse_durable_or_legacy(
             if payload.version != RECOVERY_STORE_VERSION {
                 return Err(format!("不支持的标记版本：{}", payload.version));
             }
-            let engine =
-                RecoveryEngine::from_json(&payload.engine).map_err(|e| e.to_string())?;
+            let engine = RecoveryEngine::from_json(&payload.engine).map_err(|e| e.to_string())?;
             let last_context = if payload.last_context.is_empty() {
                 engine.context().to_vec()
             } else {
@@ -372,9 +366,7 @@ fn parse_durable_or_legacy(
                 .map_err(|e| format!("durable={durable_error}; legacy UTF-8={e}"))?;
             parse_legacy(text)
                 .map(|(engine, in_flight, context)| (engine, in_flight, context, 0))
-                .map_err(|legacy_error| {
-                    format!("durable={durable_error}; legacy={legacy_error}")
-                })
+                .map_err(|legacy_error| format!("durable={durable_error}; legacy={legacy_error}"))
         }
     }
 }
@@ -775,8 +767,12 @@ mod tests {
         let text = fs::read_to_string(store.path().unwrap()).unwrap();
         assert!(text.contains("\"lastContext\""), "落盘内容：{text}");
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(v["lastContext"].as_array().unwrap().len(), 2);
-        assert_eq!(v["lastContext"], v["engine"]["context"], "两份必须同源");
+        assert_eq!(v["payload"]["lastContext"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            v["payload"]["lastContext"],
+            v["payload"]["engine"]["context"],
+            "两份必须同源"
+        );
     }
 
     #[test]

@@ -4920,10 +4920,8 @@ fn load_settings_doc(
             match serde_json::from_slice::<Vec<(String, tauron_settings::PluginState)>>(&bytes) {
                 Ok(entries) => Ok(Some((entries, 0))),
                 Err(legacy_error) => {
-                    let quarantined = path.with_extension(format!(
-                        "json.corrupt-{}",
-                        crate::recovery::now_ms()
-                    ));
+                    let quarantined =
+                        path.with_extension(format!("json.corrupt-{}", crate::recovery::now_ms()));
                     let quarantine_note = match std::fs::rename(path, &quarantined) {
                         Ok(()) => format!("；已隔离到 {}", quarantined.display()),
                         Err(error) => format!("；隔离失败：{error}"),
@@ -4950,17 +4948,14 @@ fn persist_settings_doc(state: &SubstrateState) -> HostResult<()> {
     };
     let entries = state.settings.lock().snapshot_all();
     let next_generation = state.settings_generation.lock().saturating_add(1);
-    let envelope = tauron_host::DurableEnvelope::seal(
-        HOST_SETTINGS_DURABLE_SCHEMA,
-        next_generation,
-        entries,
-    )
-    .map_err(|e| {
-        HostError::new(
-            ErrorCode::E_INVALID_MANIFEST,
-            format!("设置文档 durable envelope 构造失败：{e}"),
-        )
-    })?;
+    let envelope =
+        tauron_host::DurableEnvelope::seal(HOST_SETTINGS_DURABLE_SCHEMA, next_generation, entries)
+            .map_err(|e| {
+                HostError::new(
+                    ErrorCode::E_INVALID_MANIFEST,
+                    format!("设置文档 durable envelope 构造失败：{e}"),
+                )
+            })?;
     let bytes = tauron_host::encode_durable(&envelope).map_err(|e| {
         HostError::new(
             ErrorCode::E_INVALID_MANIFEST,
@@ -10631,12 +10626,10 @@ mod tests {
         // persistent copy instead of treating it as a valid first-run state.
         let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
         assert_eq!(cmd_settings_get(&state, "secure").unwrap(), serde_json::Value::Null);
-        assert!(
-            std::fs::read_dir(t.path())
-                .unwrap()
-                .filter_map(Result::ok)
-                .any(|entry| entry.file_name().to_string_lossy().contains("host-settings.json.corrupt-"))
-        );
+        assert!(std::fs::read_dir(t.path()).unwrap().filter_map(Result::ok).any(|entry| entry
+            .file_name()
+            .to_string_lossy()
+            .contains("host-settings.json.corrupt-")));
     }
 
     #[test]

@@ -143,11 +143,8 @@ impl PersistentWriterLease {
             }
         }
 
-        let previous_epoch = read_locked_lease(&mut file)
-            .ok()
-            .flatten()
-            .map(|lease| lease.epoch)
-            .unwrap_or(0);
+        let previous_epoch =
+            read_locked_lease(&mut file).ok().flatten().map(|lease| lease.epoch).unwrap_or(0);
         let lease = SingleWriterLease {
             namespace,
             owner: owner.to_string(),
@@ -219,10 +216,7 @@ fn read_locked_lease(file: &mut File) -> Result<Option<SingleWriterLease>, Write
     Ok(serde_json::from_slice::<SingleWriterLease>(&bytes).ok())
 }
 
-fn write_locked_lease(
-    file: &mut File,
-    lease: &SingleWriterLease,
-) -> Result<(), WriterLeaseError> {
+fn write_locked_lease(file: &mut File, lease: &SingleWriterLease) -> Result<(), WriterLeaseError> {
     let bytes = serde_json::to_vec(lease).map_err(|error| WriterLeaseError::Io {
         action: "encode lock record".into(),
         detail: error.to_string(),
