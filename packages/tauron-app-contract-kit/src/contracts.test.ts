@@ -69,6 +69,8 @@ describe('契约 1：错误码全集', () => {
       'E_CONTRIBUTES_DRIFT',
       // V4 A79：慢消费者导致接收方 credit 耗尽；需显式 grant 后再重试。
       'E_STREAM_BACKPRESSURE',
+      // V4 A77：同步调用图检测到环、重入或 hop 上限。
+      'E_CALL_CYCLE',
     ]);
   });
 
