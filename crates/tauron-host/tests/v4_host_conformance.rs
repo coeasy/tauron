@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use tauron_host::{
     decode_wire_json, encode_wire_json, peer_proof, production_doctor, Degradation, DeploymentMode,
     HealthReport, Liveness, LocalHostBroker, OrderedEventMeta, OrderingError, OrderingTracker,
-    PeerCredentialEvidence, ProductionReadiness, Readiness, WireFrame, DEFAULT_MAX_WIRE_BYTES,
+    PeerCredentialEvidence, PersistentWriterLease, ProductionReadiness, Readiness, StorageNamespace,
+    WireFrame, WriterLeaseError, DEFAULT_MAX_WIRE_BYTES,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,4 +114,24 @@ fn conform_ordering_detects_duplicate_gap_and_revision_regression() {
         tracker.observe(&regressed),
         Err(OrderingError::RevisionRegression { previous: 10, actual: 9 })
     ));
+}
+
+
+#[test]
+fn conform_storage_single_writer_uses_cross_process_file_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let namespace = StorageNamespace {
+        tenant: "default".into(),
+        application: "conformance".into(),
+        principal: "registry".into(),
+    };
+    let first = PersistentWriterLease::acquire(root.path(), namespace.clone(), "host-a").unwrap();
+    assert!(matches!(
+        PersistentWriterLease::acquire(root.path(), namespace.clone(), "host-b"),
+        Err(WriterLeaseError::Busy { .. })
+    ));
+    let first_epoch = first.lease().epoch;
+    drop(first);
+    let second = PersistentWriterLease::acquire(root.path(), namespace, "host-b").unwrap();
+    assert!(second.lease().epoch > first_epoch);
 }

@@ -128,7 +128,9 @@ pub use scoped_fs::{
     write_hard as scoped_fs_write_hard, FsEnforcement, ScopedDirEntry, ScopedFsError, ScopedPath,
 };
 pub use service_graph::{ServiceGraph, ServiceGraphError, ServiceNode};
-pub use storage::{SingleWriterLease, StorageNamespace, WriterLeaseError, WriterLeaseTable};
+pub use storage::{
+    PersistentWriterLease, SingleWriterLease, StorageNamespace, WriterLeaseError, WriterLeaseTable,
+};
 pub use target::{
     current_target_spec, resolve_best as resolve_best_target, TargetAbi, TargetArch, TargetOs,
     TargetSpec,
