@@ -1091,10 +1091,7 @@ mod tests {
 
         cache.insert(module1).unwrap();
         assert!(
-            matches!(
-                cache.insert(module2.clone()),
-                Err(WasmError::ModuleCacheFull { .. })
-            ),
+            matches!(cache.insert(module2.clone()), Err(WasmError::ModuleCacheFull { .. })),
             "A89 forbids LRU from deleting an active generation"
         );
 
