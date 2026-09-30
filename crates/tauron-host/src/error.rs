@@ -100,6 +100,8 @@ pub enum ErrorCode {
     E_STREAM_BACKPRESSURE,
     /// Synchronous call graph would cycle, re-enter a principal, or exceed the bounded hop budget.
     E_CALL_CYCLE,
+    /// Event causation chain exceeded the bounded depth budget.
+    E_EVENT_CAUSATION_LIMIT,
 }
 
 /// V4 retry semantics. A boolean cannot safely express panic/transaction/reconnect behavior.
@@ -128,6 +130,7 @@ impl ErrorCode {
             Self::E_LEASE_EXPIRED => RetryClass::AfterReconnect,
             Self::E_STREAM_BACKPRESSURE => RetryClass::Manual,
             Self::E_CALL_CYCLE => RetryClass::Never,
+            Self::E_EVENT_CAUSATION_LIMIT => RetryClass::Never,
             _ => RetryClass::Never,
         }
     }
@@ -170,6 +173,7 @@ impl fmt::Display for ErrorCode {
             Self::E_CONTRIBUTES_DRIFT => write!(f, "E_CONTRIBUTES_DRIFT"),
             Self::E_STREAM_BACKPRESSURE => write!(f, "E_STREAM_BACKPRESSURE"),
             Self::E_CALL_CYCLE => write!(f, "E_CALL_CYCLE"),
+            Self::E_EVENT_CAUSATION_LIMIT => write!(f, "E_EVENT_CAUSATION_LIMIT"),
         }
     }
 }
