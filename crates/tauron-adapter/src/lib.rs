@@ -4784,9 +4784,20 @@ pub fn cmd_events_publish(
     topic: &str,
     payload: serde_json::Value,
 ) -> HostResult<PublishResult> {
+    cmd_events_publish_with_causation(state, publisher, topic, payload, None)
+}
+
+/// V4 A78 event publication with an optional parent causation context.
+pub fn cmd_events_publish_with_causation(
+    state: &SubstrateState,
+    publisher: &str,
+    topic: &str,
+    payload: serde_json::Value,
+    causation: Option<&tauron_host::EventCausation>,
+) -> HostResult<PublishResult> {
     guard("events_publish", || {
         let bus = state.bus.lock();
-        bus.publish_request(publisher, topic, payload)
+        bus.publish_request_with_causation(publisher, topic, payload, causation)
     })?
 }
 
