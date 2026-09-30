@@ -225,7 +225,25 @@ mod tests {
         assert!(codes.contains(&"RECOVERY_DURABILITY_REQUIRED"));
         assert!(codes.contains(&"ADMIN_AUDIT_REQUIRED"));
         assert!(codes.contains(&"DATA_DIR_REQUIRED"));
-        assert!(codes.contains(&"TRUSTED_TIME_REQUIRED"));
+    }
+
+    #[test]
+    fn production_install_requires_trusted_time_only_when_install_is_enabled() {
+        let mut input = ready();
+        input.trusted_time_available = false;
+        let violations = validate(DeploymentMode::Production, &input);
+        assert!(
+            violations.iter().any(|v| v.code == "TRUSTED_TIME_REQUIRED"),
+            "production install must fail closed without trusted time"
+        );
+
+        input.install_feature_enabled = false;
+        assert!(
+            validate(DeploymentMode::Production, &input)
+                .iter()
+                .all(|v| v.code != "TRUSTED_TIME_REQUIRED"),
+            "hosts without installation capability must not require a time source they never use"
+        );
     }
 
     #[test]
