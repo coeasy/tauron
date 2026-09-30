@@ -95,7 +95,10 @@ impl CallDelivery for ProcessCallDelivery {
             None => {
                 return Ok(DeliveryReceipt {
                     delivered: false,
-                    reason: Some(format!("插件 `{}` 没有绑定可投递的 runtime generation", call.target)),
+                    reason: Some(format!(
+                        "插件 `{}` 没有绑定可投递的 runtime generation",
+                        call.target
+                    )),
                 })
             }
         };
@@ -170,9 +173,7 @@ impl ProcessFrameSink for ProcessFrameSinkImpl {
             Err(_) => return,
         };
         let Some(expected) = call.runtime_generation else {
-            eprintln!(
-                "[tauron] sidecar 回帧拒绝：callId={call_id} 没有绑定 runtimeGeneration"
-            );
+            eprintln!("[tauron] sidecar 回帧拒绝：callId={call_id} 没有绑定 runtimeGeneration");
             return;
         };
         let current = self.registry.live_runtime_handle_of(&call.target);
