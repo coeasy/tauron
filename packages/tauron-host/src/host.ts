@@ -432,9 +432,23 @@ export class HostClient {
   async eventsPublish(evt: {
     topic: string;
     payload: JsonValue;
+    /**
+     * V4 A78 parent causation context. Pass the four fields from a consumed EventFrame when
+     * publishing a derived event; omit for a new root event.
+     */
+    causation?: {
+      eventId: string;
+      causationId: string;
+      eventHop: number;
+      maxCausationDepth: number;
+    };
   }): Promise<{ delivered: number; dropped: boolean }> {
     return this.call('host_events_publish', {
-      evt: { topic: evt.topic, payload: evt.payload },
+      evt: {
+        topic: evt.topic,
+        payload: evt.payload,
+        ...(evt.causation !== undefined ? { causation: evt.causation } : {}),
+      },
     });
   }
 
