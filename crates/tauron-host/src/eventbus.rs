@@ -1023,12 +1023,7 @@ mod tests {
         );
         b.policy
             .lock()
-            .validate_scoped(
-                &token,
-                "com.b",
-                PRIVATE_SUBSCRIBE_OPERATION,
-                "plugin:com.a:private",
-            )
+            .validate_scoped(&token, "com.b", PRIVATE_SUBSCRIBE_OPERATION, "plugin:com.a:private")
             .unwrap();
 
         assert!(b.revoke("com.b", "plugin:com.a:private"));
