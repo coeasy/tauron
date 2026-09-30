@@ -44,10 +44,16 @@ export interface PublishResult {
 export interface EventFrame {
   /** 事件 topic（约定 `plugin:<插件id>:<事件名>`，与框架层 `eventNamespace` 一致）。 */
   topic: string;
-  /** 单调递增序号（跨通道独立）。 */
+  /** V4 A102 per sender→receiver monotonic sequence. */
   seq: number;
   /** JSON 载荷。 */
   payload: JsonValue;
+  /** V4 A102 sender principal. */
+  sender?: string;
+  /** V4 A102 receiver principal. */
+  receiver?: string;
+  /** V4 A102 monotonic state revision for state-channel publications. */
+  stateRevision?: number;
   /** V4 A78 event id. Always present on V4 hosts; optional for N-1 source compatibility. */
   eventId?: string;
   /** V4 A78 root causation id shared by the full event chain. */

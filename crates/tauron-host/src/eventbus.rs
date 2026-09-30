@@ -29,6 +29,7 @@ use serde_json::Value;
 use crate::call_graph::{EventCausation, DEFAULT_MAX_CAUSATION_DEPTH};
 use crate::error::{ErrorCode, HostError, HostResult};
 use crate::manifest::EventDecl;
+use crate::ordering::{OrderedEventMeta, OrderingTracker};
 use crate::policy::{DecisionError, PolicyAuthority};
 
 /// 单插件队列上限（计划 §4.4 关键约束）。
@@ -266,9 +267,16 @@ enum EnqueueResult {
 #[serde(rename_all = "camelCase")]
 pub struct Frame {
     pub topic: String,
-    /// 单调递增序号（跨通道独立）。
+    /// V4 A102 per sender→receiver monotonic sequence.
     pub seq: u64,
     pub payload: Value,
+    /// V4 A102 sender principal.
+    pub sender: String,
+    /// V4 A102 receiver principal.
+    pub receiver: String,
+    /// V4 A102 monotonic state revision for state-channel publications.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_revision: Option<u64>,
     /// V4 A78 unique event identifier for this emitted frame.
     pub event_id: String,
     /// V4 A78 stable root causation identifier across an event chain.
@@ -322,15 +330,18 @@ fn next_event_causation(
 
 fn frame_with_causation(
     topic: &str,
-    seq: u64,
     payload: Value,
     causation: &EventCausation,
+    ordering: &OrderedEventMeta,
 ) -> Frame {
     Frame {
         topic: topic.to_string(),
-        seq,
+        seq: ordering.sequence,
         payload,
-        event_id: causation.parent_id.clone().unwrap_or_else(|| causation.root_id.clone()),
+        sender: ordering.sender.clone(),
+        receiver: ordering.receiver.clone(),
+        state_revision: ordering.state_revision,
+        event_id: ordering.event_id.clone(),
         causation_id: causation.root_id.clone(),
         event_hop: causation.depth,
         max_causation_depth: causation.budget,
@@ -354,6 +365,7 @@ fn policy_decision_error(error: DecisionError) -> HostError {
 ///
 /// **锁顺序**：普通索引路径保持 `subs → topic_subscribers`；V4 A81 私有订阅提交
 /// 使用授权事务 `approvals (outer) → policy (short) → subs → topic_subscribers`。
+/// 发布路径的 A102 顺序锁固定为 `state_revisions → ordering → queues`；没有反向获取。
 /// 没有任何路径在持有 `subs/topic_subscribers` 时再获取 `approvals`，因此不会形成环。
 ///
 /// 反序持有会构成死锁环。历史缺陷（已修）：
@@ -373,6 +385,10 @@ pub struct EventBus {
     approvals: Mutex<HashMap<(String, String), ()>>,
     /// V4 A81 grant-version authority for runtime approval/revoke decisions.
     policy: Mutex<PolicyAuthority>,
+    /// V4 A102 per sender→receiver ordering authority.
+    ordering: Mutex<OrderingTracker>,
+    /// V4 A102 state revision source, keyed by (publisher, topic).
+    state_revisions: Mutex<HashMap<(String, String), u64>>,
     queues: Mutex<HashMap<QueueKey, Queue>>,
     stats: Mutex<BusStats>,
     next_token: std::sync::atomic::AtomicU64,
@@ -387,6 +403,8 @@ impl Default for EventBus {
             topic_subscribers: Mutex::default(),
             approvals: Mutex::default(),
             policy: Mutex::new(PolicyAuthority::new()),
+            ordering: Mutex::new(OrderingTracker::default()),
+            state_revisions: Mutex::default(),
             queues: Mutex::default(),
             stats: Mutex::default(),
             next_token: std::sync::atomic::AtomicU64::new(1),
@@ -636,6 +654,16 @@ impl EventBus {
             ts.get(topic).cloned().unwrap_or_default()
         };
 
+        let state_revision = if kind == ChannelKind::State {
+            let mut revisions = self.state_revisions.lock();
+            let revision =
+                revisions.entry((publisher.to_string(), topic.to_string())).or_insert(0);
+            *revision = revision.saturating_add(1);
+            Some(*revision)
+        } else {
+            None
+        };
+
         let mut delivered = 0usize;
         let mut overflow = 0usize;
 
@@ -652,10 +680,29 @@ impl EventBus {
 
             let key = (subscriber.clone(), kind);
             let result = {
+                let mut ordering = self.ordering.lock();
+                let ordered = ordering
+                    .issue(
+                        publisher,
+                        &subscriber,
+                        causation.parent_id.as_deref().unwrap_or(&causation.root_id),
+                        state_revision,
+                        Some(&causation.root_id),
+                    )
+                    .expect("host-generated ordering metadata is monotonic");
                 let mut qs = self.queues.lock();
-                let q = qs.entry(key.clone()).or_insert_with(|| Queue::new(self.capacity));
-                let seq = q.frames.len() as u64;
-                q.enqueue(kind, frame_with_causation(topic, seq, payload.clone(), causation))
+                let q = qs.entry(key).or_insert_with(|| Queue::new(self.capacity));
+                let result = q.enqueue(
+                    kind,
+                    frame_with_causation(topic, payload.clone(), causation, &ordered),
+                );
+                if matches!(result, EnqueueResult::Full) {
+                    debug_assert!(
+                        ordering.rollback_last(&ordered),
+                        "reliable request enqueue failure must roll back its unpublished sequence"
+                    );
+                }
+                result
             };
             match result {
                 EnqueueResult::Queued => delivered += 1,
@@ -724,14 +771,23 @@ impl EventBus {
         if target.is_empty() {
             return Err(HostError::new(ErrorCode::E_AUTH_DENIED, "调用投递目标不可为空"));
         }
+        let event_id = uuid::Uuid::new_v4().to_string();
+        let causation = root_event_causation(&event_id);
+        let mut ordering = self.ordering.lock();
+        let ordered = ordering
+            .issue("host", target, &event_id, None, Some(&causation.root_id))
+            .expect("host-generated ordering metadata is monotonic");
         let mut qs = self.queues.lock();
         let key = (target.to_string(), ChannelKind::Request);
         let q = qs.entry(key).or_insert_with(|| Queue::new(self.capacity));
-        let seq = q.frames.len() as u64;
-        let event_id = uuid::Uuid::new_v4().to_string();
-        let causation = root_event_causation(&event_id);
         let result =
-            q.enqueue(ChannelKind::Request, frame_with_causation(topic, seq, payload, &causation));
+            q.enqueue(ChannelKind::Request, frame_with_causation(topic, payload, &causation, &ordered));
+        if matches!(result, EnqueueResult::Full) {
+            debug_assert!(
+                ordering.rollback_last(&ordered),
+                "reliable inbound enqueue failure must roll back its unpublished sequence"
+            );
+        }
         match result {
             EnqueueResult::Queued | EnqueueResult::QueuedWithOverflow => Ok(1),
             EnqueueResult::Full | EnqueueResult::DroppedCircuitOpen => Err(HostError::new(
@@ -807,6 +863,10 @@ impl EventBus {
             let mut a = self.approvals.lock();
             a.retain(|(_, topic), _| !removed_topics.contains(topic));
         }
+        self.state_revisions
+            .lock()
+            .retain(|(owner, topic), _| owner != publisher && !removed_topics.contains(topic));
+        self.ordering.lock().clear_principal(publisher);
         killed
     }
 
@@ -825,6 +885,8 @@ impl EventBus {
         }
         let mut qs = self.queues.lock();
         qs.retain(|(sub, _), _| sub != subscriber);
+        drop(qs);
+        self.ordering.lock().clear_principal(subscriber);
         tokens.len()
     }
 
@@ -931,6 +993,44 @@ mod tests {
         b.subscribe("plugin.b", "window", "plugin:owner:public")
             .expect("plugin.a 的配额不能阻断 plugin.b");
         assert_eq!(b.subscription_count("plugin.b"), 1);
+    }
+
+    #[test]
+    fn ordering_sequence_survives_drain_and_is_per_receiver() {
+        let b = bus(8);
+        declare(&b, "com.a", "plugin:com.a:x", true);
+        b.subscribe("com.b", "w", "plugin:com.a:x").unwrap();
+        b.subscribe("com.c", "w", "plugin:com.a:x").unwrap();
+
+        b.publish("com.a", "plugin:com.a:x", Value::from(1), ChannelKind::Event);
+        let first_b = b.drain("com.b", ChannelKind::Event).unwrap().remove(0);
+        let first_c = b.drain("com.c", ChannelKind::Event).unwrap().remove(0);
+        assert_eq!((first_b.seq, first_c.seq), (1, 1));
+        assert_eq!((&first_b.sender, &first_b.receiver), (&"com.a".to_string(), &"com.b".to_string()));
+
+        b.publish("com.a", "plugin:com.a:x", Value::from(2), ChannelKind::Event);
+        let second_b = b.drain("com.b", ChannelKind::Event).unwrap().remove(0);
+        assert_eq!(second_b.seq, 2, "drain must not reset the sender→receiver sequence");
+        assert_eq!(second_b.causation_id, second_b.event_id);
+    }
+
+    #[test]
+    fn state_revision_is_monotonic_and_shared_across_receivers() {
+        let b = bus(8);
+        declare(&b, "com.a", "plugin:com.a:state", true);
+        b.subscribe("com.b", "w", "plugin:com.a:state").unwrap();
+        b.subscribe("com.c", "w", "plugin:com.a:state").unwrap();
+
+        b.publish("com.a", "plugin:com.a:state", Value::from(1), ChannelKind::State);
+        let first_b = b.drain("com.b", ChannelKind::State).unwrap().remove(0);
+        let first_c = b.drain("com.c", ChannelKind::State).unwrap().remove(0);
+        assert_eq!(first_b.state_revision, Some(1));
+        assert_eq!(first_c.state_revision, Some(1));
+
+        b.publish("com.a", "plugin:com.a:state", Value::from(2), ChannelKind::State);
+        let second = b.drain("com.b", ChannelKind::State).unwrap().remove(0);
+        assert_eq!(second.state_revision, Some(2));
+        assert_eq!(second.seq, 2);
     }
 
     #[test]

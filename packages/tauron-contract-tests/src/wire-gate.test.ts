@@ -1230,7 +1230,10 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
       'event_id',
       'max_causation_depth',
       'payload',
+      'receiver',
+      'sender',
       'seq',
+      'state_revision',
       'topic',
     ]);
     const ts = read('packages/tauron-host/src/events.ts');
@@ -1243,7 +1246,10 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
       'eventId',
       'maxCausationDepth',
       'payload',
+      'receiver',
+      'sender',
       'seq',
+      'stateRevision',
       'topic',
     ]);
     // drain 的返回类型必须是 EventFrame（不是流式 CallFrame）
