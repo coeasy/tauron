@@ -25,6 +25,8 @@ pub struct ProductionReadiness {
     pub recovery_explicitly_unsupported: bool,
     pub install_feature_enabled: bool,
     pub install_trust_configured: bool,
+    /// A100: trusted time is required for supply-chain expiry decisions when install is enabled.
+    pub trusted_time_available: bool,
     pub audit_for_admin_operations_available: bool,
     pub writable_data_dir_available: bool,
     /// Whether this host instance actually installs the process-plugin runtime.
@@ -86,6 +88,12 @@ pub fn doctor(mode: DeploymentMode, input: &ProductionReadiness) -> ProductionDo
             message: "plugin installation trust material is complete when install is enabled",
         },
         ProductionDoctorCheck {
+            id: "trusted-time",
+            pass: !input.install_feature_enabled || input.trusted_time_available,
+            required_in_production: true,
+            message: "plugin installation has a currently trusted time source for expiry decisions",
+        },
+        ProductionDoctorCheck {
             id: "admin-audit",
             pass: input.audit_for_admin_operations_available,
             required_in_production: true,
@@ -143,6 +151,12 @@ pub fn validate(mode: DeploymentMode, input: &ProductionReadiness) -> Vec<Readin
             message: "plugin install is enabled but trust material is incomplete",
         });
     }
+    if input.install_feature_enabled && !input.trusted_time_available {
+        out.push(ReadinessViolation {
+            code: "TRUSTED_TIME_REQUIRED",
+            message: "plugin install is enabled but no currently trusted time provider is available",
+        });
+    }
     if !input.audit_for_admin_operations_available {
         out.push(ReadinessViolation {
             code: "ADMIN_AUDIT_REQUIRED",
@@ -186,6 +200,7 @@ mod tests {
             recovery_explicitly_unsupported: false,
             install_feature_enabled: true,
             install_trust_configured: true,
+            trusted_time_available: true,
             audit_for_admin_operations_available: true,
             writable_data_dir_available: true,
             process_runtime_enabled: true,
@@ -209,6 +224,7 @@ mod tests {
         assert!(codes.contains(&"RECOVERY_DURABILITY_REQUIRED"));
         assert!(codes.contains(&"ADMIN_AUDIT_REQUIRED"));
         assert!(codes.contains(&"DATA_DIR_REQUIRED"));
+        assert!(codes.contains(&"TRUSTED_TIME_REQUIRED"));
     }
 
     #[test]

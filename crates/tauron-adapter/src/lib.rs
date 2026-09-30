@@ -192,6 +192,16 @@ impl AdapterConfig {
         #[cfg(not(feature = "plugin-install"))]
         let install_trust_configured = true;
 
+        #[cfg(feature = "plugin-install")]
+        let trusted_time_available = self
+            .trusted_time_provider
+            .as_ref()
+            .is_some_and(|provider| {
+                provider.trusted_time().state == tauron_host::TimeTrustState::Trusted
+            });
+        #[cfg(not(feature = "plugin-install"))]
+        let trusted_time_available = true;
+
         tauron_host::ProductionReadiness {
             caller_identity_policy_enabled: self.caller_identity_policy_enabled
                 || !self.origin_allowlist.is_empty(),
@@ -199,6 +209,7 @@ impl AdapterConfig {
             recovery_explicitly_unsupported: self.recovery_explicitly_unsupported,
             install_feature_enabled: cfg!(feature = "plugin-install"),
             install_trust_configured,
+            trusted_time_available,
             audit_for_admin_operations_available: self.admin_audit_available,
             writable_data_dir_available: self.recovery_data_dir.is_some(),
             // AdapterConfig describes the substrate. The process runtime is attached later,
@@ -301,6 +312,8 @@ impl AdapterConfig {
             plugin_signing_keys: std::collections::BTreeMap::new(),
             #[cfg(feature = "plugin-install")]
             acl_signing_key: None,
+            #[cfg(feature = "plugin-install")]
+            trusted_time_provider: None,
         }
     }
 
@@ -315,6 +328,16 @@ impl AdapterConfig {
         self.plugin_install_dir = Some(root);
         self.plugin_signing_keys = signing_keys;
         self.acl_signing_key = Some(acl_signing_key);
+        self
+    }
+
+    /// A100: inject the host-owned trusted-time source used by supply-chain expiry decisions.
+    #[cfg(feature = "plugin-install")]
+    pub fn with_trusted_time_provider(
+        mut self,
+        provider: Arc<dyn tauron_host::TrustedTimeProvider>,
+    ) -> Self {
+        self.trusted_time_provider = Some(provider);
         self
     }
 
@@ -395,6 +418,9 @@ pub struct AdapterConfig {
     /// Host-provided ACL HMAC key. Never generated from a public constant.
     #[cfg(feature = "plugin-install")]
     pub acl_signing_key: Option<Vec<u8>>,
+    /// A100 host-owned trusted-time source. Production install requires a currently Trusted value.
+    #[cfg(feature = "plugin-install")]
+    pub trusted_time_provider: Option<Arc<dyn tauron_host::TrustedTimeProvider>>,
 }
 
 /// Result for a committed signed plugin installation.
@@ -2664,6 +2690,7 @@ struct InstallRuntimeConfig {
     root: PathBuf,
     signing_keys: std::collections::BTreeMap<String, Vec<u8>>,
     acl_signing_key: Option<Vec<u8>>,
+    trusted_time_provider: Option<Arc<dyn tauron_host::TrustedTimeProvider>>,
 }
 
 impl core::ops::Deref for PluginRuntimeState {
@@ -3008,6 +3035,7 @@ impl PluginRuntimeState {
                 root,
                 signing_keys: cfg.plugin_signing_keys,
                 acl_signing_key: cfg.acl_signing_key,
+                trusted_time_provider: cfg.trusted_time_provider,
             }),
             #[cfg(feature = "plugin-install")]
             install_reviews: Arc::new(Mutex::new(HashMap::new())),
@@ -3849,9 +3877,25 @@ fn read_verified_package(
     let public_key = config.signing_keys.get(&envelope.kid).ok_or_else(|| {
         HostError::new(ErrorCode::E_INSTALL_FAILED, format!("未信任的签名 kid `{}`", envelope.kid))
     })?;
-    let (verified, manifest) =
+    let verification = if let Some(provider) = config.trusted_time_provider.as_deref() {
+        tauron_market::package_signature::verify_tpkg_reader_with_time(
+            &mut archive,
+            &sidecar,
+            public_key,
+            provider,
+        )
+    } else if state.deployment_mode == tauron_host::DeploymentMode::Production {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "production plugin installation requires a currently trusted time provider",
+        ));
+    } else {
+        // Development/Test compatibility: preserve the pre-A100 local-clock behavior when the
+        // host has not opted into a trusted-time provider.
         tauron_market::package_signature::verify_tpkg_reader(&mut archive, &sidecar, public_key)
-            .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, e.to_string()))?;
+    };
+    let (verified, manifest) =
+        verification.map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, e.to_string()))?;
     {
         use std::io::{Seek, SeekFrom};
         archive.seek(SeekFrom::Start(0)).map_err(|e| {
@@ -8548,6 +8592,38 @@ mod tests {
             acl_signing_key: Some(vec![0x5a; 32]),
             ..AdapterConfig::default()
         })
+    }
+
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn explicit_suspicious_time_provider_blocks_install_before_side_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("plugins");
+        let (package, verifying_key) = signed_install_fixture(dir.path(), "com.install.time");
+        let mut signing_keys = std::collections::BTreeMap::new();
+        signing_keys.insert("fixture-key".to_string(), verifying_key.to_bytes().to_vec());
+        let state = PluginRuntimeState::with_adapter_config(
+            AdapterConfig {
+                plugin_install_dir: Some(install_root.clone()),
+                plugin_signing_keys: signing_keys,
+                acl_signing_key: Some(vec![0x5a; 32]),
+                ..AdapterConfig::default()
+            }
+            .with_trusted_time_provider(Arc::new(tauron_host::SystemTimeProvider::new(
+                tauron_host::TimeTrustState::Suspicious,
+            ))),
+        );
+
+        let err = cmd_registry_install_preview_as(
+            &Caller::MainWindow,
+            &state,
+            package.to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_INSTALL_FAILED);
+        assert!(err.message.contains("时间不可受信"), "{}", err.message);
+        assert!(!install_root.join("com.install.time").exists());
+        assert!(state.registry.find(&PluginId::new("com.install.time").unwrap()).is_none());
     }
 
     /// 解包防护（端到端回归锁）：条目数超上限的包必须被拒绝。
@@ -14745,6 +14821,8 @@ mod v4_production_config_tests {
         assert!(error.message.contains("CALLER_IDENTITY_POLICY_REQUIRED"));
         assert!(error.message.contains("ADMIN_AUDIT_REQUIRED"));
         assert!(error.message.contains("DATA_DIR_REQUIRED"));
+        #[cfg(feature = "plugin-install")]
+        assert!(error.message.contains("TRUSTED_TIME_REQUIRED"));
     }
 
     #[test]
@@ -14763,6 +14841,23 @@ mod v4_production_config_tests {
         let cfg = AdapterConfig::default();
         let descriptor = tauron_proc::ProcessSandboxDescriptor::unsupported("test");
         assert!(cfg.validate_process_runtime_for_start(&descriptor).is_ok());
+    }
+
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn production_install_time_trust_is_explicit_and_current() {
+        let cfg = AdapterConfig::default();
+        assert!(!cfg.production_readiness().trusted_time_available);
+
+        let trusted = cfg.clone().with_trusted_time_provider(Arc::new(
+            tauron_host::SystemTimeProvider::new(tauron_host::TimeTrustState::Trusted),
+        ));
+        assert!(trusted.production_readiness().trusted_time_available);
+
+        let suspicious = cfg.with_trusted_time_provider(Arc::new(
+            tauron_host::SystemTimeProvider::new(tauron_host::TimeTrustState::Suspicious),
+        ));
+        assert!(!suspicious.production_readiness().trusted_time_available);
     }
 
     #[test]

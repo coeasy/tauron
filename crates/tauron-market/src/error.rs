@@ -6,6 +6,10 @@ pub enum MarketError {
     #[error("包签名校验失败：{0}")]
     SignatureInvalid(String),
 
+    /// A100 trusted-time gate rejected a supply-chain time decision.
+    #[error("供应链时间不可受信：{0}")]
+    TimeUntrusted(String),
+
     /// Hash 不符。
     #[error("文件 hash 不符：期望 {expected}，实际 {actual}")]
     HashMismatch { expected: String, actual: String },

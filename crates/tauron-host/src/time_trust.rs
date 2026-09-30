@@ -19,7 +19,7 @@ pub struct TrustedTime {
     pub state: TimeTrustState,
 }
 
-pub trait TrustedTimeProvider: Send + Sync {
+pub trait TrustedTimeProvider: Send + Sync + std::fmt::Debug {
     fn trusted_time(&self) -> TrustedTime;
 }
 
@@ -85,6 +85,7 @@ pub fn suspicious_if_skew_exceeds(
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
     struct Fixed(TrustedTime);
 
     impl TrustedTimeProvider for Fixed {
