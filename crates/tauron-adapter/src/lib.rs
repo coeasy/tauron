@@ -10619,10 +10619,7 @@ mod tests {
         // settings engine from the durable envelope before allowing ordinary work again.
         assert_eq!(cmd_settings_migrate_as(&Caller::MainWindow, &state).unwrap(), 0);
         assert_eq!(state.settings_fault.lock().state(), tauron_host::FaultState::Ready);
-        assert_eq!(
-            cmd_settings_get(&state, "plugin:p.theme").unwrap(),
-            serde_json::json!("dark")
-        );
+        assert_eq!(cmd_settings_get(&state, "plugin:p.theme").unwrap(), serde_json::json!("dark"));
     }
 
     #[test]
