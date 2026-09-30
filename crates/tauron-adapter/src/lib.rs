@@ -6544,9 +6544,7 @@ pub fn cmd_recover_trial_enable(
                     Ok(("alreadyEnabled".to_string(), false))
                 } else {
                     match state.registry.report_event(&id, Event::TrialEnable) {
-                        Ok(o) if !o.illegal => {
-                            Ok((format!("trialEnable:{}", o.to.as_str()), true))
-                        }
+                        Ok(o) if !o.illegal => Ok((format!("trialEnable:{}", o.to.as_str()), true)),
                         Ok(o) => Err(HostError::new(
                             ErrorCode::E_STATE_INVALID_TRANSITION,
                             format!(
@@ -9512,14 +9510,16 @@ mod tests {
         let id = PluginId::new("com.a").unwrap();
         state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
 
-        // Exhaust only the registry-side D28 trial budget. Do not report this failure through
+        // Exhaust only the registry-side D28 trial budget. Do not report these failures through
         // the recovery adapter; the engine intentionally still has an unused trial budget.
         let entered = state.registry.report_event(&id, Event::SafemodeEnter).unwrap();
         assert!(!entered.illegal);
-        let trial = state.registry.report_event(&id, Event::TrialEnable).unwrap();
-        assert!(!trial.illegal);
-        let failed = state.registry.report_event(&id, Event::ErrorRetryable).unwrap();
-        assert!(!failed.illegal);
+        for _ in 0..tauron_host::lifecycle::MAX_TRIAL_ATTEMPTS {
+            let trial = state.registry.report_event(&id, Event::TrialEnable).unwrap();
+            assert!(!trial.illegal);
+            let failed = state.registry.report_event(&id, Event::ErrorRetryable).unwrap();
+            assert!(!failed.illegal);
+        }
 
         // Independently move the recovery engine into safemode. Reconcile sees the registry
         // already disabled-by-safemode, so the next TrialEnable reaches the registry budget gate.
