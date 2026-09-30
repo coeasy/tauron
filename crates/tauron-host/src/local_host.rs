@@ -5,12 +5,16 @@
 //! one-time challenges, bootstrap-secret proof, replay rejection and stale-generation fencing.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use hmac::{Hmac, Mac};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
 use uuid::Uuid;
+
+use crate::generation::PackLeaseRegistry;
 
 const MAX_PENDING_CHALLENGES: usize = 128;
 type HmacSha256 = Hmac<Sha256>;
@@ -77,6 +81,8 @@ pub struct LocalHostBroker {
     next_generation: u64,
     challenges: HashMap<String, ChallengeRecord>,
     challenge_order: VecDeque<String>,
+    /// V4 A89 shared cache lifetime authority owned by the dedicated Local Host.
+    pack_leases: Arc<Mutex<PackLeaseRegistry>>,
 }
 
 impl LocalHostBroker {
@@ -87,11 +93,17 @@ impl LocalHostBroker {
             next_generation: 1,
             challenges: HashMap::new(),
             challenge_order: VecDeque::new(),
+            pack_leases: Arc::new(Mutex::new(PackLeaseRegistry::default())),
         }
     }
 
     pub fn active_lease(&self) -> Option<&LocalHostLease> {
         self.active.as_ref()
+    }
+
+    /// Shared Pack/Cache lease authority for runtime-pack owners.
+    pub fn pack_lease_registry(&self) -> Arc<Mutex<PackLeaseRegistry>> {
+        self.pack_leases.clone()
     }
 
     pub fn acquire(
@@ -116,6 +128,7 @@ impl LocalHostBroker {
     pub fn release(&mut self, lease: &LocalHostLease) -> Result<(), LocalHostBrokerError> {
         match &self.active {
             Some(active) if active == lease => {
+                self.pack_leases.lock().release_host(&active.owner_id);
                 self.active = None;
                 self.challenges.clear();
                 self.challenge_order.clear();
@@ -145,6 +158,7 @@ impl LocalHostBroker {
         if self.active.as_ref() != Some(observed) {
             return Err(LocalHostBrokerError::StaleLease);
         }
+        self.pack_leases.lock().release_host(&observed.owner_id);
         self.active = None;
         self.challenges.clear();
         self.challenge_order.clear();
@@ -280,6 +294,25 @@ mod tests {
             broker.verify(&ev, &challenge.challenge_id, &bad),
             Err(LocalHostBrokerError::InvalidProof)
         );
+    }
+
+    #[test]
+    fn pack_lease_registry_is_shared_and_clean_owner_release_drops_owner_leases() {
+        use crate::generation::{Generation, PackCacheKey, PackGcState};
+
+        let mut broker = LocalHostBroker::new(b"secret");
+        let owner = broker.acquire("host-1", "endpoint").unwrap();
+        let authority = broker.pack_lease_registry();
+        let key = PackCacheKey::new("wasm:p", "sha", Generation::INITIAL);
+        authority.lock().track(
+            key.clone(),
+            PackGcState { active: true, rollback_pinned: false, transaction_staged: false },
+        );
+        authority.lock().acquire(&owner.owner_id, &key, 0, 10_000).unwrap();
+        assert_eq!(authority.lock().lease_count(), 1);
+
+        broker.release(&owner).unwrap();
+        assert_eq!(authority.lock().lease_count(), 0);
     }
 
     #[test]

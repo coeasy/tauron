@@ -15,10 +15,15 @@
 // 本 crate 不依赖 `tauri`：WASM 管理是抽象的，单元测试用 Mock。
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tauron_host::{
+    Generation, GenerationError, PackCacheKey, PackGcState, PackLease, PackLeaseRegistry,
+};
 
 pub mod error;
 pub mod execute;
@@ -457,96 +462,270 @@ pub struct CachedModule {
 }
 
 /// 模块缓存。
+///
+/// V4 A89: one plugin may have multiple immutable generations resident at the same time.
+/// New work resolves through the authority's active generation; LRU/TTL only delete bytes after
+/// PackLeaseRegistry proves the generation is inactive, unpinned, unleased and not staged.
 pub struct ModuleCache {
     config: ModuleCacheConfig,
-    cache: HashMap<String, CachedModule>,
-    order: Vec<String>, // LRU 顺序
+    cache: HashMap<PackCacheKey, CachedModule>,
+    order: Vec<PackCacheKey>,
+    pack_leases: Arc<Mutex<PackLeaseRegistry>>,
 }
 
 impl ModuleCache {
-    /// 创建新的模块缓存。
+    /// Standalone embedding gets a private authority; LocalHost production should inject shared.
     pub fn new(config: ModuleCacheConfig) -> Self {
-        Self { config, cache: HashMap::new(), order: Vec::new() }
+        Self::with_pack_lease_registry(config, Arc::new(Mutex::new(PackLeaseRegistry::default())))
     }
 
-    /// 获取当前配置。
+    pub fn with_pack_lease_registry(
+        config: ModuleCacheConfig,
+        pack_leases: Arc<Mutex<PackLeaseRegistry>>,
+    ) -> Self {
+        Self { config, cache: HashMap::new(), order: Vec::new(), pack_leases }
+    }
+
+    pub fn pack_lease_registry(&self) -> Arc<Mutex<PackLeaseRegistry>> {
+        self.pack_leases.clone()
+    }
+
     pub fn config(&self) -> &ModuleCacheConfig {
         &self.config
     }
 
-    /// 获取缓存数量。
     pub fn cache_count(&self) -> usize {
         self.cache.len()
     }
 
-    /// 获取缓存的模块。
-    pub fn get(&self, plugin_id: &str) -> Option<&CachedModule> {
-        self.cache.get(plugin_id)
+    pub fn active_key(&self, plugin_id: &str) -> Option<PackCacheKey> {
+        self.pack_leases.lock().active_key(plugin_id)
     }
 
-    /// 插入模块到缓存。
+    pub fn generation_count(&self, plugin_id: &str) -> usize {
+        self.cache.keys().filter(|key| key.pack_id == plugin_id).count()
+    }
+
+    pub fn get(&self, plugin_id: &str) -> Option<&CachedModule> {
+        let key = self.active_key(plugin_id)?;
+        self.cache.get(&key)
+    }
+
+    pub fn get_generation(
+        &self,
+        plugin_id: &str,
+        generation: Generation,
+    ) -> Option<&CachedModule> {
+        self.cache
+            .iter()
+            .find(|(key, _)| key.pack_id == plugin_id && key.generation == generation)
+            .map(|(_, module)| module)
+    }
+
+    fn touch(&mut self, key: &PackCacheKey) {
+        if let Some(pos) = self.order.iter().position(|candidate| candidate == key) {
+            self.order.remove(pos);
+        }
+        self.order.push(key.clone());
+    }
+
+    fn remove_local_key(&mut self, key: &PackCacheKey) -> Option<CachedModule> {
+        let removed = self.cache.remove(key);
+        if let Some(pos) = self.order.iter().position(|candidate| candidate == key) {
+            self.order.remove(pos);
+        }
+        removed
+    }
+
+    fn authority_error(plugin_id: &str, error: GenerationError) -> WasmError {
+        WasmError::ModuleLease { plugin_id: plugin_id.to_string(), reason: error.to_string() }
+    }
+
+    /// Insert and atomically activate immutable content. module_hash is the content version.
     pub fn insert(&mut self, module: CachedModule) -> WasmResult<()> {
-        if self.cache.len() >= self.config.max_cached_modules {
-            // 驱逐最旧的
-            if let Some(evicted_id) = self.order.first().cloned() {
-                self.cache.remove(&evicted_id);
-                self.order.remove(0);
-            } else {
-                return Err(WasmError::ModuleCacheFull { plugin_id: module.plugin_id.clone() });
-            }
-        }
-
-        // 如果已存在，更新 LRU 顺序
-        if self.cache.contains_key(&module.plugin_id) {
-            let pos = self.order.iter().position(|id| id == &module.plugin_id);
-            if let Some(pos) = pos {
-                self.order.remove(pos);
-            }
-        }
-
         let plugin_id = module.plugin_id.clone();
-        self.cache.insert(plugin_id.clone(), module);
-        self.order.push(plugin_id);
+        let version = module.module_hash.clone();
+        let now_ms = wasm_now_ms();
+        let max = self.config.max_cached_modules;
+        let authority_arc = self.pack_leases.clone();
+        let mut authority = authority_arc.lock();
+
+        if let Some(active) = authority.active_key(&plugin_id) {
+            if active.version == version {
+                if !self.cache.contains_key(&active) && self.cache.len() >= max {
+                    let candidate = self
+                        .order
+                        .iter()
+                        .find(|key| authority.gc_eligible(key, now_ms).unwrap_or(false))
+                        .cloned()
+                        .ok_or_else(|| WasmError::ModuleCacheFull {
+                            plugin_id: plugin_id.clone(),
+                        })?;
+                    if authority
+                        .retire_if_gc_eligible(&candidate, now_ms)
+                        .map_err(|e| Self::authority_error(&plugin_id, e))?
+                    {
+                        self.remove_local_key(&candidate);
+                    }
+                }
+                self.cache.insert(active.clone(), module);
+                self.touch(&active);
+                return Ok(());
+            }
+        }
+
+        let previous_active = authority.active_key(&plugin_id);
+        let key =
+            PackCacheKey::new(plugin_id.clone(), version, authority.next_generation(&plugin_id));
+        let needed = self.cache.len().saturating_add(1).saturating_sub(max);
+        let mut eviction = Vec::new();
+
+        for candidate in &self.order {
+            if eviction.len() >= needed {
+                break;
+            }
+            let eligible = if previous_active.as_ref() == Some(candidate) {
+                authority.gc_eligible_after_deactivate(candidate, now_ms)
+            } else {
+                authority.gc_eligible(candidate, now_ms)
+            }
+            .unwrap_or(false);
+            if eligible {
+                eviction.push(candidate.clone());
+            }
+        }
+        if eviction.len() < needed {
+            return Err(WasmError::ModuleCacheFull { plugin_id });
+        }
+
+        authority.track(
+            key.clone(),
+            PackGcState { active: false, rollback_pinned: false, transaction_staged: true },
+        );
+        self.cache.insert(key.clone(), module);
+        self.order.push(key.clone());
+        authority
+            .activate_staged(&key)
+            .map_err(|e| Self::authority_error(&plugin_id, e))?;
+
+        for candidate in eviction {
+            if authority
+                .retire_if_gc_eligible(&candidate, now_ms)
+                .map_err(|e| Self::authority_error(&plugin_id, e))?
+            {
+                self.remove_local_key(&candidate);
+            }
+        }
         Ok(())
     }
 
-    /// 移除缓存的模块。
-    pub fn remove(&mut self, plugin_id: &str) -> Option<CachedModule> {
-        let module = self.cache.remove(plugin_id);
-        let pos = self.order.iter().position(|id| id == plugin_id);
-        if let Some(pos) = pos {
-            self.order.remove(pos);
+    pub fn acquire_active_lease(
+        &self,
+        host_instance_id: &str,
+        plugin_id: &str,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> WasmResult<Option<PackLease>> {
+        let mut authority = self.pack_leases.lock();
+        let Some(key) = authority.active_key(plugin_id) else {
+            return Ok(None);
+        };
+        if !self.cache.contains_key(&key) {
+            return Err(WasmError::ModuleLease {
+                plugin_id: plugin_id.to_string(),
+                reason: format!(
+                    "active generation {} is not resident in this cache owner",
+                    key.generation.0
+                ),
+            });
         }
-        module
+        authority
+            .acquire(host_instance_id, &key, now_ms, ttl_ms)
+            .map(Some)
+            .map_err(|e| Self::authority_error(plugin_id, e))
     }
 
-    /// 清理过期模块。
+    pub fn heartbeat_lease(
+        &self,
+        plugin_id: &str,
+        token: &str,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> WasmResult<PackLease> {
+        self.pack_leases
+            .lock()
+            .heartbeat(token, now_ms, ttl_ms)
+            .map_err(|e| Self::authority_error(plugin_id, e))
+    }
+
+    pub fn release_lease(&self, token: &str) -> bool {
+        self.pack_leases.lock().release(token)
+    }
+
+    pub fn set_rollback_pinned(&self, key: &PackCacheKey, pinned: bool) -> WasmResult<()> {
+        let mut authority = self.pack_leases.lock();
+        let mut state = authority.state(key).ok_or_else(|| WasmError::ModuleLease {
+            plugin_id: key.pack_id.clone(),
+            reason: "generation is not tracked".to_string(),
+        })?;
+        state.rollback_pinned = pinned;
+        authority
+            .set_state(key, state)
+            .map_err(|e| Self::authority_error(&key.pack_id, e))
+    }
+
+    /// Deactivate the lineage, then delete only generations the shared authority allows to GC.
+    pub fn remove(&mut self, plugin_id: &str) -> Option<CachedModule> {
+        let now_ms = wasm_now_ms();
+        let authority_arc = self.pack_leases.clone();
+        let mut authority = authority_arc.lock();
+        authority.deactivate(plugin_id);
+        let keys: Vec<_> =
+            self.order.iter().filter(|key| key.pack_id == plugin_id).cloned().collect();
+        let mut first = None;
+        for key in keys {
+            if authority.retire_if_gc_eligible(&key, now_ms).unwrap_or(false) {
+                let removed = self.remove_local_key(&key);
+                if first.is_none() {
+                    first = removed;
+                }
+            }
+        }
+        first
+    }
+
+    /// TTL creates candidates only; the A89 authority makes the deletion decision.
     pub fn cleanup_expired(&mut self) -> Vec<String> {
         let now = Utc::now();
+        let now_ms = wasm_now_ms();
         let ttl = chrono::Duration::seconds(self.config.cache_ttl_secs as i64);
-        let mut to_remove = Vec::new();
+        let candidates: Vec<_> = self
+            .cache
+            .iter()
+            .filter(|(_, module)| now - module.cached_at > ttl)
+            .map(|(key, _)| key.clone())
+            .collect();
 
-        for (id, module) in self.cache.iter() {
-            if now - module.cached_at > ttl {
-                to_remove.push(id.clone());
+        let authority_arc = self.pack_leases.clone();
+        let mut authority = authority_arc.lock();
+        let mut removed = Vec::new();
+        for key in candidates {
+            if authority.retire_if_gc_eligible(&key, now_ms).unwrap_or(false) {
+                if let Some(module) = self.remove_local_key(&key) {
+                    removed.push(module.plugin_id);
+                }
             }
         }
-
-        for id in &to_remove {
-            self.cache.remove(id);
-            let pos = self.order.iter().position(|x| x == id);
-            if let Some(pos) = pos {
-                self.order.remove(pos);
-            }
-        }
-
-        to_remove
+        removed
     }
 
-    /// 清除指定插件的缓存。
     pub fn clear_plugin(&mut self, plugin_id: &str) -> Option<CachedModule> {
         self.remove(plugin_id)
     }
+}
+
+fn wasm_now_ms() -> u64 {
+    Utc::now().timestamp_millis().max(0) as u64
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -942,6 +1121,90 @@ mod tests {
         let removed = cache.remove("test.plugin");
         assert!(removed.is_some());
         assert_eq!(cache.cache_count(), 0);
+    }
+
+    #[test]
+    fn pack_lease_keeps_old_generation_resident_across_activation_and_ttl_gc() {
+        let authority = Arc::new(Mutex::new(PackLeaseRegistry::default()));
+        let config = ModuleCacheConfig { max_cached_modules: 2, cache_ttl_secs: 1 };
+        let mut cache = ModuleCache::with_pack_lease_registry(config, authority);
+
+        cache
+            .insert(CachedModule {
+                plugin_id: "test.plugin".into(),
+                module_hash: "hash-v1".into(),
+                cached_at: Utc::now() - chrono::Duration::seconds(10),
+                size_bytes: 1024,
+            })
+            .unwrap();
+        let old_key = cache.active_key("test.plugin").unwrap();
+        let lease = cache
+            .acquire_active_lease("host-a", "test.plugin", wasm_now_ms(), 60_000)
+            .unwrap()
+            .unwrap();
+
+        cache
+            .insert(CachedModule {
+                plugin_id: "test.plugin".into(),
+                module_hash: "hash-v2".into(),
+                cached_at: Utc::now(),
+                size_bytes: 2048,
+            })
+            .unwrap();
+        assert_eq!(cache.generation_count("test.plugin"), 2);
+        assert_eq!(cache.get("test.plugin").unwrap().module_hash, "hash-v2");
+        assert!(cache.get_generation("test.plugin", old_key.generation).is_some());
+
+        assert!(cache.cleanup_expired().is_empty());
+        assert!(cache.release_lease(&lease.token));
+        assert_eq!(cache.cleanup_expired(), vec!["test.plugin".to_string()]);
+        assert_eq!(cache.generation_count("test.plugin"), 1);
+    }
+
+    #[test]
+    fn rollback_pin_blocks_lru_eviction_until_unpinned() {
+        let authority = Arc::new(Mutex::new(PackLeaseRegistry::default()));
+        let config = ModuleCacheConfig { max_cached_modules: 2, cache_ttl_secs: 3600 };
+        let mut cache = ModuleCache::with_pack_lease_registry(config, authority.clone());
+
+        for hash in ["v1", "v2"] {
+            cache
+                .insert(CachedModule {
+                    plugin_id: "test.plugin".into(),
+                    module_hash: hash.into(),
+                    cached_at: Utc::now(),
+                    size_bytes: 1,
+                })
+                .unwrap();
+        }
+        let old = {
+            let registry = authority.lock();
+            registry
+                .keys_for("test.plugin")
+                .into_iter()
+                .find(|key| !registry.state(key).unwrap().active)
+                .unwrap()
+        };
+        cache.set_rollback_pinned(&old, true).unwrap();
+
+        let result = cache.insert(CachedModule {
+            plugin_id: "other.plugin".into(),
+            module_hash: "other".into(),
+            cached_at: Utc::now(),
+            size_bytes: 1,
+        });
+        assert!(matches!(result, Err(WasmError::ModuleCacheFull { .. })));
+
+        cache.set_rollback_pinned(&old, false).unwrap();
+        cache
+            .insert(CachedModule {
+                plugin_id: "other.plugin".into(),
+                module_hash: "other".into(),
+                cached_at: Utc::now(),
+                size_bytes: 1,
+            })
+            .unwrap();
+        assert_eq!(cache.cache_count(), 2);
     }
 
     #[test]

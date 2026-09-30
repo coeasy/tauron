@@ -24,6 +24,10 @@ pub enum WasmError {
     #[error("模块缓存已满：{plugin_id}")]
     ModuleCacheFull { plugin_id: String },
 
+    /// Pack/cache generation authority rejected activation or execution lease.
+    #[error("模块缓存租约失败：{plugin_id}，原因 {reason}")]
+    ModuleLease { plugin_id: String, reason: String },
+
     /// 崩溃计数超限。
     #[error("崩溃计数超限：{plugin_id}")]
     CrashLimitExceeded { plugin_id: String },

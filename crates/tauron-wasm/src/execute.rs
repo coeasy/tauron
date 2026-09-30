@@ -10,10 +10,13 @@
 // 本模块不依赖 `tauri`：WASM 管理是抽象的，单元测试用 Mock。
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tauron_host::PackLeaseRegistry;
 
 use crate::{
     validate_host_fn, validate_plugin_config, CachedModule, CrashLimitConfig, InstancePool,
@@ -68,6 +71,23 @@ pub struct HostFnCallRecord {
 /// host_fn 处理函数类型。
 pub type HostFnHandler = Box<dyn Fn(String, String) -> Result<String, String> + Send + Sync>;
 
+struct ActivePackLeaseGuard {
+    authority: Arc<Mutex<PackLeaseRegistry>>,
+    token: Option<String>,
+}
+
+impl Drop for ActivePackLeaseGuard {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.authority.lock().release(&token);
+        }
+    }
+}
+
+fn wasm_now_ms() -> u64 {
+    Utc::now().timestamp_millis().max(0) as u64
+}
+
 /// WASM 引擎配置。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +105,8 @@ pub struct WasmEngine {
     config: WasmEngineConfig,
     pool: InstancePool,
     cache: ModuleCache,
+    /// HostInstance identity recorded on shared A89 execution leases.
+    host_instance_id: String,
     crash_tracker: WasmCrashTracker,
     host_fns: HashMap<String, HostFnHandler>,
     host_fn_calls: Vec<HostFnCallRecord>,
@@ -93,9 +115,23 @@ pub struct WasmEngine {
 impl WasmEngine {
     /// 创建新的 WASM 引擎。
     pub fn new(config: WasmEngineConfig) -> Self {
+        Self::with_pack_lease_registry(
+            config,
+            "standalone-wasm-engine",
+            Arc::new(Mutex::new(PackLeaseRegistry::default())),
+        )
+    }
+
+    /// Production LocalHost/cache owners inject the shared A89 authority and owner identity.
+    pub fn with_pack_lease_registry(
+        config: WasmEngineConfig,
+        host_instance_id: impl Into<String>,
+        pack_leases: Arc<Mutex<PackLeaseRegistry>>,
+    ) -> Self {
         Self {
             pool: InstancePool::new(config.instance_pool.clone()),
-            cache: ModuleCache::new(config.module_cache.clone()),
+            cache: ModuleCache::with_pack_lease_registry(config.module_cache.clone(), pack_leases),
+            host_instance_id: host_instance_id.into(),
             crash_tracker: WasmCrashTracker::new(config.crash_limit.clone()),
             config,
             host_fns: HashMap::new(),
@@ -197,6 +233,22 @@ impl WasmEngine {
                 plugin_id: plugin_config.plugin_id.clone(),
             });
         }
+
+        // V4 A89: pin the exact active module generation for the whole execution. Normal returns
+        // release immediately via RAII; owner death leaves a bounded TTL lease for crash safety.
+        let lease_ttl_ms = self.config.module_cache.cache_ttl_secs.saturating_mul(1_000).max(1);
+        let _pack_lease = self
+            .cache
+            .acquire_active_lease(
+                &self.host_instance_id,
+                &plugin_config.plugin_id,
+                wasm_now_ms(),
+                lease_ttl_ms,
+            )?
+            .map(|lease| ActivePackLeaseGuard {
+                authority: self.cache.pack_lease_registry(),
+                token: Some(lease.token),
+            });
 
         // 4. 从池获取或创建实例
         let instance = match self.pool.get_instance(&plugin_config.plugin_id) {
@@ -445,6 +497,26 @@ mod tests {
     }
 
     // ── 执行测试 ──
+
+    #[test]
+    fn execution_uses_shared_pack_authority_and_releases_lease_on_return() {
+        let authority = Arc::new(Mutex::new(PackLeaseRegistry::default()));
+        let mut engine = WasmEngine::with_pack_lease_registry(
+            WasmEngineConfig::default(),
+            "host-a",
+            authority.clone(),
+        );
+        let config = make_plugin_config();
+        engine.load_module(&config.plugin_id, "hash123", 1024).unwrap();
+        assert_eq!(authority.lock().lease_count(), 0);
+
+        engine.execute(&config, "main", "{}").unwrap();
+        assert_eq!(authority.lock().lease_count(), 0);
+        assert_eq!(
+            authority.lock().active_key(&config.plugin_id).unwrap().version,
+            "hash123"
+        );
+    }
 
     #[test]
     fn test_execute_success() {

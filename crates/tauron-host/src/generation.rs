@@ -326,6 +326,91 @@ impl PackLeaseRegistry {
         Ok(true)
     }
 
+    /// Current active immutable generation for a pack/cache lineage.
+    pub fn active_key(&self, pack_id: &str) -> Option<PackCacheKey> {
+        self.entries
+            .iter()
+            .filter(|(key, state)| key.pack_id == pack_id && state.active)
+            .map(|(key, _)| key.clone())
+            .max_by_key(|key| key.generation)
+    }
+
+    /// Allocate the next generation number without mutating activation state.
+    pub fn next_generation(&self, pack_id: &str) -> Generation {
+        self.entries
+            .keys()
+            .filter(|key| key.pack_id == pack_id)
+            .map(|key| key.generation)
+            .max()
+            .map_or(Generation::INITIAL, Generation::next)
+    }
+
+    /// Snapshot every tracked generation for one pack lineage.
+    pub fn keys_for(&self, pack_id: &str) -> Vec<PackCacheKey> {
+        let mut keys: Vec<_> =
+            self.entries.keys().filter(|key| key.pack_id == pack_id).cloned().collect();
+        keys.sort_by_key(|key| key.generation);
+        keys
+    }
+
+    /// Ask whether an active generation would be collectable immediately after demotion.
+    pub fn gc_eligible_after_deactivate(
+        &self,
+        key: &PackCacheKey,
+        now_ms: u64,
+    ) -> Result<bool, GenerationError> {
+        let state = self.entries.get(key).ok_or_else(|| GenerationError::PackNotTracked {
+            pack_id: key.pack_id.clone(),
+            version: key.version.clone(),
+            generation: key.generation,
+        })?;
+        Ok(!state.rollback_pinned
+            && !state.transaction_staged
+            && self.live_lease_count(key, now_ms) == 0)
+    }
+
+    /// Atomically activate one staged generation and demote all older active generations in the
+    /// same lineage. Returns the previously-active key, when one existed.
+    pub fn activate_staged(
+        &mut self,
+        key: &PackCacheKey,
+    ) -> Result<Option<PackCacheKey>, GenerationError> {
+        if !self.entries.contains_key(key) {
+            return Err(GenerationError::PackNotTracked {
+                pack_id: key.pack_id.clone(),
+                version: key.version.clone(),
+                generation: key.generation,
+            });
+        }
+        let previous = self.active_key(&key.pack_id);
+        for (candidate, state) in &mut self.entries {
+            if candidate.pack_id == key.pack_id {
+                state.active = false;
+            }
+        }
+        let state = self.entries.get_mut(key).expect("entry checked above");
+        state.active = true;
+        state.transaction_staged = false;
+        Ok(previous)
+    }
+
+    /// Stop routing new work to a lineage while preserving live lease protection.
+    pub fn deactivate(&mut self, pack_id: &str) {
+        for (key, state) in &mut self.entries {
+            if key.pack_id == pack_id {
+                state.active = false;
+            }
+        }
+    }
+
+    /// Explicit LocalHost owner shutdown/reclaim: release every lease owned by that HostInstance.
+    /// Crash paths still fall back to TTL when no clean owner-death proof is available.
+    pub fn release_host(&mut self, host_instance_id: &str) -> usize {
+        let before = self.leases.len();
+        self.leases.retain(|_, lease| lease.host_instance_id != host_instance_id);
+        before - self.leases.len()
+    }
+
     pub fn lease_count(&self) -> usize {
         self.leases.len()
     }
@@ -420,6 +505,29 @@ mod tests {
         assert!(leases.retire_if_gc_eligible(&key, 5).unwrap());
         assert!(leases.state(&key).is_none());
         assert!(matches!(leases.gc_eligible(&key, 5), Err(GenerationError::PackNotTracked { .. })));
+    }
+
+    #[test]
+    fn staged_activation_demotes_old_generation_and_owner_release_unblocks_gc() {
+        let mut leases = PackLeaseRegistry::default();
+        let old = PackCacheKey::new("wasm:p", "sha-old", Generation::INITIAL);
+        leases.track(
+            old.clone(),
+            PackGcState { active: true, rollback_pinned: false, transaction_staged: false },
+        );
+        let held = leases.acquire("host-a", &old, 100, 1_000).unwrap();
+
+        let next = PackCacheKey::new("wasm:p", "sha-new", leases.next_generation("wasm:p"));
+        leases.track(
+            next.clone(),
+            PackGcState { active: false, rollback_pinned: false, transaction_staged: true },
+        );
+        assert_eq!(leases.activate_staged(&next).unwrap(), Some(old.clone()));
+        assert_eq!(leases.active_key("wasm:p"), Some(next));
+        assert!(!leases.gc_eligible(&old, 200).unwrap());
+        assert_eq!(leases.release_host("host-a"), 1);
+        assert!(leases.gc_eligible(&old, 200).unwrap());
+        assert_eq!(held.host_instance_id, "host-a");
     }
 
     #[test]
