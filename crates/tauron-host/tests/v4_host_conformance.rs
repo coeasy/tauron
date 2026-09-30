@@ -3,6 +3,8 @@
 //! This is intentionally transport-neutral and GUI-free. Every official/ref host must preserve
 //! these semantics before transport-specific conformance is layered on top.
 
+use std::process::Command;
+
 use serde::{Deserialize, Serialize};
 use tauron_host::{
     decode_wire_json, encode_wire_json, peer_proof, production_doctor, Degradation, DeploymentMode,
@@ -117,21 +119,70 @@ fn conform_ordering_detects_duplicate_gap_and_revision_regression() {
 }
 
 
-#[test]
-fn conform_storage_single_writer_uses_cross_process_file_lock() {
-    let root = tempfile::tempdir().unwrap();
-    let namespace = StorageNamespace {
+fn storage_namespace() -> StorageNamespace {
+    StorageNamespace {
         tenant: "default".into(),
         application: "conformance".into(),
         principal: "registry".into(),
+    }
+}
+
+#[test]
+fn storage_lease_child_probe() {
+    let Ok(root) = std::env::var("TAURON_STORAGE_LEASE_PROBE_ROOT") else {
+        return;
     };
-    let first = PersistentWriterLease::acquire(root.path(), namespace.clone(), "host-a").unwrap();
-    assert!(matches!(
-        PersistentWriterLease::acquire(root.path(), namespace.clone(), "host-b"),
-        Err(WriterLeaseError::Busy { .. })
-    ));
+    let expectation =
+        std::env::var("TAURON_STORAGE_LEASE_PROBE_EXPECT").unwrap_or_else(|_| "busy".into());
+    let result =
+        PersistentWriterLease::acquire(std::path::Path::new(&root), storage_namespace(), "child");
+    match expectation.as_str() {
+        "busy" => assert!(
+            matches!(result, Err(WriterLeaseError::Busy { .. })),
+            "independent process must observe the active writer lock"
+        ),
+        "acquire" => assert!(
+            result.is_ok(),
+            "independent process must acquire after the prior owner exits: {result:?}"
+        ),
+        other => panic!("unknown storage probe expectation: {other}"),
+    }
+}
+
+#[test]
+fn conform_storage_single_writer_uses_cross_process_file_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let first =
+        PersistentWriterLease::acquire(root.path(), storage_namespace(), "host-a").unwrap();
     let first_epoch = first.lease().epoch;
+
+    let current_exe = std::env::current_exe().unwrap();
+    let blocked = Command::new(&current_exe)
+        .arg("--exact")
+        .arg("storage_lease_child_probe")
+        .arg("--nocapture")
+        .env("TAURON_STORAGE_LEASE_PROBE_ROOT", root.path())
+        .env("TAURON_STORAGE_LEASE_PROBE_EXPECT", "busy")
+        .status()
+        .unwrap();
+    assert!(blocked.success(), "child process did not prove the active lock");
+
     drop(first);
-    let second = PersistentWriterLease::acquire(root.path(), namespace, "host-b").unwrap();
-    assert!(second.lease().epoch > first_epoch);
+
+    let acquired = Command::new(&current_exe)
+        .arg("--exact")
+        .arg("storage_lease_child_probe")
+        .arg("--nocapture")
+        .env("TAURON_STORAGE_LEASE_PROBE_ROOT", root.path())
+        .env("TAURON_STORAGE_LEASE_PROBE_EXPECT", "acquire")
+        .status()
+        .unwrap();
+    assert!(acquired.success(), "child process could not acquire after owner drop");
+
+    let second =
+        PersistentWriterLease::acquire(root.path(), storage_namespace(), "host-b").unwrap();
+    assert!(
+        second.lease().epoch > first_epoch,
+        "persistent fencing epoch must advance across process ownership changes"
+    );
 }
