@@ -56,12 +56,25 @@
 
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+use tauron_host::{decode_durable, encode_durable, DurableEnvelope};
 use tauron_recovery::{BootContextEntry, RecoveryEngine};
 
 /// 标记文件 envelope 的格式版本。
 const RECOVERY_STORE_VERSION: u64 = 1;
+const RECOVERY_DURABLE_SCHEMA: &str = "tauron.recovery-state/2";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RecoveryDurablePayload {
+    version: u64,
+    boot_in_flight: bool,
+    last_context: Vec<BootContextEntry>,
+    engine: serde_json::Value,
+}
 
 /// 标记文件名（位于宿主数据目录下）。
 const RECOVERY_FILE: &str = "recovery-state.json";
@@ -125,6 +138,9 @@ pub struct RecoveryStore {
     /// `load` 时来自磁盘，`save*` 时来自引擎快照。空 = 没有可回传的上下文
     /// （首次启动、或标记文件里这一段读不出来）——**不伪造**。
     pub last_context: Vec<BootContextEntry>,
+    /// Monotonic durable generation. Legacy records start at generation 0 and are upgraded on
+    /// the next successful save.
+    generation: u64,
 }
 
 impl RecoveryStore {
@@ -135,7 +151,13 @@ impl RecoveryStore {
 
     /// 在宿主数据目录下启用持久化。
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir: Some(dir), in_flight: false, last_error: None, last_context: Vec::new() }
+        Self {
+            dir: Some(dir),
+            in_flight: false,
+            last_error: None,
+            last_context: Vec::new(),
+            generation: 0,
+        }
     }
 
     /// 持久化是否启用。
@@ -186,13 +208,23 @@ impl RecoveryStore {
         let path = dir.join(RECOVERY_FILE);
         let mut load_error: Option<String> = None;
         let (mut engine, previous_in_flight, persisted_context, source) =
-            match fs::read_to_string(&path) {
-                Ok(text) => match parse(&text) {
-                    Ok((engine, in_flight, last_context)) => {
+            match fs::read(&path) {
+                Ok(bytes) => match parse_durable_or_legacy(&bytes) {
+                    Ok((engine, in_flight, last_context, generation)) => {
+                        self.generation = generation;
                         (engine, in_flight, last_context, LoadSource::Restored)
                     }
                     Err(err) => {
-                        load_error = Some(format!("恢复标记文件不可解析：{err}"));
+                        let quarantine = quarantine_corrupt(&path);
+                        load_error = Some(match quarantine {
+                            Ok(path) => format!(
+                                "恢复标记文件完整性校验失败：{err}；已隔离到 {}",
+                                path.display()
+                            ),
+                            Err(qerr) => format!(
+                                "恢复标记文件完整性校验失败：{err}；隔离失败：{qerr}"
+                            ),
+                        });
                         (
                             RecoveryEngine::new(required_plugins.clone()),
                             true,
@@ -208,7 +240,6 @@ impl RecoveryStore {
                     LoadSource::Fresh,
                 ),
                 Err(e) => {
-                    // 目录不可读（权限被拒）不是「上次崩溃」的证据，不能误计数。
                     load_error = Some(format!("恢复标记文件读取失败：{e}"));
                     (
                         RecoveryEngine::new(required_plugins.clone()),
@@ -267,25 +298,40 @@ impl RecoveryStore {
             return true;
         };
 
-        let payload = serde_json::json!({
-            "version": RECOVERY_STORE_VERSION,
-            "bootInFlight": self.in_flight,
-            // 顶层一份显式的 `lastContext`：`RecoveryStore` 自己的持久化字段
-            // （门禁「RecoveryStore 必须持久化 last_context」读的就是它）。
-            "lastContext": self.last_context,
-            "engine": engine,
-        });
-        // payload 由 json! 构造，序列化不可能失败。
-        let text = serde_json::to_string(&payload).expect("json! 构造的 Value 序列化不会失败");
+        let next_generation = self.generation.saturating_add(1);
+        let payload = RecoveryDurablePayload {
+            version: RECOVERY_STORE_VERSION,
+            boot_in_flight: self.in_flight,
+            last_context: self.last_context.clone(),
+            engine: engine.clone(),
+        };
+        let bytes = match DurableEnvelope::seal(
+            RECOVERY_DURABLE_SCHEMA,
+            next_generation,
+            payload,
+        )
+        .and_then(|envelope| encode_durable(&envelope))
+        {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.last_error = Some(format!("恢复标记 durable envelope 编码失败：{error}"));
+                return false;
+            }
+        };
 
         let tmp = dir.join(RECOVERY_TMP_FILE);
         let target = dir.join(RECOVERY_FILE);
         let result = fs::create_dir_all(&dir)
-            .and_then(|_| fs::write(&tmp, text))
+            .and_then(|_| {
+                let mut file = fs::File::create(&tmp)?;
+                file.write_all(&bytes)?;
+                file.sync_all()
+            })
             .and_then(|_| fs::rename(&tmp, &target));
 
         match result {
             Ok(()) => {
+                self.generation = next_generation;
                 self.last_error = None;
                 true
             }
@@ -299,10 +345,44 @@ impl RecoveryStore {
     }
 }
 
-/// 解析标记文件 envelope。
-///
-/// 返回 `(引擎, bootInFlight, lastContext)`。
-fn parse(text: &str) -> std::result::Result<(RecoveryEngine, bool, Vec<BootContextEntry>), String> {
+/// Parse the V4 durable envelope, with one-way compatibility for the pre-V4 plain JSON record.
+fn parse_durable_or_legacy(
+    bytes: &[u8],
+) -> std::result::Result<(RecoveryEngine, bool, Vec<BootContextEntry>, u64), String> {
+    match decode_durable::<RecoveryDurablePayload>(bytes) {
+        Ok(envelope) => {
+            if envelope.schema != RECOVERY_DURABLE_SCHEMA {
+                return Err(format!("不支持的 durable schema：{}", envelope.schema));
+            }
+            let payload = envelope.payload;
+            if payload.version != RECOVERY_STORE_VERSION {
+                return Err(format!("不支持的标记版本：{}", payload.version));
+            }
+            let engine =
+                RecoveryEngine::from_json(&payload.engine).map_err(|e| e.to_string())?;
+            let last_context = if payload.last_context.is_empty() {
+                engine.context().to_vec()
+            } else {
+                payload.last_context
+            };
+            Ok((engine, payload.boot_in_flight, last_context, envelope.generation))
+        }
+        Err(durable_error) => {
+            let text = std::str::from_utf8(bytes)
+                .map_err(|e| format!("durable={durable_error}; legacy UTF-8={e}"))?;
+            parse_legacy(text)
+                .map(|(engine, in_flight, context)| (engine, in_flight, context, 0))
+                .map_err(|legacy_error| {
+                    format!("durable={durable_error}; legacy={legacy_error}")
+                })
+        }
+    }
+}
+
+/// Pre-V4 recovery record parser. Kept only as an upgrade reader; new writes never use it.
+fn parse_legacy(
+    text: &str,
+) -> std::result::Result<(RecoveryEngine, bool, Vec<BootContextEntry>), String> {
     let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let version = v
         .get("version")
@@ -313,15 +393,18 @@ fn parse(text: &str) -> std::result::Result<(RecoveryEngine, bool, Vec<BootConte
     }
     let engine = v.get("engine").ok_or_else(|| "缺少 engine 字段".to_string())?;
     let engine = RecoveryEngine::from_json(engine).map_err(|e| e.to_string())?;
-    // 字段缺失时按「上一次未干净结束」处理（安全方向）。
     let in_flight = v.get("bootInFlight").and_then(serde_json::Value::as_bool).unwrap_or(true);
-    // `lastContext` 缺失/损坏 → 视为无 context，**不**把整份标记判为损坏。
-    // 顶层没有时退回引擎快照里那份（两者同源，兼容只写了其中一份的标记）。
     let last_context = v
         .get("lastContext")
-        .and_then(|c| serde_json::from_value::<Vec<BootContextEntry>>(c.clone()).ok())
+        .and_then(|context| serde_json::from_value::<Vec<BootContextEntry>>(context.clone()).ok())
         .unwrap_or_else(|| engine.context().to_vec());
     Ok((engine, in_flight, last_context))
+}
+
+fn quarantine_corrupt(path: &Path) -> std::io::Result<PathBuf> {
+    let quarantined = path.with_extension(format!("json.corrupt-{}", now_ms()));
+    fs::rename(path, &quarantined)?;
+    Ok(quarantined)
 }
 
 /// 从引擎快照里提炼上下文；缺失或损坏都返回空（诊断字段不做「猜」）。
@@ -496,6 +579,30 @@ mod tests {
         // 两次崩溃已经让阶段推进到安全模式，且跨进程留痕。
         assert_eq!(r.engine.counter().consecutive_failures, 2);
         assert_eq!(r.engine.phase(), BootPhase::Safemode);
+    }
+
+    #[test]
+    fn durable_envelope_detects_tamper_and_quarantines_corrupt_state() {
+        let t = tempfile::tempdir().unwrap();
+        let mut store = store_in(&t);
+        let record = store.load(HashSet::new());
+        assert!(store.save(&record.engine));
+        let path = store.path().unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["payload"]["bootInFlight"] = serde_json::Value::Bool(false);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let mut reloaded = store_in(&t);
+        let record = reloaded.load(HashSet::new());
+        assert_eq!(record.source, LoadSource::Corrupt);
+        assert!(
+            fs::read_dir(t.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().contains("corrupt-")),
+            "tampered durable record must be quarantined"
+        );
     }
 
     #[test]
