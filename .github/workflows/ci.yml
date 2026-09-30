@@ -265,6 +265,10 @@ jobs:
       - name: 测试 tauron-adapter（tauri feature）
         run: cargo test -p tauron-adapter --features tauri --locked
 
+      # V4 A84/A94/A100: security-sensitive install behavior must be executed, not merely compiled.
+      - name: 测试 tauron-adapter（plugin-install feature）
+        run: cargo test -p tauron-adapter --features plugin-install --locked
+
       # 全 feature 组合的编译检查。放在这个 job 里是因为 `--all-features`
       # 会打开 tauri，需要上面那批系统库。
       - name: 全特性编译检查
