@@ -46,6 +46,17 @@ pub enum KillOutcome {
     AlreadyGone,
 }
 
+/// V4 process liveness contract. `Unknown` is deliberately distinct from `Alive`:
+/// losing the Child handle or failing `try_wait` must not be advertised as a healthy runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProcessStatus {
+    Alive,
+    Exited,
+    Unknown,
+}
+
+
 /// 进程启动器（可注入）。
 ///
 /// **契约**：`spawn` 返回 `Ok` 即表示操作系统层面**真的**有一个进程在跑，
@@ -56,10 +67,20 @@ pub trait ProcSpawner: Send + Sync {
     /// 启动 sidecar。
     fn spawn(&self, cfg: &SpawnConfig) -> ProcResult<SpawnedProc>;
 
-    /// 进程是否仍存活。
+    /// Tri-state process status. Compatibility implementations that only provide `is_alive`
+    /// map their explicit boolean result to Alive/Exited.
+    fn status(&self, pid: u32) -> ProcessStatus {
+        if self.is_alive(pid) {
+            ProcessStatus::Alive
+        } else {
+            ProcessStatus::Exited
+        }
+    }
+
+    /// Legacy boolean probe. Implementations without probe support remain conservative.
     ///
-    /// 缺省返回 `true`：**没有探测能力的实现不得凭空判死**。误判"已死"会触发
-    /// 崩溃计数与 `RuntimeCrash` 事件，比"测不出来"严重得多（后者只是不报警）。
+    /// Production callers should prefer [`ProcSpawner::status`] so Unknown is not confused
+    /// with a proven-alive process.
     fn is_alive(&self, pid: u32) -> bool {
         let _ = pid;
         true
@@ -461,23 +482,28 @@ impl ProcSpawner for CommandSpawner {
         Ok(SpawnedProc { pid })
     }
 
-    fn is_alive(&self, pid: u32) -> bool {
+    fn status(&self, pid: u32) -> ProcessStatus {
         let mut children = self.children.lock();
         match children.get_mut(&pid) {
-            // `try_wait()` = `Some(..)` → 已退出；`None` → 仍在跑。
             Some(child) => match child.try_wait() {
                 Ok(Some(_status)) => {
-                    // 退出后句柄已无用：顺手移除，避免无界累积。
                     children.remove(&pid);
-                    false
+                    ProcessStatus::Exited
                 }
-                Ok(None) => true,
-                // 探测自身失败（句柄失效等）：**不判死**（见 trait 文档）。
-                Err(_) => true,
+                Ok(None) => ProcessStatus::Alive,
+                // A broken/invalid handle is not proof of life and not proof of death.
+                Err(_) => ProcessStatus::Unknown,
             },
-            // 不在表里 = 不是本启动器起的进程：同样不判死。
-            None => true,
+            // Not tracked by this spawner: ownership/liveness is unknown.
+            None => ProcessStatus::Unknown,
         }
+    }
+
+    fn is_alive(&self, pid: u32) -> bool {
+        // Preserve old conservative behavior for legacy callers while production V4 code uses
+        // status(): Unknown must not increment crash counters but also must not be advertised
+        // as proven alive.
+        !matches!(self.status(pid), ProcessStatus::Exited)
     }
 
     /// 终止并**回收**（`wait`）子进程。

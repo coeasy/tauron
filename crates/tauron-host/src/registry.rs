@@ -17,6 +17,7 @@
 //! （`pending → streams → runtime → active_order`）。
 
 use crate::call_delivery::CallOutcome;
+use crate::call_state::{AtomicCallState, CallTerminalState};
 use crate::error::{ErrorCode, HostError, HostResult};
 use crate::lifecycle::{transition, Event, PluginState, State, TransitionOutcome};
 use crate::manifest::{PermissionIndex, PluginId, PluginIdentity, PluginManifest};
@@ -207,6 +208,9 @@ pub struct PendingCall {
     pub target: String,
     /// 调用状态：等待执行方回填 / 已结算。
     pub state: CallState,
+    /// V4 terminal arbiter shared by every clone. Exactly one completion/cancel/timeout/failure wins.
+    #[serde(skip)]
+    terminal: Arc<AtomicCallState>,
     /// 执行方回填的结果载荷（仅 `Settled` 且成功时）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
@@ -219,6 +223,41 @@ pub struct PendingCall {
     pub created_at: Instant,
     #[serde(serialize_with = "serialize_instant")]
     pub expires_at: Instant,
+}
+
+impl PendingCall {
+    /// Canonical constructor: every pending call owns a shared V4 terminal arbiter.
+    ///
+    /// Keeping construction here prevents test/runtime call sites from accidentally creating
+    /// a call without the exactly-once terminal state used by settle/cancel/timeout races.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        call_id: String,
+        plugin_id: String,
+        cmd: String,
+        args: serde_json::Value,
+        caller: String,
+        target: String,
+        seq: u64,
+        created_at: Instant,
+        expires_at: Instant,
+    ) -> Self {
+        Self {
+            call_id,
+            plugin_id,
+            cmd,
+            args,
+            caller,
+            target,
+            state: CallState::Pending,
+            terminal: Arc::new(AtomicCallState::new()),
+            result: None,
+            error_code: None,
+            seq,
+            created_at,
+            expires_at,
+        }
+    }
 }
 
 /// 跨主体调用的状态（0.4-A1）。
@@ -644,20 +683,17 @@ impl Registry {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let call_id = Uuid::new_v4().to_string();
         let now = Instant::now();
-        let call = PendingCall {
-            call_id: call_id.clone(),
-            plugin_id: quota_owner.to_string(),
-            cmd: cmd.to_string(),
+        let call = PendingCall::new(
+            call_id.clone(),
+            quota_owner.to_string(),
+            cmd.to_string(),
             args,
-            caller: caller.to_string(),
-            target: target.to_string(),
-            state: CallState::Pending,
-            result: None,
-            error_code: None,
+            caller.to_string(),
+            target.to_string(),
             seq,
-            created_at: now,
-            expires_at: now + self.config.pending_ttl,
-        };
+            now,
+            now + self.config.pending_ttl,
+        );
         pending.insert(call_id, call.clone());
         Ok(call)
     }
@@ -667,13 +703,14 @@ impl Registry {
     /// **顺带回收该调用上的流并补发 `end` 终帧**：handler 忘了关流时，接收方靠这一帧
     /// 才会结束等待（R5 不变量 3）。这是唯一兜底，因此不能省。
     pub fn call_end(&self, call_id: &str) -> HostResult<PendingCall> {
-        self.end_call(call_id, StreamKind::End, None)
+        self.end_call(call_id, CallTerminalState::Completed, StreamKind::End, None)
     }
 
     /// 取消调用（仅回收，不返回条目）。流以 `error` 终帧收尾并带上原因。
     pub fn call_cancel(&self, call_id: &str) -> HostResult<()> {
         self.end_call(
             call_id,
+            CallTerminalState::Cancelled,
             StreamKind::Error,
             Some(serde_json::json!({ "reason": "canceled" })),
         )?;
@@ -685,27 +722,55 @@ impl Registry {
     fn end_call(
         &self,
         call_id: &str,
+        terminal_state: CallTerminalState,
         terminal: StreamKind,
         reason: Option<serde_json::Value>,
     ) -> HostResult<PendingCall> {
-        // 先做 TTL 校验再摘条目。
-        //
-        // `call_status` 是**已过期**与**不存在**的区分点：没有这一步时，一个
-        // 早已超时、只是还没被 GC 扫到的调用，会被 `host_call_end` 当成**正常
-        // 结束**接受——调用方收到"成功"，而它其实已经超时了。这是两个不同的
-        // 事实，错误码不同（`E_CALL_TIMEOUT` vs `E_CALL_NOT_FOUND`），调用方的
-        // 下一个动作也不同（重发 vs 放弃）。
-        //
-        // 锁序：`call_status` 取 `pending` 读锁后**释放**，`remove` 再取一次，
-        // 两次不嵌套——符合本文件「锁不嵌套」的并发模型。
+        // V4: expiry check + terminal arbitration + removal happen under one pending lock.
+        // This removes the old check-then-remove race where settle/cancel/timeout could all
+        // observe the same call as pending in separate critical sections.
         let now = Instant::now();
-        self.call_status(call_id, now)?;
-        let call = self.pending.lock().remove(call_id).ok_or_else(|| {
-            HostError::new(
-                ErrorCode::E_CALL_NOT_FOUND,
-                format!("pending call `{call_id}` 不存在或已结束"),
-            )
-        })?;
+        let mut pending = self.pending.lock();
+        let expired = pending
+            .get(call_id)
+            .ok_or_else(|| {
+                HostError::new(
+                    ErrorCode::E_CALL_NOT_FOUND,
+                    format!("pending call `{call_id}` 不存在或已结束"),
+                )
+            })?
+            .expires_at
+            <= now;
+
+        if expired {
+            let call = pending.remove(call_id).expect("checked pending call exists");
+            let _ = call.terminal.try_finish(CallTerminalState::TimedOut);
+            drop(pending);
+            self.streams.lock().close_for_call(
+                call_id,
+                StreamKind::Error,
+                Some(serde_json::json!({ "reason": "call_timeout" })),
+            );
+            return Err(HostError::new(
+                ErrorCode::E_CALL_TIMEOUT,
+                format!(
+                    "pending call `{call_id}` 已超时（TTL {}ms）",
+                    self.config.pending_ttl.as_millis()
+                ),
+            ));
+        }
+
+        let call = pending.remove(call_id).expect("checked pending call exists");
+        if !call.terminal.try_finish(terminal_state) {
+            // A completion already won. Put the settled snapshot back so the legitimate
+            // consumer can still take it; losing racers must not destroy the winning result.
+            pending.insert(call_id.to_string(), call);
+            return Err(HostError::new(
+                ErrorCode::E_CALL_ALREADY_SETTLED,
+                format!("pending call `{call_id}` 已有终态，重复结束被拒"),
+            ));
+        }
+        drop(pending);
         self.streams.lock().close_for_call(call_id, terminal, reason);
         Ok(call)
     }
@@ -716,7 +781,14 @@ impl Registry {
         let removed = {
             let mut pending = self.pending.lock();
             let before = pending.len();
-            pending.retain(|_, c| c.plugin_id != id.as_str());
+            pending.retain(|_, c| {
+                if c.plugin_id == id.as_str() {
+                    let _ = c.terminal.try_finish(CallTerminalState::Failed);
+                    false
+                } else {
+                    true
+                }
+            });
             before - pending.len()
         };
         // 同一订阅者的流整组回收（补 `error` 终帧 + 原因）：窗口没了，接收方
@@ -736,7 +808,9 @@ impl Registry {
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in &ids {
-                pending.remove(id);
+                if let Some(call) = pending.remove(id) {
+                    let _ = call.terminal.try_finish(CallTerminalState::TimedOut);
+                }
             }
             ids
         };
@@ -764,10 +838,12 @@ impl Registry {
                 format!("pending call `{call_id}` 不存在或已被取走"),
             )
         })?;
-        if call.state == CallState::Settled {
+        if call.state == CallState::Settled
+            || !call.terminal.try_finish(CallTerminalState::Completed)
+        {
             return Err(HostError::new(
                 ErrorCode::E_CALL_ALREADY_SETTLED,
-                format!("pending call `{call_id}` 已被结算，重复回填被拒"),
+                format!("pending call `{call_id}` 已被结算或已有终态，重复回填被拒"),
             ));
         }
         call.state = CallState::Settled;
@@ -1663,12 +1739,13 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         assert_eq!(r.gc_expired(), 1, "TTL GC 必须回收过期条目（计划 §4.1）");
         assert_eq!(r.pending_len(), 0);
-        // 超时查询返回 E_CALL_TIMEOUT（可重试）。
+        // 超时查询返回 E_CALL_TIMEOUT，但 V4 不允许 SDK 盲目自动重放。
         let call2 = r.call_begin(&id, "b", serde_json::json!({})).unwrap();
         std::thread::sleep(Duration::from_millis(5));
         let e = r.call_status(&call2.call_id, Instant::now()).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_CALL_TIMEOUT);
-        assert!(e.retryable);
+        assert!(!e.retryable);
+        assert_eq!(e.retry_class, crate::error::RetryClass::Manual);
         // 不超时前查询成功。
         let call3 = r.call_begin(&id, "c", serde_json::json!({})).unwrap();
         let c = r.call_status(&call3.call_id, Instant::now()).unwrap();
@@ -1706,15 +1783,13 @@ mod tests {
 
         let err = r.call_end(&c.call_id).unwrap_err();
         assert_eq!(err.code, ErrorCode::E_CALL_TIMEOUT);
-        // `E_CALL_TIMEOUT` 属于框架的可重试集合（`ErrorCode::retryable()`）——
-        // 超时是暂时性失败，重发可能成功。这里断言的是"码对了、可重试标志随码走"。
-        assert!(err.retryable, "超时应保持可重试（与 ErrorCode::retryable 一致）");
+        assert!(!err.retryable, "V4 timeout is manual, not blindly auto-retryable");
+        assert_eq!(err.retry_class, crate::error::RetryClass::Manual);
 
-        // 条目**没有**被摘掉：拒绝路径不得改动状态（调用方仍能观察到它）。
-        assert_eq!(r.pending_len(), 1);
-        // 取消同理，也不会把它当正常路径吞掉。
-        assert_eq!(r.call_cancel(&c.call_id).unwrap_err().code, ErrorCode::E_CALL_TIMEOUT);
-        assert_eq!(r.pending_len(), 1);
+        // Expiry is itself the terminal transition: remove the call and close bound resources
+        // immediately so a timed-out caller cannot become a permanent pending orphan.
+        assert_eq!(r.pending_len(), 0);
+        assert_eq!(r.call_cancel(&c.call_id).unwrap_err().code, ErrorCode::E_CALL_NOT_FOUND);
     }
 
     // ────────────────────────────────────────────────────────────

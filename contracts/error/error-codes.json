@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "codes": [
+    {
+      "code": "E_HOST_PANIC",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_UNKNOWN_PLUGIN",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_AUTH_DENIED",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_INVALID_MANIFEST",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_STATE_INVALID_TRANSITION",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_CALL_NOT_FOUND",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_CALL_TIMEOUT",
+      "retryClass": "manual"
+    },
+    {
+      "code": "E_FORBIDDEN_PERMISSION",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_ABI_MISMATCH",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_PLUGIN_DISABLED",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_REGISTRY_FULL",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_CALL_PENDING_FULL",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_SUBSCRIPTION_FULL",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_PLUGIN_EXISTS",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_INSTALL_FAILED",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_PLUGIN_FILTERED",
+      "retryClass": "manual"
+    },
+    {
+      "code": "E_PLUGIN_TYPE_NO_RUNTIME",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_LEASE_EXPIRED",
+      "retryClass": "after-reconnect"
+    },
+    {
+      "code": "E_STREAM_FULL",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_CALL_ALREADY_SETTLED",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_CONTRIBUTES_DRIFT",
+      "retryClass": "never"
+    }
+  ]
+}

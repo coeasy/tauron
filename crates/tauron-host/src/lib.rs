@@ -14,18 +14,22 @@
 
 pub mod authz;
 pub mod call_delivery;
+pub mod call_state;
 pub mod config;
 pub mod error;
 pub mod eventbus;
 pub mod lifecycle;
 pub mod manifest;
+pub mod production;
 pub mod registry;
 pub mod runtime;
+pub mod service_graph;
 pub mod stream;
+pub mod target;
 
 pub use authz::{AuthTier, CommandAuth, ADMIN_COMMANDS, COMMANDS};
 pub use config::{ClientConfig, RegistryConfigOverride};
-pub use error::{guard, ErrorCode, HostError, HostResult};
+pub use error::{guard, ErrorCode, HostError, HostResult, RetryClass};
 pub use eventbus::{
     BusStats, ChannelKind, EventBus, Frame, PublishResult, QueueStats, SubscribeOutcome, MAX_QUEUE,
     OVERFLOW_STREAK_LIMIT,
@@ -39,3 +43,15 @@ pub use manifest::{
 };
 pub use registry::{PendingCall, PluginEntry, PluginFilter, Registry, RegistryConfig};
 pub use runtime::{LeaseReaper, ReapOutcome, ReapStats, RuntimeHandle, RuntimeLease, RuntimeTable};
+
+// V4 universal/industrial foundation exports.
+pub use call_state::{AtomicCallState, CallTerminalState};
+pub use production::{
+    is_production_safe, validate as validate_production_readiness, DeploymentMode,
+    ProductionReadiness, ReadinessViolation,
+};
+pub use service_graph::{ServiceGraph, ServiceGraphError, ServiceNode};
+pub use target::{
+    current_target_spec, resolve_best as resolve_best_target, TargetAbi, TargetArch, TargetOs,
+    TargetSpec,
+};

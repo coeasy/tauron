@@ -21,6 +21,7 @@ import { TAURON_COMMANDS } from '@tauron/core';
 import {
   CAPABILITIES,
   HOST_ERROR_CODES,
+  HOST_RETRY_CLASS,
   LIFECYCLE_EVENTS,
   LIFECYCLE_STATES,
   PLUGIN_REPORTABLE_EVENTS,
@@ -248,14 +249,17 @@ describe('门禁：应用层宿主错误码 TS ↔ Rust 一致', () => {
     );
   }
 
-  it('线名逐项同序一致（Rust ErrorCode ↔ TS HOST_ERROR_CODES）', () => {
+  it('线名集合与 canonical registry 一致；source declaration order 不属于协议', () => {
     const rustCodes = [...variantToCode().values()];
-    expect(rustCodes, 'Rust 侧应解析出全部变体').toEqual([...HOST_ERROR_CODES]);
-    // 不再硬编码个数（此前写死 18，新增 `E_STREAM_FULL` 就得改这里——个数是从
-    // 两侧解析结果里导出的，硬编码只会制造"改一处忘一处"的假失败）。
-    // 这里改钉**下限**：确保正则真的抓到了码表，而不是空匹配蒙混过关。
+    const registry = JSON.parse(read('contracts/error/error-codes.json')) as {
+      codes: Array<{ code: string; retryClass: string }>;
+    };
+    const canonicalCodes = registry.codes.map((entry) => entry.code);
+    expect(new Set(rustCodes).size).toBe(rustCodes.length);
+    expect(new Set(HOST_ERROR_CODES).size).toBe(HOST_ERROR_CODES.length);
+    expect([...rustCodes].sort()).toEqual([...canonicalCodes].sort());
+    expect([...HOST_ERROR_CODES].sort()).toEqual([...canonicalCodes].sort());
     expect(HOST_ERROR_CODES.length).toBeGreaterThanOrEqual(18);
-    expect(rustCodes.length).toBe(HOST_ERROR_CODES.length);
   });
 
   it('线名必须等于枚举变体名（E_* 大写蛇形，禁止 camelCase 漂移）', () => {
@@ -266,23 +270,41 @@ describe('门禁：应用层宿主错误码 TS ↔ Rust 一致', () => {
     }
   });
 
-  it('可重试集合一致（Rust variant → 线名 → TS 集合）', () => {
-    const open = hostErrorSrc.indexOf('matches!(', hostErrorSrc.indexOf('pub fn retryable'));
-    expect(open, 'retryable() matches! not found').toBeGreaterThan(-1);
-    const block = hostErrorSrc.slice(open, hostErrorSrc.indexOf(')', open) + 1);
+  it('V4 retryClass 一致，panic 不得自动重试', () => {
     const lookup = variantToCode();
-    const rustRetryable = [...block.matchAll(/Self::(E_\w+)/g)]
-      .map((m) => m[1]!)
-      .map((v) => lookup.get(v))
-      .filter((c): c is string => Boolean(c));
-    expect(rustRetryable.sort()).toEqual([...RETRYABLE_HOST_ERROR_CODES].sort());
-    expect(rustRetryable).toHaveLength(3);
+    const retryBlock = /pub const fn retry_class\(self\)[\s\S]*?\n    \}/.exec(hostErrorSrc)?.[0] ?? '';
+    expect(retryBlock, 'retry_class() must exist').not.toBe('');
+    const rustClass = new Map<string, string>();
+    for (const m of retryBlock.matchAll(/Self::(E_\w+)\s*=>\s*RetryClass::(\w+)/g)) {
+      const code = lookup.get(m[1]!);
+      expect(code, `variant ${m[1]} has no wire code`).toBeDefined();
+      const cls = m[2]!
+        .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+        .toLowerCase();
+      rustClass.set(code!, cls);
+    }
+    const registry = JSON.parse(read('contracts/error/error-codes.json')) as {
+      codes: Array<{ code: keyof typeof HOST_RETRY_CLASS; retryClass: string }>;
+    };
+    // Unlisted Rust variants use the explicit Never fallback; canonical registry is the
+    // language-neutral public source and every binding must agree with it.
+    for (const entry of registry.codes) {
+      const expected = rustClass.get(entry.code) ?? 'never';
+      expect(HOST_RETRY_CLASS[entry.code], entry.code).toBe(expected);
+      expect(entry.retryClass, entry.code).toBe(expected);
+    }
+    expect(HOST_RETRY_CLASS.E_HOST_PANIC).toBe('never');
+    expect(HOST_RETRY_CLASS.E_CALL_TIMEOUT).toBe('manual');
+    expect(HOST_RETRY_CLASS.E_LEASE_EXPIRED).toBe('after-reconnect');
+    expect(RETRYABLE_HOST_ERROR_CODES).toEqual([]);
   });
 
   it('HostError 必须以结构化 JSON 穿越 IPC（禁止 {:?} 文本转储）', () => {
-    // 派生 Serialize：前端 normalizeError 分支 1 依赖 { code, message, retryable }。
-    const derive = hostErrorSrc.match(/#\[derive\(([^)]*)\)\]\s*\n#\[error/)?.[1] ?? '';
+    // 派生 Serialize：前端 normalizeError 分支 1 依赖 { code, message, retryable, retryClass }。
+    const derive = hostErrorSrc.match(/#\[derive\(([^)]*)\)\][\s\S]{0,160}?#\[error/)?.[1] ?? '';
     expect(derive, 'HostError 必须 derive(Serialize)').toContain('Serialize');
+    expect(hostErrorSrc).toMatch(/pub struct HostError[\s\S]*?pub retry_class: RetryClass/);
+    expect(hostErrorSrc).toMatch(/serde\(rename_all = "camelCase"\)/);
     // 文本转储会丢掉 message 字段，前端只能靠正则从转储里反抠错误码。
     const tauri = read('crates/tauron-adapter/src/tauri.rs');
     expect(tauri).not.toContain('format!("{:?}", e)');

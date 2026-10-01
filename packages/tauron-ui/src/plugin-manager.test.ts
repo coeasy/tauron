@@ -113,7 +113,8 @@ describe('PluginManagerStore', () => {
           code: 'E_HOST_PANIC',
           rawCode: 'E_HOST_PANIC',
           message: 'boom',
-          retryable: true,
+          retryable: false,
+          retryClass: 'never',
         }),
       },
     ]);
@@ -265,6 +266,7 @@ describe('PluginManagerStore', () => {
           rawCode: 'E_AUTH_DENIED',
           message: 'no perm',
           retryable: false,
+          retryClass: 'never',
         }),
       },
     ]);

@@ -158,28 +158,57 @@ pub struct SignedFile {
     pub hash: String,
 }
 
-/// Verify a CLI archive and its sidecar, including archive metadata and each actual file hash.
+/// Verify an in-memory CLI archive. Compatibility wrapper over the streaming verifier.
 pub fn verify_tpkg(
     archive: &[u8],
     sidecar_json: &str,
     trusted_public_key: &[u8],
 ) -> MarketResult<(PackageSignature, PluginManifest)> {
+    verify_tpkg_reader(std::io::Cursor::new(archive), sidecar_json, trusted_public_key)
+}
+
+/// Verify a package directly from a file without materializing the whole archive in memory.
+pub fn verify_tpkg_file(
+    path: &std::path::Path,
+    sidecar_json: &str,
+    trusted_public_key: &[u8],
+) -> MarketResult<(PackageSignature, PluginManifest)> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| MarketError::ManifestFormat(format!("打开安装包失败：{e}")))?;
+    verify_tpkg_reader(file, sidecar_json, trusted_public_key)
+}
+
+/// Streaming package verifier used by file/in-memory callers.
+///
+/// The only entry retained in memory is `manifest.json` (capped at 1 MiB). Every other entry
+/// is SHA-256 hashed through a fixed 64 KiB buffer, so verification RSS is independent of the
+/// archive and largest-entry sizes.
+pub fn verify_tpkg_reader<R>(
+    reader: R,
+    sidecar_json: &str,
+    trusted_public_key: &[u8],
+) -> MarketResult<(PackageSignature, PluginManifest)>
+where
+    R: std::io::Read + std::io::Seek,
+{
     use std::io::Read;
+
+    const HASH_BUFFER_BYTES: usize = 64 * 1024;
+    const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+
     let signature = verify_package_signature(sidecar_json, trusted_public_key)?;
-    let cursor = std::io::Cursor::new(archive);
-    let mut zip = zip::ZipArchive::new(cursor)
+    let mut zip = zip::ZipArchive::new(reader)
         .map_err(|e| MarketError::ManifestFormat(format!("ZIP 解析失败：{e}")))?;
     if zip.is_empty() || zip.len() > MAX_ENTRIES || zip.len() != signature.files.len() {
         return Err(MarketError::ManifestFormat("ZIP 条目数与签名文件清单不一致".into()));
     }
+
     let mut total_unpacked = 0u64;
     let mut manifest_bytes = None;
     let mut seen = std::collections::HashSet::with_capacity(zip.len());
-    // 中央目录元数据留一份，循环后交给 `validate_zip_constants` 做**聚合策略**
-    // 断言（条目数 / 解压总量 / 单文件 / 压缩比）。循环里那几条同形检查是
-    // **提前退出**用的——必须在读字节之前判，否则一个 200MB+ 的包会先被整个
-    // 读进内存再拒绝。两者不是重复实现：一处是"早退"，一处是"策略单一真相源"。
     let mut metas: Vec<ZipEntryInfo> = Vec::with_capacity(zip.len());
+    let mut buffer = [0u8; HASH_BUFFER_BYTES];
+
     for index in 0..zip.len() {
         let mut file = zip
             .by_index(index)
@@ -188,6 +217,7 @@ pub fn verify_tpkg(
         if !seen.insert(name.clone()) {
             return Err(MarketError::ManifestFormat(format!("ZIP 路径重复：{name}")));
         }
+
         let mode = file.unix_mode().unwrap_or(0);
         let is_symlink = mode & 0o170000 == 0o120000;
         let is_regular = mode == 0 || mode & 0o170000 == 0o100000;
@@ -199,6 +229,7 @@ pub fn verify_tpkg(
             compressed_size: file.compressed_size(),
         };
         sanitize_entry_path(&name, &entry)?;
+
         total_unpacked = total_unpacked
             .checked_add(file.size())
             .ok_or_else(|| MarketError::ManifestFormat("ZIP 解压大小溢出".into()))?;
@@ -215,7 +246,14 @@ pub fn verify_tpkg(
                 limit_mb: MAX_SINGLE_FILE_MB,
             });
         }
+        if name == "manifest.json" && file.size() > MAX_MANIFEST_BYTES {
+            return Err(MarketError::ManifestFormat(format!(
+                "manifest.json 超过 {} 字节上限",
+                MAX_MANIFEST_BYTES
+            )));
+        }
         metas.push(entry);
+
         let expected = signature
             .files
             .iter()
@@ -224,30 +262,48 @@ pub fn verify_tpkg(
         if expected.size != file.size() {
             return Err(MarketError::ManifestFormat(format!("文件大小与签名不符：{name}")));
         }
-        let limit = expected
-            .size
-            .checked_add(1)
-            .ok_or_else(|| MarketError::ManifestFormat("文件大小溢出".into()))?;
-        let mut bytes = Vec::with_capacity(usize::try_from(expected.size).unwrap_or(0));
-        (&mut file)
-            .take(limit)
-            .read_to_end(&mut bytes)
-            .map_err(|e| MarketError::ManifestFormat(format!("读取文件失败 `{name}`：{e}")))?;
-        if bytes.len() as u64 != expected.size {
-            return Err(MarketError::ManifestFormat(format!("解压文件大小不符：{name}")));
+
+        let mut hasher = Sha256::new();
+        let mut remaining = expected.size;
+        let mut manifest = (name == "manifest.json")
+            .then(|| Vec::with_capacity(usize::try_from(expected.size).unwrap_or(0)));
+
+        while remaining > 0 {
+            let want = usize::try_from(remaining.min(HASH_BUFFER_BYTES as u64))
+                .map_err(|_| MarketError::ManifestFormat("文件大小转换溢出".into()))?;
+            let read = file
+                .read(&mut buffer[..want])
+                .map_err(|e| MarketError::ManifestFormat(format!("读取文件失败 `{name}`：{e}")))?;
+            if read == 0 {
+                return Err(MarketError::ManifestFormat(format!("解压文件提前结束：{name}")));
+            }
+            hasher.update(&buffer[..read]);
+            if let Some(bytes) = manifest.as_mut() {
+                bytes.extend_from_slice(&buffer[..read]);
+            }
+            remaining -= read as u64;
         }
-        let actual = hex_lower(&Sha256::digest(&bytes));
+
+        // Metadata already declared the exact uncompressed size; still ensure the reader does
+        // not expose an unexpected trailing byte before accepting the hash.
+        let mut extra = [0u8; 1];
+        if file
+            .read(&mut extra)
+            .map_err(|e| MarketError::ManifestFormat(format!("读取文件尾失败 `{name}`：{e}")))?
+            != 0
+        {
+            return Err(MarketError::ManifestFormat(format!("解压文件大小超出声明：{name}")));
+        }
+
+        let actual = hex_lower(&hasher.finalize());
         if actual != expected.hash {
             return Err(MarketError::HashMismatch { expected: expected.hash.clone(), actual });
         }
-        if name == "manifest.json" {
+        if let Some(bytes) = manifest {
             manifest_bytes = Some(bytes);
         }
     }
-    // 聚合策略断言：这是 `validate_zip_constants` 的**唯一**生产调用点。
-    // 它此前"有实现、有测试、零调用"——循环里的早退检查与它同形，于是没人发现
-    // 它从未被调用；而它独有的**压缩比**检查（`MAX_COMPRESSION_RATIO`）也就
-    // 从未生效过。放在这里而不是循环里：它是策略，不是早退。
+
     validate_zip_constants(&metas)?;
     let manifest_bytes = manifest_bytes
         .ok_or_else(|| MarketError::ManifestFormat("包内缺少 manifest.json".into()))?;

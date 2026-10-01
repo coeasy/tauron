@@ -147,6 +147,78 @@ impl ContributesRegistry {
 }
 
 impl AdapterConfig {
+    /// Select the deployment posture. Production activates fail-closed readiness gates.
+    pub fn with_deployment_mode(mut self, mode: tauron_host::DeploymentMode) -> Self {
+        self.deployment_mode = mode;
+        self
+    }
+
+    /// Declare that a non-origin transport has a verified caller identity policy.
+    pub fn with_caller_identity_policy(mut self, enabled: bool) -> Self {
+        self.caller_identity_policy_enabled = enabled;
+        self
+    }
+
+    /// Explicitly disable durable recovery instead of silently falling back to memory-only.
+    pub fn with_recovery_unsupported(mut self, unsupported: bool) -> Self {
+        self.recovery_explicitly_unsupported = unsupported;
+        self
+    }
+
+    /// Declare that privileged administration is connected to an audit sink.
+    pub fn with_admin_audit(mut self, available: bool) -> Self {
+        self.admin_audit_available = available;
+        self
+    }
+
+    /// Test-only/development provider declaration. Production rejects this flag.
+    pub fn with_mock_provider(mut self, enabled: bool) -> Self {
+        self.mock_provider_enabled = enabled;
+        self
+    }
+
+    /// Derive the canonical V4 production-readiness facts from actual adapter configuration.
+    pub fn production_readiness(&self) -> tauron_host::ProductionReadiness {
+        #[cfg(feature = "plugin-install")]
+        let install_trust_configured = self.plugin_install_dir.is_some()
+            && !self.plugin_signing_keys.is_empty()
+            && self.acl_signing_key.as_ref().is_some_and(|key| key.len() >= 32);
+        #[cfg(not(feature = "plugin-install"))]
+        let install_trust_configured = true;
+
+        tauron_host::ProductionReadiness {
+            caller_identity_policy_enabled: self.caller_identity_policy_enabled
+                || !self.origin_allowlist.is_empty(),
+            durable_recovery_available: self.recovery_data_dir.is_some(),
+            recovery_explicitly_unsupported: self.recovery_explicitly_unsupported,
+            install_feature_enabled: cfg!(feature = "plugin-install"),
+            install_trust_configured,
+            audit_for_admin_operations_available: self.admin_audit_available,
+            writable_data_dir_available: self.recovery_data_dir.is_some(),
+            mock_provider_enabled: self.mock_provider_enabled,
+        }
+    }
+
+    /// Fail-closed production startup validation. Development/Test compatibility is unchanged.
+    pub fn validate_for_start(&self) -> HostResult<()> {
+        let violations = tauron_host::validate_production_readiness(
+            self.deployment_mode,
+            &self.production_readiness(),
+        );
+        if violations.is_empty() {
+            return Ok(());
+        }
+        let detail = violations
+            .iter()
+            .map(|v| format!("{}: {}", v.code, v.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(HostError::new(
+            ErrorCode::E_STATE_INVALID_TRANSITION,
+            format!("production readiness rejected host startup: {detail}"),
+        ))
+    }
+
     /// 从第三方集成用的 [`ClientConfig`] 派生装配配置。
     ///
     /// **这是 `ClientConfig` 的生产消费点**。在此之前 `ClientConfig`
@@ -172,6 +244,11 @@ impl AdapterConfig {
 
         Self {
             registry: Some(cfg.registry_config()),
+            deployment_mode: tauron_host::DeploymentMode::Development,
+            caller_identity_policy_enabled: false,
+            recovery_explicitly_unsupported: false,
+            admin_audit_available: false,
+            mock_provider_enabled: false,
             recovery_data_dir,
             required_plugins: HashSet::new(),
             origin_allowlist: Vec::new(),
@@ -217,6 +294,16 @@ impl AdapterConfig {
 /// 集合，即 `CommandState::new` 的既有行为（单元测试不需要磁盘）。
 #[derive(Debug, Clone, Default)]
 pub struct AdapterConfig {
+    /// Deployment posture. Development is the backwards-compatible default for tests/local use.
+    pub deployment_mode: tauron_host::DeploymentMode,
+    /// A custom/non-origin transport can assert only after it installs verified caller identity.
+    pub caller_identity_policy_enabled: bool,
+    /// Production may explicitly declare recovery unsupported instead of pretending it is durable.
+    pub recovery_explicitly_unsupported: bool,
+    /// Privileged admin operations must be auditable in production.
+    pub admin_audit_available: bool,
+    /// Production forbids mock/test providers.
+    pub mock_provider_enabled: bool,
     /// 注册表配置（上限、TTL、加载过滤器）。`None` = [`RegistryConfig::default()`]。
     pub registry: Option<RegistryConfig>,
     /// 宿主数据目录：恢复标记（崩溃检测）落盘位置。
@@ -357,6 +444,108 @@ pub struct PluginInstallPreview {
     pub plugin_name: String,
     pub version: String,
     pub permissions: Vec<PluginPermissionReview>,
+    /// One-time cryptographic binding between what the user reviewed and what commit installs.
+    pub review_token: InstallReviewToken,
+}
+
+/// V4 install approval token. It is one-time, bounded and bound to verified package facts.
+#[cfg(feature = "plugin-install")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstallReviewToken {
+    pub package_digest: String,
+    pub manifest_digest: String,
+    pub permission_digest: String,
+    pub key_id: String,
+    pub publisher_id: Option<String>,
+    pub plugin_id: String,
+    pub version: String,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub nonce: String,
+}
+
+#[cfg(feature = "plugin-install")]
+const INSTALL_REVIEW_TTL_SECS: u64 = 10 * 60;
+#[cfg(feature = "plugin-install")]
+const MAX_INSTALL_REVIEWS: usize = 64;
+
+#[cfg(feature = "plugin-install")]
+struct VerifiedPluginPackage {
+    manifest: PluginManifest,
+    /// Open handle to the exact archive bytes that were verified. Commit extracts from this
+    /// handle, not by reopening the path, closing the verify→extract TOCTOU window.
+    archive: std::fs::File,
+    package_digest: String,
+    manifest_digest: String,
+    permission_digest: String,
+    key_id: String,
+    publisher_id: Option<String>,
+}
+
+#[cfg(feature = "plugin-install")]
+fn digest_bytes(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+#[cfg(feature = "plugin-install")]
+fn digest_file_and_rewind(file: &mut std::fs::File) -> HostResult<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Seek, SeekFrom};
+
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("定位安装包失败：{e}")))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|e| {
+            HostError::new(ErrorCode::E_INSTALL_FAILED, format!("读取安装包失败：{e}"))
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|e| {
+        HostError::new(ErrorCode::E_INSTALL_FAILED, format!("重置安装包位置失败：{e}"))
+    })?;
+    Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(feature = "plugin-install")]
+fn permission_digest(manifest: &PluginManifest) -> String {
+    let mut permissions: Vec<&str> = manifest.permissions.iter().map(|p| p.as_str()).collect();
+    permissions.sort_unstable();
+    digest_bytes(permissions.join("\n").as_bytes())
+}
+
+#[cfg(feature = "plugin-install")]
+fn mint_install_review(verified: &VerifiedPluginPackage) -> InstallReviewToken {
+    let issued_at = unix_time_seconds();
+    InstallReviewToken {
+        package_digest: verified.package_digest.clone(),
+        manifest_digest: verified.manifest_digest.clone(),
+        permission_digest: verified.permission_digest.clone(),
+        key_id: verified.key_id.clone(),
+        publisher_id: verified.publisher_id.clone(),
+        plugin_id: verified.manifest.id.to_string(),
+        version: verified.manifest.version.to_string(),
+        issued_at,
+        expires_at: issued_at.saturating_add(INSTALL_REVIEW_TTL_SECS),
+        nonce: uuid::Uuid::new_v4().to_string(),
+    }
+}
+
+#[cfg(feature = "plugin-install")]
+fn review_matches_verified(token: &InstallReviewToken, verified: &VerifiedPluginPackage) -> bool {
+    token.package_digest == verified.package_digest
+        && token.manifest_digest == verified.manifest_digest
+        && token.permission_digest == verified.permission_digest
+        && token.key_id == verified.key_id
+        && token.publisher_id == verified.publisher_id
+        && token.plugin_id == verified.manifest.id.as_str()
+        && token.version == verified.manifest.version.to_string()
 }
 
 /// 可选能力未装配时的明确说明。
@@ -410,6 +599,8 @@ pub struct CapabilitiesBody {
     pub commands: Vec<String>,
     pub unsupported: Vec<UnsupportedDomain>,
     pub plugin_runtime: bool,
+    /// V4 compile-time target fact used by ArtifactVariantResolver before any OS loader call.
+    pub target: tauron_host::TargetSpec,
 }
 
 /// 返回当前装配形态能力快照。能力列表与 handler 宏由 wire-gate 锁定一致。
@@ -518,6 +709,7 @@ pub fn cmd_host_capabilities(state: &SubstrateState) -> HostResult<CapabilitiesB
             commands: commands.into_iter().map(str::to_string).collect(),
             unsupported,
             plugin_runtime,
+            target: tauron_host::current_target_spec(),
         })
     })?
 }
@@ -1671,6 +1863,12 @@ pub struct WindowRelaunchOutcome {
 /// **一份插件状态都不建**。
 #[derive(Clone)]
 pub struct SubstrateState {
+    /// V4 deployment posture carried into command paths (not only checked at construction).
+    pub deployment_mode: tauron_host::DeploymentMode,
+    /// Canonical acyclic service order used by platform lifecycle bindings.
+    pub service_startup_order: Arc<Vec<String>>,
+    /// Reverse topological order for deterministic shutdown.
+    pub service_shutdown_order: Arc<Vec<String>>,
     pub bus: Arc<Mutex<EventBus>>,
     /// 宿主设置文档（R7-2：`tauron-settings` 的 [`SettingsStore`]，激活孤儿 crate）。
     ///
@@ -1684,6 +1882,9 @@ pub struct SubstrateState {
     /// [`SubstrateState::settings_path`] 读回，每次写成功后落盘。`None` = 不落盘
     /// （测试与底座-only 宿主），行为与之前一致。
     pub settings: Arc<Mutex<SettingsStore>>,
+    /// Serialize settings mutations across stage → durable write → commit/rollback without
+    /// holding the SettingsStore mutex across filesystem I/O.
+    pub settings_write_lock: Arc<Mutex<()>>,
     /// 设置文档的落盘位置（`None` = 纯内存，重启即丢）。
     pub settings_path: Option<std::path::PathBuf>,
     /// **只写不读**的兼容通知日志（R8 之前的 `host_notify` 产物）。
@@ -1850,8 +2051,10 @@ impl RuntimeSpawnProfile {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeHealth {
-    /// 进程是否仍存活（由注入的 [`ProcSpawner::is_alive`] 判定）。
+    /// Proven-alive flag. Unknown is deliberately false rather than optimistic true.
     pub alive: bool,
+    /// V4 tri-state process probe. Unknown means ownership/probe could not prove either state.
+    pub status: tauron_proc::ProcessStatus,
     /// 该租约绑定的进程号。
     pub pid: u32,
     /// 崩溃窗口内的崩溃次数（`tauron_proc::CrashTracker`，**唯一**计数来源）。
@@ -1981,6 +2184,9 @@ pub struct PluginRuntimeState {
     pub deliveries: Arc<HashMap<DeliveryKind, Box<dyn CallDelivery>>>,
     #[cfg(feature = "plugin-install")]
     install_config: Option<InstallRuntimeConfig>,
+    /// One-time bounded install-review tokens. Preview mints; commit consumes.
+    #[cfg(feature = "plugin-install")]
+    install_reviews: Arc<Mutex<HashMap<String, InstallReviewToken>>>,
 }
 
 #[cfg(feature = "plugin-install")]
@@ -2069,6 +2275,23 @@ fn authz_table_selfcheck() -> &'static Result<(), String> {
     CHECK.get_or_init(|| tauron_host::authz::validate_command_registry().map_err(|e| e.message))
 }
 
+fn canonical_substrate_service_graph() -> tauron_host::ServiceGraph {
+    use tauron_host::{ServiceGraph, ServiceNode};
+    let mut graph = ServiceGraph::default();
+    for node in [
+        ServiceNode { id: "contract".into(), requires: vec![] },
+        ServiceNode { id: "policy".into(), requires: vec!["contract".into()] },
+        ServiceNode { id: "recovery".into(), requires: vec!["contract".into()] },
+        ServiceNode { id: "settings".into(), requires: vec!["contract".into()] },
+        ServiceNode { id: "capability".into(), requires: vec!["contract".into(), "policy".into()] },
+        ServiceNode { id: "provider".into(), requires: vec!["capability".into()] },
+        ServiceNode { id: "message".into(), requires: vec!["policy".into(), "capability".into()] },
+    ] {
+        graph.insert(node).expect("canonical Tauron service IDs are unique");
+    }
+    graph
+}
+
 impl SubstrateState {
     /// 底座装配：恢复持久化 + i18n + origin 清单 + 通知存储。
     ///
@@ -2083,6 +2306,22 @@ impl SubstrateState {
     /// **不消费 `cfg.registry`**：注册表属插件运行时（[`PluginRuntimeState`]），
     /// 底座装配不该顺带建一份——那正是 R1 要拆掉的东西。
     pub fn with_adapter_config(cfg: &AdapterConfig) -> Self {
+        // V4 Production Profile: compatibility fallbacks are allowed only outside production.
+        // Production startup must fail before any service/state side effect is created.
+        if let Err(error) = cfg.validate_for_start() {
+            panic!("[tauron] {error}");
+        }
+
+        // V4 ServiceGraph: cycles/missing dependencies are build/startup defects, never
+        // runtime retry conditions. Compute both orders before creating service state.
+        let service_graph = canonical_substrate_service_graph();
+        let service_startup_order = service_graph
+            .startup_order()
+            .unwrap_or_else(|e| panic!("[tauron] service dependency graph invalid: {e:?}"));
+        let service_shutdown_order = service_graph
+            .shutdown_order()
+            .unwrap_or_else(|e| panic!("[tauron] service dependency graph invalid: {e:?}"));
+
         // §8-17 生产自检（P1-10）：档位表是构建期常量，错了就是构建缺陷。
         // 失败**立即 panic**（与同一构造函数里 `NotifyStore::new(512).expect(..)` 的
         // 失败姿态一致）——让缺陷在第一次启动就暴露，而不是带病运行到越权发生。
@@ -2125,8 +2364,12 @@ impl SubstrateState {
         }
 
         Self {
+            deployment_mode: cfg.deployment_mode,
+            service_startup_order: Arc::new(service_startup_order),
+            service_shutdown_order: Arc::new(service_shutdown_order),
             bus: Arc::new(Mutex::new(EventBus::default())),
             settings: Arc::new(Mutex::new(settings)),
+            settings_write_lock: Arc::new(Mutex::new(())),
             settings_path,
             notifications: Arc::new(Mutex::new(Vec::new())),
             notify_store: Arc::new(Mutex::new(notify_store)),
@@ -2247,6 +2490,8 @@ impl PluginRuntimeState {
                 signing_keys: cfg.plugin_signing_keys,
                 acl_signing_key: cfg.acl_signing_key,
             }),
+            #[cfg(feature = "plugin-install")]
+            install_reviews: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -2742,7 +2987,30 @@ pub fn cmd_registry_install_as(
     approved_permissions: &[String],
 ) -> HostResult<PluginInstallResult> {
     require_main_window(caller, "host_registry_install")?;
-    guard("registry_install", || registry_install_inner(state, package_path, approved_permissions))?
+    if state.deployment_mode == tauron_host::DeploymentMode::Production {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "production install requires InstallReviewToken from host_registry_install_preview",
+        ));
+    }
+    guard("registry_install_legacy", || {
+        registry_install_inner(state, package_path, approved_permissions, None)
+    })?
+}
+
+/// V4 reviewed install path. This is the only path wired to production Tauri IPC.
+#[cfg(feature = "plugin-install")]
+pub fn cmd_registry_install_reviewed_as(
+    caller: &Caller,
+    state: &PluginRuntimeState,
+    package_path: &str,
+    approved_permissions: &[String],
+    review_token: &InstallReviewToken,
+) -> HostResult<PluginInstallResult> {
+    require_main_window(caller, "host_registry_install")?;
+    guard("registry_install_reviewed", || {
+        registry_install_inner(state, package_path, approved_permissions, Some(review_token))
+    })?
 }
 
 #[cfg(feature = "plugin-install")]
@@ -2764,7 +3032,8 @@ fn registry_install_preview_inner(
     package_path: &str,
 ) -> HostResult<PluginInstallPreview> {
     use tauron_host::manifest::{embedded_permission_index, PluginType};
-    let (manifest, _signature) = read_verified_package(state, package_path)?;
+    let verified = read_verified_package(state, package_path)?;
+    let manifest = &verified.manifest;
     if manifest.plugin_type != PluginType::Js {
         return Err(HostError::new(ErrorCode::E_PLUGIN_TYPE_NO_RUNTIME, "当前仅支持 JS 插件安装"));
     }
@@ -2780,9 +3049,25 @@ fn registry_install_preview_inner(
         unix_time_seconds(),
         1,
     )?;
+    let review_token = mint_install_review(&verified);
+    {
+        let now = unix_time_seconds();
+        let mut reviews = state.install_reviews.lock();
+        reviews.retain(|_, token| token.expires_at > now);
+        if reviews.len() >= MAX_INSTALL_REVIEWS {
+            if let Some(oldest) = reviews
+                .values()
+                .min_by_key(|token| token.issued_at)
+                .map(|token| token.nonce.clone())
+            {
+                reviews.remove(&oldest);
+            }
+        }
+        reviews.insert(review_token.nonce.clone(), review_token.clone());
+    }
     Ok(PluginInstallPreview {
         plugin_id: manifest.id.to_string(),
-        plugin_name: manifest.name,
+        plugin_name: manifest.name.clone(),
         version: manifest.version.to_string(),
         permissions: rows
             .grants
@@ -2794,6 +3079,7 @@ fn registry_install_preview_inner(
                 default_checked: grant.risk != tauron_host::manifest::Risk::High,
             })
             .collect(),
+        review_token,
     })
 }
 
@@ -2802,6 +3088,7 @@ fn registry_install_inner(
     state: &PluginRuntimeState,
     package_path: &str,
     approved_permissions: &[String],
+    review_token: Option<&InstallReviewToken>,
 ) -> HostResult<PluginInstallResult> {
     use std::collections::BTreeSet;
     use tauron_acl::{draft_grant_set, validate_grants, AclStore};
@@ -2819,7 +3106,35 @@ fn registry_install_inner(
             "ACL HMAC key 未配置或少于 32 字节",
         ));
     }
-    let (manifest, archive) = read_verified_package(state, package_path)?;
+    let verified = read_verified_package(state, package_path)?;
+    if let Some(review_token) = review_token {
+        let now = unix_time_seconds();
+        let stored = state.install_reviews.lock().remove(&review_token.nonce).ok_or_else(|| {
+            HostError::new(
+                ErrorCode::E_INSTALL_FAILED,
+                "install review token is unknown, expired, or already consumed",
+            )
+        })?;
+        if stored != *review_token || review_token.expires_at <= now {
+            return Err(HostError::new(
+                ErrorCode::E_INSTALL_FAILED,
+                "install review token is stale or has been tampered with; preview again",
+            ));
+        }
+        if !review_matches_verified(review_token, &verified) {
+            return Err(HostError::new(
+                ErrorCode::E_INSTALL_FAILED,
+                "package changed after approval; preview and approval must be repeated",
+            ));
+        }
+    } else if state.deployment_mode == tauron_host::DeploymentMode::Production {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "production install requires an unexpired one-time InstallReviewToken",
+        ));
+    }
+
+    let VerifiedPluginPackage { manifest, archive, .. } = verified;
     if manifest.plugin_type != PluginType::Js {
         return Err(HostError::new(
             ErrorCode::E_PLUGIN_TYPE_NO_RUNTIME,
@@ -2876,7 +3191,7 @@ fn registry_install_inner(
         HostError::new(ErrorCode::E_INSTALL_FAILED, format!("创建临时安装目录失败：{e}"))
     })?;
     let unpack_result = (|| -> HostResult<()> {
-        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&archive))
+        let mut zip = zip::ZipArchive::new(archive)
             .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("打开包失败：{e}")))?;
         // 解包常量（条目数 / 单文件 / 解压总量 / 压缩比）与路径清洗**不在这里**
         // 重复实现：它们在 `read_verified_package` → `verify_tpkg` →
@@ -2973,7 +3288,7 @@ fn unix_time_seconds() -> u64 {
 fn read_verified_package(
     state: &PluginRuntimeState,
     package_path: &str,
-) -> HostResult<(PluginManifest, Vec<u8>)> {
+) -> HostResult<VerifiedPluginPackage> {
     let config = state.install_config.as_ref().ok_or_else(|| {
         HostError::new(
             ErrorCode::E_INSTALL_FAILED,
@@ -2991,8 +3306,9 @@ fn read_verified_package(
         return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "仅支持本地 .tpkg 安装"));
     }
     let sidecar_path = PathBuf::from(format!("{package_path}.sig"));
-    let archive = std::fs::read(&source)
-        .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("读取安装包失败：{e}")))?;
+    let mut archive = std::fs::File::open(&source)
+        .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("打开安装包失败：{e}")))?;
+    let package_digest = digest_file_and_rewind(&mut archive)?;
     let sidecar = std::fs::read_to_string(&sidecar_path).map_err(|e| {
         HostError::new(ErrorCode::E_INSTALL_FAILED, format!("读取签名 sidecar 失败：{e}"))
     })?;
@@ -3004,12 +3320,32 @@ fn read_verified_package(
         HostError::new(ErrorCode::E_INSTALL_FAILED, format!("未信任的签名 kid `{}`", envelope.kid))
     })?;
     let (verified, manifest) =
-        tauron_market::package_signature::verify_tpkg(&archive, &sidecar, public_key)
+        tauron_market::package_signature::verify_tpkg_reader(&mut archive, &sidecar, public_key)
             .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, e.to_string()))?;
+    {
+        use std::io::{Seek, SeekFrom};
+        archive.seek(SeekFrom::Start(0)).map_err(|e| {
+            HostError::new(ErrorCode::E_INSTALL_FAILED, format!("重置已验签包位置失败：{e}"))
+        })?;
+    }
     if verified.kid != envelope.kid {
         return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "验签 kid 不一致"));
     }
-    Ok((manifest, archive))
+    let manifest_bytes = serde_json::to_vec(&manifest).map_err(|e| {
+        HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            format!("manifest canonicalization failed: {e}"),
+        )
+    })?;
+    Ok(VerifiedPluginPackage {
+        package_digest,
+        manifest_digest: digest_bytes(&manifest_bytes),
+        permission_digest: permission_digest(&manifest),
+        key_id: envelope.kid,
+        publisher_id: manifest.publisher.clone(),
+        manifest,
+        archive,
+    })
 }
 
 pub fn cmd_registry_admin(
@@ -3903,15 +4239,21 @@ fn refuse_exhausted_crash_budget(
 pub fn cmd_runtime_health(state: &PluginRuntimeState, lease: &str) -> HostResult<RuntimeHealth> {
     guard("runtime_health", || {
         let entry = state.registry.runtime_lease(lease)?;
-        let alive = state.proc_runtime.spawner().is_alive(entry.pid);
+        let status = state.proc_runtime.spawner().status(entry.pid);
+        let alive = matches!(status, tauron_proc::ProcessStatus::Alive);
 
-        if !alive && state.registry.runtime_mark_crashed(lease)? {
+        // Unknown is a degraded diagnostic state, not a crash: never consume crash budget unless
+        // the process is positively observed Exited.
+        if matches!(status, tauron_proc::ProcessStatus::Exited)
+            && state.registry.runtime_mark_crashed(lease)?
+        {
             state.proc_runtime.record_crash(&entry.plugin_id);
             deliver_runtime_crash(state, &entry.plugin_id);
         }
 
         Ok(RuntimeHealth {
             alive,
+            status,
             pid: entry.pid,
             crashes: state.proc_runtime.crash_count(&entry.plugin_id),
             consecutive_failures: state.recovery.lock().counter().consecutive_failures,
@@ -4360,6 +4702,11 @@ pub fn host_settings_data_version(state: &SubstrateState) -> Option<String> {
     state.settings.lock().data_version(HOST_SETTINGS_NAMESPACE).map(str::to_string)
 }
 
+/// Monotonic revision of successfully committed host-setting writes.
+pub fn host_settings_revision(state: &SubstrateState) -> u64 {
+    state.settings.lock().revision()
+}
+
 /// `host_settings_get`：读取设置。
 ///
 /// **线形不变**（前端契约）：入参 `key: string`，返回任意 JSON；未写过的键
@@ -4391,17 +4738,28 @@ pub fn cmd_settings_set(
                 "设置键不能为空（调用方可能传了 undefined/null）".to_string(),
             ));
         }
+
+        // One writer owns stage → durable write → commit/rollback. The SettingsStore mutex
+        // itself is released before filesystem I/O, avoiding a lock-across-blocking-I/O path.
+        let _write = state.settings_write_lock.lock();
         let path = settings_path(key);
-        {
+        let (before, event) = {
             let mut store = state.settings.lock();
-            store
-                .set(HOST_SETTINGS_NAMESPACE, HOST_SETTINGS_NAMESPACE, &path, &value)
+            let before = store.snapshot_all();
+            let (_op, event) = store
+                .set_deferred(HOST_SETTINGS_NAMESPACE, HOST_SETTINGS_NAMESPACE, &path, &value)
                 .map_err(settings_to_host_error)?;
+            (before, event)
+        };
+
+        if let Err(error) = persist_settings_doc(state) {
+            state.settings.lock().restore(&before);
+            return Err(error);
         }
-        // 落盘。写成功但落盘失败必须**如实失败**——否则前端显示"已保存"，
-        // 重启后设置却没了（这正是本仓此前的行为：Store 只改内存态，
-        // 没有调用方承担磁盘 I/O，`snapshot_all`/`restore` 只在测试里出现过）。
-        persist_settings_doc(state)
+
+        // Watchers only observe a revision after durable persistence succeeded.
+        state.settings.lock().publish_committed_change(event);
+        Ok(())
     })?
 }
 
@@ -4414,12 +4772,19 @@ pub fn cmd_settings_set(
 /// **线形**：入参 `doc: object`（键 = 设置键，值 = 设置值），返回 `()`。
 /// 非对象文档返回 `E_INVALID_MANIFEST`（不静默退化成空文档）。写入后数据版本
 /// 标注为 [`HOST_SETTINGS_SCHEMA_V1`]，[`cmd_settings_migrate`] 才知道起点。
-pub fn cmd_settings_adopt_legacy(state: &SubstrateState, doc: serde_json::Value) -> HostResult<()> {
+pub fn cmd_settings_adopt_legacy(
+    state: &SubstrateState,
+    doc: serde_json::Value,
+) -> HostResult<()> {
     guard("settings_adopt_legacy", || {
+        let _write = state.settings_write_lock.lock();
+        let before = state.settings.lock().snapshot_all();
         host_settings_adopt_legacy(state, doc)?;
-        // 接手旧版文档同样要落盘：只改内存态的话，重启后磁盘上的旧文档又盖回来，
-        // 迁移看起来"成功"了却永远不生效。
-        persist_settings_doc(state)
+        if let Err(error) = persist_settings_doc(state) {
+            state.settings.lock().restore(&before);
+            return Err(error);
+        }
+        Ok(())
     })?
 }
 
@@ -4449,11 +4814,14 @@ pub fn cmd_settings_adopt_legacy_as(
 /// 穿过 IPC 边界。
 pub fn cmd_settings_migrate(state: &SubstrateState) -> HostResult<usize> {
     guard("settings_migrate", || {
+        let _write = state.settings_write_lock.lock();
+        let before = state.settings.lock().snapshot_all();
         let steps = host_settings_migrate(state)?;
-        // 只有真的发生了迁移（steps > 0）才落盘：已是当前版本时不该因为一次
-        // 诊断性的 migrate 调用而重写磁盘（也避免无谓的临时文件抖动）。
         if steps > 0 {
-            persist_settings_doc(state)?;
+            if let Err(error) = persist_settings_doc(state) {
+                state.settings.lock().restore(&before);
+                return Err(error);
+            }
         }
         Ok(steps)
     })?
@@ -13011,5 +13379,71 @@ mod tests {
             manifest.entry.ui = Some(ui.to_string());
             manifest
         }
+    }
+}
+
+#[cfg(test)]
+mod v4_production_config_tests {
+    use super::*;
+
+    #[test]
+    fn development_defaults_remain_test_friendly() {
+        assert!(AdapterConfig::default().validate_for_start().is_ok());
+    }
+
+    #[test]
+    fn production_default_is_fail_closed() {
+        let cfg =
+            AdapterConfig::default().with_deployment_mode(tauron_host::DeploymentMode::Production);
+        let error = cfg.validate_for_start().expect_err("empty production config must fail");
+        assert_eq!(error.code, ErrorCode::E_STATE_INVALID_TRANSITION);
+        assert!(error.message.contains("CALLER_IDENTITY_POLICY_REQUIRED"));
+        assert!(error.message.contains("ADMIN_AUDIT_REQUIRED"));
+        assert!(error.message.contains("DATA_DIR_REQUIRED"));
+    }
+
+    #[test]
+    fn origin_allowlist_is_real_identity_policy_evidence() {
+        let mut cfg = AdapterConfig::default();
+        cfg.origin_allowlist.push("tauri://localhost".to_string());
+        assert!(cfg.production_readiness().caller_identity_policy_enabled);
+    }
+}
+
+#[cfg(test)]
+mod v4_service_graph_wiring_tests {
+    use super::*;
+
+    #[test]
+    fn substrate_construction_uses_acyclic_service_graph_and_reverse_shutdown() {
+        let state = SubstrateState::with_adapter_config(&AdapterConfig::default());
+        assert_eq!(state.service_startup_order.first().map(String::as_str), Some("contract"));
+        let mut reversed = state.service_startup_order.as_ref().clone();
+        reversed.reverse();
+        assert_eq!(&reversed, state.service_shutdown_order.as_ref());
+        assert!(state.service_startup_order.iter().any(|id| id == "message"));
+        assert!(state.service_startup_order.iter().any(|id| id == "provider"));
+    }
+}
+
+
+#[cfg(test)]
+mod v4_settings_transaction_tests {
+    use super::*;
+
+    #[test]
+    fn in_memory_settings_commit_advances_revision_after_set() {
+        let state = SubstrateState::with_adapter_config(&AdapterConfig::default());
+        assert_eq!(host_settings_revision(&state), 0);
+        cmd_settings_set(&state, "theme", serde_json::json!("dark")).unwrap();
+        assert_eq!(host_settings_revision(&state), 1);
+        assert_eq!(cmd_settings_get(&state, "theme").unwrap(), serde_json::json!("dark"));
+    }
+
+    #[test]
+    fn settings_write_lock_is_shared_by_cloned_substrate_state() {
+        let state = SubstrateState::with_adapter_config(&AdapterConfig::default());
+        let cloned = state.clone();
+        assert!(Arc::ptr_eq(&state.settings_write_lock, &cloned.settings_write_lock));
     }
 }
