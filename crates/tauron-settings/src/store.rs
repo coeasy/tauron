@@ -503,6 +503,11 @@ impl SettingsStore {
     ///
     /// The queue is bounded and same-key bursts coalesce. Events are published only by
     /// [`Self::publish_committed_change`] after a caller declares the mutation committed.
+    ///
+    /// This queue is the **host-embedder (Rust) extension point**. It has no IPC command
+    /// in front of it: wire-side observers get the same facts from the adapter's
+    /// message-plane mirror, which is published from that very commit point — so an
+    /// in-process watcher and a plugin subscription can never diverge.
     pub fn watch(&mut self, plugin_id: &str) -> u64 {
         self.watcher.subscribe(plugin_id)
     }

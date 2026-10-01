@@ -118,8 +118,8 @@ backend.adoptCapabilities(caps.commands); // 拒空 / 拒缺 host_capabilities
 以下客户端面向**主窗**，通过 `host_window_*` / `host_dialog_*` / `host_clipboard_*` /
 `host_market_*` / `host_deep_link_*` / `host_capabilities` 等主窗命令族工作（完整命令面见
 `crates/tauron-adapter/src/tauri.rs` 的 `tauron_substrate_handler!` / `tauron_plugin_handler!`
-宏：底座 **57** + 插件运行时 **21** = **78** 条；`plugin-install` 2 条**已进默认特性**，
-默认装配共 **80** 条）：
+宏：底座 **61** + 插件运行时 **22** = **83** 条；`plugin-install` 另 **2** 条**已进默认特性**，
+默认装配共 **85** 条）：
 
 - `ShellClient` / `ShellController` — 标题栏动作、主题、更新事件路由（已接线）
 - `AutoUpdateClient` — 检查/下载/安装/重启状态机 + 定时自动检查
@@ -133,6 +133,24 @@ backend.adoptCapabilities(caps.commands); // 拒空 / 拒缺 host_capabilities
 > 里唯一一处运行时 import `@tauron/core` 的地方——本包声明 `sideEffects: false`，
 > 于是它在示例产物里根本不存在。它已在 1.0-W1 删除。启动编排属**应用装配层**：
 > 接入方按自己的顺序组合上面的客户端（见 `examples/minimal-app/src/main.ts`）。
+
+## 库级 API（宿主 App 侧，仓库内没有消费者）
+
+下面这些模块**是** `@tauron/host` 的公开面，但本仓的示例与 SDK 都不调用它们——
+它们面向的是**接入方自己的宿主应用**。列在这里是为了让"没有消费者"这件事
+可核对，而不是让人误以为它们是断链或死代码（每个模块都有自己的单测）。
+
+| 模块 / 导出 | 干什么 | 对应线上入口 |
+|---|---|---|
+| `LazyPluginLoader` / `createLazyPluginLoader` | 本地懒加载状态机：`register({ id, entry: () => import(...) })` → 首次 `load()` 才执行工厂，`pending/loading/loaded/failed` 四态 + 失败可 `reset()` 重试 | **纯前端**，不占命令面（加载的是宿主自己的模块） |
+| `validateClientConfig` / `fullLoadConfig` / `minimalConfig` / `templateConfig` | 客户端配置的无 IO 校验与三档预置，字段与 Rust `ClientConfig` / `PluginFilter` 镜像 | 无命令：配置在装配期读，运行期由宿主侧生效 |
+| `capabilityOfGrantSet` / `scopeGrew` / `requiresReapproval` / `GRANT_SET_SCHEMA_VERSION` | 安装期授予集 → Tauri capability 模板，以及"权限/scope 变多必须重审"的纯策略判定 | 无命令：**安装期**策略库，需接入方显式调用；运行期订阅审批走 `host_events_approve` |
+| `toHostRpc(client)` | 把 `HostClient` 适配成传输无关的 `HostRpc`（`stream` / `event` / `subscribe`），换 IPC 后端时业务代码不动（方案 R5） | 复用既有命令，不新增 |
+| `MemoryTransport` | 纯进程内 `HostTransport`：给非 Tauri 壳 / 嵌入式宿主 / 测试复用同一套客户端协议 | 无 IPC（命令名仍必须是 `host_*`，构造时校验） |
+| `FrameSink` | 流式帧的落地口（`HostClient` 内部与 `MemoryTransport` 共用） | `host_stream_*` |
+
+> 判断"是不是断链"的口径：上面每一项的**能力**在线上都有对应命令或是纯本地逻辑；
+> 真正没有线上入口的东西会在表里写「无命令」，不会假装接了。
 
 ## 开发
 

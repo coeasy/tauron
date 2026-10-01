@@ -3018,7 +3018,7 @@ macro_rules! tauron_plugin_handler {
             $crate::tauri::host_theme_get,
             $crate::tauri::host_theme_set,
             $crate::tauri::host_capabilities,
-            // ── 插件运行时（21 条；底座-only 宿主不得注册）──
+            // ── 插件运行时（22 条；底座-only 宿主不得注册）──
             // 其中**插件面可触达**的那些（`host_lifecycle_report` / `host_plugin_call` /
             // `host_call_end` / `host_cancel` / `host_registry_list` /
             // `host_contributes_register` / `host_contributes_reconcile` /
@@ -3079,7 +3079,8 @@ macro_rules! tauron_plugin_handler {
 ///    `plugin:tauron|<name>`——**必须**为 `tauron` 插件配置 capability/permission
 ///    授予所需命令（Tauri v2 对 `plugin:` 命令强制 ACL），生产客户端应采用。
 ///
-/// 不跑插件运行时的宿主改用 [`tauron_substrate_handler!`]（少 21 条插件命令）。
+/// 不跑插件运行时的宿主改用 [`tauron_substrate_handler!`]（少 22 条插件运行时命令，
+/// 另 2 条 `plugin-install` 由 feature 决定）。
 #[macro_export]
 macro_rules! tauron_generate_handler {
     () => {

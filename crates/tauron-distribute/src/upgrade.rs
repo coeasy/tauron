@@ -8,6 +8,15 @@
 // - 回滚机制
 //
 // 本模块不依赖 `tauri`：升级逻辑是抽象的，单元测试用 Mock。
+//
+// **接入状态（诚实说明）**：适配器的更新链路只消费**检查侧**
+// （`check_for_update` / `GrayscalePolicy` / `CrashGate` / `EndpointClient` /
+// `InstallationIdentity`）。本模块的**执行侧**（下载→验签→替换→重启→回滚）
+// 目前**没有**仓内生产消费方：`host_market_download` / `host_market_install`
+// 只推进进程内 `updateState` 并回 `simulated: true`（不下载字节、不验签），
+// 不是这里。要把它接成应用更新器，装配方需自己注入
+// `Downloader` / `SignatureVerifier` 并驱动 `UpgradeRunner`——这是留给接入方的
+// 集成点，不是宿主已经提供的现成能力。
 
 use std::collections::BTreeMap;
 use std::fs;

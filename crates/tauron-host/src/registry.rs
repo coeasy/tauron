@@ -1151,6 +1151,8 @@ impl Registry {
         self.streams.lock().grant(stream_id, subscriber, bytes)
     }
 
+    /// 剩余额度（只读探针，**不在命令面**：写方从 [`Self::stream_grant`] 的返回值
+    /// 就已拿到同一数字）。语义见 [`StreamRegistry::credit_remaining`]。
     pub fn stream_credit_remaining(&self, stream_id: &str) -> Option<usize> {
         self.streams.lock().credit_remaining(stream_id)
     }

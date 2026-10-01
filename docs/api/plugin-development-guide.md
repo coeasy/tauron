@@ -392,6 +392,11 @@ export default createPlugin({
 
 ### 谁能收到
 
+> 这条订阅是 SDK 在激活时**自动**建立的，与 `events.subscribe` 的声明清单**无关**：
+> 不用把 `host:settings:changed` 也写进声明里。写进去不会重复建宿主订阅
+> （同一 topic 只订阅一次），但会**额外**触发一次 `onEvent`——两个回调都会收到同一帧。
+> 需要审批的仍然是**宿主侧**——见下表第一行。
+
 | 条件 | 结果 |
 |---|---|
 | 未获主窗批准该 topic | 订阅拿不到 token → 取件泵不起跑 → 钩子**永不触发**（静默降级，激活照常成功） |
@@ -416,8 +421,14 @@ await shell.settingsSet('plugin:com.example.formatter.width', 120); // 插件窗
   这个钩子用于「响应最新值」，**不能**当变更流水账回放。要权威值仍用 `host_settings_get`。
 - **等值写入不产生变更帧**：写入与当前值相同会被视为无操作回落，不镜像。
 - **字节预算**（R3-5）：单个设置值上限 64 KiB（超限得 `ValueTooLarge`，在 schema 校验
-  **之前**拒绝，零副作用）；单个观察队列上限 1 MiB（与条数上限同时生效，先到先淘汰）。
-- 主窗侧的进程内 watcher（`SettingsStore` 命名空间隔离）与该镜像**互不影响**：
+  **之前**拒绝，零副作用）。丢弃发生在**两条不同的队列**上，别混着算：
+  消息面投递用的是 EventBus 的 `(订阅者 × 通道)` 队列——1000 条 / 2 MiB 双上限，
+  单帧上限 256 KiB；`SettingsStore` 自己的 Rust 观察队列是另一套 1 MiB 上限，
+  只在宿主进程内嵌入方生效。
+- **线上只有这一条设置通知线**：`SettingsStore::watch/drain` 是 **Rust 嵌入方的扩展点**
+  （`host_settings_watch` 这类线上命令**不存在**，插件侧别去找它）。它与消息面镜像
+  挂在**同一个提交口**（适配器的 `commit_settings_change` → `publish_committed_change`），
+  所以宿主内即使有人用 Rust watcher，也**不会**和插件收到的帧分叉出两份事实；
   两条路各拿各的队列，一边溢出不会饿死另一边。
 
 ---

@@ -28,7 +28,7 @@ A4–A8 与轮 23–29 **未开工**；本文先做**整体重评估**（不假�
 | **W1-b 单线收敛（TS 侧）** | ⚠️ **部分** | 已落：**删除死编排器 `bootstrap()`**（P1-1 的载体：它 import `@tauron/core` 三个**运行时类**，而本包 `sideEffects:false` → 真实构建里这些类不存在，一用即崩）；`@tauron/host` 的 `package.json` / `pnpm-lock.yaml` 移除 `@tauron/core` 依赖 → **活线不再依赖死线**；P1-5 的「TS `maxPlugins: 32` vs Rust `max_plugins: 8`」第二事实源随之消失，并加门禁「TS 不得出现硬编码 `maxPlugins:` 字面量」+「host 全目录不得 import `@tauron/core`」。**未落**：P1-2 两套 IPC 后端合表（两套是**两层协议**——框架层 `plugin_*` vs 应用层 `host_*`，合并需先定框架层存废，与 W1-a 同题）；P1-10 已单独完成（见下） |
 | **P1-10 档位表生产自检** | ✅ **完成** | `authz_table_selfcheck()`（`OnceLock` 缓存、可断言）+ 在 `SubstrateState::with_adapter_config` 装配期调用，失败即 panic（构建缺陷不得带病运行）；新增 wire-gate 门禁「必须在**非测试**区域调用」。adapter +1 test |
 | W1-a 单线收敛（Rust 侧） | ⬜ 待做 | 需先定框架层（`plugin_invoke` 三命令）的存废：`PluginDispatcher::dispatch` 是**同步**签名，而真实投递是**异步**（`host_plugin_call` + 取件），「复活」需设计有界阻塞桥或改协议语义——**这是设计决策，不是编码量** |
-| W4 平台五域 Provider | ✅ **完成（R9）** | menu（3）/ tray（3）/ fs（6）/ http（1）/ updater（2）共 18 条命令进底座命令面，57 条；menu/tray 在 `tauri` feature 下真实现，fs 走 `std::fs`（允许根内），updater 接 `tauron-distribute`，http 诚实降级为可注入 `HttpSink` |
+| W4 平台五域 Provider | ✅ **完成（R9）** | menu（3）/ tray（3）/ fs（6）/ http（1）/ updater（2）共 18 条命令进底座命令面，**当时** 57 条（现为 61，见 README 命令面口径）；menu/tray 在 `tauri` feature 下真实现，fs 走 `std::fs`（允许根内），updater 接 `tauron-distribute`，http 诚实降级为可注入 `HttpSink` |
 | W5 插件形态四通（Native / Wasm） | ⬜ 待做 | — |
 | W8 横切组件打通 | ⬜ 待做 | — |
 | W9 内存传输统一 | ⬜ 待做 | — |

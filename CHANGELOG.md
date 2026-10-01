@@ -79,6 +79,33 @@
   `productionDoctor` + `eventsApprovals`，闭合 A109 孤儿命令面）；修正插件 SDK
   文档中的幻影命令名 `host_report_call_result`（实为 `host_call_result`）；
   `@tauron/host` 补导出 `HealthReport`。
+- **轮 4 链路自检（本轮新落地代码自身）**：
+  - 设置的两路投递（Store 提交口 + 消息面镜像）此前**写在每个调用方里**——新增写路径
+    就可能只发其中一路（「主窗知道、插件不知道」的半接线复发）。现收成适配器内唯一
+    提交口 `commit_settings_change`，并由**两侧结构门禁**钉住：Rust 侧
+    `settings_commit_has_single_mirror_site` 数 `publish_committed_change` 出现次数
+    必须为 1，TS 侧 wire-gate 的 R7 断言改指「写路径 → 单一提交口」的接线。
+  - 镜像帧的 `key` 不再依赖调用方手传的原始键，改由 `settings_wire_key()` 从 Store
+    编码路径反解——任何调用方都自动给出线形键（编码形态泄漏给订阅方会对不上账）。
+  - **安装身份此前只在测试里是持久化的**：生产装配走临时身份，灰度桶跨进程漂移。
+    现在只要配置了 `recovery_data_dir` 就落盘 `installation.id` 并暴露为
+    `SubstrateState::installation_identity`，更新链路的桶值与它同源。
+- **轮 5 前后端贯通与孤儿扫描**：命令名两侧（handler 宏 ↔ TS 调用点 ↔
+  `host_capabilities` 静态表）逐名比对**无断链**；修的是口径与交代：
+  - 「进程内 watcher」不再被描述成主窗的线上能力——Store 观察队列是 **Rust 嵌入方
+    扩展点**，线上没有 `host_settings_watch`（接口文档、架构文档、crate 文档三处统一）。
+  - 明确并**行为化**一条边界：`host_settings_adopt_legacy` / `host_settings_migrate`
+    是整份文档级操作，**不扇出镜像帧、也不推进 revision**，订阅方必须重读
+    `host_settings_get`（新增 `settings_bulk_ops_fan_out_no_frames_and_advance_no_revision`，
+    含按键写的对照组，防「总线本来就静默」的假绿）。
+  - `docs/architecture/overview.md` 第 14 条从「运行期订阅审批尚未接线」更正为
+    **已接线**（三条特权命令 + `AdminClient`，仍缺键粒度授权）；`@tauron/host`
+    README 的主窗客户端命令计数 78/80 → **83/85**。
+  - 无消费者的公开 API 全部登记并标注归属（V4 文档新增「轮 5 未接线公开 API 台账」）：
+    `tauron-distribute` 的 `upgrade` **执行侧**是留给装配方的集成点（宿主只消费检查侧，
+    `host_market_*` 的下载/安装是 `simulated` 的进程内状态推进）、设置观察队列与
+    流式额度探针标为嵌入方扩展点（后者补了与 `grant` 返回值同事实的断言）、
+    `tauron-ffi` 补进 README 项目结构树、`@tauron/host` README 新增「库级 API」表。
 
 ## [1.0.2] - 2026-09-28
 

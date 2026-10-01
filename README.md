@@ -477,7 +477,9 @@ tauron/
 │   ├── tauron-recovery/             # 崩溃恢复
 │   ├── tauron-distribute/           # CI 分发运维
 │   ├── tauron-proc/                 # 进程插件 Host
-│   └── tauron-wasm/                 # WASM Supervisor
+│   ├── tauron-wasm/                 # WASM Supervisor
+│   └── tauron-ffi/                  # 稳定 C ABI 所有权边界（供**非 Rust 宿主**接入 Universal Wire；
+│                                    #   仓内没有 Rust 消费者是设计使然，契约见 docs/contracts/ffi-v1.md）
 ├── packages/                        # npm 包（20 个，同一个目录；下面按层分组）
 │   # ── 框架层（12 个）──
 │   ├── types/                       # @tauron/types — 信封/错误码/ACL/Manifest/事件

@@ -2814,8 +2814,14 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(lib, 'settings_set 未走 V4 deferred transaction 写入').toMatch(
       /set_deferred\(HOST_SETTINGS_NAMESPACE,\s*HOST_SETTINGS_NAMESPACE/,
     );
-    expect(lib, 'settings_set 未在持久化成功后发布 committed revision').toMatch(
-      /persist_settings_doc\(state\)[\s\S]{0,500}publish_committed_change\(event\)/,
+    // 提交口收成一个函数（§33 R2-4 轮 4）：watcher 与消息面镜像必须同处一地发生，
+    // 所以这里断的是「写路径 → 单一提交口」的接线，而不是「写命令里能看到 publish」。
+    // 若有人新增写路径绕过 commit_settings_change，第二条断言就会失配（镜像帧只有一处产生点）。
+    expect(lib, 'settings_set 未在持久化成功后经单一提交口发布变更').toMatch(
+      /persist_settings_doc\(state\)[\s\S]{0,400}commit_settings_change\(state,\s*event\)/,
+    );
+    expect(lib, 'committed revision 的发布口必须是 commit_settings_change（且只有一处）').toMatch(
+      /fn commit_settings_change\([\s\S]{0,700}publish_committed_change\(event\)[\s\S]{0,700}HOST_SETTINGS_CHANGED_TOPIC/,
     );
 
     // 断链回归（本轮实测）：`host_settings_adopt_legacy` / `host_settings_migrate`

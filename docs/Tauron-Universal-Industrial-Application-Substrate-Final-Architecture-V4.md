@@ -2444,7 +2444,7 @@ unsupported
 | 工作流 | 状态 | 本轮落点（可复现证据） | 未落差异（诚实登记） |
 |---|---|---|---|
 | W1 协议单线 | ⚠️ 部分 | 设置观察线本轮收到**一条宿主权威线**上：提交后镜像 `{key,value,source,revision}` 到 `host:settings:changed`，SDK 钩子与进程内 watcher 都从同一份提交事实出发 | legacy `@tauron/plugin-sdk` 仍在示例主 quickstart（`examples/minimal-app/src/main.ts` 的 `PluginBridge` iframe 演示）；legacy state engine 未删；shell 仍是独立门面 |
-| W2 Minimal Profile / Feature Graph | ⚠️ 部分 | feature 图已在（`plugin-install` 进默认、`tauri` 不进），`--features plugin-install` 矩阵测试绿（263 passed） | **三 profile 体积门禁**未落地：还没有 `core` / `runtime` / `full` 三档的体积基线与断言 |
+| W2 Minimal Profile / Feature Graph | ⚠️ 部分 | feature 图已在（`plugin-install` 进默认、`tauri` 不进），`--features plugin-install` 矩阵测试绿（267 passed，轮 6 复跑） | **三 profile 体积门禁**未落地：还没有 `core` / `runtime` / `full` 三档的体积基线与断言 |
 | W3 Tauri Plugin Canonical Integration | ⬜ 未做 | — | 当前是 **root handler** 注册（`tauron_generate_handler!`）；permissions codegen、capability 模板、「不占 root handler」三条都未落地 |
 | W4 Capability V2 | ⚠️ 部分 | **fail-closed negotiation 已落**：TS `TauriBackend` 只 bootstrap 认 `host_capabilities`，`adoptCapabilities` 拒空集合与缺 `host_capabilities` 的集合；示例改为退避重试而非回落全量表（`tauri-backend.test.ts` 3 例 + wire-gate 锁定签名） | provider health、pack source 两列未落地；V4 提的「bootstrap 三命令」实际只落 `host_capabilities` 一条——`host_protocol_info` / `host_health` 没有对应命令，**不硬凑** |
 | W5 AppLifecycleBinding | ⬜ 未做 | — | auto cleanup / boot readiness / quit drain 仍需接入方手工编排（示例仍手动调 `ShellController` 恢复口） |
@@ -2452,16 +2452,34 @@ unsupported
 | W7 Observability + InstallationIdentity | ⚠️ 部分 | **InstallationIdentity 已落并进主路径**（R2-8）：首用随机 UUIDv4 持久化、损坏拒绝静默重置、FNV-1a→u32 出灰度桶，更新检查的桶值来自它而非硬编码 `0`（`tauron-distribute` 59 passed，含 200 身份分桶分布与稳定性断言）。**资源预算补齐 count + bytes**（R3-5）：单帧 256 KiB / 队列 2 MiB / 设置值 64 KiB / 观察队列 1 MiB / 通知 512 B + 4 KiB，超限零副作用拒绝 | 观测面仍是「自检报告 + 统计读」形态，没有指标导出（OTel/Prometheus）；审批是 **topic 粒度**而非键粒度，跨插件的键级授权需新特性 |
 | W8 External Consumer + Branch Governance | ⚠️ 部分 | 干净目录消费者脚本不再钉死版本号：运行期从 `Cargo.toml [workspace.package]` 读版本并与 `package.json` 对账（不一致即退出） | branch protection 属仓库设置，**未自动配置**；性能/体积 baseline 未建 |
 
-**本轮门禁实照**（同一次运行采集，非记忆值）：`cargo test --workspace` **1420 passed / exit 0**；
-`cargo test -p tauron-adapter --features plugin-install` **263 passed**；
-`cargo clippy --workspace --all-targets -- -D warnings` **exit 0**；`cargo fmt --all -- --check` **exit 0**；
+**轮 6 门禁实照**（2026-10-01 同一次运行采集，非记忆值）：
+`cargo fmt --all -- --check` **exit 0**；`cargo clippy --workspace --all-targets -- -D warnings` **exit 0**；
+`cargo test --workspace` **1424 passed / exit 0**；
+`cargo test -p tauron-adapter --features plugin-install` **267 passed / exit 0**；
 `pnpm verify`（build + typecheck + test 全包）**exit 0**，20 个包 103 个测试文件 **1748 passed**；
-其中 `tauron-contract-tests` **151 passed**、`tauron-app-plugin-sdk` **43 passed**。
+其中 `tauron-contract-tests` **151 passed**、`tauron-app-plugin-sdk` **43 passed**；
+`node scripts/generate-public-surface-ledger.mjs --check` → **85 public commands, no orphan metadata**。
 
 **Exit Gate 判定**：尚未达成。三条判据里「一个 Tauron plugin 接入」（W3）与
 「无手工生命周期补丁」（W5）仍是硬缺口，基础 profile 的体积门禁（W2）也未建。
 故 1.1 对外只承诺**已落项**（能力协商 fail-closed、设置观察、安装身份灰度、资源预算），
 不得宣称「Platform Foundation 完成」。
+
+### 轮 5 扫描：未接线的公开 API 台账（2026-10-01）
+
+命令面两侧同名比对（宏 ↔ TS 调用点 ↔ `host_capabilities` 静态表）**无断链**；
+下面是**核心 crate 的 pub API**里没有仓内生产消费方的部分，按处置分类：
+
+| 项 | 位置 | 处置 |
+| --- | --- | --- |
+| 升级**执行侧**（`UpgradeRunner` / `Downloader` / `SignatureVerifier` / `UpgradeState` 等整个 `upgrade` 模块） | `crates/tauron-distribute/src/upgrade.rs` | **留给装配方的集成点**：宿主更新链路只消费检查侧，`host_market_download/install` 是 `simulated` 的进程内状态推进。模块头已写明接入前提，不对外宣称"应用更新器现成可用" |
+| `SettingsStore::{watch, drain, unwatch, subscriber_count}`、`MAX_WATCH_QUEUE_BYTES` | `crates/tauron-settings/src/store.rs` | **Rust 嵌入方扩展点**：与消息面镜像同挂一个提交口，不会分叉；线上**没有** `host_settings_watch` 这类命令（接口文档已写明，别再去找） |
+| `SettingsStore::{get_with_source, registry}`、`SchemaRegistry::render` | 同上 | 同上口径：Store 的读侧/渲染 API，供嵌入方与 schema 装配用；命令面走自己的路径 |
+| `Registry::bind_identity` / `PluginIdentity` | `crates/tauron-host/src/registry.rs:540` | **已知重复**：适配器在 `plugin-<id>` label 处自己铸身份（`lib.rs:8174` 注释即「唯一铸造点」），核心这套 `u64` token 形态与前端 uuid 期望不一致（`tauri.rs:1825` 已记录）。删除是破坏性变更，1.x 内保留但不接入，后续按新提案统一 |
+| `EventBus::is_approved`、`PolicyAuthority::{decide, bump_policy}`、`AbiFingerprint::is_compatible`、`Principal::{is_plugin, is_invalid}`、`CallGraph::active_len`、`Registry::stream_credit_remaining` / `StreamRegistry::credit_remaining` | `crates/tauron-host/src/*` | 均有单测覆盖的库级读口/策略原语；额度探针已在文档里标明**不在命令面**（写方从 `host_stream_grant` 返回值拿到同一数字）|
+
+**判据**：本表的每一项要么有测试、要么在代码与文档里写明「谁是消费者」。
+「有实现、无人接、也没交代」才算孤儿——那一类本轮已清零。
 
 ---
 

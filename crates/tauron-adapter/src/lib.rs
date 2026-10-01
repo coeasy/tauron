@@ -2142,9 +2142,23 @@ pub struct DistributeUpdaterSink {
 impl DistributeUpdaterSink {
     /// **缺省**：无端点（`native_supported() == false`，命令层如实降级）。
     pub fn unconfigured() -> Self {
+        Self::unconfigured_with_identity(Arc::new(
+            tauron_distribute::InstallationIdentity::ephemeral(),
+        ))
+    }
+
+    /// 无端点、但携带**持久化安装身份**的缺省形态。
+    ///
+    /// 为什么要单独给这个口：身份（§9.1）和端点是两件事——端点没配时更新检查
+    /// 仍然如实报「不可用」，但身份不该因此变成每次进程重启换桶的临时值。
+    /// 宿主装配（[`SubstrateState::with_adapter_config`]）在有数据目录时就用这条，
+    /// 让「这一份安装是谁」先于「有没有更新服务器」成立。
+    pub fn unconfigured_with_identity(
+        installation: Arc<tauron_distribute::InstallationIdentity>,
+    ) -> Self {
         Self {
             client: Arc::new(UnconfiguredEndpointClient),
-            installation: Arc::new(tauron_distribute::InstallationIdentity::ephemeral()),
+            installation,
             grayscale: Mutex::new(tauron_distribute::GrayscalePolicy::default()),
             crash_gate: Mutex::new(tauron_distribute::CrashGate::default()),
             configured: false,
@@ -2373,6 +2387,12 @@ pub struct SubstrateState {
     /// Reverse topological order for deterministic shutdown.
     pub service_shutdown_order: Arc<Vec<String>>,
     pub bus: Arc<Mutex<EventBus>>,
+    /// 本份安装的身份（V4 §9.1 / R2-8）：灰度分桶与「这一份安装是谁」的依据。
+    ///
+    /// 配了数据目录就是**持久化**身份（`installation.id`，重开不换桶、不含 PII）；
+    /// 纯内存装配是临时身份（`is_durable() == false`）。装配方注入更新端点时
+    /// （[`DistributeUpdaterSink::with_endpoint`]）应把这份额身份一并传过去。
+    pub installation_identity: Arc<tauron_distribute::InstallationIdentity>,
     /// V4 A87: process-wide durable-state writer lease. When a data directory is configured,
     /// exactly one Host process may own recovery/settings writes for that directory at a time.
     /// Clones share the same lease handle; dropping the last SubstrateState releases the OS lock.
@@ -2945,12 +2965,35 @@ impl SubstrateState {
             )
             .expect("host-owned mirror topic cannot collide (reserved namespace `host:`)");
 
+        // §33 R2-8（§9.1）：安装身份**先于**更新端点成立。有数据目录就地持久化
+        // （首用随机 UUIDv4，重开不换桶，不含 PII）；文件损坏时 `load_or_create`
+        // 拒绝静默重置——这里按降级处理（临时身份 + 留痕），因为「灰度桶跨进程
+        // 稳定」是优化项，不是启动不变量，拒启代价太大。无数据目录（纯内存装配）
+        // 才用临时身份。
+        let installation_identity = Arc::new(
+            match cfg
+                .recovery_data_dir
+                .as_ref()
+                .map(|dir| tauron_distribute::InstallationIdentity::load_or_create(dir))
+            {
+                Some(Ok(identity)) => identity,
+                Some(Err(err)) => {
+                    eprintln!(
+                        "[tauron] 安装身份不可用，本轮以临时身份启动（灰度桶不跨进程）：{err}"
+                    );
+                    tauron_distribute::InstallationIdentity::ephemeral()
+                }
+                None => tauron_distribute::InstallationIdentity::ephemeral(),
+            },
+        );
+
         Self {
             deployment_mode: cfg.deployment_mode,
             production_readiness: cfg.production_readiness(),
             service_startup_order: Arc::new(service_startup_order),
             service_shutdown_order: Arc::new(service_shutdown_order),
             bus,
+            installation_identity: installation_identity.clone(),
             storage_writer_lease,
             settings: Arc::new(Mutex::new(settings)),
             settings_write_lock: Arc::new(Mutex::new(())),
@@ -2987,7 +3030,9 @@ impl SubstrateState {
             ),
             http_sink: Arc::new(UnavailableHttpSink),
             http_policy: Arc::new(cfg.http_policy.clone()),
-            updater_sink: Arc::new(DistributeUpdaterSink::unconfigured()),
+            updater_sink: Arc::new(DistributeUpdaterSink::unconfigured_with_identity(
+                installation_identity,
+            )),
             themes: Arc::new(Mutex::new(tauron_theme::ThemeRegistry::default())),
         }
     }
@@ -5535,6 +5580,75 @@ pub fn settings_path(key: &str) -> String {
     out
 }
 
+/// [`settings_path`] 的**逆**：把 Store 的编码点路径还原成调用方使用的线形键。
+///
+/// 为什么需要它：消息面（`host:settings:changed`）给订阅方的必须是线形键
+/// ——他们拿这个键直接 `host_settings_get/set` 回查回写；给编码路径
+/// （`plugin:p%2Etheme`）就成了「读得到、用不了」。编码是单字符→`%XX`，
+/// 因此按 `%` 引导的三字符序列解码即可，无需回溯。
+pub fn settings_wire_key(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut chars = path.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            out.push(ch);
+            continue;
+        }
+        // 不完整/未知的 `%` 序列原样保留（编码产物只可能是下面三种，
+        // 出现别的说明键本来就不含编码语义，不该被改写）。
+        let seq: String = chars.clone().take(2).collect();
+        match seq.as_str() {
+            "25" => {
+                out.push('%');
+                chars.next();
+                chars.next();
+            }
+            "2E" => {
+                out.push('.');
+                chars.next();
+                chars.next();
+            }
+            "24" => {
+                out.push('$');
+                chars.next();
+                chars.next();
+            }
+            _ => out.push('%'),
+        }
+    }
+    out
+}
+
+/// **适配器内唯一的设置提交口**：进程内 watcher + 消息面镜像，同一份事实。
+///
+/// 为什么收成函数而不是在每个写命令里各写一遍：这两路投递**必须同时发生**。
+/// 只发 watcher 就是「主窗知道、插件不知道」的半接线（§33 R2-4 的原始形态），
+/// 只发镜像就是订阅方收到 watcher 都没确认过的变更。新增写路径走这里，
+/// 由 `settings_commit_has_single_mirror_site` 门禁钉住。
+///
+/// 调用前提是**durable 写入已成功**（回滚由调用方负责）——revision 只有在
+/// 落盘后才分配，观察者不该看见后来被回滚的东西。
+fn commit_settings_change(
+    state: &SubstrateState,
+    event: tauron_settings::ChangeEvent,
+) -> tauron_settings::ChangeEvent {
+    let committed = state.settings.lock().publish_committed_change(event);
+    // 可丢的 Event 通道：慢消费者丢最旧、按 topic 收敛到最新 revision，
+    // 与进程内 watcher 互不影响；镜像失败不影响已 durable 的提交本身。
+    state.bus.lock().publish(
+        "host",
+        HOST_SETTINGS_CHANGED_TOPIC,
+        serde_json::json!({
+            "key": settings_wire_key(&committed.key),
+            "value": committed.value,
+            "source": committed.source,
+            "revision": committed.revision,
+        }),
+        tauron_host::eventbus::ChannelKind::Event,
+    );
+    committed
+}
+
 /// v1 → v2：把裸键文档改写成转义键文档（`%unset` 保留键原样放行）。
 ///
 /// v1 文档是平铺对象，键就是设置键本身，所以这里做的是**逐键改名**，
@@ -5711,12 +5825,19 @@ pub fn host_settings_migrate(state: &SubstrateState) -> HostResult<usize> {
     Ok(host_settings_migrate_transaction(state)?.steps())
 }
 
-/// 当前宿主设置的数据版本（诊断用；`None` = 既无数据也无标注）。
+/// 当前宿主设置的数据版本（**宿主嵌入方的 Rust 诊断读口**；`None` = 既无数据也无标注）。
+///
+/// 线上没有对应命令：插件侧能看到的最接近事实是镜像帧里的 `revision`，
+/// 版本本身要靠 `host_settings_migrate` 的返回步数推断。
 pub fn host_settings_data_version(state: &SubstrateState) -> Option<String> {
     state.settings.lock().data_version(HOST_SETTINGS_NAMESPACE).map(str::to_string)
 }
 
 /// Monotonic revision of successfully committed host-setting writes.
+///
+/// Rust embedding diagnostic read-out — there is **no** wire command for it;
+/// wire consumers observe the same counter through the `revision` field of
+/// [`HOST_SETTINGS_CHANGED_TOPIC`] frames.
 pub fn host_settings_revision(state: &SubstrateState) -> u64 {
     state.settings.lock().revision()
 }
@@ -5772,23 +5893,7 @@ pub fn cmd_settings_set(
         }
 
         // Watchers only observe a revision after durable persistence succeeded.
-        let committed = state.settings.lock().publish_committed_change(event);
-        // §33 R2-4：持久化提交成功后镜像到消息面（可丢 Event 通道：慢消费者
-        // 丢最旧、按 topic 收敛到最新 revision，与进程内 watcher 互不影响）。
-        state.bus.lock().publish(
-            "host",
-            HOST_SETTINGS_CHANGED_TOPIC,
-            serde_json::json!({
-                // 消息面对外暴露**线形键**（调用方 host_settings_set/get 用的形态），
-                // 不暴露 Store 的编码点路径（`plugin:p.theme` → `plugin:p%2Etheme`）：
-                // 订阅方拿到 key 应当能直接回查/回写，编码形态会让他们对不上账。
-                "key": key,
-                "value": committed.value,
-                "source": committed.source,
-                "revision": committed.revision,
-            }),
-            tauron_host::eventbus::ChannelKind::Event,
-        );
+        commit_settings_change(state, event);
         Ok(())
     })
 }
@@ -11432,6 +11537,51 @@ mod tests {
         assert!(cmd_events_subscribe(&state, "com.b", "w2", HOST_SETTINGS_CHANGED_TOPIC).is_err());
     }
 
+    #[test]
+    fn settings_bulk_ops_fan_out_no_frames_and_advance_no_revision() {
+        // 文档口径（app-layer-wire：「产帧范围只有按键写路径」）的行为化门禁。
+        // adopt/migrate 走 `set_layer` / `migrate_transactional`，压根不产生
+        // `ChangeEvent` → 既不镜像也不推进 revision。订阅方在这两个操作后必须
+        // 重读 `host_settings_get`，别指望收到"某个键变了"的帧。
+        use tauron_host::eventbus::ChannelKind;
+        let state = CommandState::new();
+        cmd_events_approve_as(&Caller::MainWindow, &state, "com.b", HOST_SETTINGS_CHANGED_TOPIC)
+            .unwrap();
+        cmd_events_subscribe(&state, "com.b", "w1", HOST_SETTINGS_CHANGED_TOPIC).unwrap();
+        let before = state.settings.lock().revision();
+
+        cmd_settings_adopt_legacy(&state, serde_json::json!({ "plugin:p.theme": "v1-dark" }))
+            .unwrap();
+        assert_eq!(
+            state.settings.lock().revision(),
+            before,
+            "整份接手不是按键提交，不得推进 revision"
+        );
+        assert!(
+            state.bus.lock().drain("com.b", ChannelKind::Event).unwrap().is_empty(),
+            "接手不得扇出镜像帧"
+        );
+
+        assert_eq!(cmd_settings_migrate(&state).unwrap(), 1, "v1 → v2 是一步");
+        assert_eq!(state.settings.lock().revision(), before, "迁移同样不是按键提交");
+        assert!(
+            state.bus.lock().drain("com.b", ChannelKind::Event).unwrap().is_empty(),
+            "迁移不得扇出镜像帧"
+        );
+        assert_eq!(
+            cmd_settings_get(&state, "plugin:p.theme").unwrap(),
+            serde_json::json!("v1-dark"),
+            "迁移后旧键必须按 v2 线形读得回来（否则不扇出就是丢数据）"
+        );
+
+        // 对照组：按键写两样都做。缺了这组，上面所有断言只是「总线本来就静默」的假绿。
+        cmd_settings_set(&state, "plugin:p.theme", serde_json::json!("cobalt")).unwrap();
+        assert!(state.settings.lock().revision() > before, "按键提交必须推进 revision");
+        let frames = state.bus.lock().drain("com.b", ChannelKind::Event).unwrap();
+        assert_eq!(frames.len(), 1, "按键提交必须镜像一帧");
+        assert_eq!(frames[0].payload["key"], "plugin:p.theme");
+    }
+
     // ────────────────────────────────────────────────────────────
     // R7-2：settings 走 tauron-settings 的 Store
     // ────────────────────────────────────────────────────────────
@@ -11508,6 +11658,72 @@ mod tests {
         assert_eq!(settings_path("$unset"), "%24unset");
         assert_ne!(settings_path("a.b"), settings_path("a%2Eb"));
         assert_eq!(settings_path("plain"), "plain");
+    }
+
+    #[test]
+    fn settings_wire_key_inverts_encoding() {
+        // 消息面给订阅方的必须是线形键：编码/解码互为逆，且对**非编码**的 `%`
+        // 序列不做改写（否则一个本来就含 `%` 的键会被解码改坏）。
+        for key in [
+            "plugin:p.theme",
+            "host$dollar",
+            "raw%percent",
+            "plain",
+            "a.b.c",
+            "%",
+            "$unset",
+            "plugin:com.example.formatter.width",
+        ] {
+            assert_eq!(settings_wire_key(&settings_path(key)), key, "roundtrip {key}");
+        }
+        assert_eq!(settings_wire_key("50%"), "50%");
+        assert_eq!(settings_wire_key("%zz"), "%zz");
+        assert_eq!(settings_wire_key("%2"), "%2");
+    }
+
+    #[test]
+    fn settings_commit_has_single_mirror_site() {
+        // §33 R2-4 的结构不变量：进程内 watcher 与消息面镜像**必须同处一地发生**。
+        // 新增设置写路径若绕过 `commit_settings_change`，就会出现「主窗知道、
+        // 插件不知道」的半接线——这条门禁把它钉成文本事实（数一下就行）。
+        //
+        // 探针**拼出来**而不是字面量：本测试文件自身就含这些串，直接写字面量
+        // 会让计数把自己也算进去（假绿/假红都_possible）。
+        let src = include_str!("lib.rs");
+        let commit = format!("{}(", "publish_committed_change");
+        let mirror_field = format!("\"key\": settings_{}_key(&committed.key)", "wire");
+        assert_eq!(
+            src.matches(commit.as_str()).count(),
+            1,
+            "publish_committed_change 只允许出现在 commit_settings_change 内"
+        );
+        assert_eq!(src.matches(mirror_field.as_str()).count(), 1, "消息面镜像帧只允许有一个产生点");
+        assert!(src.contains("fn commit_settings_change("), "提交口必须收成一个函数");
+    }
+
+    #[test]
+    fn installation_identity_is_durable_when_data_dir_configured() {
+        // R2-8 / §9.1：身份的持久化归**宿主装配**，不是装配方的额外功课。
+        // 配了数据目录 → `installation.id` 落盘、跨重开同桶；纯内存装配才临时。
+        let t = tempfile::tempdir().unwrap();
+        let cfg = recovery_cfg(t.path());
+
+        let first_id = {
+            let state = SubstrateState::with_adapter_config(&cfg);
+            assert!(state.installation_identity.is_durable(), "有数据目录时身份必须是持久化的");
+            state.installation_identity.installation_id().to_string()
+        };
+        assert!(t.path().join("installation.id").exists());
+
+        let second = SubstrateState::with_adapter_config(&cfg);
+        assert_eq!(
+            second.installation_identity.installation_id(),
+            first_id,
+            "同一数据目录重开必须拿回同一身份（灰度桶不跨重启漂移）"
+        );
+
+        let memory = SubstrateState::with_adapter_config(&AdapterConfig::default());
+        assert!(!memory.installation_identity.is_durable());
     }
 
     #[test]

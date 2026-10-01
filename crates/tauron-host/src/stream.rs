@@ -236,6 +236,10 @@ impl StreamRegistry {
         Ok(handle.credit_bytes)
     }
 
+    /// 只读探一眼某条流的剩余额度。
+    ///
+    /// **嵌入方诊断口**：写方在 [`Self::grant`] 的返回值里就已经拿到新额度，
+    /// 命令面没有对应的读取命令（不为此扩线上契约）。
     pub fn credit_remaining(&self, stream_id: &str) -> Option<usize> {
         self.handles.get(stream_id).map(|h| h.credit_bytes)
     }
@@ -520,6 +524,9 @@ mod tests {
         let (mut reg, id) = registry_with_sink(Arc::new(RecordingSink::default()));
         assert_eq!(reg.grant(&id, "p1", usize::MAX).unwrap(), MAX_STREAM_CREDIT_BYTES);
         assert_eq!(reg.grant(&id, "p2", 1).unwrap_err().code, ErrorCode::E_AUTH_DENIED);
+        // 只读探针与 grant 的返回值必须报同一份事实（嵌入方诊断口的前提）。
+        assert_eq!(reg.credit_remaining(&id), Some(MAX_STREAM_CREDIT_BYTES));
+        assert_eq!(reg.credit_remaining("不存在的流"), None);
     }
 
     #[test]

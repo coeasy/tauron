@@ -156,7 +156,9 @@ export function createPlugin(def: PluginDefinition): PluginInstance {
 
         // 5b. `onSettingsChanged` 接消息面（R2-4/W6）：以前这个钩子只在类型里
         //     声明、没有任何投递路径——插件作者写了它永远不会被调用。
-        //     现在它走宿主的设置提交镜像 topic，与进程内 watcher 互不影响。
+        //     现在它走宿主的设置提交镜像 topic。宿主侧的 Store 观察队列
+        //     （`SettingsStore::watch`，Rust 嵌入方扩展点）与这条镜像挂在同一个
+        //     提交口上，两份投递各拿各的队列，不会互相饿死也不会分叉。
         //     未获主窗批准时订阅静默降级（context.ts 既有语义），钩子不触发；
         //     获批后仍只投递本插件命名空间的键（见 isOwnSettingsKey）。
         if (def.onSettingsChanged) {

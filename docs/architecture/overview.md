@@ -279,15 +279,16 @@ tauron-*       ← 全部 Rust crate
     成功必须上报一次，否则每次重启都被计为一次崩溃，连续两次进安全模式
     （方向安全：一次 `success` 即自愈）。安全模式内逐个试启用
     `host_recover_trial_enable`，试验失败 1 次即回落 `disabled-by-safemode`。
-14. **运行期订阅审批尚未接线** — `EventBus::approve` 无任何线上入口
-    （适配层无命令、`@tauron/host` 无方法），`approvals` 表在生产中恒空，
-    `is_approved` 分支不可达；跨插件订阅私有 topic 目前只能靠声明方标
-    `public: true`。方向是 fail-closed（未授权即 `E_AUTH_DENIED`，不会误放行），
-    启用需补一条批准命令 + TS 方法。**安装期**授权是另一套且可达
-    （`@tauron/host` 的 `grants.ts`），两者不可混谈。
-    `grants.ts` 本身是**纯策略函数库**（`requiresReapproval` 等），仓库内没有
-    生产消费方——即「重新审批」策略要由接入方在安装/更新路径上显式调用才会
-    生效，不调用则不构成门禁。
+14. **运行期订阅审批已接线（1.1 / V4 §33 R2-5）** — `host_events_approve` /
+    `host_events_revoke` / `host_events_approvals` 三条**特权**命令（仅主窗，
+    `authz::ADMIN_COMMANDS`）+ `@tauron/host` 的 `AdminClient.eventsApprove/
+    Revoke/Approvals`，落到 `EventBus` 的跨主体审批表；未获批订阅私有 topic 得
+    `E_AUTH_DENIED`（fail-closed），审批表有容量上限。**仍缺的是键粒度**：审批只到
+    topic 一级，宿主不按键过滤投递（设置镜像 topic 的命名空间过滤在 SDK 侧，属
+    投递约定而非安全边界）。**安装期**授权是另一套（`@tauron/host` 的 `grants.ts`），
+    两者不可混谈；`grants.ts` 本身是**纯策略函数库**（`requiresReapproval` 等），
+    仓库内没有生产消费方——要由接入方在安装/更新路径上显式调用才会生效，
+    不调用则不构成门禁。
 15. **i18n 引擎已接线，bundle 由应用侧供** — `host_i18n_t` / `t_params` /
     `set_locale` / `load` / `stats` / `cleanup_plugin` 全部落到 `tauron-i18n`
     引擎（语言状态单一来源 + 回退链 + 缺失键计数）。**回退链全部落空时返回

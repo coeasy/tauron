@@ -305,8 +305,16 @@ export interface HostRpc {
   | --- | --- | --- |
   | `key` | **线形键**（调用方 `host_settings_get/set` 用的形态，如 `plugin:p.theme`） | 不是 Store 的编码点路径（`plugin:p%2Etheme`）——订阅方拿到要能直接回查/回写 |
   | `value` | 提交后的新值 | 等值写入按无操作回落，**不产帧** |
-  | `source` | 提交来源 | 与进程内 watcher 同源；两份投递互不影响 |
+  | `source` | 提交来源 | 与 `SettingsStore` 的进程内观察队列同一个提交点产出（`commit_settings_change` → `publish_committed_change`）；两份投递互不影响 |
   | `revision` | 提交序号 | 单调递增；慢消费者收敛到最新 revision 即视为追平 |
+
+  **产帧范围只有按键写路径**（`host_settings_set` / `host_settings_set_as`）。
+  `host_settings_adopt_legacy` 与 `host_settings_migrate` 是**整份文档级**、主窗专属的
+  操作，走 `set_layer` / `migrate_transactional`，**既不扇出镜像帧、也不推进
+  Store revision**（`set_layer` 路径压根不产生 `ChangeEvent`）——所以订阅方在这两个
+  操作之后必须重新 `host_settings_get` 取权威值，别指望收到"某个键变了"的帧。
+  这是有意为之：整份文档扇出等于把 N 个键塞进同一条**可丢** topic 队列，慢消费者
+  只会收到最后一条，比"不投+明确要重读"更容易误用。
 
   可见性走 **Event 审批链**（`host_events_approve` / `revoke` / `approvals`）：该
   topic 由宿主以 `publisher = "host"` 声明且**非 public**，未被批准的订阅者调
@@ -636,8 +644,10 @@ translate_at_boundary(err, boundary): {
 - **上限是「条数 + 字节」两维（V4 §33 R3-5）**：只按条数限额时，一条大 payload
   可以在条数毫不越界的情况下吃穿内存——所以两维同时生效，先到先约束：
   `MAX_FRAME_BYTES=256 KiB`（单帧序列化后含 topic 与元数据开销计费）、
-  队列 `MAX_QUEUE_BYTES=2 MiB`、设置值 `MAX_VALUE_BYTES=64 KiB`、
-  观察队列 `MAX_WATCH_QUEUE_BYTES=1 MiB`、通知标题/正文 `512 B` / `4 KiB`。
+  队列 `MAX_QUEUE_BYTES=2 MiB`（**消息面**，按 `(订阅者 × 通道)` 记账，与条数上限
+  `MAX_QUEUE=1000` 并存）、设置值 `MAX_VALUE_BYTES=64 KiB`、
+  观察队列 `MAX_WATCH_QUEUE_BYTES=1 MiB`（**Store 进程内**观察队列，Rust 嵌入方扩展点，
+  与消息面那两条队列不是一回事）、通知标题/正文 `512 B` / `4 KiB`。
   **超限是零副作用拒绝**：在状态快照被覆盖之前、在 schema 校验之前、在通知入队
   之前判定，既有一帧/旧值/队列原样不动——「拒绝了但把现场改坏了」不算诚实失败。
 
