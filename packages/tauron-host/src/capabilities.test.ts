@@ -4,8 +4,8 @@ import { MockBackend } from './backend.js';
 import { CAPABILITIES, capabilityMatrix, capabilityOf, isAvailable } from './capabilities.js';
 
 describe('CAPABILITIES（计划 §2.1 命令面镜像）', () => {
-  it('共 28 条：19 条插件命令 + 9 条主窗特权命令', () => {
-    expect(CAPABILITIES).toHaveLength(28);
+  it('共 29 条：19 条插件命令 + 10 条主窗特权命令', () => {
+    expect(CAPABILITIES).toHaveLength(29);
   });
 
   it('插件命令 19 条，其中 scoped-read 恰好 2 条（host_registry_list / host_contributes_list）', () => {
@@ -36,6 +36,7 @@ describe('CAPABILITIES（计划 §2.1 命令面镜像）', () => {
       'host_events_approvals',
       'host_events_approve',
       'host_events_revoke',
+      'host_production_doctor',
       'host_registry_admin',
       'host_registry_install',
       'host_registry_install_preview',
@@ -84,12 +85,12 @@ describe('isAvailable / capabilityMatrix', () => {
     expect(isAvailable(backend, 'totally-unknown')).toBe(false);
   });
 
-  it('capabilityMatrix 覆盖全部 28 条命令', () => {
+  it('capabilityMatrix 覆盖全部 29 条命令', () => {
     const backend = new MockBackend({
       capabilities: CAPABILITIES.map((c) => c.command),
     });
     const matrix = capabilityMatrix(backend);
-    expect(Object.keys(matrix)).toHaveLength(28);
+    expect(Object.keys(matrix)).toHaveLength(29);
     expect(Object.values(matrix).every(Boolean)).toBe(true);
   });
 

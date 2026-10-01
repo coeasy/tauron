@@ -314,6 +314,12 @@ pub static ADMIN_COMMANDS: &[CommandAuth] = &[
         consumer: "宿主 UI 主窗（事件权限审批）",
         description: "读取当前 EventBus 私有 topic 审批事实",
     },
+    CommandAuth {
+        command: "host_production_doctor",
+        tier: AuthTier::Privileged,
+        consumer: "宿主 UI 主窗（生产就绪自检 A109）",
+        description: "读取机器可读的 production readiness 自检报告",
+    },
 ];
 
 /// 管理操作枚举（D15 定稿）。
@@ -785,11 +791,12 @@ mod tests {
             assert!(!c.consumer.is_empty(), "{} 缺 consumer 登记", c.command);
         }
         assert_eq!(COMMANDS.len(), 19, "既有 18 条插件命令 + V4 stream credit grant 1 条");
-        // 主窗面包含注册表管理、sidecar 管理、资源诊断与 Event Approval Broker。
+        // 主窗面包含注册表管理、sidecar 管理、资源诊断、Event Approval Broker
+        // 与生产就绪自检（A109）。
         assert_eq!(
             ADMIN_COMMANDS.len(),
-            7,
-            "核心注册的主窗特权命令 7 条；adapter 可按 feature 扩展"
+            8,
+            "核心注册的主窗特权命令 8 条；adapter 可按 feature 扩展"
         );
     }
 
@@ -846,6 +853,7 @@ mod tests {
         for command in ["host_events_approve", "host_events_revoke", "host_events_approvals"] {
             assert_eq!(resolve(command).unwrap().tier, AuthTier::Privileged, "{command}");
         }
+        assert_eq!(resolve("host_production_doctor").unwrap().tier, AuthTier::Privileged);
     }
 
     #[test]

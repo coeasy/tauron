@@ -52,6 +52,8 @@ export type {
   ContributeEntryInput,
   ContributesReconcileReport,
   InstallReviewToken,
+  ProductionDoctorCheck,
+  ProductionDoctorReport,
 } from './host.js';
 
 export { ShellClient, SIDECAR_ABI_CONTRACT } from './shell-client.js';

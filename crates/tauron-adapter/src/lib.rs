@@ -1166,6 +1166,7 @@ pub const SUBSTRATE_COMMANDS: &[&str] = &[
     "host_theme_list",
     "host_theme_get",
     "host_theme_set",
+    "host_production_doctor",
     "host_capabilities",
 ];
 
@@ -2352,6 +2353,10 @@ pub struct WindowRelaunchOutcome {
 pub struct SubstrateState {
     /// V4 deployment posture carried into command paths (not only checked at construction).
     pub deployment_mode: tauron_host::DeploymentMode,
+    /// V4 A109 production-readiness facts derived from the adapter config at assembly.
+    /// `host_production_doctor` recomputes process-runtime facts from the actually
+    /// attached sandbox descriptor, so the report cannot drift from the startup gate.
+    pub production_readiness: tauron_host::ProductionReadiness,
     /// Canonical acyclic service order used by platform lifecycle bindings.
     pub service_startup_order: Arc<Vec<String>>,
     /// Reverse topological order for deterministic shutdown.
@@ -2911,6 +2916,7 @@ impl SubstrateState {
 
         Self {
             deployment_mode: cfg.deployment_mode,
+            production_readiness: cfg.production_readiness(),
             service_startup_order: Arc::new(service_startup_order),
             service_shutdown_order: Arc::new(service_shutdown_order),
             bus: Arc::new(Mutex::new(EventBus::default())),
@@ -5237,6 +5243,27 @@ pub fn cmd_events_approvals_as(
             .into_iter()
             .map(|(subscriber, topic)| EventApproval { subscriber, topic })
             .collect()
+    })
+}
+
+/// 主窗读取机器可读的生产就绪自检报告（V4 A109）。
+///
+/// 与启动门禁同源：底座的 `production_readiness` 在装配时由 [`AdapterConfig`] 推导；
+/// 进程运行时事实以**实际注入**的 sandbox descriptor 为准重算（与
+/// `validate_process_runtime_for_start` 同一判定），报告不会与启动路径漂移。
+pub fn cmd_production_doctor_as(
+    caller: &Caller,
+    state: &SubstrateState,
+) -> HostResult<tauron_host::ProductionDoctorReport> {
+    require_main_window(caller, "host_production_doctor")?;
+    guard("production_doctor", || {
+        let mut readiness = state.production_readiness.clone();
+        if let Some(descriptor) = state.process_sandbox.get() {
+            readiness.process_runtime_enabled = true;
+            readiness.hard_process_sandbox_available =
+                matches!(descriptor.enforcement, tauron_proc::ProcessSandboxEnforcement::Hard);
+        }
+        tauron_host::production_doctor(state.deployment_mode, &readiness)
     })
 }
 
@@ -12183,6 +12210,31 @@ mod tests {
 
         let denied = cmd_resource_stats_as(&plugin_caller("p.stats"), &state).unwrap_err();
         assert_eq!(denied.code, ErrorCode::E_AUTH_DENIED);
+    }
+
+    #[test]
+    fn production_doctor_is_main_window_only_and_mirrors_readiness() {
+        let dev = SubstrateState::with_adapter_config(&AdapterConfig::default());
+        let report = cmd_production_doctor_as(&Caller::MainWindow, &dev).unwrap();
+        assert_eq!(report.deployment_mode, tauron_host::DeploymentMode::Development);
+        assert!(!report.production_safe, "Development 永远不得声称 production-safe");
+        assert!(report.checks.iter().any(|c| c.id == "caller-identity" && !c.pass));
+
+        let denied = cmd_production_doctor_as(&plugin_caller("p.doctor"), &dev).unwrap_err();
+        assert_eq!(denied.code, ErrorCode::E_AUTH_DENIED);
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = AdapterConfig::production();
+        cfg.origin_allowlist = vec!["tauri://localhost".into()];
+        cfg.recovery_data_dir = Some(temp.path().to_path_buf());
+        cfg.admin_audit_available = true;
+        let prod = SubstrateState::with_adapter_config(&cfg);
+        let report = cmd_production_doctor_as(&Caller::MainWindow, &prod).unwrap();
+        assert!(report.production_safe, "checks={:?}", report.checks);
+        let wire = serde_json::to_value(&report).unwrap();
+        assert_eq!(wire["deploymentMode"], "production");
+        assert_eq!(wire["productionSafe"], true);
+        assert_eq!(wire["checks"][0]["requiredInProduction"], true);
     }
 
     #[test]

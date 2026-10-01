@@ -87,6 +87,7 @@ const FRAMEWORK_COMMANDS = [
   'host_runtime_spawn',
   'host_runtime_health',
   'host_resource_stats',
+  'host_production_doctor',
   // 注册表（主窗）
   'host_registry_list_all',
   // 设置

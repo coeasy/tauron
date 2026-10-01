@@ -535,6 +535,21 @@ export interface InstallReviewToken {
   nonce: string;
 }
 
+/** One machine-readable production-readiness check (V4 A109, wire camelCase). */
+export interface ProductionDoctorCheck {
+  id: string;
+  pass: boolean;
+  requiredInProduction: boolean;
+  message: string;
+}
+
+/** Result of `host_production_doctor` — mirrors `tauron_host::ProductionDoctorReport`. */
+export interface ProductionDoctorReport {
+  deploymentMode: 'development' | 'test' | 'production';
+  productionSafe: boolean;
+  checks: ProductionDoctorCheck[];
+}
+
 export class AdminClient {
   private readonly backend: Backend;
 
@@ -571,6 +586,15 @@ export class AdminClient {
   async eventsApprovals(): Promise<Array<{ subscriber: string; topic: string }>> {
     return this.backend
       .invoke<Array<{ subscriber: string; topic: string }>>('host_events_approvals', {})
+      .catch((err: unknown) => {
+        throw translate_at_boundary(err, 'plugin-webview→host').error;
+      });
+  }
+
+  /** Read the machine-readable production readiness self-test report (V4 A109). */
+  async productionDoctor(): Promise<ProductionDoctorReport> {
+    return this.backend
+      .invoke<ProductionDoctorReport>('host_production_doctor', {})
       .catch((err: unknown) => {
         throw translate_at_boundary(err, 'plugin-webview→host').error;
       });

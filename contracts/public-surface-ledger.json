@@ -3,10 +3,10 @@
   "generatedFrom": "crates/tauron-adapter/src/lib.rs canonical command arrays",
   "note": "Generated V4 A105 ledger. Stable public commands may not exist without owner, producer, consumer, authorization, lifecycle, cleanup and test metadata.",
   "counts": {
-    "substrate": 60,
+    "substrate": 61,
     "pluginRuntime": 22,
     "pluginInstall": 2,
-    "total": 84
+    "total": 85
   },
   "entries": [
     {
@@ -676,6 +676,20 @@
       "producer": "tauron-adapter canonical command surface",
       "consumer": "@tauron/host / generated host binding",
       "authorization": "Plugin/runtime identity + command policy",
+      "lifecycle": "request-scoped",
+      "cleanup": "request completion",
+      "test": "Rust unit + TypeScript wire-gate + CI command-surface drift gate",
+      "maturity": "stable"
+    },
+    {
+      "kind": "command",
+      "symbol": "host_production_doctor",
+      "family": "production",
+      "set": "substrate",
+      "owner": "Tauron Host Kernel / Platform Adapter",
+      "producer": "tauron-adapter canonical command surface",
+      "consumer": "@tauron/host / generated host binding",
+      "authorization": "CallerContext + command policy; privileged commands require host authority",
       "lifecycle": "request-scoped",
       "cleanup": "request completion",
       "test": "Rust unit + TypeScript wire-gate + CI command-surface drift gate",

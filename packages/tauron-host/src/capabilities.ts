@@ -218,6 +218,12 @@ export const CAPABILITIES: readonly Capability[] = [
     consumer: 'main-window',
     description: '列出当前私有 EventBus topic 审批事实；仅主窗审批面可调用',
   },
+  {
+    command: 'host_production_doctor',
+    tier: 'privileged',
+    consumer: 'main-window',
+    description: '读取机器可读的 production readiness 自检报告（A109）；仅主窗可调用',
+  },
 ] as const;
 
 export type CapabilityCommand = (typeof CAPABILITIES)[number]['command'];
