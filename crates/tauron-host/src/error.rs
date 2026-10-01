@@ -274,6 +274,7 @@ mod tests {
         assert!(!ErrorCode::E_HOST_PANIC.retryable());
         assert_eq!(ErrorCode::E_HOST_PANIC.retry_class(), RetryClass::Never);
         assert_eq!(ErrorCode::E_CALL_TIMEOUT.retry_class(), RetryClass::Manual);
+        assert_eq!(ErrorCode::E_PLUGIN_FILTERED.retry_class(), RetryClass::Manual);
         assert_eq!(ErrorCode::E_LEASE_EXPIRED.retry_class(), RetryClass::AfterReconnect);
         assert!(!ErrorCode::E_INVALID_MANIFEST.retryable());
         assert!(!ErrorCode::E_ABI_MISMATCH.retryable());

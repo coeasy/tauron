@@ -1009,6 +1009,17 @@ impl Registry {
                 format!("pending call `{call_id}` 不存在或已被取走"),
             )
         })?;
+        // V4: an expired call must not be resurrected by a late result (substrate), and the
+        // terminal arbitrator is the single source of truth for duplicate settle (HEAD).
+        if Instant::now() >= call.expires_at {
+            return Err(HostError::new(
+                ErrorCode::E_CALL_TIMEOUT,
+                format!(
+                    "pending call `{call_id}` 已超时（TTL {}ms），迟到结果被拒",
+                    self.config.pending_ttl.as_millis()
+                ),
+            ));
+        }
         if call.state == CallState::Settled
             || !call.terminal.try_finish(CallTerminalState::Completed)
         {
@@ -2130,6 +2141,57 @@ mod tests {
         // immediately so a timed-out caller cannot become a permanent pending orphan.
         assert_eq!(r.pending_len(), 0);
         assert_eq!(r.call_cancel(&c.call_id).unwrap_err().code, ErrorCode::E_CALL_NOT_FOUND);
+    }
+
+    #[test]
+    fn settled_result_wins_over_late_cancel_and_end() {
+        let r = Registry::default();
+        let id = r.install(&index(), manifest("com.example.terminal", None)).unwrap();
+        enable(&r, &id);
+        let call = r.call_begin(&id, "a", serde_json::json!({})).unwrap();
+
+        r.settle_call(
+            &call.call_id,
+            CallOutcome {
+                ok: true,
+                result: Some(serde_json::json!({"winner":"result"})),
+                error_code: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            r.call_cancel(&call.call_id).unwrap_err().code,
+            ErrorCode::E_CALL_ALREADY_SETTLED
+        );
+        assert_eq!(r.call_end(&call.call_id).unwrap_err().code, ErrorCode::E_CALL_ALREADY_SETTLED);
+        let taken = r.take_call(&call.call_id).unwrap();
+        assert_eq!(taken.result, Some(serde_json::json!({"winner":"result"})));
+        assert_eq!(r.pending_len(), 0);
+    }
+
+    #[test]
+    fn late_result_cannot_resurrect_an_expired_call() {
+        let cfg = RegistryConfig { pending_ttl: Duration::from_millis(0), ..default_config() };
+        let r = Registry::new(cfg);
+        let id = r.install(&index(), manifest("com.example.late", None)).unwrap();
+        enable(&r, &id);
+        let call = r.call_begin(&id, "a", serde_json::json!({})).unwrap();
+
+        let err = r
+            .settle_call(
+                &call.call_id,
+                CallOutcome {
+                    ok: true,
+                    result: Some(serde_json::json!({"too":"late"})),
+                    error_code: None,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_CALL_TIMEOUT);
+        assert_eq!(r.peek_call(&call.call_id).unwrap().state, CallState::Pending);
+        assert_eq!(r.gc_expired(), 1);
+        assert_eq!(r.pending_len(), 0);
     }
 
     // ────────────────────────────────────────────────────────────
