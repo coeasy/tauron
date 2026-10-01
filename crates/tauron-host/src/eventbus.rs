@@ -26,8 +26,11 @@ use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::call_graph::{EventCausation, DEFAULT_MAX_CAUSATION_DEPTH};
 use crate::error::{ErrorCode, HostError, HostResult};
 use crate::manifest::EventDecl;
+use crate::ordering::{OrderedEventMeta, OrderingTracker};
+use crate::policy::{DecisionError, PolicyAuthority};
 
 /// 单插件队列上限（计划 §4.4 关键约束）。
 pub const MAX_QUEUE: usize = 1000;
@@ -264,19 +267,106 @@ enum EnqueueResult {
 #[serde(rename_all = "camelCase")]
 pub struct Frame {
     pub topic: String,
-    /// 单调递增序号（跨通道独立）。
+    /// V4 A102 per sender→receiver monotonic sequence.
     pub seq: u64,
     pub payload: Value,
+    /// V4 A102 sender principal.
+    pub sender: String,
+    /// V4 A102 receiver principal.
+    pub receiver: String,
+    /// V4 A102 monotonic state revision for state-channel publications.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_revision: Option<u64>,
+    /// V4 A78 unique event identifier for this emitted frame.
+    pub event_id: String,
+    /// V4 A78 stable root causation identifier across an event chain.
+    pub causation_id: String,
+    /// V4 A78 1-based event hop in the causation chain.
+    pub event_hop: u16,
+    /// V4 A78 hard depth budget enforced by the Host.
+    pub max_causation_depth: u16,
+}
+
+fn root_event_causation(event_id: &str) -> EventCausation {
+    EventCausation::root(event_id, DEFAULT_MAX_CAUSATION_DEPTH)
+        .child(event_id)
+        .expect("root event depth is always within the default causation budget")
+}
+
+fn next_event_causation(
+    parent: Option<&EventCausation>,
+    event_id: &str,
+) -> HostResult<EventCausation> {
+    let Some(parent) = parent else {
+        return Ok(root_event_causation(event_id));
+    };
+    let parent_event_id = parent.parent_id.as_deref().unwrap_or_default();
+    if parent.root_id.trim().is_empty() || parent_event_id.trim().is_empty() {
+        return Err(HostError::new(
+            ErrorCode::E_EVENT_CAUSATION_LIMIT,
+            "event causation context is missing causationId/eventId",
+        ));
+    }
+    let budget = parent.budget.clamp(1, DEFAULT_MAX_CAUSATION_DEPTH);
+    if parent.depth == 0 || parent.depth > budget {
+        return Err(HostError::new(
+            ErrorCode::E_EVENT_CAUSATION_LIMIT,
+            format!("event causation context has invalid depth {}/{}", parent.depth, budget),
+        ));
+    }
+    let sanitized = EventCausation {
+        root_id: parent.root_id.clone(),
+        parent_id: Some(parent_event_id.to_string()),
+        depth: parent.depth,
+        budget,
+    };
+    sanitized.child(event_id).map_err(|error| {
+        HostError::new(
+            ErrorCode::E_EVENT_CAUSATION_LIMIT,
+            format!("event causation budget rejected publish: {error}"),
+        )
+    })
+}
+
+fn frame_with_causation(
+    topic: &str,
+    payload: Value,
+    causation: &EventCausation,
+    ordering: &OrderedEventMeta,
+) -> Frame {
+    Frame {
+        topic: topic.to_string(),
+        seq: ordering.sequence,
+        payload,
+        sender: ordering.sender.clone(),
+        receiver: ordering.receiver.clone(),
+        state_revision: ordering.state_revision,
+        event_id: ordering.event_id.clone(),
+        causation_id: causation.root_id.clone(),
+        event_hop: causation.depth,
+        max_causation_depth: causation.budget,
+    }
 }
 
 type QueueKey = (String, ChannelKind);
+
+const PRIVATE_SUBSCRIBE_OPERATION: &str = "events.subscribe.private";
+
+fn policy_decision_error(error: DecisionError) -> HostError {
+    HostError::new(
+        ErrorCode::E_AUTH_DENIED,
+        format!("event subscription authorization became stale before commit: {error}"),
+    )
+}
 
 /// 事件总线。
 ///
 /// 全部内部状态用锁保护，可被多窗口并发调用。
 ///
-/// **锁顺序（规范顺序，任何路径都不得反序持有）**：
-/// `stats` → `topics` → `subs` → `topic_subscribers` → `approvals` → `queues`。
+/// **锁顺序**：普通索引路径保持 `subs → topic_subscribers`；V4 A81 私有订阅提交
+/// 使用授权事务 `approvals (outer) → policy (short) → subs → topic_subscribers`。
+/// 发布路径的 A102 顺序锁固定为 `state_revisions → ordering → queues`；没有反向获取。
+/// 没有任何路径在持有 `subs/topic_subscribers` 时再获取 `approvals`，因此不会形成环。
 ///
 /// 反序持有会构成死锁环。历史缺陷（已修）：
 /// - `subscribe` 曾先取 `topic_subscribers` 再取 `subs`，与 `publish` 的
@@ -293,6 +383,12 @@ pub struct EventBus {
     subs: Mutex<HashMap<String, SubMeta>>,
     topic_subscribers: Mutex<HashMap<String, Vec<String>>>,
     approvals: Mutex<HashMap<(String, String), ()>>,
+    /// V4 A81 grant-version authority for runtime approval/revoke decisions.
+    policy: Mutex<PolicyAuthority>,
+    /// V4 A102 per sender→receiver ordering authority.
+    ordering: Mutex<OrderingTracker>,
+    /// V4 A102 state revision source, keyed by (publisher, topic).
+    state_revisions: Mutex<HashMap<(String, String), u64>>,
     queues: Mutex<HashMap<QueueKey, Queue>>,
     stats: Mutex<BusStats>,
     next_token: std::sync::atomic::AtomicU64,
@@ -306,6 +402,9 @@ impl Default for EventBus {
             subs: Mutex::default(),
             topic_subscribers: Mutex::default(),
             approvals: Mutex::default(),
+            policy: Mutex::new(PolicyAuthority::new()),
+            ordering: Mutex::new(OrderingTracker::default()),
+            state_revisions: Mutex::default(),
             queues: Mutex::default(),
             stats: Mutex::default(),
             next_token: std::sync::atomic::AtomicU64::new(1),
@@ -356,7 +455,10 @@ impl EventBus {
     ///
     /// 这里只维护 EventBus 的最小授权事实；谁有权批准由 adapter/Policy 边界判定。
     pub fn approve(&self, subscriber: &str, topic: &str) {
-        self.approvals.lock().insert((subscriber.to_string(), topic.to_string()), ());
+        let mut approvals = self.approvals.lock();
+        if approvals.insert((subscriber.to_string(), topic.to_string()), ()).is_none() {
+            self.policy.lock().bump_grant(subscriber);
+        }
     }
 
     /// 撤销一条审批（幂等）。返回本次是否真的删除了记录。
@@ -364,10 +466,12 @@ impl EventBus {
     /// 撤销只阻止**后续新订阅**；既有订阅必须由管理面显式退订或在主体销毁时
     /// 级联回收。这样授权事实与订阅资源的生命周期不会在本层暗中混为一谈。
     pub fn revoke(&self, subscriber: &str, topic: &str) -> bool {
-        self.approvals
-            .lock()
-            .remove(&(subscriber.to_string(), topic.to_string()))
-            .is_some()
+        let mut approvals = self.approvals.lock();
+        let removed = approvals.remove(&(subscriber.to_string(), topic.to_string())).is_some();
+        if removed {
+            self.policy.lock().bump_grant(subscriber);
+        }
+        removed
     }
 
     /// 稳定顺序列出全部审批，供宿主管理面审计/展示。
@@ -409,31 +513,40 @@ impl EventBus {
             )
         })?;
 
-        // 授权判定：`is_approved` 内部取 `approvals` 锁，**不嵌套**其他锁；
-        // 紧随其后的 `stats` 也在前者的守卫释放之后才取。
-        //
-        // 关于声明锁序（`stats → topics → subs → topic_subscribers → approvals →
-        // queues`）：该顺序约束的是**嵌套持有**——反序嵌套会构成死锁环。
-        // 本处是**先后**而非嵌套（`allowed` 求值完毕、approvals 守卫已释放，
-        // 才取 `stats` 计数），因此不构成任何环。**刻意不改成嵌套**：把 `stats`
-        // 提到 `is_approved` 之前会让二者真正嵌套，反而新增死锁面。
-        let allowed =
-            meta.publisher == subscriber || meta.is_public || self.is_approved(subscriber, topic);
-        if !allowed {
-            self.stats.lock().rejected_subscribes += 1;
-            return Err(HostError::new(
-                ErrorCode::E_AUTH_DENIED,
-                format!(
-                    "插件 `{subscriber}` 无权订阅私有 topic `{topic}`（声明者 `{}`，需标 public: true）",
-                    meta.publisher
-                ),
-            ));
-        }
+        // Public/self subscriptions are non-revocable at this layer. Private cross-principal
+        // subscriptions keep the approval lock until the subscription indices are committed.
+        // revoke() takes the same outer lock before bumping GrantVersion, so a stale approval
+        // cannot pass revalidation and then race into the table after revocation.
+        let private_approval = if meta.publisher == subscriber || meta.is_public {
+            None
+        } else {
+            let approvals = self.approvals.lock();
+            if !approvals.contains_key(&(subscriber.to_string(), topic.to_string())) {
+                drop(approvals);
+                self.stats.lock().rejected_subscribes += 1;
+                return Err(HostError::new(
+                    ErrorCode::E_AUTH_DENIED,
+                    format!(
+                        "插件 `{subscriber}` 无权订阅私有 topic `{topic}`（声明者 `{}`，需显式审批）",
+                        meta.publisher
+                    ),
+                ));
+            }
+            let decision =
+                self.policy.lock().decide_scoped(subscriber, PRIVATE_SUBSCRIBE_OPERATION, topic);
+            Some((approvals, decision))
+        };
 
         // 幂等：同 subscriber × window × topic 已存在则复用 token。
         // 上限检查放在幂等**之后**：已达上限时，重复订阅（复用同一 token）
         // 仍必须成功，否则持续重复调用的插件会突然开始失败。
         let token = {
+            if let Some((_, decision)) = private_approval.as_ref() {
+                self.policy
+                    .lock()
+                    .validate_scoped(decision, subscriber, PRIVATE_SUBSCRIBE_OPERATION, topic)
+                    .map_err(policy_decision_error)?;
+            }
             let mut s = self.subs.lock();
             if let Some(existing) = s
                 .values()
@@ -511,19 +624,27 @@ impl EventBus {
         payload: Value,
         kind: ChannelKind,
     ) -> PublishResult {
+        let event_id = uuid::Uuid::new_v4().to_string();
+        let causation = root_event_causation(&event_id);
+        self.publish_with_causation(publisher, topic, payload, kind, &causation)
+    }
+
+    fn publish_with_causation(
+        &self,
+        publisher: &str,
+        topic: &str,
+        payload: Value,
+        kind: ChannelKind,
+        causation: &EventCausation,
+    ) -> PublishResult {
         self.stats.lock().publishes += 1;
 
-        // **锁序**：`topics` 读锁必须在取 `stats` 之前释放。写成 `match
-        // self.topics.read().get(...)` 时读锁临时量会活到整个 match 结束，
-        // 于是出现 `topics → stats` 的反序持有；先 cloned() 到独立语句，
-        // 读锁在语句末尾即释放（文档顺序：stats → topics）。
         let meta = self.topics.read().get(topic).cloned();
         let Some(meta) = meta else {
             self.stats.lock().undeclared_publishes += 1;
             return PublishResult { dropped: true, ..Default::default() };
         };
         if meta.publisher != publisher {
-            // 发布者越界：不是该 topic 的声明者（R8：以声明元数据判定，不解析 topic 前缀）。
             self.stats.lock().undeclared_publishes += 1;
             return PublishResult { dropped: true, ..Default::default() };
         }
@@ -533,13 +654,21 @@ impl EventBus {
             ts.get(topic).cloned().unwrap_or_default()
         };
 
+        let state_revision = if kind == ChannelKind::State {
+            let mut revisions = self.state_revisions.lock();
+            let revision = revisions.entry((publisher.to_string(), topic.to_string())).or_insert(0);
+            *revision = revision.saturating_add(1);
+            Some(*revision)
+        } else {
+            None
+        };
+
         let mut delivered = 0usize;
         let mut overflow = 0usize;
 
         for token in tokens {
             let subscriber = match self.subs.lock().get(&token).map(|m| m.subscriber.clone()) {
                 Some(s) => s,
-                // 悬挂订阅：token 在反向索引里但已退订。清理它。
                 None => {
                     if let Some(list) = self.topic_subscribers.lock().get_mut(topic) {
                         list.retain(|t| t != &token);
@@ -550,10 +679,29 @@ impl EventBus {
 
             let key = (subscriber.clone(), kind);
             let result = {
+                let mut ordering = self.ordering.lock();
+                let ordered = ordering
+                    .issue(
+                        publisher,
+                        &subscriber,
+                        causation.parent_id.as_deref().unwrap_or(&causation.root_id),
+                        state_revision,
+                        Some(&causation.root_id),
+                    )
+                    .expect("host-generated ordering metadata is monotonic");
                 let mut qs = self.queues.lock();
-                let q = qs.entry(key.clone()).or_insert_with(|| Queue::new(self.capacity));
-                let seq = q.frames.len() as u64;
-                q.enqueue(kind, Frame { topic: topic.to_string(), seq, payload: payload.clone() })
+                let q = qs.entry(key).or_insert_with(|| Queue::new(self.capacity));
+                let result = q.enqueue(
+                    kind,
+                    frame_with_causation(topic, payload.clone(), causation, &ordered),
+                );
+                if matches!(result, EnqueueResult::Full) {
+                    debug_assert!(
+                        ordering.rollback_last(&ordered),
+                        "reliable request enqueue failure must roll back its unpublished sequence"
+                    );
+                }
+                result
             };
             match result {
                 EnqueueResult::Queued => delivered += 1,
@@ -576,7 +724,26 @@ impl EventBus {
         topic: &str,
         payload: Value,
     ) -> HostResult<PublishResult> {
-        let res = self.publish(publisher, topic, payload, ChannelKind::Request);
+        self.publish_request_with_causation(publisher, topic, payload, None)
+    }
+
+    /// V4 A78 reliable event publish with an optional parent causation context.
+    pub fn publish_request_with_causation(
+        &self,
+        publisher: &str,
+        topic: &str,
+        payload: Value,
+        parent: Option<&EventCausation>,
+    ) -> HostResult<PublishResult> {
+        let event_id = uuid::Uuid::new_v4().to_string();
+        let causation = next_event_causation(parent, &event_id)?;
+        let res = self.publish_with_causation(
+            publisher,
+            topic,
+            payload,
+            ChannelKind::Request,
+            &causation,
+        );
         if res.overflow > 0 {
             return Err(HostError::new(
                 ErrorCode::E_CALL_PENDING_FULL,
@@ -603,12 +770,25 @@ impl EventBus {
         if target.is_empty() {
             return Err(HostError::new(ErrorCode::E_AUTH_DENIED, "调用投递目标不可为空"));
         }
+        let event_id = uuid::Uuid::new_v4().to_string();
+        let causation = root_event_causation(&event_id);
+        let mut ordering = self.ordering.lock();
+        let ordered = ordering
+            .issue("host", target, &event_id, None, Some(&causation.root_id))
+            .expect("host-generated ordering metadata is monotonic");
         let mut qs = self.queues.lock();
         let key = (target.to_string(), ChannelKind::Request);
         let q = qs.entry(key).or_insert_with(|| Queue::new(self.capacity));
-        let seq = q.frames.len() as u64;
-        let result =
-            q.enqueue(ChannelKind::Request, Frame { topic: topic.to_string(), seq, payload });
+        let result = q.enqueue(
+            ChannelKind::Request,
+            frame_with_causation(topic, payload, &causation, &ordered),
+        );
+        if matches!(result, EnqueueResult::Full) {
+            debug_assert!(
+                ordering.rollback_last(&ordered),
+                "reliable inbound enqueue failure must roll back its unpublished sequence"
+            );
+        }
         match result {
             EnqueueResult::Queued | EnqueueResult::QueuedWithOverflow => Ok(1),
             EnqueueResult::Full | EnqueueResult::DroppedCircuitOpen => Err(HostError::new(
@@ -684,6 +864,10 @@ impl EventBus {
             let mut a = self.approvals.lock();
             a.retain(|(_, topic), _| !removed_topics.contains(topic));
         }
+        self.state_revisions
+            .lock()
+            .retain(|(owner, topic), _| owner != publisher && !removed_topics.contains(topic));
+        self.ordering.lock().clear_principal(publisher);
         killed
     }
 
@@ -702,6 +886,8 @@ impl EventBus {
         }
         let mut qs = self.queues.lock();
         qs.retain(|(sub, _), _| sub != subscriber);
+        drop(qs);
+        self.ordering.lock().clear_principal(subscriber);
         tokens.len()
     }
 
@@ -811,6 +997,47 @@ mod tests {
     }
 
     #[test]
+    fn ordering_sequence_survives_drain_and_is_per_receiver() {
+        let b = bus(8);
+        declare(&b, "com.a", "plugin:com.a:x", true);
+        b.subscribe("com.b", "w", "plugin:com.a:x").unwrap();
+        b.subscribe("com.c", "w", "plugin:com.a:x").unwrap();
+
+        b.publish("com.a", "plugin:com.a:x", Value::from(1), ChannelKind::Event);
+        let first_b = b.drain("com.b", ChannelKind::Event).unwrap().remove(0);
+        let first_c = b.drain("com.c", ChannelKind::Event).unwrap().remove(0);
+        assert_eq!((first_b.seq, first_c.seq), (1, 1));
+        assert_eq!(
+            (&first_b.sender, &first_b.receiver),
+            (&"com.a".to_string(), &"com.b".to_string())
+        );
+
+        b.publish("com.a", "plugin:com.a:x", Value::from(2), ChannelKind::Event);
+        let second_b = b.drain("com.b", ChannelKind::Event).unwrap().remove(0);
+        assert_eq!(second_b.seq, 2, "drain must not reset the sender→receiver sequence");
+        assert_eq!(second_b.causation_id, second_b.event_id);
+    }
+
+    #[test]
+    fn state_revision_is_monotonic_and_shared_across_receivers() {
+        let b = bus(8);
+        declare(&b, "com.a", "plugin:com.a:state", true);
+        b.subscribe("com.b", "w", "plugin:com.a:state").unwrap();
+        b.subscribe("com.c", "w", "plugin:com.a:state").unwrap();
+
+        b.publish("com.a", "plugin:com.a:state", Value::from(1), ChannelKind::State);
+        let first_b = b.drain("com.b", ChannelKind::State).unwrap().remove(0);
+        let first_c = b.drain("com.c", ChannelKind::State).unwrap().remove(0);
+        assert_eq!(first_b.state_revision, Some(1));
+        assert_eq!(first_c.state_revision, Some(1));
+
+        b.publish("com.a", "plugin:com.a:state", Value::from(2), ChannelKind::State);
+        let second = b.drain("com.b", ChannelKind::State).unwrap().remove(0);
+        assert_eq!(second.state_revision, Some(2));
+        assert_eq!(second.seq, 2);
+    }
+
+    #[test]
     fn undeclared_topic_is_dropped_and_counted() {
         let b = bus(16);
         let r = b.publish("com.a", "plugin:com.a:nope", Value::Null, ChannelKind::Event);
@@ -890,6 +1117,42 @@ mod tests {
     }
 
     #[test]
+    fn revoke_invalidates_private_subscription_decision_token() {
+        let b = bus(16);
+        b.approve("com.b", "plugin:com.a:private");
+        let token = b.policy.lock().decide_scoped(
+            "com.b",
+            PRIVATE_SUBSCRIBE_OPERATION,
+            "plugin:com.a:private",
+        );
+        b.policy
+            .lock()
+            .validate_scoped(&token, "com.b", PRIVATE_SUBSCRIBE_OPERATION, "plugin:com.a:private")
+            .unwrap();
+
+        assert!(b.revoke("com.b", "plugin:com.a:private"));
+        assert!(matches!(
+            b.policy.lock().validate_scoped(
+                &token,
+                "com.b",
+                PRIVATE_SUBSCRIBE_OPERATION,
+                "plugin:com.a:private"
+            ),
+            Err(DecisionError::StaleGrant { .. })
+        ));
+        assert!(!b.revoke("com.b", "plugin:com.a:private"));
+    }
+
+    #[test]
+    fn duplicate_approve_does_not_churn_grant_version() {
+        let b = bus(16);
+        b.approve("com.b", "plugin:com.a:private");
+        let version = b.policy.lock().grant_version("com.b");
+        b.approve("com.b", "plugin:com.a:private");
+        assert_eq!(b.policy.lock().grant_version("com.b"), version);
+    }
+
+    #[test]
     fn approved_private_topic_is_subscribable() {
         let b = bus(16);
         declare(&b, "com.a", "plugin:com.a:private", false);
@@ -905,10 +1168,7 @@ mod tests {
         declare(&b, "com.a", "plugin:com.a:private", false);
 
         b.approve("com.b", "plugin:com.a:private");
-        assert_eq!(
-            b.approvals(),
-            vec![("com.b".to_string(), "plugin:com.a:private".to_string())]
-        );
+        assert_eq!(b.approvals(), vec![("com.b".to_string(), "plugin:com.a:private".to_string())]);
         assert!(b.subscribe("com.b", "w1", "plugin:com.a:private").is_ok());
 
         assert!(b.revoke("com.b", "plugin:com.a:private"));
@@ -1094,6 +1354,48 @@ mod tests {
     // ── 三类通道语义分离 ─────────────────────────────────────────
 
     #[test]
+    fn event_causation_is_propagated_and_depth_is_bounded() {
+        let b = EventBus::default();
+        b.declare_topics("com.a", &[EventDecl { topic: "plugin:com.a:x".into(), public: true }])
+            .unwrap();
+        b.subscribe("com.b", "w", "plugin:com.a:x").unwrap();
+
+        b.publish_request_with_causation("com.a", "plugin:com.a:x", Value::from(1), None).unwrap();
+        let first = b.drain("com.b", ChannelKind::Request).unwrap().remove(0);
+        assert_eq!(first.event_hop, 1);
+        assert_eq!(first.causation_id, first.event_id);
+
+        let parent = EventCausation {
+            root_id: first.causation_id.clone(),
+            parent_id: Some(first.event_id.clone()),
+            depth: first.event_hop,
+            budget: 2,
+        };
+        b.publish_request_with_causation("com.a", "plugin:com.a:x", Value::from(2), Some(&parent))
+            .unwrap();
+        let second = b.drain("com.b", ChannelKind::Request).unwrap().remove(0);
+        assert_eq!(second.causation_id, first.causation_id);
+        assert_eq!(second.event_hop, 2);
+
+        let exhausted = EventCausation {
+            root_id: second.causation_id.clone(),
+            parent_id: Some(second.event_id.clone()),
+            depth: second.event_hop,
+            budget: 2,
+        };
+        let err = b
+            .publish_request_with_causation(
+                "com.a",
+                "plugin:com.a:x",
+                Value::from(3),
+                Some(&exhausted),
+            )
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_EVENT_CAUSATION_LIMIT);
+        assert!(b.drain("com.b", ChannelKind::Request).unwrap().is_empty());
+    }
+
+    #[test]
     fn three_channels_have_separate_queues() {
         let b = bus(3);
         declare(&b, "com.a", "plugin:com.a:x", true);
@@ -1228,8 +1530,7 @@ mod tests {
 
         assert!(
             subs_lock < subs_insert && subs_insert < reverse_index,
-            "锁序反转：subscribe 必须先取 subs（规范顺序 stats → topics → subs → \
-             topic_subscribers → approvals → queues）"
+            "锁序反转：订阅索引提交必须保持 subs → topic_subscribers；私有授权事务的 approvals 是外层锁"
         );
     }
 

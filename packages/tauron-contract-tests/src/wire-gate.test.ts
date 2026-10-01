@@ -1488,8 +1488,9 @@ describe('门禁：应用层命令注册完整性（未注册 = 前端 command n
   // 编译期可关（`default-features = false`）；此前它们被无条件列进
   // `FRAMEWORK_COMMANDS`，于是 `capabilities()` 对它们误报已注册——调用方按能力表
   // 判断"能不能装插件"拿到 `true`，直到 invoke 才 `command not found`。
-  // （注：`plugin-install` 现已进默认特性，默认装配会注册；但"静态全集不得硬编码"
-  //  这条纪律与 feature 的默认值无关——关掉 feature 的装配仍会误报。）
+  // （注：`plugin-install` 是**opt-in** 特性（`default = []`），默认装配不注册；
+  //  「静态全集不得硬编码」这条纪律与 feature 的默认值无关——开或关都可能漂移，
+  //  真相只允许来自运行期 `host_capabilities`。）
   // 本门禁把「哪些命令是可选的」这份真相钉在两侧之间：集合必须对得上，
   // 且可选命令**不得**出现在静态全集里（只能由 host_capabilities 运行期开门）。
   it('TS 可选命令集与 Rust feature-gated 命令集一致（默认构建不得误报已注册）', () => {

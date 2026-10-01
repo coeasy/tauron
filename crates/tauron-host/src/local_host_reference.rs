@@ -613,7 +613,7 @@ mod windows {
     /// Create one first-instance named pipe with a protected DACL for the current user.
     pub fn bind_endpoint(path: &Path) -> Result<WindowsPipeListener, LocalHostReferenceError> {
         let name = wide(path.as_os_str());
-        let (mut attrs, _descriptor) = security_descriptor_for_current_user()?;
+        let (attrs, _descriptor) = security_descriptor_for_current_user()?;
         // SAFETY: name/SECURITY_ATTRIBUTES remain alive for this synchronous create call.
         let handle = unsafe {
             CreateNamedPipeW(
@@ -624,7 +624,7 @@ mod windows {
                 PIPE_BUFFER_BYTES,
                 PIPE_BUFFER_BYTES,
                 PIPE_CONNECT_TIMEOUT_MS,
-                &mut attrs,
+                &attrs,
             )
         };
         Ok(WindowsPipeListener { handle: OwnedHandle::new(handle)? })

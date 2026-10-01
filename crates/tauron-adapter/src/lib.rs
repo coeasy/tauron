@@ -1826,6 +1826,7 @@ fn fs_io_error(op: &str, path: &std::path::Path, e: std::io::Error) -> HostError
     )
 }
 
+#[cfg(unix)]
 fn scoped_fs_error(
     op: &str,
     path: &tauron_host::ScopedPath,
@@ -3208,13 +3209,14 @@ mod substrate_only_tests {
         let prod = AdapterConfig::production();
         let err =
             prod.validate_production_readiness().expect_err("empty production config must fail");
-        assert!(err.contains("origin allowlist"), "err={err}");
-        assert!(err.contains("recovery data directory"), "err={err}");
+        assert!(err.contains("caller identity"), "err={err}");
+        assert!(err.contains("recovery"), "err={err}");
 
         let temp = tempfile::tempdir().unwrap();
         let mut ready = AdapterConfig::production();
         ready.origin_allowlist = vec!["tauri://localhost".into()];
         ready.recovery_data_dir = Some(temp.path().to_path_buf());
+        ready.admin_audit_available = true;
         assert!(ready.validate_production_readiness().is_ok());
     }
 
@@ -7104,10 +7106,42 @@ fn fs_unavailable() -> UnsupportedBody {
     )
 }
 
+/// 规范化**已存在的最近祖先**并把剩余组件原样接回：允许对尚不存在的目标
+/// （如 `host_fs_write` 的新文件）做 root 前缀判定，而不用整路径 `canonicalize`
+/// 失败即拒绝。
+fn canonicalize_existing_prefix(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let mut pending: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut cursor = path;
+    loop {
+        match cursor.canonicalize() {
+            Ok(mut base) => {
+                for component in pending.iter().rev() {
+                    base.push(component);
+                }
+                return Ok(base);
+            }
+            Err(error) => {
+                let Some(parent) = cursor.parent() else {
+                    return Err(error);
+                };
+                let Some(name) = cursor.file_name() else {
+                    return Err(error);
+                };
+                pending.push(name);
+                cursor = parent;
+            }
+        }
+    }
+}
+
 /// V4 A95：把授权结果转换为“可信 root + portable relative path”。
 ///
 /// 预检查只用于选择 root；真正 read/write/stat 在 Unix 通过 openat/O_NOFOLLOW
 /// 沿同一 root handle 执行，因此 check/use 期间替换 symlink 仍会被拒绝。
+///
+/// 候选路径先按**最近的已存在祖先**规范化再比对前缀：宿主装配期的 roots 已经
+/// `canonicalize`（Windows 上会带 `\\?\` verbatim 前缀），直接用原始字符串做
+/// `starts_with` 会把 root 内的合法路径误判为越界。
 fn scoped_within_roots(roots: &[PathBuf], raw: &str) -> HostResult<tauron_host::ScopedPath> {
     let candidate = PathBuf::from(raw);
     if !candidate.is_absolute() {
@@ -7116,6 +7150,9 @@ fn scoped_within_roots(roots: &[PathBuf], raw: &str) -> HostResult<tauron_host::
             format!("fs 路径 `{raw}` 必须是允许 root 下的绝对路径"),
         ));
     }
+    let candidate = canonicalize_existing_prefix(&candidate).map_err(|error| {
+        HostError::new(ErrorCode::E_AUTH_DENIED, format!("fs 路径 `{raw}` 无法规范化：{error}"))
+    })?;
 
     for root in roots {
         if !candidate.starts_with(root) {

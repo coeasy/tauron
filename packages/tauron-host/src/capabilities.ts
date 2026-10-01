@@ -240,7 +240,8 @@ export function isAvailable(backend: Backend, command: string): boolean {
 /**
  * 能力矩阵：每个能力 → 是否可用。
  *
- * 供 `useCoreCapabilities()` / 插件管理页等消费（§4.10 `<oc-plugin-manager>`）。
+ * 面向应用侧的公开工具（如自建的插件管理面板、诊断页）：一次性拿到
+ * 全部核心能力的运行期可用性快照，避免逐个 `isAvailable` 拼装。
  */
 export function capabilityMatrix(backend: Backend): Record<string, boolean> {
   const out: Record<string, boolean> = {};
