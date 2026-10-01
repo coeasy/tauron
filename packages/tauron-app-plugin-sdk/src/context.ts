@@ -67,7 +67,7 @@ export function createPluginContext(
   // 0.4-A1：本泵同时是**跨主体调用的执行泵**——宿主投给本插件的调用帧
   // （topic `plugin:<id>:__call`，经 request 通道直达队列、不走订阅）也由
   // 这里取回，按帧上的 `cmd` 找到已注册命令自动执行，并经
-  // `host_report_call_result` 回填结果。因此**注册命令即开泵**：没有泵，
+  // `host_call_result`（SDK 方法 `reportCallResult`）回填结果。因此**注册命令即开泵**：没有泵，
   // 别人调你永远是「已受理、永不回帧」。
   const PUMP_INTERVAL_MS = 100;
   /** 入站调用 topic 后缀（与 Rust `call_delivery::CALL_TOPIC_SUFFIX` 对齐）。 */

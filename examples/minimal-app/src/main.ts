@@ -1,7 +1,7 @@
 // tauron 应用层贯通示例 —— 宿主主窗入口。
 //
-// 演示七条核心链路（全部走 tauron-adapter 的 78 条默认 host_* 命令面；
-// 本示例默认特性开 `plugin-install`，故实际注册 80 条）：
+// 演示八条核心链路（全部走 tauron-adapter 的 83 条默认 host_* 命令面；
+// 本示例默认特性开 `plugin-install`，故实际注册 85 条）：
 // 1. iframe 沙箱插件：PluginBridge 握手（token 经 URL hash 注入）+ callPluginMethod
 // 2. 窗口控制：ShellClient → Tauri 真实窗口操作
 // 3. 系统能力：DialogClient（剪贴板）+ AutoUpdateClient（检查更新）
@@ -9,11 +9,18 @@
 // 5. 壳层组件动作：ShellController 接管标题栏/更新/插件管理/命令面板
 // 6. 启动恢复（§4.14）：上报启动结果（驱动信号）+ 读回阶段决策
 // 7. 跨主体调用（0.4-A1/A2）：callPlugin → 插件 webview 执行泵 → callTakeResult 取件
+// 8. 主窗管理面自检：AdminClient 生产就绪自检（A109）+ Event 审批事实
 //
-// 编号与正文各节标题一一对应（七节 = 七条），改任一侧请同步另一侧。
+// 编号与正文各节标题一一对应（八节 = 八条），改任一侧请同步另一侧。
 
 import { TauriBackend } from '@tauron/host/tauri';
-import { ShellClient, DialogClient, AutoUpdateClient, ShellController } from '@tauron/host';
+import {
+  AdminClient,
+  ShellClient,
+  DialogClient,
+  AutoUpdateClient,
+  ShellController,
+} from '@tauron/host';
 import type { PendingCallInfo } from '@tauron/host';
 import { PluginBridge, callPluginMethod } from '@tauron/plugin-sdk';
 import '@tauron/ui/wc'; // 注册全部自定义元素（oc-toast / oc-plugin-manager / …）
@@ -306,6 +313,38 @@ el<HTMLButtonElement>('btn-cross-call').addEventListener('click', () => {
     (err: Error) => log('cross-out', `跨主体调用失败：${err.message}`),
   );
 });
+
+// ── 8. 主窗管理面自检（AdminClient：A109 生产就绪 + Event 审批事实）─────
+//
+// `productionDoctor` 返回与**启动门禁同源**的机器可读报告：Production 形态下
+// 任一未过项会在 READY 前直接拒启；Development/Test 则用它提前看清「换生产
+// 会挂在哪几条」（requiredInProduction 的未过项 = 发布阻断项）。
+// `eventsApprovals` 读回 Event Approval Broker 当前私有 topic 审批事实——
+// 审批面（approve/revoke）的展示与回收都以这份事实为准。
+const admin = new AdminClient({ backend });
+void admin
+  .productionDoctor()
+  .then((r) => {
+    const failed = r.checks.filter((c) => !c.pass);
+    log(
+      'host-out',
+      `生产就绪自检（${r.deploymentMode}）：${
+        r.productionSafe ? '全部通过' : `${failed.length} 项未过`
+      }${failed.length ? '——' + failed.map((c) => c.id).join(', ') : ''}`,
+    );
+  })
+  .catch((err: Error) => log('host-out', `生产就绪自检失败：${err.message}`));
+void admin
+  .eventsApprovals()
+  .then((rows) =>
+    log(
+      'host-out',
+      rows.length
+        ? `Event 审批事实：${rows.map((x) => `${x.subscriber}→${x.topic}`).join(', ')}`
+        : 'Event 审批事实：（无）',
+    ),
+  )
+  .catch((err: Error) => log('host-out', `读取 Event 审批事实失败：${err.message}`));
 
 // ── 启动 ─────────────────────────────────────────────────────────────────
 

@@ -3223,6 +3223,17 @@ mod substrate_only_tests {
         ready.origin_allowlist = vec!["tauri://localhost".into()];
         ready.recovery_data_dir = Some(temp.path().to_path_buf());
         ready.admin_audit_available = true;
+        #[cfg(feature = "plugin-install")]
+        {
+            // plugin-install 打开时，安装信任材料与可信时间也是生产必要条件。
+            let mut keys = std::collections::BTreeMap::new();
+            keys.insert("fixture-key".to_string(), vec![0x4b; 32]);
+            ready = ready
+                .with_plugin_install(temp.path().join("plugins"), keys, vec![0x5a; 32])
+                .with_trusted_time_provider(Arc::new(tauron_host::SystemTimeProvider::new(
+                    tauron_host::TimeTrustState::Trusted,
+                )));
+        }
         assert!(ready.validate_production_readiness().is_ok());
     }
 
@@ -3236,8 +3247,10 @@ mod substrate_only_tests {
         cfg.plugin_install_dir = Some(temp.path().join("plugins"));
 
         let err = cfg.validate_production_readiness().expect_err("partial trust must fail");
-        assert!(err.contains("plugin signing trust set"), "err={err}");
-        assert!(err.contains("ACL signing key"), "err={err}");
+        // 失败面用 readiness 规范码：装了目录但没有签名密钥 → INSTALL_TRUST_REQUIRED；
+        // 未注入可信时间源 → TRUSTED_TIME_REQUIRED。
+        assert!(err.contains("INSTALL_TRUST_REQUIRED"), "err={err}");
+        assert!(err.contains("TRUSTED_TIME_REQUIRED"), "err={err}");
     }
 
     #[test]
@@ -5006,6 +5019,10 @@ pub fn cmd_runtime_health_as(
 /// 插件明细取自对应资源表本身，不维护第二份计数状态。
 pub fn cmd_resource_stats(state: &PluginRuntimeState) -> HostResult<serde_json::Value> {
     guard("resource_stats", || {
+        // 诊断读 = 回收点：过期 pending / 调用图边 / 准入令牌此前只在 pending
+        // 触顶（begin_call）时被顺带回收；主窗若不轮询诊断，N 笔未结束的调用
+        // 会占用内存直到重启。这里随读回收一次，快照也因此与回收事实一致。
+        state.registry.gc_expired();
         let plugins = state.registry.list_all();
         let plugin_ids: Vec<String> = plugins.iter().map(|plugin| plugin.id.to_string()).collect();
         let pending_used = state.registry.pending_len();
@@ -5215,7 +5232,9 @@ pub fn cmd_events_approve_as(
     if subscriber.trim().is_empty() || topic.trim().is_empty() {
         return Err(HostError::new(ErrorCode::E_AUTH_DENIED, "subscriber 与 topic 均不可为空"));
     }
-    guard("events_approve", || state.bus.lock().approve(subscriber, topic))
+    // 内层 `?`：`approve` 自身的拒绝（未声明 topic / 审批表满）必须原样上线，
+    // 不能被当作 panic 捕获后丢掉。
+    guard("events_approve", || state.bus.lock().approve(subscriber, topic))?
 }
 
 /// 主窗撤销插件私有 topic 审批。幂等；返回是否真实删除。
@@ -8852,12 +8871,12 @@ mod tests {
             &Caller::MainWindow,
             &state,
             package.to_str().unwrap(),
-            &preview.review_token,
             &["store:allow-get".into()],
+            &preview.review_token,
         )
         .expect_err("package replacement after preview must be rejected");
         assert_eq!(err.code, ErrorCode::E_INSTALL_FAILED);
-        assert!(err.message.contains("已审批内容不一致"), "{}", err.message);
+        assert!(err.message.contains("package changed after approval"), "{}", err.message);
         assert!(!install_root.join(id).exists());
     }
 
@@ -8876,8 +8895,8 @@ mod tests {
             &Caller::MainWindow,
             &state,
             package.to_str().unwrap(),
-            &preview.review_token,
             &["store:allow-get".into()],
+            &preview.review_token,
         )
         .unwrap();
         assert_eq!(installed.plugin_id, "com.install.review-ok");
@@ -8886,12 +8905,16 @@ mod tests {
             &Caller::MainWindow,
             &state,
             package.to_str().unwrap(),
-            &preview.review_token,
             &["store:allow-get".into()],
+            &preview.review_token,
         )
         .expect_err("review token must be one-time");
         assert_eq!(reused.code, ErrorCode::E_INSTALL_FAILED);
-        assert!(reused.message.contains("不存在或已使用"), "{}", reused.message);
+        assert!(
+            reused.message.contains("unknown, expired, or already consumed"),
+            "{}",
+            reused.message
+        );
     }
 
     #[cfg(feature = "plugin-install")]
@@ -12228,6 +12251,18 @@ mod tests {
         cfg.origin_allowlist = vec!["tauri://localhost".into()];
         cfg.recovery_data_dir = Some(temp.path().to_path_buf());
         cfg.admin_audit_available = true;
+        #[cfg(feature = "plugin-install")]
+        {
+            // 与 production_readiness 同源：plugin-install 打开时启动门还要求
+            // 安装信任材料与可信时间，否则 with_adapter_config 直接 panic。
+            let mut keys = std::collections::BTreeMap::new();
+            keys.insert("fixture-key".to_string(), vec![0x4b; 32]);
+            cfg = cfg
+                .with_plugin_install(temp.path().join("plugins"), keys, vec![0x5a; 32])
+                .with_trusted_time_provider(Arc::new(tauron_host::SystemTimeProvider::new(
+                    tauron_host::TimeTrustState::Trusted,
+                )));
+        }
         let prod = SubstrateState::with_adapter_config(&cfg);
         let report = cmd_production_doctor_as(&Caller::MainWindow, &prod).unwrap();
         assert!(report.production_safe, "checks={:?}", report.checks);

@@ -316,7 +316,7 @@ async function newAppProject(
     '  npm run tauri dev                      # 一键起开发环境（beforeDevCommand 自动拉 vite）',
   );
   printInfo('  cd src-tauri && cargo check            # 或单独验证 tauron 装配能编译');
-  printInfo('  cd src-tauri && cargo check --features substrate-only   # 只取底座（57 条命令）');
+  printInfo('  cd src-tauri && cargo check --features substrate-only   # 只取底座（61 条命令）');
   printWarn('src-tauri/icons/ 是**占位图**（纯色），发布前请替换成自己的品牌图标。');
 }
 

@@ -2848,9 +2848,9 @@ where
 // macro，输入按**字面 path 列表**解析——实测传入 `family!()` 会得到
 // `error: expected ','`，族的展开结果无法拼进同一个 handler。因此族以**两组编译期
 // 可选集合**表达：宿主在**编译期**二选一，而不是运行时过滤。
-//   · [`tauron_substrate_handler!`] 底座-only（58 条）
-//   · [`tauron_plugin_handler!`] 全量（79 条 = 底座 58 + 插件运行时 21；
-//     另 2 条安装命令为 `plugin-install` feature-gated，启用后共 81 条）
+//   · [`tauron_substrate_handler!`] 底座-only（61 条）
+//   · [`tauron_plugin_handler!`] 全量（83 条 = 底座 61 + 插件运行时 22；
+//     另 2 条安装命令为 `plugin-install` feature-gated，启用后共 85 条）
 //
 // 两组集合的一致性**不靠人眼**：wire-gate 断言
 //   ① 全量集合 == tauri.rs 中全部 `#[tauri::command] pub fn host_*` 定义；
@@ -2948,13 +2948,13 @@ macro_rules! tauron_substrate_handler {
     };
 }
 
-/// **全量**命令集：底座 58 条 + 插件运行时 21 条（多插件宿主；另 2 条安装命令
-/// 受 `plugin-install` feature 门控，启用后共 81 条）。
+/// **全量**命令集：底座 61 条 + 插件运行时 22 条（多插件宿主；另 2 条安装命令
+/// 受 `plugin-install` feature 门控，启用后共 85 条）。
 #[macro_export]
 macro_rules! tauron_plugin_handler {
     () => {
         $crate::tauri::origin_gated_handler(tauri::generate_handler![
-            // ── 底座（与 [`tauron_substrate_handler!`] 的 58 条逐条一致）──
+            // ── 底座（与 [`tauron_substrate_handler!`] 的 61 条逐条一致）──
             $crate::tauri::host_window_minimize,
             $crate::tauri::host_window_maximize,
             $crate::tauri::host_window_restore,

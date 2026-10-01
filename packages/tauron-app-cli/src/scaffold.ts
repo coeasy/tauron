@@ -721,12 +721,12 @@ serde_json = "1"
 # 这一行与 examples/minimal-app/src-tauri/Cargo.toml 同源（实测 cargo check 可过）。
 indexmap = { version = "1.9.3", features = ["std"] }
 # 框架层：plugin_invoke / plugin_cancel / plugin_emit 三条信封命令
-# 应用层：host_* 命令族（默认 78 条 + plugin-install 2 条 = 80 条）
+# 应用层：host_* 命令族（默认 83 条 + plugin-install 2 条 = 85 条）
 ${deps}
 
 [features]
 default = ["plugin-install"]
-# 只取底座（57 条命令）：不建 PluginRuntimeState、不注册插件命令。
+# 只取底座（61 条命令）：不建 PluginRuntimeState、不注册插件命令。
 #   cargo check --features substrate-only --all-targets
 substrate-only = []
 plugin-install = ["tauron-adapter/plugin-install"]
@@ -745,9 +745,9 @@ tauri-build = { version = "2", features = [] }
  *
  * 两种编译期形态：
  * - 默认（全量）：`state_init_with_adapter_config` + `tauron_generate_handler![]`
- *   （80 条），并在窗口销毁时回收该窗的订阅/队列与 pending 调用；
+ *   （85 条），并在窗口销毁时回收该窗的订阅/队列与 pending 调用；
  * - `--features substrate-only`：只 `manage(SubstrateState)` +
- *   `tauron_substrate_handler![]`（57 条）。
+ *   `tauron_substrate_handler![]`（61 条）。
  */
 function generateMainRust(config: ScaffoldConfig): string {
   return `//! ${config.name} —— tauron 宿主入口（由 \`tauron-app new\` 生成）。
@@ -839,7 +839,7 @@ fn main() {
     #[cfg(not(feature = "plugin-install"))]
     let builder = tauri::Builder::default();
 
-    // ── 默认：底座 + 插件运行时（80 条命令）──
+    // ── 默认：底座 + 插件运行时（85 条命令）──
     #[cfg(not(feature = "substrate-only"))]
     let builder = builder
         // 用 state_init_with_adapter_config 而不是 state_init：前者把 ClientConfig
@@ -857,7 +857,7 @@ fn main() {
             }
         });
 
-    // ── substrate-only：只有底座状态与底座命令族（57 条）──
+    // ── substrate-only：只有底座状态与底座命令族（61 条）──
     #[cfg(feature = "substrate-only")]
     let builder = builder
         .setup(|app| {

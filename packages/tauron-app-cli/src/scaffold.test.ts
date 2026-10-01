@@ -846,13 +846,13 @@ describe('tauron 装配', () => {
 
   it('main.rs 生成真装配，不是裸 Builder', () => {
     const mainRs = generateFiles(config).get('src-tauri/src/main.rs')!;
-    // 默认档：底座 + 插件运行时（80 条）
+    // 默认档：底座 + 插件运行时（85 条）
     expect(mainRs).toContain('tauron_adapter::tauri::state_init_with_adapter_config');
     expect(mainRs).toContain('tauron_adapter::tauron_generate_handler![]');
     expect(mainRs).toContain('tauron_adapter::tauri::cleanup_closed_window');
     expect(mainRs).toContain('on_window_event');
     expect(mainRs).toContain('TAURON_CLIENT_CONFIG');
-    // substrate-only 档：57 条底座命令
+    // substrate-only 档：61 条底座命令
     expect(mainRs).toContain('tauron_adapter::SubstrateState::with_adapter_config');
     expect(mainRs).toContain('tauron_adapter::tauron_substrate_handler![]');
     // 生成物自身不是裸 Builder（裸 Builder 与 tauron 零关联，等于没接）

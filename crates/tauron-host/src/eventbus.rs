@@ -51,6 +51,13 @@ pub const OVERFLOW_STREAK_LIMIT: usize = 3;
 /// 与其余「表满」类错误一致）。
 pub const MAX_SUBSCRIPTIONS: usize = 4096;
 
+/// 跨主体审批事实的全局上限。
+///
+/// 审批表与订阅表同级，但没有「取件/退订」那样的自然回收路径：既有随主体销毁
+/// 级联清理，也要防**批了却从不订阅**的孤儿事实无限累积（管理面逐条点击即可
+/// 注入）。达上限拒绝**新增**，撤销/重复审批不受影响。
+pub const MAX_APPROVALS: usize = 4096;
+
 /// 单插件可同时登记的订阅上限。
 pub const MAX_SUBSCRIPTIONS_PER_PLUGIN: usize = 256;
 
@@ -454,11 +461,33 @@ impl EventBus {
     /// 用户/宿主策略显式审批：允许 `subscriber` 订阅私有 `topic`。
     ///
     /// 这里只维护 EventBus 的最小授权事实；谁有权批准由 adapter/Policy 边界判定。
-    pub fn approve(&self, subscriber: &str, topic: &str) {
+    ///
+    /// 两条防腐约束（否则这是唯一没有回收兄弟的 `(subscriber, topic)` 表）：
+    /// - **topic 必须已声明**：给未声明 topic 留审批 = 打错的审批事实永远无人消费，
+    ///   且主体永不销毁时不会级联回收；
+    /// - **全局上限 [`MAX_APPROVALS`]**：与订阅表同姿态，达限确定性拒绝。
+    pub fn approve(&self, subscriber: &str, topic: &str) -> HostResult<()> {
+        if self.topics.read().get(topic).is_none() {
+            return Err(HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                format!("topic `{topic}` 未被任何插件声明，不可审批"),
+            ));
+        }
+        let key = (subscriber.to_string(), topic.to_string());
         let mut approvals = self.approvals.lock();
-        if approvals.insert((subscriber.to_string(), topic.to_string()), ()).is_none() {
+        if !approvals.contains_key(&key) && approvals.len() >= MAX_APPROVALS {
+            return Err(HostError::new(
+                ErrorCode::E_SUBSCRIPTION_FULL,
+                format!(
+                    "审批表已达上限 {MAX_APPROVALS}（当前 {}），先撤销失效审批",
+                    approvals.len()
+                ),
+            ));
+        }
+        if approvals.insert(key, ()).is_none() {
             self.policy.lock().bump_grant(subscriber);
         }
+        Ok(())
     }
 
     /// 撤销一条审批（幂等）。返回本次是否真的删除了记录。
@@ -1119,7 +1148,8 @@ mod tests {
     #[test]
     fn revoke_invalidates_private_subscription_decision_token() {
         let b = bus(16);
-        b.approve("com.b", "plugin:com.a:private");
+        declare(&b, "com.a", "plugin:com.a:private", false);
+        b.approve("com.b", "plugin:com.a:private").unwrap();
         let token = b.policy.lock().decide_scoped(
             "com.b",
             PRIVATE_SUBSCRIBE_OPERATION,
@@ -1144,11 +1174,21 @@ mod tests {
     }
 
     #[test]
+    fn approve_rejects_undeclared_topic_and_leaves_no_orphan_fact() {
+        let b = bus(16);
+        let e = b.approve("com.b", "plugin:com.a:ghost").unwrap_err();
+        assert_eq!(e.code, ErrorCode::E_AUTH_DENIED);
+        assert!(e.message.contains("未被任何插件声明"));
+        assert!(b.approvals().is_empty(), "被拒的审批不得留下授权事实");
+    }
+
+    #[test]
     fn duplicate_approve_does_not_churn_grant_version() {
         let b = bus(16);
-        b.approve("com.b", "plugin:com.a:private");
+        declare(&b, "com.a", "plugin:com.a:private", false);
+        b.approve("com.b", "plugin:com.a:private").unwrap();
         let version = b.policy.lock().grant_version("com.b");
-        b.approve("com.b", "plugin:com.a:private");
+        b.approve("com.b", "plugin:com.a:private").unwrap();
         assert_eq!(b.policy.lock().grant_version("com.b"), version);
     }
 
@@ -1157,7 +1197,7 @@ mod tests {
         let b = bus(16);
         declare(&b, "com.a", "plugin:com.a:private", false);
         assert!(b.subscribe("com.b", "w1", "plugin:com.a:private").is_err());
-        b.approve("com.b", "plugin:com.a:private");
+        b.approve("com.b", "plugin:com.a:private").unwrap();
         let o = b.subscribe("com.b", "w1", "plugin:com.a:private").unwrap();
         assert!(!o.duplicate);
     }
@@ -1167,7 +1207,7 @@ mod tests {
         let b = bus(16);
         declare(&b, "com.a", "plugin:com.a:private", false);
 
-        b.approve("com.b", "plugin:com.a:private");
+        b.approve("com.b", "plugin:com.a:private").unwrap();
         assert_eq!(b.approvals(), vec![("com.b".to_string(), "plugin:com.a:private".to_string())]);
         assert!(b.subscribe("com.b", "w1", "plugin:com.a:private").is_ok());
 
@@ -1490,7 +1530,7 @@ mod tests {
         b.subscribe("com.b", "w2", "plugin:com.a:x").unwrap();
         b.publish("com.a", "plugin:com.a:x", Value::Null, ChannelKind::Event);
         b.publish("com.a", "plugin:com.a:x", Value::Null, ChannelKind::State);
-        b.approve("com.b", "plugin:com.a:x");
+        b.approve("com.b", "plugin:com.a:x").unwrap();
 
         let killed = b.dispose_subscriber("com.b");
         assert_eq!(killed, 2);
@@ -1596,7 +1636,7 @@ mod tests {
         let b = bus(8);
         declare(&b, "com.a", "plugin:com.a:x", true);
         declare(&b, "com.a", "plugin:com.a:y", false);
-        b.approve("com.c", "plugin:com.a:y");
+        b.approve("com.c", "plugin:com.a:y").unwrap();
         b.subscribe("com.b", "w1", "plugin:com.a:x").unwrap();
         b.subscribe("com.c", "w1", "plugin:com.a:y").unwrap();
 

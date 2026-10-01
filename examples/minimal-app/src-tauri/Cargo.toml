@@ -11,14 +11,14 @@ serde_json = "1"
 indexmap = { version = "1.9.3", features = ["std"] }
 # 框架层：plugin_invoke / plugin_cancel / plugin_emit 三条信封命令
 tauron-shell = { path = "../../../crates/tauron-shell", features = ["tauri"] }
-# 应用层：host_* 命令族（默认 78 条 + plugin-install 2 条 = 本示例注册 80 条：
+# 应用层：host_* 命令族（默认 83 条 + plugin-install 2 条 = 本示例注册 85 条：
 # 窗口/剪贴板/对话框/更新/事件总线/恢复/i18n/注册表/调用/安装…）
 tauron-adapter = { path = "../../../crates/tauron-adapter", features = ["tauri"] }
 
 [features]
 default = ["plugin-install", "runtime-wasm-broker"]
 # 验收标准 1 的证据（方案 §9-1）：只 `manage(SubstrateState)` + 底座命令族
-# （57 条），不建 PluginRuntimeState、不注册插件命令。
+# （61 条），不建 PluginRuntimeState、不注册插件命令。
 #   cargo check --manifest-path examples/minimal-app/src-tauri/Cargo.toml \
 #     --features substrate-only --all-targets
 substrate-only = []

@@ -28,8 +28,10 @@ export interface Capability {
 /**
  * 框架服务命令面（计划 §2.1，D1/D2/D15/D16 修订后定稿）。
  *
- * - 13 条插件命令：12 条 `self` + 1 条 `scoped-read`
- * - 主窗特权命令包含注册表/运行时/资源诊断与 Event Approval Broker 管理面
+ * - 19 条插件命令：17 条 `self` + 2 条 `scoped-read`
+ * - 主窗特权命令覆盖注册表/运行时/资源诊断/Event Approval Broker 审批
+ *   （approve/revoke/approvals）与生产就绪自检（A109）——SDK 只提供命令面，
+ *   审批与诊断 UI 由宿主管理面自行实现
  * - `host_grant_request` 已按 D16 在 v1 删除
  * - `host_call_begin` 已按 D2 被 `host_plugin_call` 取代
  *

@@ -89,6 +89,7 @@ export type {
   RuntimeSpawnProfile,
   RuntimeHandle,
   RuntimeHealth,
+  HealthReport,
   ResourceStats,
   ReapStats,
   MenuItemSpec,
