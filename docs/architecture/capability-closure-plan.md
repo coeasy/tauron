@@ -141,9 +141,9 @@ tauron-acl ──────→ tauron-host
 
 | 集合 | 条数 | 定义 |
 |---|---:|---|
-| 底座 `tauron_substrate_handler!` | **57** | `tauri.rs` 的 `macro_rules! tauron_substrate_handler`（R9 补 menu/tray/fs/http/updater 五域 18 条后 39→57） |
-| 插件运行时 `tauron_plugin_handler!` | **78**（57 + 21） | `tauri.rs` 的 `macro_rules! tauron_plugin_handler`（行号随重构漂移，以符号名为准） |
-| 安装（feature-gated） | **+2** | 同上宏体内的 `#[cfg(feature="plugin-install")]` 两条，**已进默认特性**，默认构建共 **80** 条 |
+| 底座 `tauron_substrate_handler!` | **61** | `tauri.rs` 的 `macro_rules! tauron_substrate_handler`（R9 补 menu/tray/fs/http/updater 五域 18 条后 39→57；1.1 再补 Event 审批 3 条 + 生产就绪自检 1 条 → 61） |
+| 插件运行时 `tauron_plugin_handler!` | **83**（61 + 22） | `tauri.rs` 的 `macro_rules! tauron_plugin_handler`（行号随重构漂移，以符号名为准） |
+| 安装（feature-gated） | **+2** | 同上宏体内的 `#[cfg(feature="plugin-install")]` 两条，**已进默认特性**，默认构建共 **85** 条 |
 
 `crates/tauron-adapter/Cargo.toml:21` → `default = ["plugin-install"]`（**`plugin-install` 已进默认**，1.0-W6；`tauri` feature 仍不默认）。
 唯一真实装配入口：`examples/minimal-app/src-tauri/src/main.rs:140`。
@@ -640,7 +640,7 @@ pub struct DeliveryReceipt {
 
 | 文档 | 需同步内容 |
 |---|---|
-| [overview.md](./overview.md) | 三层结构（补充「活线依赖死线」）；接线状态表按 A8-5 归置表更新；命令面 78 条（默认 80） |
+| [overview.md](./overview.md) | 三层结构（补充「活线依赖死线」）；接线状态表按 A8-5 归置表更新；命令面 83 条（默认 85） |
 | [app-layer-wire.md](./app-layer-wire.md) | 新增 install 的 feature 可达性说明、调用投递的 `DeliveryReceipt` 线形、contributes reconcile |
 | [canonical-owners.md](./canonical-owners.md) | crate 归置表按 A4/A5/A8-5 更新；wasm 从「可选组件」改为「可选组件（已接线）」 |
 | [multi-plugin-substrate-roadmap.md](./multi-plugin-substrate-roadmap.md) | §2 残差表按本次实测重写（M-1/M-2 已实现） |

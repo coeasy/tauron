@@ -11,6 +11,49 @@
 
 ---
 
+## [1.1.0] - 2026-10-01
+
+### Added
+
+- **V4 生产就绪线并入（三条 feature 分支合并到 main）**：`DeploymentMode` /
+  `ProductionReadiness` / `production_doctor`（A109）与 **fail-closed 启动门**——
+  `AdapterConfig::production()` 下 readiness 不达标时宿主直接拒绝启动（Development/Test
+  行为不变）；进程沙箱接入时按 A97 `hard` 强制再对账一次。
+- **`host_production_doctor`（第 8 条主窗特权命令）**：机器可读的生产就绪自检报告
+  （`deploymentMode` + 逐项 `checks[]` + `productionSafe`），TS 侧
+  `AdminClient#productionDoctor()`；与启动门**同源**，不会出现「自检通过但启动拒绝」。
+- **Event 审批三命令（`host_events_approve` / `revoke` / `approvals`）**：跨主体
+  订阅审批事实的唯一落点；审批只接受**已被插件声明的主题**，审批表上限
+  `MAX_APPROVALS = 4096`（达限 `E_SUBSCRIPTION_FULL`，不静默扩张）。
+- **`host_stream_grant`**：流式通道的有界 byte credit 补充（插件运行时命令，
+  self 档）。
+- **一次性安装评审链（V4）**：`host_registry_install_preview` 铸造 nonce 键控的
+  `InstallReviewToken`（TTL 600s、一次性消费、表满按过期优先驱逐），
+  `host_registry_install` 校验 token 与包哈希一致后才落盘——审批过的内容与实际
+  安装内容之间的断链被闭合。
+- **命令面**：底座 `tauron_substrate_handler!` **57 → 61**，全量
+  `tauron_plugin_handler!` **78 → 83**，默认特性（含 `plugin-install` 2 条）
+  **80 → 85**；`authz` 登记档位命令 **22 → 27**（特权 4 → 8）。口径由 wire-gate
+  与 `contracts/public-surface-ledger.json`（85 条）逐名锁定。
+
+### Fixed
+
+- `host_events_approve` 的内层拒绝此前会被 guard 包装吞掉（错误丢失、返回恒成功），
+  现原样上线。
+- 注册表 pending 调用此前只在容量压力下 GC；现在诊断读
+  （`host_resource_stats`）也顺带 `gc_expired()`，避免「只读不回收」。
+- 崩溃投递与恢复引擎**同路径**（`RecoveryEngine::record_boot_failure`）：
+  `consecutiveFailures` 与安全模式判定不再可能两套口径。
+- 三轮全链路审计的接缝修复：`plugin-install` feature 矩阵下 5 处测试与实现脱节
+  （生产就绪配置缺安装信任/可信时间材料、评审安装断言与实现文案不一致）已按
+  实现真相对齐；CI 的 feature 矩阵门禁本地全绿。
+- 文档与示例计数漂移清零（README / installation / app-layer-wire /
+  incremental-adoption / plugin-development-guide / host README 等统一到
+  61/83/85 口径）；`examples/minimal-app` 增第 8 条链路（AdminClient 消费
+  `productionDoctor` + `eventsApprovals`，闭合 A109 孤儿命令面）；修正插件 SDK
+  文档中的幻影命令名 `host_report_call_result`（实为 `host_call_result`）；
+  `@tauron/host` 补导出 `HealthReport`。
+
 ## [1.0.2] - 2026-09-28
 
 ### Fixed

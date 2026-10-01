@@ -9,7 +9,7 @@ import * as path from 'node:path';
 import { generateClientConfig } from './client-config.js';
 import { ensureDir, writeFile, pathExists, toPosixRelative } from './fs-operations.js';
 
-const FRAMEWORK_VERSION = '1.0.2';
+const FRAMEWORK_VERSION = '1.1.0';
 
 // ── 类型 ──
 

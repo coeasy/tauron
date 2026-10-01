@@ -1,6 +1,6 @@
 {
   "name": "@tauron/adapter-svelte",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "tauron Svelte 适配器（设计文档 §4.2）：invoke/event/capabilities stores",
   "license": "MIT",
   "repository": {

@@ -51,16 +51,16 @@ try {
 
   const generatedPackage = JSON.parse(readFileSync(join(target, 'package.json'), 'utf8'));
   const cargoManifest = readFileSync(join(target, 'src-tauri/Cargo.toml'), 'utf8');
-  if (generatedPackage.dependencies?.['@tauron/host'] !== '1.0.2') {
-    throw new Error('Generated starter does not pin @tauron/host to 1.0.2.');
+  if (generatedPackage.dependencies?.['@tauron/host'] !== '1.1.0') {
+    throw new Error('Generated starter does not pin @tauron/host to 1.1.0.');
   }
-  if (!cargoManifest.includes('tauron-adapter = { version = "=1.0.2"')) {
-    throw new Error('Generated starter does not pin tauron-adapter to 1.0.2.');
+  if (!cargoManifest.includes('tauron-adapter = { version = "=1.1.0"')) {
+    throw new Error('Generated starter does not pin tauron-adapter to 1.1.0.');
   }
 
   if (process.env.TAURON_INSTALL_PREFLIGHT === '1') {
     execSync('pnpm install --no-frozen-lockfile', { cwd: target, stdio: 'inherit' });
-    execSync('pnpm add @tauron/ui@1.0.2', { cwd: target, stdio: 'inherit' });
+    execSync('pnpm add @tauron/ui@1.1.0', { cwd: target, stdio: 'inherit' });
     execSync('pnpm run build', { cwd: target, stdio: 'inherit' });
   }
 

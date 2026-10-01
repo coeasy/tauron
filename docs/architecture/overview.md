@@ -25,7 +25,7 @@
 ├──────────────────────────────────────────────────────────────────────────┤
 │                  Tauri 命令适配层（薄包装，feature = "tauri"）              │
 │   tauron-shell: plugin_invoke / plugin_cancel / plugin_emit (3 条信封命令) │
-│   tauron-adapter: host_* 命令族（应用层，78 条 = 底座 57 + 插件运行时 21；install 2 条 feature-gated 默认开启 → 80 条）│
+│   tauron-adapter: host_* 命令族（应用层，83 条 = 底座 61 + 插件运行时 22；install 2 条 feature-gated 默认开启 → 85 条）│
 ├──────────────────────────────────────────────────────────────────────────┤
 │          Rust 壳层                        TS 插件 SDK 层                   │
 │  ┌──────────────────────────┐      ┌──────────────────────────────────┐  │
@@ -76,7 +76,7 @@ tauron 由**框架层**与**应用层**组成。两层共享同一套类型与�
 | **面向** | 第三方客户端集成 | 完整客户端交付 |
 | **npm** | `@tauron/types` `core` `plugin-sdk` `dual-world` `adapter-*` `market` `shell-matrix` `cli` `contract-tests` | `@tauron/host` `framework` `ui` `app-cli` `app-plugin-sdk` `app-contract-kit` |
 | **Rust** | `tauron-shell` | `tauron-host` `tauron-adapter` |
-| **命令族** | `plugin_invoke` / `plugin_cancel` / `plugin_emit` | `host_*`（78 条；`plugin-install` 默认开启时 80 条） |
+| **命令族** | `plugin_invoke` / `plugin_cancel` / `plugin_emit` | `host_*`（83 条；`plugin-install` 默认开启时 85 条） |
 | **入口** | `tauron_shell::commands::init()` 或零配置 `state_init()` + `tauron_generate_handler![]` | `tauron_adapter::tauri::init()` 或 `state_init()` + `tauron_generate_handler![]` |
 
 > 应用层**复用**框架层的类型与协议，不修改框架层契约。两层之间的命令名与

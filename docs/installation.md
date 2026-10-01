@@ -17,7 +17,7 @@
 | A | **跑起来看看**（拿安装包装上就开） | §1 | ⚠️ 部分可以：Windows NSIS **出包**实测过；macOS / Linux 的包 CI 能出，但三种平台的包**都未做过真机安装验证**（出包 ≠ 装过） |
 | B | **改代码 / 自己构建** | §2 | ✅ 可以，源码可构建 |
 | C | **把 tauron 当库接进自己的项目** | §3 | ✅ npm 包已发布；Rust crate 的可安装性以本次 crates.io 发布和干净工程验收为准 |
-| D | **一键脚手架起新工程**（`tauron-app new`） | §3.2 | ✅ `create-tauron-app@1.0.2` 已发布，可直接运行 |
+| D | **一键脚手架起新工程**（`tauron-app new`） | §3.2 | ✅ `create-tauron-app@1.1.0` 已发布，可直接运行 |
 
 ---
 
@@ -26,7 +26,7 @@
 ### 1.1 下载
 
 到 [Releases](https://github.com/coeasy/tauron/releases) 页面，在最新版本的
-**Assets** 里按平台取文件。命名形如 `Tauron Minimal App_1.0.2_<平台>.<后缀>`：
+**Assets** 里按平台取文件。命名形如 `Tauron Minimal App_1.1.0_<平台>.<后缀>`：
 
 | 平台 | 取哪个文件 | 格式 |
 |---|---|---|
@@ -50,7 +50,7 @@
 
 ### 1.2 Windows
 
-1. 双击 `Tauron Minimal App_1.0.2_x64-setup.exe`。
+1. 双击 `Tauron Minimal App_1.1.0_x64-setup.exe`。
 2. 会弹 **Windows SmartScreen**（「Windows 已保护你的电脑」）——因为安装包
    **没有代码签名**。点「更多信息」→「仍要运行」。
 3. 按向导装完，从开始菜单启动。
@@ -217,8 +217,8 @@ pnpm --filter minimal-app build
 
 | 目标 | 前端直接依赖 | Rust 直接依赖 | 最短路径 |
 |---|---|---|---|
-| 新建 Tauri 2 客户端 | 脚手架生成 `@tauron/host` | 脚手架生成 `tauron-adapter` | `npm create tauron-app@1.0.2 -- ./my-app --framework react`，然后 `cd my-app && npm install` |
-| 接入已有 Tauri 2 客户端 | CLI 自动加 `@tauron/host` 与 `@tauron/ui` | CLI 自动加 `tauron-adapter` | `npx @tauron/app-cli@1.0.2 init --dir ./my-app`，再按 CLI 提示安装依赖 |
+| 新建 Tauri 2 客户端 | 脚手架生成 `@tauron/host` | 脚手架生成 `tauron-adapter` | `npm create tauron-app@1.1.0 -- ./my-app --framework react`，然后 `cd my-app && npm install` |
+| 接入已有 Tauri 2 客户端 | CLI 自动加 `@tauron/host` 与 `@tauron/ui` | CLI 自动加 `tauron-adapter` | `npx @tauron/app-cli@1.1.0 init --dir ./my-app`，再按 CLI 提示安装依赖 |
 | 手工集成 | 从 `@tauron/host` 开始；需要组件时再加 `@tauron/ui` | 只加 `tauron-adapter` 并启用 `tauri` feature | 只需安装直接使用的包；npm / Cargo 会解析 Tauron 的传递依赖 |
 
 `tauron-adapter` 是 Rust 侧聚合入口，下面 10+ 个内部 crate 会作为传递依赖处理；前端包同样会自动解析内部包依赖。React、Vue、Svelte 是脚手架选择的前端方案，用户不需要同时安装三套框架适配器。需要更细粒度控制时，再按后续章节逐包集成。
@@ -230,14 +230,14 @@ pnpm --filter minimal-app build
 | # | 方式 | 具体做法 | 现在能不能用 | 依据 |
 |---|---|---|---|---|
 | 1 | **源码集成** | `path` / `file:` 指向本机 tauron checkout | ✅ 可用于源码联调 | §3.3 |
-| 2 | **npm 包集成** | `npm i @tauron/...` | ✅ 20 个公开包已发布为 `1.0.2` | §3.4 |
+| 2 | **npm 包集成** | `npm i @tauron/...` | ✅ 20 个公开包已发布为 `1.1.0` | §3.4 |
 | 3 | **crate 集成** | `cargo add tauron-*` | ✅ 15 个 crate 已发布；干净 Tauri 消费工程通过 | §3.5 |
-| 4 | **一键脚手架** | `npm create tauron-app@1.0.2` | ✅ npm 上可直接运行 | §3.2 |
+| 4 | **一键脚手架** | `npm create tauron-app@1.1.0` | ✅ npm 上可直接运行 | §3.2 |
 | 5 | **安装包** | 从 Releases 取 Tauri bundle 装上即用 | ⚠️ 仅限**示例应用**；Windows 腿 `--bundles nsis` 出包实测过，**装机未验证** | §1 |
 
 ### 3.1 发布状态
 
-npm 侧 20 个公开包与 Rust 侧 15 个 crates 均已发布为 `1.0.2`；干净目录验收通过后创建正式 Release。
+npm 侧 20 个公开包与 Rust 侧 15 个 crates 均已发布为 `1.1.0`；干净目录验收通过后创建正式 Release。
 
 - **npm**：21 个 package manifests 中 **20 个可发布**并补齐发布元数据（`license` /
   `repository` / `homepage` / `bugs` / `keywords` / `engines` / `publishConfig.access=public`
@@ -246,8 +246,8 @@ npm 侧 20 个公开包与 Rust 侧 15 个 crates 均已发布为 `1.0.2`；干�
   用例还依赖 monorepo 目录布局，发布出去对第三方无意义）。
 - **crates**：15 个 crate 的内部互引用都已同时给出 `version`；发布检查会从每个 `.crate`
   tarball 实际构建，并断言产物 manifest 里 `path` 已被 cargo 剥离，只剩 `version`。
-- **npm**：`@tauron/*@1.0.2` 与 `create-tauron-app@1.0.2` 已发布，可从公共 npm registry 安装。
-- **Rust crates**：15 个 `tauron-*@1.0.2` 已发布；`cargo add` 可从 crates.io 安装。
+- **npm**：`@tauron/*@1.1.0` 与 `create-tauron-app@1.1.0` 已发布，可从公共 npm registry 安装。
+- **Rust crates**：15 个 `tauron-*@1.1.0` 已发布；`cargo add` 可从 crates.io 安装。
 
 发布编排脚本、发布状态与验收见 §3.7。
 
@@ -257,10 +257,10 @@ npm 侧 20 个公开包与 Rust 侧 15 个 crates 均已发布为 `1.0.2`；干�
 
 ```bash
 # npm create 会运行 create-tauron-app 包，生成已接线的 Tauri 2 工程
-npm create tauron-app@1.0.2 -- ./my-app --framework react
+npm create tauron-app@1.1.0 -- ./my-app --framework react
 
 # 已有 Tauri 2 项目：注入接入
-npx @tauron/app-cli@1.0.2 init --dir ./my-existing-app
+npx @tauron/app-cli@1.1.0 init --dir ./my-existing-app
 ```
 
 在 Tauron 仓库中进行本地源码开发时，可运行 `node packages/tauron-app-cli/dist/cli.js new ./my-app
@@ -271,7 +271,7 @@ npx @tauron/app-cli@1.0.2 init --dir ./my-existing-app
 | 产出 | 状态 |
 |---|---|
 | `src-tauri/`（`Cargo.toml` / `main.rs` / `build.rs` / `capabilities/default.json` / `tauri.conf.json`） | ✅ 真装配，与 `examples/minimal-app` 同源 |
-| 依赖坐标 | ✅ 默认固定到 `1.0.2` registry；源码开发时 `--tauron-path` 显式使用本地 checkout |
+| 依赖坐标 | ✅ 默认固定到 `1.1.0` registry；源码开发时 `--tauron-path` 显式使用本地 checkout |
 | 前端 bundler / dev-server 配置 | ✅ 生成 `vite.config.ts`（端口/产物目录与 `tauri.conf.json` 对齐）+ 根 `index.html` + `beforeDevCommand` / `beforeBuildCommand` |
 | `src-tauri/icons/` | ⚠️ 生成**纯色占位图**（6 个文件，覆盖 Windows / macOS / Linux 打包所需）；**发布前须替换成品牌图标**。缺这组文件连 `cargo check` 都过不去（`tauri-build` 在 Windows 上要 `icons/icon.ico`） |
 
@@ -281,8 +281,8 @@ npx @tauron/app-cli@1.0.2 init --dir ./my-existing-app
 cd my-app && npm install && npm run tauri dev
 ```
 
-> **实测（2026-09-27）**：生成物（含占位图标与 vite 配置）开箱即可编译——默认形态
-> （80 条）与 `--features substrate-only`（57 条）两档 `cargo check` **均通过**。
+> **实测（2026-10-01）**：生成物（含占位图标与 vite 配置）开箱即可编译——默认形态
+> （85 条）与 `--features substrate-only`（61 条）两档 `cargo check` **均通过**。
 >
 > **仅覆盖 Rust 侧**：`npm install` / `npm run tauri dev` 未在本机验证（要从 registry
 > 取包，沙箱无网络）。前置条件两条：本机 tauron 检出已 `pnpm install`、且
@@ -311,7 +311,7 @@ pnpm add @tauron/types@file:../tauron/packages/types
 # src-tauri/Cargo.toml
 [dependencies]
 tauron-shell = { path = "../tauron/crates/tauron-shell", features = ["tauri"] }
-# 应用层整套（含 80 条命令）：
+# 应用层整套（含 85 条命令）：
 # tauron-adapter = { path = "../tauron/crates/tauron-adapter", features = ["tauri"] }
 ```
 
@@ -324,7 +324,7 @@ tauron-shell = { path = "../tauron/crates/tauron-shell", features = ["tauri"] }
 
 ### 3.4 方式 2：npm 包集成
 
-20 个公共 npm 包已发布为 `1.0.2`，可以通过常规包管理器安装：
+20 个公共 npm 包已发布为 `1.1.0`，可以通过常规包管理器安装：
 
 - 20 个可发布包已补齐 `license` / `repository` / `homepage` / `bugs` /
   `keywords` / `engines`（`>=22`，与 README 徽章一致）/ `publishConfig.access=public`
@@ -337,7 +337,7 @@ tauron-shell = { path = "../tauron/crates/tauron-shell", features = ["tauri"] }
 **发布必须用 pnpm（不是 npm）——这是实测结论**：`npm pack` 会把 `workspace:*`
 **原样写进 tarball 的 `package.json`**，而 npm 在 workspace 之外解析 `workspace:`
 会直接报 `EUNSUPPORTEDPROTOCOL`；`pnpm pack` / `pnpm publish` 则会把它改写成具体
-版本（本机解包实测：`"@tauron/types": "1.0.2"`）。发布脚本因此固定走 pnpm，
+版本（本机解包实测：`"@tauron/types": "1.1.0"`）。发布脚本因此固定走 pnpm，
 且把「无 `workspace:` 残留」作为硬校验项。
 
 发布后用法：
@@ -354,7 +354,7 @@ pnpm add @tauron/types @tauron/core @tauron/host   # npm / yarn 同理
 （`path` 由 cargo 剥离）。本次发布工作流按依赖顺序上传，完成后再由 Windows 干净消费者工程实际安装构建。
 
 - ✅ **本机已验证**：`cargo package -p <crate> --allow-dirty --offline` 对全部 15 个 crate
-  产出并构建 `.crate`，且产物内 `[dependencies.tauron-*]` 只剩 `version = "1.0.2"`、没有 `path`。
+  产出并构建 `.crate`，且产物内 `[dependencies.tauron-*]` 只剩 `version = "1.1.0"`、没有 `path`。
 - ⏳ **CI 发布与验收**：由配置了发布凭据的 GitHub Actions 执行；失败可从断点安全续发。
 
 **发布必须按依赖拓扑顺序逐个来**（被依赖者先发）——`cargo publish` 剥离 `path` 后
@@ -365,10 +365,10 @@ pnpm add @tauron/types @tauron/core @tauron/host   # npm / yarn 同理
 
 ```toml
 [dependencies]
-# 应用层：整套 host_* 命令（默认 80 条）
-tauron-adapter = { version = "=1.0.2", features = ["tauri"] }
+# 应用层：整套 host_* 命令（默认 85 条）
+tauron-adapter = { version = "=1.1.0", features = ["tauri"] }
 # 或框架层：只要信封协议 3 条命令
-tauron-shell = { version = "=1.0.2", features = ["tauri"] }
+tauron-shell = { version = "=1.1.0", features = ["tauri"] }
 ```
 
 ### 3.6 三档装配——先决定你要哪一档
@@ -377,9 +377,9 @@ tauron 的装配是**分档**的，别一上来就全接：
 
 | 档位 | 拿到什么 | 命令面 | 适用 |
 |---|---|---|---|
-| **只取底座** | 窗口/剪贴板/对话框/事件/设置/恢复/i18n/通知/品牌/主题，以及菜单/托盘/文件系统/HTTP/更新通道五个宿主能力域 | 57 条 | 不跑插件系统的普通客户端 |
-| **底座 + 插件运行时** | 上面 + 注册表/生命周期/流式调用 | 78 条（`plugin-install` 已进默认特性，默认装配含安装 2 条 → 共 **80**） | 要装插件 |
-| **完整客户端** | 上面 + 设置中心/白标/主题/UI 组件 | 78 条 + UI 层（同上） | 交付完整产品 |
+| **只取底座** | 窗口/剪贴板/对话框/事件/设置/恢复/i18n/通知/品牌/主题，以及菜单/托盘/文件系统/HTTP/更新通道五个宿主能力域 | 61 条 | 不跑插件系统的普通客户端 |
+| **底座 + 插件运行时** | 上面 + 注册表/生命周期/流式调用 | 83 条（`plugin-install` 已进默认特性，默认装配含安装 2 条 → 共 **85**） | 要装插件 |
+| **完整客户端** | 上面 + 设置中心/白标/主题/UI 组件 | 83 条 + UI 层（同上） | 交付完整产品 |
 
 > 命令面口径：底座 `tauron_substrate_handler!` **57** 条；`tauron_plugin_handler!` 在其上
 > 加插件运行时 **21** 条 = **78**；`plugin-install` feature 另加 `host_registry_install` /

@@ -1,6 +1,6 @@
 {
   "name": "@tauron/adapter-vue",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "tauron Vue 适配器（设计文档 §4.2）：useInvoke/useEvent/useCapabilities composables、ReactiveStore",
   "license": "MIT",
   "repository": {

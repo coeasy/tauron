@@ -1,6 +1,6 @@
 {
   "name": "@tauron/shell-events",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "tauron 壳层事件契约：oc-* 事件名常量与 detail 类型（零依赖，UI 组件与宿主控制器共用的唯一事实源）",
   "license": "MIT",
   "repository": {

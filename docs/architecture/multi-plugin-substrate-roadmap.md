@@ -25,7 +25,7 @@
 | Rust 测试 | **1221 / 0 failed**（15 crate） | 轮 12 收口 |
 | TS 测试 | **1571 / 0 failed**（97 文件，21 包） | 轮 12 收口 |
 | 跨语言门禁 wire-gate | **125 / 125**（当轮计数口径，见下方口径注） | `packages/tauron-contract-tests/src/wire-gate.test.ts` |
-| 命令面（本方案新增 `host_capabilities` 后） | **78 = 底座 57 + 插件运行时 21**（0.4-A1 三命令、0.4-W3 对账命令，以及 R9 五域 menu/tray/fs/http/updater 与品牌/主题接通；`plugin-install` feature 另注册 2 条且默认开启 → 80 条） | `tauron_substrate_handler!` / `tauron_plugin_handler!` |
+| 命令面（本方案新增 `host_capabilities` 后） | **83 = 底座 61 + 插件运行时 22**（0.4-A1 三命令、0.4-W3 对账命令，以及 R9 五域 menu/tray/fs/http/updater 与品牌/主题接通；1.1 再进 Event 审批 3 条 + 生产就绪自检 1 条；`plugin-install` feature 另注册 2 条且默认开启 → 85 条） | `tauron_substrate_handler!` / `tauron_plugin_handler!` |
 | 能力表 | 16（13 插件面 + 3 特权） | `authz::COMMANDS` / `capabilities.ts` |
 | 底座独立装配 | ✅ 有编译证据 + 功能证据 | `substrate-only` feature + `substrate_only_host_is_functionally_complete` |
 
@@ -209,7 +209,7 @@ Rust 侧配套：把 `ChannelSink` 的 `tauri::Wry` 换成 `trait FrameSink`（`
 - 「`tauri::Wry` 只允许出现在 `ChannelSink` 实现块内」
 - 「非 Tauri 传输必须存在一个可编译的替代实现」（新增 `MemoryTransport` 参考实现 + 编译期断言）
 
-**验证**：用 `MemoryTransport`（进程内直通，无 Tauri）跑通档 1 底座 57 条命令的等价路径；
+**验证**：用 `MemoryTransport`（进程内直通，无 Tauri）跑通档 1 底座 61 条命令的等价路径；
 `HostClient` 在 Tauri 与 Memory 两种传输下行为逐项相等。
 
 **影响**：Electron / 纯 Web / 移动 WebView / Node CLI 宿主只需实现 6 个方法即可接入整个底座，
@@ -366,7 +366,7 @@ TS 侧 `Backend.capabilities()` 已有字段，改为**启动时拉取一次并�
 
 **门禁**：「`host_capabilities` 的 `commands` 集合 == 两个 handler 宏的并集（按当前装配形态）」。
 
-**验证**：档 1 装配返回 57 条且 `pluginRuntime: false`；档 3 返回 78 条且 `true`；
+**验证**：档 1 装配返回 61 条且 `pluginRuntime: false`；档 3 返回 83 条且 `true`；
 `families` / `unsupported` 由各域 sink 的运行期可用性**推导**（两列互斥），
 注入/不注入 provider 时同一域在两列之间迁移——由单测
 `host_capabilities_derives_domains_from_injected_sinks` 锁死。

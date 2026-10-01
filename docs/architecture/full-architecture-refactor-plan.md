@@ -92,10 +92,10 @@ A4–A8 与轮 23–29 **未开工**；本文先做**整体重评估**（不假�
 
 | 集合 | 条数 | 定义处 |
 |---|---:|---|
-| 底座 `tauron_substrate_handler!` | **57** | `crates/tauron-adapter/src/tauri.rs`（R9 五域补齐后 39→57） |
-| 插件运行时 `tauron_plugin_handler!` | **78**（底座 57 + 运行时 21；`plugin-install` 另 2 条 gated，**已进默认特性** → 默认 **80**） | 同上 |
-| TS `FRAMEWORK_COMMANDS` / `OPTIONAL_FRAMEWORK_COMMANDS` | **78 / 2** | `packages/tauron-host/src/tauri-backend.ts` |
-| `authz::COMMANDS`（插件面档位表） | **18**（Self_ 16 + ScopedRead 2） | `crates/tauron-host/src/authz.rs:78-200` |
+| 底座 `tauron_substrate_handler!` | **61** | `crates/tauron-adapter/src/tauri.rs`（R9 五域补齐后 39→57；1.1 审批 3 条 + 生产就绪自检 1 条 → 61） |
+| 插件运行时 `tauron_plugin_handler!` | **83**（底座 61 + 运行时 22；`plugin-install` 另 2 条 gated，**已进默认特性** → 默认 **85**） | 同上 |
+| TS `FRAMEWORK_COMMANDS` / `OPTIONAL_FRAMEWORK_COMMANDS` | **85**（含 OPTIONAL 两条 install）/ **2** | `packages/tauron-host/src/tauri-backend.ts` |
+| `authz::COMMANDS`（插件面档位表） | **19**（Self_ 17 + ScopedRead 2） | `crates/tauron-host/src/authz.rs` |
 | `authz::ADMIN_COMMANDS`（主窗特权） | **4** | 同上 `:240-268` |
 
 > 三方一致性由 `@tauron/contract-tests` 的 wire-gate 锁定（2026-09-27 复核：**126/126 绿**；本包合计 147 条）。

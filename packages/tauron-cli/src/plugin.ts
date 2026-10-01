@@ -177,7 +177,7 @@ export function generatePackageJson(config: PluginConfig): PackageManifest {
     type: 'module',
     main: config.type === 'process' ? 'main.js' : 'src/index.js',
     devDependencies: {
-      '@tauron/plugin-sdk': '^1.0.2',
+      '@tauron/plugin-sdk': '^1.1.0',
     },
   };
 }

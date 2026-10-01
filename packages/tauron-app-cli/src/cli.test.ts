@@ -95,12 +95,12 @@ describe('app scaffold CLI（一键路径）', () => {
       );
 
       const cargo = fs.readFileSync(path.join(target, 'src-tauri', 'Cargo.toml'), 'utf8');
-      expect(cargo).toContain('tauron-adapter = { version = "=1.0.2"');
+      expect(cargo).toContain('tauron-adapter = { version = "=1.1.0"');
       expect(cargo).not.toContain('path =');
       const frontend = JSON.parse(fs.readFileSync(path.join(target, 'package.json'), 'utf8')) as {
         dependencies: Record<string, string>;
       };
-      expect(frontend.dependencies['@tauron/host']).toBe('1.0.2');
+      expect(frontend.dependencies['@tauron/host']).toBe('1.1.0');
 
       // 装配必须是真装配，不是裸 Builder
       const mainRs = fs.readFileSync(path.join(target, 'src-tauri', 'src', 'main.rs'), 'utf8');
@@ -128,7 +128,7 @@ describe('app scaffold CLI（一键路径）', () => {
       ]);
       expect(process.exitCode).toBe(0);
       const cargo = fs.readFileSync(path.join(target, 'src-tauri', 'Cargo.toml'), 'utf8');
-      expect(cargo).toContain('version = "=1.0.2", path =');
+      expect(cargo).toContain('version = "=1.1.0", path =');
       const pkg = JSON.parse(fs.readFileSync(path.join(target, 'package.json'), 'utf8')) as {
         dependencies: Record<string, string>;
       };
@@ -245,14 +245,14 @@ describe('tauron-app init（接入现有项目）', () => {
       expect(process.exitCode).toBe(0);
 
       const cargo = fs.readFileSync(path.join(project, 'src-tauri', 'Cargo.toml'), 'utf8');
-      expect(cargo).toContain('tauron-adapter = { version = "=1.0.2"');
+      expect(cargo).toContain('tauron-adapter = { version = "=1.1.0"');
       expect(cargo).not.toContain('path =');
 
       const frontend = JSON.parse(fs.readFileSync(path.join(project, 'package.json'), 'utf8')) as {
         dependencies: Record<string, string>;
       };
-      expect(frontend.dependencies['@tauron/host']).toBe('1.0.2');
-      expect(frontend.dependencies['@tauron/ui']).toBe('1.0.2');
+      expect(frontend.dependencies['@tauron/host']).toBe('1.1.0');
+      expect(frontend.dependencies['@tauron/ui']).toBe('1.1.0');
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -350,7 +350,7 @@ describe('tauron-app init（接入现有项目）', () => {
       await main(['node', 'cli.js', 'init', '--dir', project]);
       expect(process.exitCode).toBe(0);
       expect(fs.readFileSync(path.join(project, 'src-tauri', 'Cargo.toml'), 'utf8')).toContain(
-        '[dependencies]\ntauron-adapter = { version = "=1.0.2"',
+        '[dependencies]\ntauron-adapter = { version = "=1.1.0"',
       );
     } finally {
       fs.rmSync(root, { recursive: true, force: true });

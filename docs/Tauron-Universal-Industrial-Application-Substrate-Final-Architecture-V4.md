@@ -2173,7 +2173,7 @@ pnpm tauri dev
 - 写 window cleanup；
 - 写 capability 列表；
 - 写 recovery success；
-- 配 80 条 Tauri permission。
+- 配 85 条 Tauri permission。
 
 ## 35.2 已有 Tauri 项目
 

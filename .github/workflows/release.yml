@@ -361,14 +361,14 @@ jobs:
             ### 第三方 Tauri 2 项目快速接入
 
             ```bash
-            npm create tauron-app@1.0.2 -- ./my-app --framework react
+            npm create tauron-app@1.1.0 -- ./my-app --framework react
             cd my-app
             npm install
             npm run tauri dev
             ```
 
             前端支持 React、Vue、Svelte 与原生 TypeScript。已有 Tauri 2 项目可用
-            `npx @tauron/app-cli@1.0.2 init --dir ./my-app`；已有命令处理器与权限配置会保留，
+            `npx @tauron/app-cli@1.1.0 init --dir ./my-app`；已有命令处理器与权限配置会保留，
             需要手工合并时 CLI 会明确报告。其他宿主必须实现自己的 `Backend` / `HostTransport`
             适配，Tauron v1 不承诺同一安装器覆盖所有客户端。
 

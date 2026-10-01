@@ -56,7 +56,7 @@ tauron 插件系统在**清单层**定义了四种插件类型（`PluginType` �
 
 ### 获取 CLI
 
-`@tauron/cli@1.0.2` 已发布到 npm，可通过 `npm install -g @tauron/cli@1.0.2` 安装；
+`@tauron/cli@1.1.0` 已发布到 npm，可通过 `npm install -g @tauron/cli@1.1.0` 安装；
 在 Tauron 仓库内开发时也可直接运行 bin。
 
 **下文一律用 `tauron` 代指 `node packages/tauron-cli/bin/tauron.js`（在仓库根执行）。**
@@ -64,7 +64,7 @@ tauron 插件系统在**清单层**定义了四种插件类型（`PluginType` �
 ### 验证
 
 ```bash
-tauron --version   # tauron v1.0.2
+tauron --version   # tauron v1.1.0
 tauron doctor      # 环境诊断：探测 Node / pnpm / Rust / Tauri CLI
 ```
 
@@ -159,7 +159,7 @@ tauron plugin new com.example.sys  --type process  # 骨架含 main.js
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.js",
-  "devDependencies": { "@tauron/plugin-sdk": "^1.0.2" }
+  "devDependencies": { "@tauron/plugin-sdk": "^1.1.0" }
 }
 ```
 
@@ -374,9 +374,9 @@ js / process 两条通路都在 `tauron-adapter::default_deliveries` 里生产�
 登记表（`authz::COMMANDS` / `ADMIN_COMMANDS`）的强制兑底是**门禁测试**
 （`validate_command_registry` + TS 镜像 `capabilities.ts`）。
 
-### 插件面命令（18 条，登记在 `authz::COMMANDS`）
+### 插件面命令（19 条，登记在 `authz::COMMANDS`）
 
-**Self_（16 条）**——身份取自 webview label（`plugin-<id>`），入参里的身份字段一律忽略（防冒充）：
+**Self_（17 条）**——身份取自 webview label（`plugin-<id>`），入参里的身份字段一律忽略（防冒充）：
 
 | 命令 | 说明 |
 |---|---|
@@ -392,6 +392,7 @@ js / process 两条通路都在 `tauron-adapter::default_deliveries` 里生产�
 | `host_events_drain` | 拉取本插件待投递帧（只取自己订阅的可见集） |
 | `host_stream_open` | 为一次已挂帧载体的调用开流 |
 | `host_stream_write` | 写一帧（seq 由宿主铸） |
+| `host_stream_grant` | 补充流的有界 byte credit（背压窗口，接收方消费后补给，见 `authz::COMMANDS` 登记） |
 | `host_stream_close` | 发终帧并使句柄失效 |
 | `host_call_plugin` | 跨主体调用：宿主调插件或插件调插件（caller / target 显式，见[跨主体调用](#跨主体调用04-a1)） |
 | `host_call_result` | 执行方回填一次调用的结果（仅 target 可回填） |
@@ -412,9 +413,9 @@ js / process 两条通路都在 `tauron-adapter::default_deliveries` 里生产�
 | `host_registry_list` | 列出可见插件（结果按可见性过滤） |
 | `host_contributes_list` | 列出贡献表（commands / menus / panels / settings，纯只读） |
 
-### 主窗特权命令（4 条，登记在 `authz::ADMIN_COMMANDS`）
+### 主窗特权命令（8 条，登记在 `authz::ADMIN_COMMANDS`）
 
-**Privileged（4 条）**——仅主窗 / 宿主 UI，代码层判定与部署 ACL 双保险：
+**Privileged（8 条）**——仅主窗 / 宿主 UI，代码层判定与部署 ACL 双保险：
 
 | 命令 | 说明 |
 |---|---|
@@ -422,6 +423,10 @@ js / process 两条通路都在 `tauron-adapter::default_deliveries` 里生产�
 | `host_runtime_spawn` | 启动进程插件 sidecar（幂等：已有租约则返回既有 pid / lease） |
 | `host_runtime_health` | 按租约查询 sidecar 健康（pid / 崩溃窗口计数；暴露 PID 故同属特权） |
 | `host_resource_stats` | 查看全局及逐插件的 pending、流、订阅与通知配额占用 |
+| `host_events_approve` | 审批一条「订阅者 × 主题」的 Event 决策（主题必须已被声明，否则 `E_AUTH_DENIED`；审批表上限 4096 条，满则 `E_SUBSCRIPTION_FULL`） |
+| `host_events_revoke` | 撤销一条 Event 审批（订阅者侧的授权事实即刻失效） |
+| `host_events_approvals` | 只读列出当前全部审批事实（宿主审批 UI / 审计对账用） |
+| `host_production_doctor` | 读取机器可读的 production readiness 自检报告（部署模式 + 逐项检查 + `productionSafe` 汇总；见下文「生产就绪自检」） |
 
 ### 插件安装命令（2 条，feature-gated 且**已进默认特性**）
 
@@ -449,6 +454,40 @@ capability 的 `windows` 字段限制（只授予 `main`），不走 `authz` 表
 
 > **`host_call_begin` / `host_grant_request` 是故意移除的命令**，回归会被
 > `packages/tauron-host/src/gates.test.ts` 拦下。
+
+### 生产就绪自检与 Event 审批（宿主 UI 侧，1.1 新增）
+
+这 4 条（1.1 新增）特权命令的 TS 入口都在 `@tauron/host` 的 `AdminClient`（与
+`registryAdmin` 同一个类），**插件侧不可调用**（非主窗一律 `E_AUTH_DENIED`）：
+
+```ts
+import { AdminClient } from '@tauron/host';
+
+const admin = new AdminClient({ backend });
+
+// 1) 生产就绪自检（A109）：机器可读的逐项 readiness 报告。
+//    wire JSON 为 camelCase；deploymentMode 取 'development' | 'test' | 'production'。
+const report = await admin.productionDoctor();
+if (!report.productionSafe) {
+  // 只列 requiredInProduction 且未通过的项即可定位缺哪块配置
+  console.warn(report.checks.filter((c) => !c.pass).map((c) => `${c.id}: ${c.message}`));
+}
+
+// 2) Event 审批三件套：审批事实的唯一落点是宿主，插件只能声明/订阅。
+await admin.eventsApprove('com.example.viewer', 'plugin:com.example.formatter:tick');
+const rows = await admin.eventsApprovals(); // → [{ subscriber, topic }, …]
+const revoked = await admin.eventsRevoke('com.example.viewer', 'plugin:com.example.formatter:tick');
+```
+
+语义与边界：
+
+- `eventsApprove` 的 `topic` **必须已被某个插件声明**，否则 `E_AUTH_DENIED`——
+  审批不会为不存在的主通制造孤儿事实；
+- 审批表有上限（`MAX_APPROVALS = 4096`），达限返回 `E_SUBSCRIPTION_FULL`
+  （不确定失败，不可自动重试），先 `eventsRevoke` 失效项再审批；
+- `productionDoctor` 是**只读**诊断：不写状态、不落盘，可在启动期安全轮询；
+  报告内容由 `AdapterConfig` 的实际配置推导（fail-closed 与启动门同源，
+  不会出现「自检通过但启动拒绝」）。
 
 ---
 

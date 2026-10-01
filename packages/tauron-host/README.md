@@ -53,14 +53,14 @@ import { MockBackend } from '@tauron/host/testing';
 
 ## 命令面（计划 §2.1 定稿）
 
-**22 条已登记命令**：`crates/tauron-host/src/authz.rs` 的 `COMMANDS` **18 条**
-（16 `self` + 2 `scoped-read`）+ `ADMIN_COMMANDS` **4 条特权**（仅主窗）；
+**27 条已登记命令**：`crates/tauron-host/src/authz.rs` 的 `COMMANDS` **19 条**
+（17 `self` + 2 `scoped-read`）+ `ADMIN_COMMANDS` **8 条特权**（仅主窗）；
 另有 **2 条 feature-gated**（`host_registry_install_preview` / `host_registry_install`，
 挂 `plugin-install`——**该特性现已进 `tauron-adapter` 的默认特性**，
 见 `crates/tauron-adapter/Cargo.toml:21`；只想取底座用 `default-features = false`）。
 
-> 「22 条」是**需登记档位**的命令；Tauri 实际注册的命令面是另一个口径：**78 条**
-> （`tauron_plugin_handler!` = 底座 57 + 插件运行时 21），默认特性下 80 条。
+> 「27 条」是**需登记档位**的命令；Tauri 实际注册的命令面是另一个口径：**83 条**
+> （`tauron_plugin_handler!` = 底座 61 + 插件运行时 22），默认特性下 85 条。
 > 两侧一致性由 `src/gates.test.ts` 逐名比对，不靠本文维护。
 
 | 命令 | 档位 | 消费方 |
@@ -76,6 +76,7 @@ import { MockBackend } from '@tauron/host/testing';
 | `host_events_drain` | self | plugin-sdk（事件取件泵） |
 | `host_stream_open` | self | plugin-sdk（流式开流） |
 | `host_stream_write` | self | plugin-sdk（流式写帧） |
+| `host_stream_grant` | self | plugin-sdk（流式 credit 补充，V4） |
 | `host_stream_close` | self | plugin-sdk（流式收尾） |
 | `host_contributes_reconcile` | self | plugin-sdk（激活后自检贡献声明） |
 | `host_call_plugin` | self | 宿主主窗 / plugin-sdk（插件→插件） |
@@ -87,6 +88,10 @@ import { MockBackend } from '@tauron/host/testing';
 | `host_runtime_spawn` | privileged | 宿主 UI 主窗（插件生命周期监管） |
 | `host_runtime_health` | privileged | 宿主 UI 主窗（插件生命周期监管） |
 | `host_resource_stats` | privileged | 宿主 UI 主窗（资源配额诊断） |
+| `host_events_approve` | privileged | 宿主 UI 主窗（Event 审批，主题须已声明） |
+| `host_events_revoke` | privileged | 宿主 UI 主窗（撤销 Event 审批） |
+| `host_events_approvals` | privileged | 宿主 UI 主窗（只读审批事实清单） |
+| `host_production_doctor` | privileged | 宿主 UI 主窗（生产就绪自检 A109，只读） |
 
 > **订阅取件**：`host_events_subscribe` 只把帧排进每订阅者队列；
 > 前端必须调用 `HostClient.eventsDrain(kind)` 取走帧（`host_events_publish`

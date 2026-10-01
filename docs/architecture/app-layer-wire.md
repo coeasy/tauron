@@ -10,9 +10,9 @@
 
 | 形态 | 用法 | 命令面 | 插件名 |
 | --- | --- | --- | --- |
-| root 注册（全量） | `state_init()` + `tauri::generate_context` 外的 `tauron_generate_handler![]`（= `tauron_plugin_handler![]`） | 78 条（底座 57 + 插件运行时 21）；`plugin-install` 2 条**已进默认特性** → 默认 80 条 | 无（裸命令） |
-| **底座-only root 注册** | 自己 `manage(SubstrateState)` + `tauron_substrate_handler![]` | 57 条（不含插件运行时 21 条） | 无（裸命令） |
-| 插件注册（需 capability/ACL） | `init()` / `init_with_adapter_config(cfg)` | 同上；78 / 80 条取决于 `plugin-install`（默认开） | `tauron` |
+| root 注册（全量） | `state_init()` + `tauri::generate_context` 外的 `tauron_generate_handler![]`（= `tauron_plugin_handler![]`） | 83 条（底座 61 + 插件运行时 22）；`plugin-install` 2 条**已进默认特性** → 默认 85 条 | 无（裸命令） |
+| **底座-only root 注册** | 自己 `manage(SubstrateState)` + `tauron_substrate_handler![]` | 61 条（不含插件运行时 22 条） | 无（裸命令） |
+| 插件注册（需 capability/ACL） | `init()` / `init_with_adapter_config(cfg)` | 同上；83 / 85 条取决于 `plugin-install`（默认开） | `tauron` |
 
 > ⚠️ **三种形态都不是"零配置"**（轮 12 改判，此前本表把 root 形态写成"零配置"是错的）：
 > Tauri v2 的规则是**不匹配任何 capability 的 webview 完全没有 IPC 访问**（原文见
@@ -427,7 +427,7 @@ clipboard / brand 等）由 Tauri ACL 按窗口 label 管辖，不在表内。�
 `src/capabilities.json`），于是这 4 条在脚手架应用里根本无法启用。已补登记，并加门禁锁死
 「`HostClient` 触达的每条命令都必须在表内且档位合法」。
 
-4 条特权命令及**为什么必须特权**：
+8 条特权命令及**为什么必须特权**：
 
 | 命令 | 档位 | 理由 |
 |---|---|---|
@@ -435,9 +435,13 @@ clipboard / brand 等）由 Tauri ACL 按窗口 label 管辖，不在表内。�
 | `host_runtime_spawn` | privileged | **进程执行原语**：按入参 `pluginId` 启动可执行文件。插件 webview 若能调用，任何插件都能起别人的 sidecar |
 | `host_runtime_health` | privileged | 暴露 pid 与崩溃计数（同样的信息面） |
 | `host_resource_stats` | privileged | 返回所有插件的资源占用快照；插件侧不能读取邻居活动量 |
+| `host_events_approve` | privileged | 写入跨主体 Event 审批事实——授权面原语，插件不能替别人批准订阅 |
+| `host_events_revoke` | privileged | 撤销既有审批（同样改变别人的授权状态） |
+| `host_events_approvals` | privileged | 只读列出全部审批事实（暴露「谁被授权听什么」的全局拓扑） |
+| `host_production_doctor` | privileged | 只读暴露部署模式与生产就绪配置（部署情报面；插件侧读取等于侦察宿主配置） |
 
 档位的**强制点**分两种注册形态（§1）：`plugin:tauron|<cmd>` 形态由 Tauri v2
-capability/ACL 强制（生产客户端应采用——把 4 条特权命令只授予主窗、
+capability/ACL 强制（生产客户端应采用——把 8 条特权命令只授予主窗、
 不给插件 webview）；裸命令形态下 origin ACL 是唯一咽喉点。
 **轮 11 起**代码层再叠一层判定，把"特权 = 仅主窗"从"只靠部署配置"变成**代码里的真判定**。
 三类判定、两个函数（都在 `crates/tauron-adapter/src/lib.rs`，拒绝码一律是既有的
@@ -445,7 +449,7 @@ capability/ACL 强制（生产客户端应采用——把 4 条特权命令只�
 
 | 判定 | 函数 | 命令 |
 | --- | --- | --- |
-| 仅主窗 | `require_main_window(caller, cmd)` | `host_registry_list_all`、`host_registry_admin`、`host_runtime_spawn`、`host_runtime_health`、`host_settings_adopt_legacy`、`host_settings_migrate`、`host_window_relaunch`、`host_window_create`（R8）、`host_recover_trial_enable`、`host_market_check`/`download`/`install`、`host_i18n_set_locale`（切的是**全局**语言）、`host_deep_link_register`（写的是**应用级**协议） |
+| 仅主窗 | `require_main_window(caller, cmd)` | `host_registry_list_all`、`host_registry_admin`、`host_runtime_spawn`、`host_runtime_health`、`host_resource_stats`、`host_events_approve`/`revoke`/`approvals`、`host_production_doctor`、`host_settings_adopt_legacy`、`host_settings_migrate`、`host_window_relaunch`、`host_window_create`（R8）、`host_recover_trial_enable`、`host_market_check`/`download`/`install`、`host_i18n_set_locale`（切的是**全局**语言）、`host_deep_link_register`（写的是**应用级**协议） |
 | 绑定到自己的键空间 | `require_settings_key_scope(caller, key)` | `host_settings_get` / `host_settings_set`（插件只能读写 `plugin:<自己>.…`；用 `strip_prefix` + 空/`.` 判据，裸前缀比较会让 `plugin:p.a` 与 `plugin:p.ab` 互相穿透） |
 | 绑定到自己的身份 | `require_self_plugin_scope(caller, cmd, claimed)` | `host_notify`（署名）、`host_i18n_load`（命名空间归属）、`host_i18n_cleanup_plugin`（销毁目标）、`host_recover_report`（失败预算 / 故障归因）、`host_notifications_read`（只能标记**自己**的通知；`None` = 全局"全部已读"与未知 id 一律拒绝——对未知 id 放行会让返回值变成存在性预言机）——插件只能以自己名义；`None`（宿主级命名空间 / 应用级上报）对插件一律拒绝，主窗任意 |
 | **按身份过滤（不是拒绝）** | `visible_notifications(...)` | `host_notifications_list`：插件只拿到署名是自己的条目，且 `total`/`unread`/分页/`dispatchLog` 与**过滤后的可见集合同源**（只裁数组、留着全局未读数仍是泄露；`limit` 必须在过滤**之后**取，否则别人的条目会占满窗口把插件自己的挤掉）。主窗数学上等于原实现 |
@@ -471,7 +475,7 @@ capability/ACL 强制（生产客户端应采用——把 4 条特权命令只�
 
 **安全边界（如实说明）**：这三个判定只回答"**你能不能以这个主体身份做这件事**"，
 **不判**目标是否存在/是否已安装（那是 `E_UNKNOWN_PLUGIN` 的语义），也**不替代** ACL——
-部署期仍需把 4 条特权命令只授予主窗。另外 `crates/tauron-adapter` 目前**没有
+部署期仍需把 8 条特权命令只授予主窗。另外 `crates/tauron-adapter` 目前**没有
 `permissions/` 目录**，走 `plugin:tauron|…` 路由的宿主在启用能力检查时会因缺权限条目被拒
 （部署配置缺口，见 §1 的告警）。
 
