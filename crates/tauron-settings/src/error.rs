@@ -33,6 +33,10 @@ pub enum SettingsError {
     #[error("非法键路径 `{0}`")]
     InvalidPath(String),
 
+    /// 单次写入的值超过字节预算（§33 R3-5：数量与字节双配额）。
+    #[error("写入 `{key}` 的值占 {bytes} 字节，超过上限 {limit}")]
+    ValueTooLarge { key: String, bytes: usize, limit: usize },
+
     /// 存储层的 I/O 或格式错误。
     #[error("存储错误：{0}")]
     Store(String),

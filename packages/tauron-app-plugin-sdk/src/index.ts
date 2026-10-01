@@ -11,7 +11,7 @@
 // `types.ts` 的编译期断言 `AppPluginContextIsContract` 拦下。
 
 // 核心
-export { createPlugin } from './createPlugin.js';
+export { createPlugin, HOST_SETTINGS_CHANGED_TOPIC } from './createPlugin.js';
 export { createPluginContext } from './context.js';
 
 // 类型（其中 PluginContext 是共享契约的具体化；断言类型一并导出便于门禁引用）

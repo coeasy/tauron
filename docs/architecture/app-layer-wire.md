@@ -297,6 +297,23 @@ export interface HostRpc {
   数据版本存于 `SettingsStore`（`1.0.0` = 旧裸键契约，`2.0.0` = 转义键契约）；
   键编码 `%`→`%25`、`.`→`%2E`、`$`→`%24` 保证"一键 = 一段 = 一叶"，
   使写 `a` 标量后再写 `a.b` 不再撞上 `merge::write_path` 的中间节点断言。
+- **设置变更镜像到消息面（V4 §33 R2-4 / W6）**：`host_settings_set` 在**落盘提交
+  成功之后**，把这次提交镜像成一条 EventBus 帧投给宿主所有的私有 topic
+  **`host:settings:changed`**（`event` 通道，可丢）。线形状：
+
+  | 字段 | 含义 | 口径 |
+  | --- | --- | --- |
+  | `key` | **线形键**（调用方 `host_settings_get/set` 用的形态，如 `plugin:p.theme`） | 不是 Store 的编码点路径（`plugin:p%2Etheme`）——订阅方拿到要能直接回查/回写 |
+  | `value` | 提交后的新值 | 等值写入按无操作回落，**不产帧** |
+  | `source` | 提交来源 | 与进程内 watcher 同源；两份投递互不影响 |
+  | `revision` | 提交序号 | 单调递增；慢消费者收敛到最新 revision 即视为追平 |
+
+  可见性走 **Event 审批链**（`host_events_approve` / `revoke` / `approvals`）：该
+  topic 由宿主以 `publisher = "host"` 声明且**非 public**，未被批准的订阅者调
+  `host_events_subscribe` 得 `E_AUTH_DENIED`。审批是 **topic 粒度**、宿主不按键过滤
+  ——键级授权是未落地的差异（SDK 侧的命名空间过滤只是**投递约定**，不是安全边界）。
+  镜像不影响设置本身：提交已 durable，消息面只是观察者通道。
+
 - **运行期订阅审批**无线上入口：`EventBus::approve` 无命令/无 TS 方法，
   `approvals` 恒空，跨插件订阅私有 topic 只能靠声明方标 `public: true`；
   失败方向 fail-closed（`E_AUTH_DENIED`）。安装期授权另有一套（`grants.ts`
@@ -616,6 +633,13 @@ translate_at_boundary(err, boundary): {
   达限返回 **`E_SUBSCRIPTION_FULL`**（确定性失败，不可自动重试，与其余「表满」
   类一致）；**幂等重复订阅不受上限影响**（复用既有 token），且卸载/退订会释放
   容量，故正常使用不会撞限。
+- **上限是「条数 + 字节」两维（V4 §33 R3-5）**：只按条数限额时，一条大 payload
+  可以在条数毫不越界的情况下吃穿内存——所以两维同时生效，先到先约束：
+  `MAX_FRAME_BYTES=256 KiB`（单帧序列化后含 topic 与元数据开销计费）、
+  队列 `MAX_QUEUE_BYTES=2 MiB`、设置值 `MAX_VALUE_BYTES=64 KiB`、
+  观察队列 `MAX_WATCH_QUEUE_BYTES=1 MiB`、通知标题/正文 `512 B` / `4 KiB`。
+  **超限是零副作用拒绝**：在状态快照被覆盖之前、在 schema 校验之前、在通知入队
+  之前判定，既有一帧/旧值/队列原样不动——「拒绝了但把现场改坏了」不算诚实失败。
 
 ### 9.1 通道溢出语义（三通道不同）
 
@@ -624,6 +648,11 @@ translate_at_boundary(err, boundary): {
 | `event` | 丢最旧，`overflow` 计数 | 静默（事件可丢，设计文档 §2.3） |
 | `state` | 保持最新一帧（快照语义） | 静默 |
 | `request` | **硬失败**：`E_CALL_PENDING_FULL`（可重试） | `eventsPublish` 抛 `HostException` |
+
+三条通道都另有**单帧字节上限**（`MAX_FRAME_BYTES`）：超限按 `TooLarge` 处理——
+`request` 得 `E_CALL_PENDING_FULL` 并点名「超出单帧字节上限」，`event` / `state`
+**不入队也不清快照**（发布方拿到 overflow 计数，既有快照原样保留）。
+入站投递（宿主 → 插件）同样按字节计费，超限帧直接结构化拒绝，不占队列。
 
 `host_events_publish` 走 `request` 通道（可靠语义），因此
 `eventsDrain()` **默认 `kind: 'request'`** 与其配对——只订阅不取件等于没订阅：

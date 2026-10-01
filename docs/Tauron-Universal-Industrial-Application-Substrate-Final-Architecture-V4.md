@@ -2435,6 +2435,34 @@ unsupported
 
 > 第三方现有 Tauri 应用通过一个 Tauron plugin + 一份生成配置即可获得最小 Substrate；无手工生命周期补丁；基础 profile 不包含 Runtime/Market 重依赖。
 
+### P0 落地状态（2026-10-01 实测回填）
+
+> 口径：**只有「代码里能用 + 有门禁把守」才算已落**，接口存在但无人调用不算。
+> 本轮落的是 §33 差异回扫里的 5 个 P0 项（R1-4 / R2-4 / R2-5 / R2-8 / R3-5），
+> 其余按原样登记为差异——**不冒充完成**。
+
+| 工作流 | 状态 | 本轮落点（可复现证据） | 未落差异（诚实登记） |
+|---|---|---|---|
+| W1 协议单线 | ⚠️ 部分 | 设置观察线本轮收到**一条宿主权威线**上：提交后镜像 `{key,value,source,revision}` 到 `host:settings:changed`，SDK 钩子与进程内 watcher 都从同一份提交事实出发 | legacy `@tauron/plugin-sdk` 仍在示例主 quickstart（`examples/minimal-app/src/main.ts` 的 `PluginBridge` iframe 演示）；legacy state engine 未删；shell 仍是独立门面 |
+| W2 Minimal Profile / Feature Graph | ⚠️ 部分 | feature 图已在（`plugin-install` 进默认、`tauri` 不进），`--features plugin-install` 矩阵测试绿（263 passed） | **三 profile 体积门禁**未落地：还没有 `core` / `runtime` / `full` 三档的体积基线与断言 |
+| W3 Tauri Plugin Canonical Integration | ⬜ 未做 | — | 当前是 **root handler** 注册（`tauron_generate_handler!`）；permissions codegen、capability 模板、「不占 root handler」三条都未落地 |
+| W4 Capability V2 | ⚠️ 部分 | **fail-closed negotiation 已落**：TS `TauriBackend` 只 bootstrap 认 `host_capabilities`，`adoptCapabilities` 拒空集合与缺 `host_capabilities` 的集合；示例改为退避重试而非回落全量表（`tauri-backend.test.ts` 3 例 + wire-gate 锁定签名） | provider health、pack source 两列未落地；V4 提的「bootstrap 三命令」实际只落 `host_capabilities` 一条——`host_protocol_info` / `host_health` 没有对应命令，**不硬凑** |
+| W5 AppLifecycleBinding | ⬜ 未做 | — | auto cleanup / boot readiness / quit drain 仍需接入方手工编排（示例仍手动调 `ShellController` 恢复口） |
+| W6 Settings/Secrets Foundation | ⚠️ 部分 | **watch E2E 已闭合**（R2-4）：审批前订阅得 `E_AUTH_DENIED`、批准后收到帧、吊销后不再投递（`tauron-adapter` 的 `settings_commit_mirrors_to_message_plane_through_approval_chain`）；SDK 侧 6 例覆盖命名空间过滤与 async 钩子异常收口；wire-gate 钉住两侧 topic 取值与帧字段 | **SecretProvider 未落地**：设置族没有密钥后端抽象，秘密仍与普通值同层存储 |
+| W7 Observability + InstallationIdentity | ⚠️ 部分 | **InstallationIdentity 已落并进主路径**（R2-8）：首用随机 UUIDv4 持久化、损坏拒绝静默重置、FNV-1a→u32 出灰度桶，更新检查的桶值来自它而非硬编码 `0`（`tauron-distribute` 59 passed，含 200 身份分桶分布与稳定性断言）。**资源预算补齐 count + bytes**（R3-5）：单帧 256 KiB / 队列 2 MiB / 设置值 64 KiB / 观察队列 1 MiB / 通知 512 B + 4 KiB，超限零副作用拒绝 | 观测面仍是「自检报告 + 统计读」形态，没有指标导出（OTel/Prometheus）；审批是 **topic 粒度**而非键粒度，跨插件的键级授权需新特性 |
+| W8 External Consumer + Branch Governance | ⚠️ 部分 | 干净目录消费者脚本不再钉死版本号：运行期从 `Cargo.toml [workspace.package]` 读版本并与 `package.json` 对账（不一致即退出） | branch protection 属仓库设置，**未自动配置**；性能/体积 baseline 未建 |
+
+**本轮门禁实照**（同一次运行采集，非记忆值）：`cargo test --workspace` **1420 passed / exit 0**；
+`cargo test -p tauron-adapter --features plugin-install` **263 passed**；
+`cargo clippy --workspace --all-targets -- -D warnings` **exit 0**；`cargo fmt --all -- --check` **exit 0**；
+`pnpm verify`（build + typecheck + test 全包）**exit 0**，20 个包 103 个测试文件 **1748 passed**；
+其中 `tauron-contract-tests` **151 passed**、`tauron-app-plugin-sdk` **43 passed**。
+
+**Exit Gate 判定**：尚未达成。三条判据里「一个 Tauron plugin 接入」（W3）与
+「无手工生命周期补丁」（W5）仍是硬缺口，基础 profile 的体积门禁（W2）也未建。
+故 1.1 对外只承诺**已落项**（能力协商 fail-closed、设置观察、安装身份灰度、资源预算），
+不得宣称「Platform Foundation 完成」。
+
 ---
 
 ## P1 — Tauron 1.2 Runtime Platform

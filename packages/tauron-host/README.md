@@ -23,6 +23,13 @@ tauron 能力编排层（开发计划 §4.9）。
    mock 单独从 `@tauron/host/testing` 引入。
 4. `self` 档命令的 `pluginId` **不得**由调用方传入（ADR-17）——宿主只认
    webview label（`plugin-<id>`）。
+5. **能力表只来自运行期协商**（V4 §8.1 R1-4）：`TauriBackend` 构造时只认
+   bootstrap 命令（`BOOTSTRAP_COMMANDS` = `['host_capabilities']`），其余命令
+   在协商回填前一律 **unknown = unsupported**。`adoptCapabilities()` 拒绝空集合、
+   也拒绝不含 `host_capabilities` 的集合（那说明协商根本没成功，不能当能力真相采纳）。
+   `FRAMEWORK_COMMANDS` 只是**门禁/文档基线**，不是运行期能力表——历史上它被无条件
+   灌进 `capabilities()`，于是 feature-gated 命令对 `available()` 误报已注册，
+   调用方直到 `invoke` 才拿到 `command not found`。
 
 ## 导出
 
@@ -35,6 +42,15 @@ import { TauriBackend, pluginIdFromLabel } from '@tauron/host/tauri';
 
 // 契约测试专用
 import { MockBackend } from '@tauron/host/testing';
+```
+
+协商用法（宿主启动后一次性回填，失败就保持 fail-closed 并重试）：
+
+```ts
+const backend = new TauriBackend({ commandPrefix: '' });
+const caps = await backend.invoke<{ commands: string[] }>('host_capabilities');
+backend.adoptCapabilities(caps.commands); // 拒空 / 拒缺 host_capabilities
+// 之后 shell.supports(...) 与 isAvailable(backend, ...) 才报得出真实可用性
 ```
 
 ## 跨语言契约门禁

@@ -3,6 +3,32 @@
 import type { PluginContext, PluginDefinition, PluginInstance } from './types.js';
 
 /**
+ * 宿主设置变更镜像 topic（§33 R2-4 / W6）。
+ *
+ * 宿主在设置**落盘提交之后**把 `{ key, value, source, revision }` 镜像到这个
+ * topic（`event` 通道：可丢，慢消费者丢最旧）。它是宿主所有的私有 topic，
+ * 默认无人可见——插件要收到帧，必须由主窗批准：
+ * `host_events_approve(pluginId, HOST_SETTINGS_CHANGED_TOPIC)`。
+ *
+ * 与 Rust 侧 `HOST_SETTINGS_CHANGED_TOPIC` 的取值一致性由
+ * `@tauron/contract-tests` 的 wire-gate 把守（改名即失败）。
+ */
+export const HOST_SETTINGS_CHANGED_TOPIC = 'host:settings:changed';
+
+/**
+ * 判定某条设置变更是否属于本插件的命名空间。
+ *
+ * 宿主侧的读写边界（`host_settings_get/set`）用的是**显式比较**而非前缀包含，
+ * 这里保持一致：`plugin:p` 的插件不应收到 `plugin:p.a` 的变更（`plugin:p` 是
+ * `plugin:p.a` 的前缀）。整 topic 获批后仍按此过滤，是「跨插件观察被拒」
+ * 这条门禁在 SDK 侧的落点。
+ */
+function isOwnSettingsKey(pluginId: string, key: string): boolean {
+  const namespace = `plugin:${pluginId}`;
+  return key === namespace || key.startsWith(`${namespace}.`);
+}
+
+/**
  * 创建插件实例。
  *
  * 用法：
@@ -126,6 +152,27 @@ export function createPlugin(def: PluginDefinition): PluginInstance {
               }),
             );
           }
+        }
+
+        // 5b. `onSettingsChanged` 接消息面（R2-4/W6）：以前这个钩子只在类型里
+        //     声明、没有任何投递路径——插件作者写了它永远不会被调用。
+        //     现在它走宿主的设置提交镜像 topic，与进程内 watcher 互不影响。
+        //     未获主窗批准时订阅静默降级（context.ts 既有语义），钩子不触发；
+        //     获批后仍只投递本插件命名空间的键（见 isOwnSettingsKey）。
+        if (def.onSettingsChanged) {
+          eventUnsubscribes.push(
+            ctx.events.subscribe(HOST_SETTINGS_CHANGED_TOPIC, (payload) => {
+              const frame = payload as { key?: unknown; value?: unknown } | null;
+              if (typeof frame?.key !== 'string' || !isOwnSettingsKey(def.id, frame.key)) return;
+              const hook = def.onSettingsChanged;
+              if (!hook) return;
+              // 钩子可能是 async：同步异常由 dispatchEvent 吞掉，rejected
+              // promise 得在这里收口，否则一次设置变更就能打死事件泵。
+              void Promise.resolve(hook({ [frame.key]: frame.value }, ctx)).catch((err) =>
+                ctx.log.warn(`onSettingsChanged（${frame.key}）抛出异常（已吞掉）`, err),
+              );
+            }),
+          );
         }
       } catch (err) {
         // 回滚：撤销注册（`commands.unregister` 会连带 `stopPumpIfIdle()`）、

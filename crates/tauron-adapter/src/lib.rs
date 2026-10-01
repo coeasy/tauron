@@ -2126,11 +2126,14 @@ impl tauron_distribute::EndpointClient for UnconfiguredEndpointClient {
 
 /// `tauron-distribute` 支撑的更新 sink（**真实现**）。
 ///
-/// 持有 `EndpointClient`（可注入）+ 灰度策略 + 崩溃门禁；`check` 直接调
-/// `tauron_distribute::check_for_update`。装配方用 [`Self::with_endpoint`] 注入
-/// 真实/模拟端点，用 [`Self::unconfigured`]（缺省）表示"无端点"。
+/// 持有 `EndpointClient`（可注入）+ 安装身份（§9.1：灰度分桶 =
+/// `hash(stableInstallationId)`，取 `AdapterConfig::recovery_data_dir` 下持久化）+
+/// 灰度策略 + 崩溃门禁；`check` 直接调 `tauron_distribute::check_for_update`。
+/// 装配方用 [`Self::with_endpoint`] 注入真实/模拟端点与安装身份，
+/// 用 [`Self::unconfigured`]（缺省）表示"无端点"。
 pub struct DistributeUpdaterSink {
     client: Arc<dyn tauron_distribute::EndpointClient>,
+    installation: Arc<tauron_distribute::InstallationIdentity>,
     grayscale: Mutex<tauron_distribute::GrayscalePolicy>,
     crash_gate: Mutex<tauron_distribute::CrashGate>,
     configured: bool,
@@ -2141,16 +2144,25 @@ impl DistributeUpdaterSink {
     pub fn unconfigured() -> Self {
         Self {
             client: Arc::new(UnconfiguredEndpointClient),
+            installation: Arc::new(tauron_distribute::InstallationIdentity::ephemeral()),
             grayscale: Mutex::new(tauron_distribute::GrayscalePolicy::default()),
             crash_gate: Mutex::new(tauron_distribute::CrashGate::default()),
             configured: false,
         }
     }
 
-    /// 注入端点（全量灰度：装配方按需推进/回退）。
-    pub fn with_endpoint(client: Arc<dyn tauron_distribute::EndpointClient>) -> Self {
+    /// 注入端点与安装身份（全量灰度起步：装配方按需推进/回退）。
+    ///
+    /// 正式分发路径的身份必须由装配方用
+    /// [`tauron_distribute::InstallationIdentity::load_or_create`] 持久化提供；
+    /// `ephemeral()` 只用于测试（进程重启换桶）。
+    pub fn with_endpoint(
+        client: Arc<dyn tauron_distribute::EndpointClient>,
+        installation: Arc<tauron_distribute::InstallationIdentity>,
+    ) -> Self {
         Self {
             client,
+            installation,
             grayscale: Mutex::new(tauron_distribute::GrayscalePolicy {
                 current: tauron_distribute::GrayscaleBatch::Batch100,
                 ..Default::default()
@@ -2183,9 +2195,8 @@ impl UpdaterSink for DistributeUpdaterSink {
             self.client.as_ref(),
             current_version,
             &policy,
-            // 灰度分桶用户标识：本轮无宿主级稳定 hash，固定 0（1% 批次下必命中）。
-            // 如实登记：真实实现应传宿主持久化的安装 id hash。
-            0,
+            // §9.1：灰度分桶来自持久化的本机安装身份（R2-8 修复，非固定 0）。
+            self.installation.user_hash(),
         );
         let outcome = match result {
             Ok(R::UpdateAvailable(m)) => UpdaterCheckOutcome {
@@ -2745,6 +2756,13 @@ pub type CommandState = PluginRuntimeState;
 /// 但每次 `host_notify` 都会写入：没有上限时它是一个纯写入的无限增长点。
 pub const MAX_NOTIFICATION_LOG: usize = 256;
 
+/// `host_notify` 单条通知的文本字节上限（§33 R3-5：count + bytes 双配额）。
+/// 环形缓冲只约束条数，不约束单条大小；不封此口时一条巨型 body 即可
+/// 与 256 条正常通知占据同一量级的内存。
+pub const MAX_NOTIFY_TITLE_BYTES: usize = 512;
+/// 见 [`MAX_NOTIFY_TITLE_BYTES`]。
+pub const MAX_NOTIFY_BODY_BYTES: usize = 4096;
+
 /// 兼容用通知记录。
 ///
 /// ⚠️ **不在线上**：没有任何命令返回它（`host_notify` 返回 `()`）。保留是为了
@@ -2914,12 +2932,25 @@ impl SubstrateState {
             }
         }
 
+        // §33 R2-4（W6）：宿主设置的**提交**要接进消息面——插件侧 `onSettingsChanged`
+        // 走 EventBus 订阅，不是新增命令。声明方是宿主自己（publisher = "host"）。
+        // topic 刻意**不开 public**：宿主设置是单命名空间、键却可能归属不同插件
+        // （`plugin:p…` 形态的键），无条件广播等于允许跨插件观察——可见性交给
+        // 审批面（`host_events_approve`，与私有 topic 五步链同一套授权事实）。
+        let bus = Arc::new(Mutex::new(EventBus::default()));
+        bus.lock()
+            .declare_topics(
+                "host",
+                &[EventDecl { topic: HOST_SETTINGS_CHANGED_TOPIC.to_string(), public: false }],
+            )
+            .expect("host-owned mirror topic cannot collide (reserved namespace `host:`)");
+
         Self {
             deployment_mode: cfg.deployment_mode,
             production_readiness: cfg.production_readiness(),
             service_startup_order: Arc::new(service_startup_order),
             service_shutdown_order: Arc::new(service_shutdown_order),
-            bus: Arc::new(Mutex::new(EventBus::default())),
+            bus,
             storage_writer_lease,
             settings: Arc::new(Mutex::new(settings)),
             settings_write_lock: Arc::new(Mutex::new(())),
@@ -5330,6 +5361,12 @@ pub fn cmd_events_drain(
 /// 命名空间隔离；`SettingsStore` 的四层合并与版本迁移在单命名空间内同样成立。
 pub const HOST_SETTINGS_NAMESPACE: &str = "host.settings";
 
+/// §33 R2-4：宿主设置**提交**（持久化成功之后）镜像到消息面的 topic，
+/// publisher 为宿主（`"host"`）。**私有**：订阅前须经 `host_events_approve`
+/// 审批（宿主设置单命名空间但键可能归属不同插件，见 SubstrateState 装配处注释）。
+/// 帧载荷：`{key, value, source, revision}`（Event 通道：可丢、收敛到最新 revision）。
+pub const HOST_SETTINGS_CHANGED_TOPIC: &str = "host:settings:changed";
+
 /// 宿主设置文档的 **v1** schema 版本。
 ///
 /// v1 的键是**裸键**（可以含 `.`，例如 `plugin:p.theme`），文档平铺存储。
@@ -5717,7 +5754,7 @@ pub fn cmd_settings_set(
         }
 
         // One writer owns stage → durable write → commit/rollback. The SettingsStore mutex
-        // itself is released before filesystem I/O, avoiding a lock-across-blocking-I/O path.
+        // itself is released before locking the write lease, avoiding a lock-across-blocking-I/O path.
         let _write = state.settings_write_lock.lock();
         let path = settings_path(key);
         let (before, event) = {
@@ -5735,7 +5772,23 @@ pub fn cmd_settings_set(
         }
 
         // Watchers only observe a revision after durable persistence succeeded.
-        state.settings.lock().publish_committed_change(event);
+        let committed = state.settings.lock().publish_committed_change(event);
+        // §33 R2-4：持久化提交成功后镜像到消息面（可丢 Event 通道：慢消费者
+        // 丢最旧、按 topic 收敛到最新 revision，与进程内 watcher 互不影响）。
+        state.bus.lock().publish(
+            "host",
+            HOST_SETTINGS_CHANGED_TOPIC,
+            serde_json::json!({
+                // 消息面对外暴露**线形键**（调用方 host_settings_set/get 用的形态），
+                // 不暴露 Store 的编码点路径（`plugin:p.theme` → `plugin:p%2Etheme`）：
+                // 订阅方拿到 key 应当能直接回查/回写，编码形态会让他们对不上账。
+                "key": key,
+                "value": committed.value,
+                "source": committed.source,
+                "revision": committed.revision,
+            }),
+            tauron_host::eventbus::ChannelKind::Event,
+        );
         Ok(())
     })
 }
@@ -5865,6 +5918,24 @@ pub fn cmd_notify(
     body: &str,
 ) -> HostResult<()> {
     guard("notify", || {
+        if title.len() > MAX_NOTIFY_TITLE_BYTES {
+            return Err(HostError::new(
+                ErrorCode::E_INVALID_MANIFEST,
+                format!(
+                    "通知标题超出字节预算（{} > {MAX_NOTIFY_TITLE_BYTES}），拒绝入队",
+                    title.len()
+                ),
+            ));
+        }
+        if body.len() > MAX_NOTIFY_BODY_BYTES {
+            return Err(HostError::new(
+                ErrorCode::E_INVALID_MANIFEST,
+                format!(
+                    "通知正文超出字节预算（{} > {MAX_NOTIFY_BODY_BYTES}），拒绝入队",
+                    body.len()
+                ),
+            ));
+        }
         let entry = NotifyEntry {
             id: uuid::Uuid::new_v4().to_string(),
             plugin_id: plugin_id.to_string(),
@@ -11317,6 +11388,50 @@ mod tests {
         assert_eq!(result, serde_json::json!("dark"));
     }
 
+    #[test]
+    fn settings_commit_mirrors_to_message_plane_through_approval_chain() {
+        // §33 R2-4（W6）Gate：settings set → 订阅者收帧（E2E）；未审批的跨插件
+        // 观察被拒；revoke 后闭环回 fail-closed——与 R2-5 五步链同一套授权事实。
+        use tauron_host::eventbus::ChannelKind;
+        let state = CommandState::new();
+
+        // 1) 未审批：订阅被拒，且镜像发布对它零投递。
+        let err = cmd_events_subscribe(&state, "com.b", "w1", HOST_SETTINGS_CHANGED_TOPIC)
+            .expect_err("host settings mirror is not openly subscribable");
+        assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
+        cmd_settings_set(&state, "plugin:p.theme", serde_json::json!("dark")).unwrap();
+        assert!(
+            state.bus.lock().drain("com.b", ChannelKind::Event).unwrap().is_empty(),
+            "被拒订阅不得收到任何帧"
+        );
+
+        // 2) 主窗审批 → 订阅成功 → 下一次提交可见。
+        cmd_events_approve_as(&Caller::MainWindow, &state, "com.b", HOST_SETTINGS_CHANGED_TOPIC)
+            .unwrap();
+        cmd_events_subscribe(&state, "com.b", "w1", HOST_SETTINGS_CHANGED_TOPIC).unwrap();
+        cmd_settings_set(&state, "plugin:p.theme", serde_json::json!("cobalt")).unwrap();
+        let frames = state.bus.lock().drain("com.b", ChannelKind::Event).unwrap();
+        assert_eq!(frames.len(), 1, "提交必须镜像一帧");
+        assert_eq!(frames[0].topic, HOST_SETTINGS_CHANGED_TOPIC);
+        assert_eq!(frames[0].payload["key"], "plugin:p.theme");
+        assert_eq!(frames[0].payload["value"], "cobalt");
+        assert_eq!(frames[0].payload["source"], "user");
+
+        // 3) 连续提交逐帧镜像（Event 通道，revision 单调）。
+        cmd_settings_set(&state, "plugin:p.lang", serde_json::json!("zh")).unwrap();
+        let frames = state.bus.lock().drain("com.b", ChannelKind::Event).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert!(
+            frames[0].payload["revision"].as_u64().unwrap() > 0,
+            "镜像帧必须携带提交后的 revision"
+        );
+
+        // 4) revoke → 新订阅回到被拒（既有队列不复活）。
+        cmd_events_revoke_as(&Caller::MainWindow, &state, "com.b", HOST_SETTINGS_CHANGED_TOPIC)
+            .unwrap();
+        assert!(cmd_events_subscribe(&state, "com.b", "w2", HOST_SETTINGS_CHANGED_TOPIC).is_err());
+    }
+
     // ────────────────────────────────────────────────────────────
     // R7-2：settings 走 tauron-settings 的 Store
     // ────────────────────────────────────────────────────────────
@@ -12022,6 +12137,27 @@ mod tests {
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].plugin_id, "p.audio");
         assert_eq!(notifications[0].title, "Title");
+    }
+
+    #[test]
+    fn notify_text_is_byte_bounded_with_zero_side_effects() {
+        // §33 R3-5：环形缓冲的条数上限挡不住"一条巨型正文"，必须另有字节预算。
+        let state = CommandState::new();
+        let err = cmd_notify(&state, "p.audio", "T", &"x".repeat(MAX_NOTIFY_BODY_BYTES + 1))
+            .expect_err("oversized body must be rejected");
+        assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST);
+        assert!(err.message.contains("正文"), "{}", err.message);
+
+        let err = cmd_notify(&state, "p.audio", &"t".repeat(MAX_NOTIFY_TITLE_BYTES + 1), "B")
+            .expect_err("oversized title must be rejected");
+        assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST);
+        assert!(err.message.contains("标题"), "{}", err.message);
+
+        assert!(state.notifications.lock().is_empty(), "拒绝路径必须零副作用");
+        assert_eq!(state.notify_store.lock().len(), 0);
+
+        cmd_notify(&state, "p.audio", "T", &"x".repeat(MAX_NOTIFY_BODY_BYTES)).unwrap();
+        assert_eq!(state.notifications.lock().len(), 1, "预算内边界值必须可写");
     }
 
     #[test]
@@ -14659,10 +14795,17 @@ mod tests {
                 ErrorCode::E_INVALID_MANIFEST
             );
 
-            // 注入端点 → 真跑 `tauron-distribute::check_for_update`。
+            // 注入端点 → 真跑 `tauron-distribute::check_for_update`；
+            // 安装身份走 §9.1 正式路径（数据目录 load_or_create，持久化）。
+            let install_dir = tempfile::tempdir().unwrap();
+            let identity = Arc::new(
+                tauron_distribute::InstallationIdentity::load_or_create(install_dir.path())
+                    .unwrap(),
+            );
+            assert!(identity.is_durable());
             let mut substrate = SubstrateState::with_adapter_config(&AdapterConfig::default());
-            substrate.updater_sink =
-                Arc::new(DistributeUpdaterSink::with_endpoint(Arc::new(FakeEndpoint {
+            substrate.updater_sink = Arc::new(DistributeUpdaterSink::with_endpoint(
+                Arc::new(FakeEndpoint {
                     manifest: Some(tauron_distribute::UpdateManifest {
                         version: "2.0.0".into(),
                         url: "https://example.com/app.zip".into(),
@@ -14670,7 +14813,9 @@ mod tests {
                         release_date: "2026-09-27T00:00:00Z".into(),
                         platform_notes: Default::default(),
                     }),
-                })));
+                }),
+                identity.clone(),
+            ));
             let state =
                 PluginRuntimeState::with_substrate(Arc::new(substrate), AdapterConfig::default());
             match cmd_updater_check(&state, "1.0.0").unwrap() {
@@ -14684,8 +14829,8 @@ mod tests {
             assert!(cmd_updater_status(&state).unwrap().available);
             // 端点清单签名为空 → 如实 `degraded`（SignatureInvalid），不谎报有更新。
             let mut substrate2 = SubstrateState::with_adapter_config(&AdapterConfig::default());
-            substrate2.updater_sink =
-                Arc::new(DistributeUpdaterSink::with_endpoint(Arc::new(FakeEndpoint {
+            substrate2.updater_sink = Arc::new(DistributeUpdaterSink::with_endpoint(
+                Arc::new(FakeEndpoint {
                     manifest: Some(tauron_distribute::UpdateManifest {
                         version: "2.0.0".into(),
                         url: "https://example.com/app.zip".into(),
@@ -14693,7 +14838,9 @@ mod tests {
                         release_date: "2026-09-27T00:00:00Z".into(),
                         platform_notes: Default::default(),
                     }),
-                })));
+                }),
+                identity,
+            ));
             let state2 =
                 PluginRuntimeState::with_substrate(Arc::new(substrate2), AdapterConfig::default());
             match cmd_updater_check(&state2, "1.0.0").unwrap() {

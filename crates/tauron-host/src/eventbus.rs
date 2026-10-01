@@ -34,6 +34,19 @@ use crate::policy::{DecisionError, PolicyAuthority};
 
 /// 单插件队列上限（计划 §4.4 关键约束）。
 pub const MAX_QUEUE: usize = 1000;
+/// 单帧总开销字节上限（序列化 payload + 元字段固定开销，§33 R3-5 count+bytes）。
+pub const MAX_FRAME_BYTES: usize = 256 * 1024;
+/// 单 `(订阅者 × 通道)` 队列的总开销字节上限，与 `MAX_QUEUE` 数量上限并存：
+/// 数量到顶**或**字节到顶都触发各自的溢出/拒绝策略。
+pub const MAX_QUEUE_BYTES: usize = 2 * 1024 * 1024;
+/// 帧元字段（topic/sender/receiver/event_id/causation + 定长数值）的固定开销估算。
+const FRAME_META_OVERHEAD: usize = 384;
+
+/// 一帧的记账成本：payload 序列化长度 + topic 长度 + 元字段固定开销。
+fn frame_cost(topic: &str, payload: &Value) -> usize {
+    let payload_bytes = serde_json::to_vec(payload).map(|v| v.len()).unwrap_or(usize::MAX);
+    topic.len().saturating_add(FRAME_META_OVERHEAD).saturating_add(payload_bytes)
+}
 /// 连续溢出达到该次数即熔断该订阅者的该通道。
 pub const OVERFLOW_STREAK_LIMIT: usize = 3;
 
@@ -164,10 +177,12 @@ pub struct BusStats {
 }
 
 /// 单队列：三类通道共用数据结构，但**策略按 kind 分叉**。
+/// 数量与字节双预算（§33 R3-5）：每帧按 [`frame_cost`] 记账，出队即销账。
 #[derive(Debug, Clone)]
 struct Queue {
     capacity: usize,
-    frames: VecDeque<Frame>,
+    frames: VecDeque<(Frame, usize)>,
+    bytes: usize,
     dropped_total: u64,
     overflow_streak: usize,
     circuit_open: bool,
@@ -178,6 +193,7 @@ impl Queue {
         Self {
             capacity,
             frames: VecDeque::new(),
+            bytes: 0,
             dropped_total: 0,
             overflow_streak: 0,
             circuit_open: false,
@@ -186,30 +202,49 @@ impl Queue {
 
     /// 入队。返回是否入队成功。
     ///
-    /// - `Event`：容量满 → 丢最旧，计溢出。
-    /// - `Request`：容量满 → **不入队**（可靠语义），由调用方转结构化错误。
+    /// - 超过单帧预算 [`MAX_FRAME_BYTES`] → **任何通道都不入队**（`TooLarge`，
+    ///   零副作用，快照通道的旧帧原样保留）。
+    /// - `Event`：数量或字节到顶 → 丢最旧腾位，计溢出。
+    /// - `Request`：数量或字节到顶 → **不入队**（可靠语义），由调用方转结构化错误。
     /// - `State`：清掉旧帧，只留最新（快照语义）。
-    fn enqueue(&mut self, kind: ChannelKind, frame: Frame) -> EnqueueResult {
+    fn enqueue(&mut self, kind: ChannelKind, frame: Frame, cost: usize) -> EnqueueResult {
+        if cost > MAX_FRAME_BYTES {
+            return EnqueueResult::TooLarge;
+        }
         match kind {
             ChannelKind::Event => {
-                if self.frames.len() >= self.capacity {
+                if self.frames.len() >= self.capacity
+                    || self.bytes.saturating_add(cost) > MAX_QUEUE_BYTES
+                {
                     if self.circuit_open {
                         self.dropped_total += 1;
                         return EnqueueResult::DroppedCircuitOpen;
                     }
-                    self.frames.pop_front();
-                    self.dropped_total += 1;
+                    let mut evicted = 0usize;
+                    while !self.frames.is_empty()
+                        && (self.frames.len() >= self.capacity
+                            || self.bytes.saturating_add(cost) > MAX_QUEUE_BYTES)
+                    {
+                        if let Some((_, old_cost)) = self.frames.pop_front() {
+                            self.bytes = self.bytes.saturating_sub(old_cost);
+                            evicted += 1;
+                        }
+                    }
+                    self.dropped_total += evicted as u64;
                     self.overflow_streak += 1;
                     if self.overflow_streak >= OVERFLOW_STREAK_LIMIT {
                         self.circuit_open = true;
                     }
-                    // 帧仍入队，但记录了一次溢出（丢最旧）。
-                    self.frames.push_back(frame);
+                    // 帧仍入队，但记录了一次溢出（丢最旧腾位）。
+                    self.bytes = self.bytes.saturating_add(cost);
+                    self.frames.push_back((frame, cost));
                     return EnqueueResult::QueuedWithOverflow;
                 }
             }
             ChannelKind::Request => {
-                if self.frames.len() >= self.capacity {
+                if self.frames.len() >= self.capacity
+                    || self.bytes.saturating_add(cost) > MAX_QUEUE_BYTES
+                {
                     if self.circuit_open {
                         self.dropped_total += 1;
                         return EnqueueResult::DroppedCircuitOpen;
@@ -219,21 +254,28 @@ impl Queue {
             }
             ChannelKind::State => {
                 // 快照语义：只有最新值有意义。
+                self.bytes = 0;
                 self.frames.clear();
             }
         }
-        self.frames.push_back(frame);
+        self.bytes = self.bytes.saturating_add(cost);
+        self.frames.push_back((frame, cost));
         EnqueueResult::Queued
     }
 
     /// 取走全部待投递帧（FIFO）。
     fn drain_all(&mut self) -> Vec<Frame> {
-        self.frames.drain(..).collect()
+        self.bytes = 0;
+        self.frames.drain(..).map(|(frame, _)| frame).collect()
     }
 
     /// 取走最新一帧（State 快照语义）。
     fn drain_latest(&mut self) -> Option<Frame> {
-        self.frames.pop_back()
+        let popped = self.frames.pop_back();
+        if let Some((_, cost)) = popped.as_ref() {
+            self.bytes = self.bytes.saturating_sub(*cost);
+        }
+        popped.map(|(frame, _)| frame)
     }
 
     fn stats(&self) -> QueueStats {
@@ -267,6 +309,8 @@ enum EnqueueResult {
     Full,
     /// 熔断中，已静默丢弃并计数。
     DroppedCircuitOpen,
+    /// 单帧超过字节预算（§33 R3-5）：零副作用拒绝，不挤占任何既有帧。
+    TooLarge,
 }
 
 /// 一帧。
@@ -694,6 +738,7 @@ impl EventBus {
 
         let mut delivered = 0usize;
         let mut overflow = 0usize;
+        let cost = frame_cost(topic, &payload);
 
         for token in tokens {
             let subscriber = match self.subs.lock().get(&token).map(|m| m.subscriber.clone()) {
@@ -723,8 +768,11 @@ impl EventBus {
                 let result = q.enqueue(
                     kind,
                     frame_with_causation(topic, payload.clone(), causation, &ordered),
+                    cost,
                 );
-                if matches!(result, EnqueueResult::Full) {
+                if kind == ChannelKind::Request
+                    && matches!(result, EnqueueResult::Full | EnqueueResult::TooLarge)
+                {
                     debug_assert!(
                         ordering.rollback_last(&ordered),
                         "reliable request enqueue failure must roll back its unpublished sequence"
@@ -740,6 +788,7 @@ impl EventBus {
                 }
                 EnqueueResult::Full => overflow += 1,
                 EnqueueResult::DroppedCircuitOpen => overflow += 1,
+                EnqueueResult::TooLarge => overflow += 1,
             }
         }
 
@@ -808,11 +857,13 @@ impl EventBus {
         let mut qs = self.queues.lock();
         let key = (target.to_string(), ChannelKind::Request);
         let q = qs.entry(key).or_insert_with(|| Queue::new(self.capacity));
+        let cost = frame_cost(topic, &payload);
         let result = q.enqueue(
             ChannelKind::Request,
             frame_with_causation(topic, payload, &causation, &ordered),
+            cost,
         );
-        if matches!(result, EnqueueResult::Full) {
+        if matches!(result, EnqueueResult::Full | EnqueueResult::TooLarge) {
             debug_assert!(
                 ordering.rollback_last(&ordered),
                 "reliable inbound enqueue failure must roll back its unpublished sequence"
@@ -820,6 +871,12 @@ impl EventBus {
         }
         match result {
             EnqueueResult::Queued | EnqueueResult::QueuedWithOverflow => Ok(1),
+            EnqueueResult::TooLarge => Err(HostError::new(
+                ErrorCode::E_CALL_PENDING_FULL,
+                format!(
+                    "调用投递超出单帧字节上限 {MAX_FRAME_BYTES}（`{target}` 的 `{topic}`），零副作用拒绝"
+                ),
+            )),
             EnqueueResult::Full | EnqueueResult::DroppedCircuitOpen => Err(HostError::new(
                 ErrorCode::E_CALL_PENDING_FULL,
                 format!(
@@ -1222,6 +1279,38 @@ mod tests {
     }
 
     #[test]
+    fn private_topic_full_chain_reject_approve_subscribe_revoke_reject() {
+        // §8.1 五步全链路：拒绝 → 审批 → 订阅成功 → 撤销 → 再拒绝，单测贯通。
+        let b = bus(16);
+        declare(&b, "com.a", "plugin:com.a:private", false);
+
+        // 1) 未审批：fail-closed 拒绝，且不产生任何授权事实
+        let e = b.subscribe("com.b", "w1", "plugin:com.a:private").unwrap_err();
+        assert_eq!(e.code, ErrorCode::E_AUTH_DENIED);
+        assert!(b.approvals().is_empty());
+
+        // 2) 审批：授权事实可见
+        b.approve("com.b", "plugin:com.a:private").unwrap();
+        assert!(b.is_approved("com.b", "plugin:com.a:private"));
+        assert_eq!(b.approvals(), vec![("com.b".to_string(), "plugin:com.a:private".to_string())]);
+
+        // 3) 订阅放行
+        let o = b.subscribe("com.b", "w1", "plugin:com.a:private").unwrap();
+        assert!(!o.duplicate);
+
+        // 4) 撤销：授权事实即刻消失，重复撤销幂等
+        assert!(b.revoke("com.b", "plugin:com.a:private"));
+        assert!(!b.revoke("com.b", "plugin:com.a:private"));
+        assert!(!b.is_approved("com.b", "plugin:com.a:private"));
+        assert!(b.approvals().is_empty());
+
+        // 5) 撤销后新订阅回到 fail-closed
+        let e = b.subscribe("com.b", "w3", "plugin:com.a:private").unwrap_err();
+        assert_eq!(e.code, ErrorCode::E_AUTH_DENIED);
+        assert!(e.message.contains("无权订阅"));
+    }
+
+    #[test]
     fn subscribe_to_unknown_topic_is_rejected() {
         let b = bus(16);
         let e = b.subscribe("com.b", "w1", "plugin:x:nowhere").unwrap_err();
@@ -1315,6 +1404,77 @@ mod tests {
         let r = b.publish("com.a", "plugin:com.a:x", Value::Null, ChannelKind::Event);
         assert_eq!(r.overflow, 1);
         assert_eq!(b.queue_stats("com.b", ChannelKind::Event).unwrap().depth, cap);
+    }
+
+    // ── 字节预算（§33 R3-5：count + bytes 双配额）──────────────────
+
+    fn big_payload(tag: usize) -> Value {
+        Value::from(format!("p{tag}|{}", "x".repeat(200_000)))
+    }
+
+    fn oversized_payload() -> Value {
+        Value::from("y".repeat(MAX_FRAME_BYTES))
+    }
+
+    #[test]
+    fn byte_budget_evicts_oldest_before_count_cap_is_reached() {
+        // 每帧 ≈200KB，数量上限 16 远未触及；2MiB 字节上限先在 10 帧处生效。
+        let b = bus(16);
+        declare(&b, "com.a", "plugin:com.a:x", true);
+        b.subscribe("com.b", "w1", "plugin:com.a:x").unwrap();
+        for i in 0..11 {
+            let r = b.publish("com.a", "plugin:com.a:x", big_payload(i), ChannelKind::Event);
+            assert_eq!(r.delivered, 1);
+            assert_eq!(r.overflow, if i < 10 { 0 } else { 1 }, "第 11 帧应因字节预算丢最旧");
+        }
+        let frames = b.drain("com.b", ChannelKind::Event).unwrap();
+        assert_eq!(frames.len(), 10, "字节上限（2MiB ÷ ≈200KB）先于数量上限（16）封顶");
+        let first = frames[0].payload.as_str().unwrap();
+        let last = frames[9].payload.as_str().unwrap();
+        assert!(first.starts_with("p1|"), "最旧一帧（p0）应已被驱逐：{first}");
+        assert!(last.starts_with("p10|"));
+    }
+
+    #[test]
+    fn oversized_event_frame_is_rejected_with_zero_side_effects() {
+        let b = bus(16);
+        declare(&b, "com.a", "plugin:com.a:x", true);
+        b.subscribe("com.b", "w1", "plugin:com.a:x").unwrap();
+        b.publish("com.a", "plugin:com.a:x", Value::from(42), ChannelKind::Event);
+        let r = b.publish("com.a", "plugin:com.a:x", oversized_payload(), ChannelKind::Event);
+        assert_eq!(r.delivered, 0, "超预算帧不得入队");
+        assert_eq!(r.overflow, 1);
+        let frames = b.drain("com.b", ChannelKind::Event).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].payload, Value::from(42), "既有帧不得被超预算发布波及");
+    }
+
+    #[test]
+    fn oversized_state_publish_keeps_previous_snapshot() {
+        let b = bus(16);
+        declare(&b, "com.a", "plugin:com.a:state", true);
+        b.subscribe("com.b", "w1", "plugin:com.a:state").unwrap();
+        b.publish("com.a", "plugin:com.a:state", Value::from("snap-1"), ChannelKind::State);
+        let r = b.publish("com.a", "plugin:com.a:state", oversized_payload(), ChannelKind::State);
+        assert_eq!(r.delivered, 0);
+        let frames = b.drain("com.b", ChannelKind::State).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].payload, Value::from("snap-1"), "快照不得被超大帧清空");
+    }
+
+    #[test]
+    fn request_channel_fails_structured_when_byte_budget_full() {
+        // 数量上限 64 未触及，字节先到顶 → 可靠通道返回结构化错误而非静默丢弃。
+        let b = bus(64);
+        declare(&b, "com.a", "plugin:com.a:req", true);
+        b.subscribe("com.b", "w1", "plugin:com.a:req").unwrap();
+        for i in 0..10 {
+            b.publish_request("com.a", "plugin:com.a:req", big_payload(i)).unwrap();
+        }
+        let e = b.publish_request("com.a", "plugin:com.a:req", big_payload(10)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::E_CALL_PENDING_FULL);
+        let frames = b.drain("com.b", ChannelKind::Request).unwrap();
+        assert_eq!(frames.len(), 10, "被拒的可靠投递不得改变队列");
     }
 
     // ── 熔断 ─────────────────────────────────────────────────────

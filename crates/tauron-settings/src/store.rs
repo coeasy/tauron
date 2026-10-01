@@ -206,25 +206,53 @@ pub struct ChangeEvent {
     pub revision: u64,
 }
 
-/// 单个订阅者待消费事件的**上限**（环形：超限丢最旧一条）。
+/// 单个订阅者待消费事件的**数量上限**（环形：超限丢最旧一条）。
 ///
 /// 为什么需要：`broadcast` 是无条件 `push`。订阅者若从不 `drain`，队列会随每次
 /// 设置写入无限增长——这是宿主内存被订阅方单方面拖垮的路径。到顶后丢最旧，
 /// 与 `tauron-notify` 的环形缓冲、`MemoryWindowSink` 的留痕上限同一策略。
 pub const MAX_PENDING_EVENTS: usize = 1024;
 
+/// 单个订阅者待消费事件的**字节上限**（§33 R3-5：count + bytes 双配额）。
+/// 数量到顶与字节到顶执行同一策略（丢最旧腾位）。
+pub const MAX_WATCH_QUEUE_BYTES: usize = 1024 * 1024;
+
+/// 单次写入被持久化的**值**的字节上限（序列化后）。
+pub const MAX_VALUE_BYTES: usize = 64 * 1024;
+
+/// 一条 `ChangeEvent` 的固定元开销（plugin_id/key/source/revision 等字段之外的摊销）。
+const CHANGE_EVENT_META_BYTES: usize = 256;
+
+fn change_event_cost(event: &ChangeEvent) -> usize {
+    let value_bytes = serde_json::to_vec(&event.value).map(|v| v.len()).unwrap_or(usize::MAX);
+    event
+        .plugin_id
+        .len()
+        .saturating_add(event.key.len())
+        .saturating_add(CHANGE_EVENT_META_BYTES)
+        .saturating_add(value_bytes)
+}
+
 /// 变更订阅者：按 namespace 隔离，每个订阅者一条有界 FIFO。
 #[derive(Default)]
 pub struct Watcher {
-    /// subscriber id → (namespace, bounded FIFO). Namespace isolation is enforced here.
-    queues: BTreeMap<u64, (String, VecDeque<ChangeEvent>)>,
+    /// subscriber id → 有界队列（namespace 隔离在此强制）。
+    queues: BTreeMap<u64, WatchQueue>,
     next_id: u64,
+}
+
+#[derive(Default)]
+struct WatchQueue {
+    namespace: String,
+    events: VecDeque<ChangeEvent>,
+    bytes: usize,
 }
 
 impl Watcher {
     pub fn subscribe(&mut self, plugin_id: &str) -> u64 {
         let id = self.next_id;
-        self.queues.insert(id, (plugin_id.to_string(), VecDeque::new()));
+        self.queues
+            .insert(id, WatchQueue { namespace: plugin_id.to_string(), ..Default::default() });
         self.next_id += 1;
         id
     }
@@ -234,27 +262,42 @@ impl Watcher {
     }
 
     pub fn broadcast(&mut self, event: &ChangeEvent) {
-        for (namespace, q) in self.queues.values_mut() {
-            if namespace != &event.plugin_id {
+        let cost = change_event_cost(event);
+        for q in self.queues.values_mut() {
+            if q.namespace != event.plugin_id {
                 continue;
             }
             // Rapid writes of the same key coalesce to the latest committed revision.
-            if let Some(last) = q.back_mut() {
+            if let Some(last) = q.events.back_mut() {
                 if last.plugin_id == event.plugin_id && last.key == event.key {
+                    q.bytes = q.bytes.saturating_sub(change_event_cost(last));
                     *last = event.clone();
+                    q.bytes = q.bytes.saturating_add(cost);
                     continue;
                 }
             }
-            if q.len() >= MAX_PENDING_EVENTS {
-                q.pop_front();
+            while !q.events.is_empty()
+                && (q.events.len() >= MAX_PENDING_EVENTS
+                    || q.bytes.saturating_add(cost) > MAX_WATCH_QUEUE_BYTES)
+            {
+                if let Some(old) = q.events.pop_front() {
+                    q.bytes = q.bytes.saturating_sub(change_event_cost(&old));
+                }
             }
-            q.push_back(event.clone());
+            q.bytes = q.bytes.saturating_add(cost);
+            q.events.push_back(event.clone());
         }
     }
 
     /// 取出某订阅者的全部待消费事件（消费即清空）。
     pub fn drain(&mut self, id: u64) -> Vec<ChangeEvent> {
-        self.queues.get_mut(&id).map(|(_, q)| q.drain(..).collect()).unwrap_or_default()
+        self.queues
+            .get_mut(&id)
+            .map(|q| {
+                q.bytes = 0;
+                q.events.drain(..).collect()
+            })
+            .unwrap_or_default()
     }
 
     /// 活跃订阅者数（用于"卸载零悬挂"类门禁）。
@@ -368,6 +411,17 @@ impl SettingsStore {
 
         // 门禁 3：路径合法。
         merge::validate_path(path)?;
+
+        // 门禁 3.5：单值字节预算（§33 R3-5）。放在 schema 校验前，
+        // 避免为必然被拒的巨大值做全树合并/校验。
+        let value_bytes = serde_json::to_vec(value).map(|v| v.len()).unwrap_or(usize::MAX);
+        if value_bytes > MAX_VALUE_BYTES {
+            return Err(SettingsError::ValueTooLarge {
+                key: path.to_string(),
+                bytes: value_bytes,
+                limit: MAX_VALUE_BYTES,
+            });
+        }
 
         // 门禁 4：写前校验。校验对象是"写入后的完整值"。
         // 设置 schema 默认禁止未声明键（additionalProperties: false）；
@@ -975,6 +1029,45 @@ mod tests {
         // 丢的是**最旧**的：留下的是最后 MAX_PENDING_EVENTS 条。
         assert_eq!(drained[0].key, format!("k{}", 25));
         assert_eq!(drained[MAX_PENDING_EVENTS - 1].key, format!("k{}", MAX_PENDING_EVENTS + 24));
+    }
+
+    #[test]
+    fn watch_queue_is_byte_bounded_independently_of_count() {
+        // §33 R3-5：1024 个"大 Value"也不得突破总字节上限——字节预算先在
+        // 远低于数量上限处封顶，仍丢最旧。
+        let mut w = Watcher::default();
+        let id = w.subscribe("p");
+        let big = "x".repeat(100_000); // 单事件成本 ≈ 100.5KB，1MiB 预算 ≈ 10 帧
+        for i in 0..30 {
+            w.broadcast(&ChangeEvent {
+                plugin_id: "p".to_string(),
+                key: format!("k{i}"),
+                value: json!(big.clone()),
+                source: LayerKind::User,
+                revision: i as u64 + 1,
+            });
+        }
+        let drained = w.drain(id);
+        assert!(
+            drained.len() < 15 && drained.len() < MAX_PENDING_EVENTS,
+            "字节预算必须先到顶：深度 {}",
+            drained.len()
+        );
+        assert_eq!(drained.last().unwrap().key, "k29", "最新的必须留下");
+        assert_ne!(drained[0].key, "k0", "最旧的必须已被驱逐");
+    }
+
+    #[test]
+    fn oversized_value_is_rejected_before_schema_validation() {
+        let mut s = store_with_audio();
+        s.set_layer("p.audio", LayerKind::Builtin, json!({"volume": 10}));
+        let huge = json!("x".repeat(MAX_VALUE_BYTES + 1));
+        let err = s.set("p.audio", "p.audio", "volume", &huge).unwrap_err();
+        assert!(
+            matches!(&err, SettingsError::ValueTooLarge { limit, bytes, .. }
+                if *limit == MAX_VALUE_BYTES && *bytes > MAX_VALUE_BYTES),
+            "必须按字节预算拒绝：{err}"
+        );
     }
 
     #[test]

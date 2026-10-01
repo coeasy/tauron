@@ -27,6 +27,21 @@
   `MAX_APPROVALS = 4096`（达限 `E_SUBSCRIPTION_FULL`，不静默扩张）。
 - **`host_stream_grant`**：流式通道的有界 byte credit 补充（插件运行时命令，
   self 档）。
+- **V4 P0 落地（§33 差异回扫，本轮结清 5 项）**：
+  - **安装身份与灰度分桶（R2-8 / §9.1）**：新增 `tauron-distribute::InstallationIdentity`
+    ——首用随机 UUIDv4（`installation.id` 落数据目录，`.simple()` 形态，创建竞态安全，
+    文件损坏**拒绝静默重置**而非重铸），FNV-1a 64→u32 折叠哈希出灰度桶，**不含 PII**；
+    卸载即重置（身份是每安装一份，不是每用户一份）。
+  - **设置变更观察（R2-4 / W6）**：宿主在设置落盘提交后把 `{ key, value, source, revision }`
+    镜像到宿主所有的私有 topic `host:settings:changed`（`event` 通道，慢消费者丢最旧）；
+    SDK 侧 `onSettingsChanged` 从此有真实投递路径（此前是**只在类型里存在的孤儿钩子**），
+    并按插件命名空间过滤——跨插件的观察不投递。键是**线形键**（可直接回查/回写），
+    不是 Store 的编码点路径。见 `docs/api/plugin-development-guide.md`「设置变更观察」。
+  - **能力协商 fail-closed（R1-4 / §8.1）**：`TauriBackend` 启动只认 bootstrap 命令
+    （`host_capabilities`），运行期协商结果经 `adoptCapabilities` 回填；空集合与
+    不含 `host_capabilities` 的集合**一律拒绝采纳**（unknown = unsupported，不再拿
+    静态全集误报能力）。`examples/minimal-app` 的协商失败改为保持 fail-closed +
+    指数退避重试，不再回落全量表。
 - **一次性安装评审链（V4）**：`host_registry_install_preview` 铸造 nonce 键控的
   `InstallReviewToken`（TTL 600s、一次性消费、表满按过期优先驱逐），
   `host_registry_install` 校验 token 与包哈希一致后才落盘——审批过的内容与实际
@@ -38,6 +53,17 @@
 
 ### Fixed
 
+- **灰度分桶此前恒为 0**：`DistributeUpdaterSink::check()` 把用户桶硬编码成 `0`，
+  于是「按桶灰度」在真实链路上等价于「只灰度 0 号桶」。现由注入的
+  `InstallationIdentity::user_hash()` 提供桶值，且 `with_endpoint(client, installation)`
+  **强制**调用方给身份（不给就编译不过），未配置端点的 `unconfigured()` 走
+  临时身份（不落盘、不参与灰度）。
+- **资源预算补齐 count + bytes（R3-5）**：EventBus 队列、Settings 观察队列与设置值
+  此前**只按条数**限额，大 payload 可以在条数不越界的情况下吃穿内存。现两侧都受
+  字节预算约束：单帧上限 256 KiB、队列 2 MiB（`event` 溢出丢最旧、`request` 溢出得
+  `E_CALL_PENDING_FULL`）、设置值上限 64 KiB、观察队列 1 MiB。超限一律**零副作用
+  拒绝**（在 schema 校验之前、在状态快照被清之前），既有快照与队列不受扰动。
+  通知标题/正文同样按字节预算拒绝（512 B / 4 KiB）。
 - `host_events_approve` 的内层拒绝此前会被 guard 包装吞掉（错误丢失、返回恒成功），
   现原样上线。
 - 注册表 pending 调用此前只在容量压力下 GC；现在诊断读

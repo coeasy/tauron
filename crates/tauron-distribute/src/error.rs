@@ -23,6 +23,10 @@ pub enum DistributeError {
     /// 清单解析错误。
     #[error("更新清单解析错误：{0}")]
     ManifestParse(String),
+
+    /// 安装身份（§9.1 InstallationIdentityProvider）读写或校验失败。
+    #[error("安装身份错误：{0}")]
+    InstallationIdentity(String),
 }
 
 pub type DistributeResult<T> = Result<T, DistributeError>;

@@ -55,8 +55,12 @@ function currentOrigin(): string | null {
  * 断链回归：此前这里只列 10 条框架命令——生产后端的 `capabilities()` 因此
  * 对其余命令误报未注册，`available('host_window_minimize')` 等在真实宿主上
  * 全部返回 `false`，按能力矩阵做特性开关的应用会把功能全部藏掉。
- * Tauri 不提供命令注册表自省 API，这份清单就是「壳声明注册」的全集；
- * 未注册命令的实际失败会在 invoke 时以结构化错误暴露（见 normalizeError）。
+ * Tauri 不提供命令注册表自省 API，这份清单就是「壳声明注册」的全集。
+ *
+ * **但它是门禁/文档基准，不是运行期能力表**（R1-4）：`TauriBackend` 的能力
+ * 集只由运行期 `host_capabilities` 协商填充，本清单不再被乐观地塞进
+ * `capabilities()`。未注册命令的实际失败仍会在 invoke 时以结构化错误暴露
+ * （见 normalizeError）。
  */
 const FRAMEWORK_COMMANDS = [
   // 框架服务（插件 webview 调用的 self/admin 档）
@@ -189,31 +193,53 @@ export type FrameworkCommand =
   (typeof FRAMEWORK_COMMANDS)[number] | (typeof OPTIONAL_FRAMEWORK_COMMANDS)[number];
 
 /**
+ * **协商前唯一可用**的命令（§8.1 R1-4：unknown = unsupported，fail-closed）。
+ *
+ * V4 原文说"bootstrap 三命令"，前提是 `host_protocol_info` / `host_health`
+ * 存在；当前命令面里它们**尚未落地**（协议握手属 P1 范围），所以 bootstrap 集
+ * 只有协商入口这一条。等握手命令落地后在此扩充，wire-gate 不动。
+ */
+export const BOOTSTRAP_COMMANDS = ['host_capabilities'] as const;
+
+/**
  * 真实 Tauri 后端。
  *
  * `commandPrefix` 默认 `'plugin:tauron|'`——Tauri 的命令级 ACL 通常以
  * `plugin:<name>|<cmd>` 形式注册。若宿主把命令注册在根命名空间，传 `''`。
+ *
+ * **能力协商 fail-closed**（R1-4）：构造后能力表只含 {@link BOOTSTRAP_COMMANDS}；
+ * 拉取 `host_capabilities` 成功并 {@link adoptCapabilities} 之前，
+ * `supports()` / `available()` 对其余命令一律报**不可用**。拉取失败的正确
+ * 处置是**重试或显式降级告警**，不是退回静态全集——静态全集只是壳声明，
+ * 从未协商成功就报"全集可用"正是 R1-4 修的方向性不安全。
  */
 export class TauriBackend implements HostTransport {
   private readonly prefix: string;
   private caps: ReadonlySet<string>;
+  private negotiated = false;
 
   constructor(options: { commandPrefix?: string } = {}) {
     this.prefix = options.commandPrefix ?? 'plugin:tauron|';
-    // Tauri 不提供命令注册表自省 API，这里报"壳声明注册"的全集。
-    // 命令未注册的实际失败会在 invoke 时以结构化错误暴露（见 normalizeError）。
-    //
-    // 注意这里**不含** {@link OPTIONAL_FRAMEWORK_COMMANDS}：那两条是 Rust 侧
-    // feature-gated 的，默认构建不注册，无条件列出就是对调用方撒谎。
-    this.caps = new Set<string>(FRAMEWORK_COMMANDS);
+    // fail-closed 起步：unknown = unsupported（R1-4）。能力真相只能来自
+    // `host_capabilities` 的运行期返回值，见 adoptCapabilities。
+    this.caps = new Set<string>(BOOTSTRAP_COMMANDS);
+  }
+
+  /** 能力集是否已被运行期真相采纳过（false = 仍在 fail-closed 的 bootstrap 态）。 */
+  get capabilitiesNegotiated(): boolean {
+    return this.negotiated;
   }
 
   /**
-   * 用**运行期真相**替换能力集（0.4-A2）。
+   * 用**运行期真相**替换能力集（0.4-A2 + R1-4）。
    *
    * 传入 `host_capabilities` 返回的 `commands`：它是在 Rust 侧由实际注册的
    * handler 集合与 `cfg!(feature = ...)` 推导出来的，因此天然包含/排除可选命令。
-   * 传空数组或解析不出命令集会抛错——宁可显式失败，也不退化成"什么都支持"。
+   *
+   * 两种输入**拒绝采纳**（宁可显式失败，也不退化成假的协商成功）：
+   * - 空集合——否则能力探测退化为"什么都不支持"的假阴性；
+   * - 不含 `host_capabilities`——一份连再协商入口都丢了的命令集不可信，
+   *   采纳它会让宿主自断唯一的真相通道。
    */
   adoptCapabilities(commands: Iterable<string>): void {
     const next = new Set(commands);
@@ -223,7 +249,13 @@ export class TauriBackend implements HostTransport {
           '拒绝采纳，否则能力探测会退化成"什么都不支持"的假阴性',
       );
     }
+    if (!next.has('host_capabilities')) {
+      throw new TypeError(
+        'adoptCapabilities: 命令集缺少 host_capabilities——拒绝采纳不完整的协商结果',
+      );
+    }
     this.caps = next;
+    this.negotiated = true;
   }
 
   private full(cmd: string): string {

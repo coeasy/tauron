@@ -3412,3 +3412,64 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     }
   });
 });
+
+describe('门禁：设置变更镜像 topic 线值（Rust HOST_SETTINGS_CHANGED_TOPIC ↔ SDK）', () => {
+  // §33 R2-4 / W6：宿主在设置落盘提交后把变更镜像到消息面，SDK 的
+  // `onSettingsChanged` 订阅同一个 topic。两侧各写一份字面量就会漂移——
+  // 漂移的后果不是编译失败，而是「钩子安静地永不触发」，正是本仓库最忌讳的断链形态。
+  const rustTopic = (): string => {
+    const src = read('crates/tauron-adapter/src/lib.rs');
+    const value =
+      /pub const HOST_SETTINGS_CHANGED_TOPIC: &str = "([^"]+)"/.exec(src)?.[1] ?? '';
+    expect(value, '未解析出 Rust 侧 HOST_SETTINGS_CHANGED_TOPIC（正则失配）').not.toBe('');
+    return value;
+  };
+
+  const sdkTopic = (): string => {
+    const src = read('packages/tauron-app-plugin-sdk/src/createPlugin.ts');
+    const value = /export const HOST_SETTINGS_CHANGED_TOPIC = '([^']+)'/.exec(src)?.[1] ?? '';
+    expect(value, '未解析出 SDK 侧 HOST_SETTINGS_CHANGED_TOPIC（正则失配）').not.toBe('');
+    return value;
+  };
+
+  it('两侧 topic 取值一致', () => {
+    expect(sdkTopic()).toBe(rustTopic());
+  });
+
+  it('SDK 用常量订阅，不重复硬编码字面量', () => {
+    const sdk = read('packages/tauron-app-plugin-sdk/src/createPlugin.ts');
+    const subscribe =
+      /if \(def\.onSettingsChanged\)[\s\S]*?ctx\.events\.subscribe\(([^,]+),/.exec(sdk)?.[1] ?? '';
+    expect(subscribe.trim(), 'onSettingsChanged 订阅点未解析（正则失配）').toBe(
+      'HOST_SETTINGS_CHANGED_TOPIC',
+    );
+  });
+
+  it('镜像帧字段（key/value/source/revision）两侧同集合', () => {
+    const rust = read('crates/tauron-adapter/src/lib.rs');
+    const publish =
+      /HOST_SETTINGS_CHANGED_TOPIC,\s*\n\s*serde_json::json!\(\{([\s\S]*?)\n\s*\}\),/.exec(rust)?.[1] ??
+      '';
+    const rustFields = [...publish.matchAll(/"([a-z]+)":/g)].map((m) => m[1]!).sort();
+    expect(rustFields.length, '未解析出 Rust 镜像帧字段（正则失配）').toBeGreaterThan(0);
+    expect(rustFields).toEqual(['key', 'revision', 'source', 'value']);
+
+    const sdk = read('packages/tauron-app-plugin-sdk/src/createPlugin.ts');
+    expect(/payload as \{ key\?: unknown; value\?: unknown \}/.test(sdk), 'SDK 未读 key').toBe(
+      true,
+    );
+    // 消息面暴露**线形键**（调用方 set/get 用的形态），不是 Store 的编码点路径。
+    expect(/frame\.key/.test(sdk)).toBe(true);
+    expect(/isOwnSettingsKey\(def\.id, frame\.key\)/.test(sdk)).toBe(true);
+  });
+
+  it('钩子有真实投递路径（不再是只在类型里存在的孤儿 API）', () => {
+    const sdk = read('packages/tauron-app-plugin-sdk/src/createPlugin.ts');
+    expect(/def\.onSettingsChanged\?\.\(/.test(sdk), 'onSettingsChanged 从未被调用').toBe(false);
+    expect(/Promise\.resolve\(hook\(\{ \[frame\.key\]: frame\.value \}, ctx\)\)/.test(sdk)).toBe(
+      true,
+    );
+    const index = read('packages/tauron-app-plugin-sdk/src/index.ts');
+    expect(/HOST_SETTINGS_CHANGED_TOPIC/.test(index), 'topic 常量未从公共入口导出').toBe(true);
+  });
+});

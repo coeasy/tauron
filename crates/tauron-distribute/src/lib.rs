@@ -17,9 +17,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub mod error;
+pub mod installation;
 pub mod upgrade;
 
 pub use error::{DistributeError, DistributeResult};
+pub use installation::InstallationIdentity;
 pub use upgrade::{
     create_default_upgrade_runner, create_upgrade_runner, Downloader, MockDownloader, MockVerifier,
     SignatureVerifier, UpgradeOptions, UpgradeProgress, UpgradeResult, UpgradeRunner, UpgradeState,

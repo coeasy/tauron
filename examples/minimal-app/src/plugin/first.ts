@@ -46,6 +46,16 @@ const plugin = createPlugin({
   contributes: {
     commands: [{ id: FORMAT_COMMAND_ID, title: 'Formatter: 格式化文本' }],
   },
+  // 设置变化通知（V4 §33 R2-4 / W6）：宿主在设置**落盘提交之后**把变更镜像到
+  // 消息面 topic `host:settings:changed`，SDK 只把属于本插件命名空间
+  // （`plugin:com.example.formatter…`）的键投进这个钩子。
+  //
+  // 前提：主窗批准过本插件订阅该 topic（`host_events_approve`）——它是宿主所有
+  // 的私有 topic，默认无人可见。未批准时订阅静默降级，钩子不触发（这不是错误，
+  // 也不阻断激活）。
+  onSettingsChanged(settings) {
+    show(`设置已更新：${Object.keys(settings).join(', ')}`);
+  },
   activate(ctx) {
     show(`插件 ${ctx.pluginId} 已激活：命令 format 已注册，执行泵运行中，等待跨主体调用…`);
   },

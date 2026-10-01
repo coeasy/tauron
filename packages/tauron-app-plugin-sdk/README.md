@@ -50,6 +50,10 @@ export default createPlugin({
   onEvent(topic, payload, ctx) {
     // 已声明 topic 的回调
   },
+  onSettingsChanged(settings, ctx) {
+    // 本插件命名空间内的设置变更（键为线形键，如 `plugin:<id>.width`）
+    // 前提：主窗已批准本插件订阅 `host:settings:changed`；未批准时不触发
+  },
 });
 ```
 
@@ -59,7 +63,23 @@ export default createPlugin({
 |---|---|
 | `createPlugin(definition)` | 由声明式 `PluginDefinition` 创建 `PluginInstance` |
 | `createPluginContext(pluginId, host)` | 手动创建生命周期上下文（高级用法） |
+| `HOST_SETTINGS_CHANGED_TOPIC` | 宿主设置变更镜像 topic 的线值（`'host:settings:changed'`）；主窗批准订阅时要用它 |
 | 类型 | `PluginDefinition` `PluginInstance` `PluginContext` `PluginHooks` `CommandHandler` `SettingsTabConfig` `EventListener` |
+
+### 设置变更观察（`onSettingsChanged`）
+
+声明该钩子即在激活时订阅 `HOST_SETTINGS_CHANGED_TOPIC`，收到的是
+**「本轮变化的线形键 → 新值」**（可直接拿去 `host_settings_get/set` 回查回写）。
+
+- **要主窗批准**：该 topic 宿主所有、默认私有；`AdminClient.eventsApprove(pluginId, HOST_SETTINGS_CHANGED_TOPIC)`
+  之前钩子永不触发（订阅拿不到 token → 取件泵不起跑），**激活仍会成功**——静默降级不是报错。
+- **只看自己的键**：等于 `plugin:<自己 id>` 或以 `plugin:<自己 id>.` 开头才投递；
+  别的插件的键、`host.*` 这类宿主级键不投给本钩子。
+- **可丢，不可回放**：走 `event` 通道，慢消费者按 topic 丢最旧（条数与字节双预算）。
+  要权威值用 `host_settings_get`，要变更流水请自建。
+- **等值写入不产帧**：与当前值相同的写入按无操作回落。
+
+完整链路与边界见 `docs/api/plugin-development-guide.md`「设置变更观察」。
 
 ### PluginContext
 

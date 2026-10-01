@@ -13,6 +13,7 @@
 - [权限系统](#权限系统)
 - [插件 SDK](#插件-sdk)
 - [跨主体调用（0.4-A1）](#跨主体调用04-a1)
+- [设置变更观察（1.1 新增，V4 §33 R2-4 / W6）](#设置变更观察11-新增v4-33-r2-4--w6)
 - [宿主命令面](#宿主命令面)
 - [错误码](#错误码)
 - [生命周期状态机](#生命周期状态机)
@@ -364,6 +365,60 @@ js / process 两条通路都在 `tauron-adapter::default_deliveries` 里生产�
   因此**主窗不能开流**（主窗 label 不是 `plugin-` 前缀，会被 `E_AUTH_DENIED` 拒）。
 - 这是**两侧对称**的"未接线"，**不是**某一侧的断链：需要跨主体流式时按新链路立项，
   不要只补一侧（补一侧会立刻变成断链）。
+
+---
+
+## 设置变更观察（1.1 新增，V4 §33 R2-4 / W6）
+
+设置写入走 `host_settings_set`，**观察者**走消息面：宿主在值**落盘提交之后**把变更
+镜像到宿主所有的 topic `host:settings:changed`（`event` 通道）。插件侧不需要手写
+任何订阅代码——声明 `onSettingsChanged` 即可：
+
+```typescript
+import { createPlugin, HOST_SETTINGS_CHANGED_TOPIC } from '@tauron/app-plugin-sdk';
+
+export default createPlugin({
+  id: 'com.example.formatter',
+  name: 'Formatter',
+  version: '1.0.0',
+  // 入参是「本轮变化的键 → 新值」，键为**线形键**（与 set/get 用的形态一致，
+  // 不是 Store 内部的编码点路径），可直接回查/回写。
+  onSettingsChanged(settings, ctx) {
+    const width = settings['plugin:com.example.formatter.width'];
+    ctx.log.info(`宽度改为 ${String(width)}`);
+  },
+});
+```
+
+### 谁能收到
+
+| 条件 | 结果 |
+|---|---|
+| 未获主窗批准该 topic | 订阅拿不到 token → 取件泵不起跑 → 钩子**永不触发**（静默降级，激活照常成功） |
+| 已获批准 | 只收到**本插件命名空间**的键：等于 `plugin:<自己 id>` 或以 `plugin:<自己 id>.` 开头 |
+| 别的插件的键、宿主级键（`host.*`） | 不投递（SDK 侧按命名空间过滤，与宿主读写边界同一套判定） |
+
+批准由主窗发起（`host_events_approve` 的 TS 口是 `AdminClient.eventsApprove`）：
+
+```typescript
+await admin.eventsApprove('com.example.formatter', HOST_SETTINGS_CHANGED_TOPIC);
+await shell.settingsSet('plugin:com.example.formatter.width', 120); // 插件窗随后收到
+```
+
+`examples/minimal-app` 的「打开插件面板窗口」按钮跑的就是这两步。
+
+### 诚实边界
+
+- **审批是 topic 粒度的，不是键粒度**：一旦某订阅者获批 `host:settings:changed`，
+  宿主就会把该 topic 的全部帧投给它（SDK 只过滤**投递给钩子**的那一份，这是应用层
+  约定，不是宿主级 ACL）。需要「按键授权」时得按新特性立项，别把 SDK 过滤当安全边界。
+- **`event` 通道可丢**：慢消费者按 topic 丢最旧（队列受条数与字节双预算约束），所以
+  这个钩子用于「响应最新值」，**不能**当变更流水账回放。要权威值仍用 `host_settings_get`。
+- **等值写入不产生变更帧**：写入与当前值相同会被视为无操作回落，不镜像。
+- **字节预算**（R3-5）：单个设置值上限 64 KiB（超限得 `ValueTooLarge`，在 schema 校验
+  **之前**拒绝，零副作用）；单个观察队列上限 1 MiB（与条数上限同时生效，先到先淘汰）。
+- 主窗侧的进程内 watcher（`SettingsStore` 命名空间隔离）与该镜像**互不影响**：
+  两条路各拿各的队列，一边溢出不会饿死另一边。
 
 ---
 

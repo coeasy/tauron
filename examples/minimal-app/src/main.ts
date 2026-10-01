@@ -22,6 +22,7 @@ import {
   ShellController,
 } from '@tauron/host';
 import type { PendingCallInfo } from '@tauron/host';
+import { HOST_SETTINGS_CHANGED_TOPIC } from '@tauron/app-plugin-sdk';
 import { PluginBridge, callPluginMethod } from '@tauron/plugin-sdk';
 import '@tauron/ui/wc'; // 注册全部自定义元素（oc-toast / oc-plugin-manager / …）
 
@@ -33,15 +34,24 @@ import '@tauron/ui/wc'; // 注册全部自定义元素（oc-toast / oc-plugin-ma
 const backend = new TauriBackend({ commandPrefix: '' });
 const shell = new ShellClient({ backend });
 
-// 0.4-A2 能力真相：启动即拉取 `host_capabilities` 并回填传输层能力缓存——
+// 0.4-A2 + R1-4 能力真相：启动即拉取 `host_capabilities` 并回填传输层能力缓存——
 // `host_registry_install*` 是否存在由 Rust 侧 `cfg!(feature = "plugin-install")`
-// 推导，前端不猜。此后 `shell.supports('host_registry_install')` 反映宿主
-// **真实**构建形态（默认构建 = false，安装按钮给出明确失败而不是 invoke 报
-// command not found）。
-void shell.refreshCapabilities().catch((err: Error) => {
-  // 老宿主没有 host_capabilities 时能力表保持静态全集——降级方向安全。
-  console.warn('[tauron] 能力快照拉取失败，能力表按静态全集降级：', err.message);
-});
+// 推导，前端不猜。**协商失败时能力表保持 fail-closed**（只有 bootstrap 的
+// `host_capabilities` 可用），指数退避重试，而不是退回静态全集乐观撒谎。
+async function negotiateCapabilities(attempt = 0): Promise<void> {
+  try {
+    await shell.refreshCapabilities();
+  } catch (err) {
+    console.warn(
+      `[tauron] 能力快照拉取失败（第 ${attempt + 1} 次），能力表保持 fail-closed：`,
+      (err as Error).message,
+    );
+    if (attempt < 5) {
+      setTimeout(() => void negotiateCapabilities(attempt + 1), 2 ** attempt * 500);
+    }
+  }
+}
+void negotiateCapabilities();
 const dialog = new DialogClient({ backend });
 const updater = new AutoUpdateClient({
   backend,
@@ -274,13 +284,27 @@ void shell
 // 的帧；所以先点「打开插件面板窗口」，再点「跨主体调用」。
 el<HTMLButtonElement>('btn-open-plugin-window').addEventListener('click', () => {
   void shell.windowCreate('com.example.formatter').then(
-    (out) =>
+    async (out) => {
       log(
         'cross-out',
         out.created
           ? `插件面板窗口已创建（label ${out.label}），执行泵就绪`
           : `窗口未创建：${out.reason ?? '宿主未实现创建原语'}`,
-      ),
+      );
+      if (!out.created) return;
+      // 设置变更观察演示（V4 §33 R2-4 / W6）。三步都是真实链路，不是伪代码：
+      //   1. 主窗批准插件订阅宿主所有的镜像 topic（默认私有 → 不批准就收不到）；
+      //   2. 主窗写一条**属于该插件命名空间**的设置（宿主落盘提交后镜像到消息面）；
+      //   3. 插件窗的 `onSettingsChanged` 收到该键并刷新自己的状态行。
+      // 跨插件的观察（别的 `plugin:<id>…` 键）不会投给它的订阅者——SDK 按命名空间过滤。
+      try {
+        await admin.eventsApprove('com.example.formatter', HOST_SETTINGS_CHANGED_TOPIC);
+        await shell.settingsSet('plugin:com.example.formatter.width', 120);
+        log('cross-out', `已批准 ${HOST_SETTINGS_CHANGED_TOPIC} 并写入设置 → 插件窗应显示「设置已更新」`);
+      } catch (err) {
+        log('cross-out', `设置变更演示失败：${(err as Error).message}`);
+      }
+    },
     (err: Error) => log('cross-out', `开窗失败：${err.message}`),
   );
 });
