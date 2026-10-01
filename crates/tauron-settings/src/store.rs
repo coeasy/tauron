@@ -26,7 +26,7 @@ use crate::registry::SchemaRegistry;
 /// 但持久化的落点需要能序列化这一层——`snapshot_all()` 的结果要能写进文件、
 /// 读回来喂 `restore()`。没有这两个 derive，`snapshot_all`/`restore` 就只能是
 /// 测试里的玩具（本仓曾如此：设置写进去，重启即丢）。
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct PluginState {
     pub builtin: Value,
@@ -58,6 +58,46 @@ impl PluginState {
     }
 }
 
+/// V4 A101 migration rollback/data-compatibility declaration.
+///
+/// A migration is allowed to participate in automatic update/rollback only when at least one
+/// safety path is explicit:
+/// - `reversible`: a semantic reverse migration exists at the product layer;
+/// - `forward_compatible`: the old reader can safely consume the new data;
+/// - `requires_snapshot`: callers must retain the pre-migration snapshot and restore it if the
+///   new version fails probation.
+///
+/// All three false is rejected before any data mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MigrationContract {
+    pub reversible: bool,
+    pub forward_compatible: bool,
+    pub requires_snapshot: bool,
+}
+
+impl MigrationContract {
+    pub const fn new(reversible: bool, forward_compatible: bool, requires_snapshot: bool) -> Self {
+        Self { reversible, forward_compatible, requires_snapshot }
+    }
+
+    /// Conservative compatibility default for legacy callers: never assume reversibility or
+    /// forward compatibility; require a retained snapshot.
+    pub const fn snapshot_required() -> Self {
+        Self::new(false, false, true)
+    }
+
+    pub const fn automatic_rollback_safe(self) -> bool {
+        self.reversible || self.forward_compatible || self.requires_snapshot
+    }
+}
+
+impl Default for MigrationContract {
+    fn default() -> Self {
+        Self::snapshot_required()
+    }
+}
+
 /// 一次 schema 版本迁移：把**用户层**的值从 `from` 版本改写成 `to` 版本。
 ///
 /// 用函数指针而不是闭包 trait：`Migration` 要能廉价地复制进/出注册表，
@@ -70,11 +110,60 @@ pub struct Migration {
     pub to: String,
     /// 改写函数：收旧用户层值，返回新用户层值。
     pub apply: fn(&Value) -> Value,
+    /// V4 A101 rollback/data compatibility declaration.
+    pub contract: MigrationContract,
 }
 
 impl Migration {
     pub fn new(from: &str, to: &str, apply: fn(&Value) -> Value) -> Self {
-        Self { from: from.to_string(), to: to.to_string(), apply }
+        Self {
+            from: from.to_string(),
+            to: to.to_string(),
+            apply,
+            contract: MigrationContract::snapshot_required(),
+        }
+    }
+
+    pub fn with_contract(mut self, contract: MigrationContract) -> Self {
+        self.contract = contract;
+        self
+    }
+}
+
+/// Receipt returned after a settings migration has mutated in-memory state.
+///
+/// Keep this receipt until durable persistence and runtime health probation have succeeded.
+/// If either fails, `rollback_migration` restores the exact pre-migration plugin state.
+#[derive(Debug, Clone)]
+pub struct MigrationReceipt {
+    plugin_id: String,
+    from_version: Option<String>,
+    to_version: String,
+    steps: usize,
+    changed: bool,
+    contract: MigrationContract,
+    before: Option<PluginState>,
+}
+
+impl MigrationReceipt {
+    pub fn steps(&self) -> usize {
+        self.steps
+    }
+
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
+
+    pub fn from_version(&self) -> Option<&str> {
+        self.from_version.as_deref()
+    }
+
+    pub fn to_version(&self) -> &str {
+        &self.to_version
+    }
+
+    pub fn contract(&self) -> MigrationContract {
+        self.contract
     }
 }
 
@@ -165,10 +254,7 @@ impl Watcher {
 
     /// 取出某订阅者的全部待消费事件（消费即清空）。
     pub fn drain(&mut self, id: u64) -> Vec<ChangeEvent> {
-        self.queues
-            .get_mut(&id)
-            .map(|(_, q)| q.drain(..).collect())
-            .unwrap_or_default()
+        self.queues.get_mut(&id).map(|(_, q)| q.drain(..).collect()).unwrap_or_default()
     }
 
     /// 活跃订阅者数（用于"卸载零悬挂"类门禁）。
@@ -431,6 +517,85 @@ impl SettingsStore {
         self.state_ref(plugin_id).map(|s| s.schema_version.as_str()).filter(|v| !v.is_empty())
     }
 
+    /// Resolve the aggregate V4 A101 contract for a migration chain without mutating data.
+    pub fn migration_contract(
+        &self,
+        plugin_id: &str,
+        to_version: &str,
+    ) -> SettingsResult<MigrationContract> {
+        let from = self.data_version(plugin_id).unwrap_or("").to_string();
+        if from == to_version || from.is_empty() {
+            return Ok(MigrationContract::new(true, true, false));
+        }
+
+        let mut current = from;
+        let mut steps = 0usize;
+        let mut aggregate = MigrationContract::new(true, true, false);
+        while current != to_version {
+            let step = self
+                .migrations
+                .get(plugin_id)
+                .and_then(|list| list.iter().find(|m| m.from == current).cloned())
+                .ok_or_else(|| {
+                    SettingsError::SchemaCompile(format!(
+                        "命名空间 `{plugin_id}` 缺少 `{current}` → `{to_version}` 的迁移步骤"
+                    ))
+                })?;
+            if !step.contract.automatic_rollback_safe() {
+                return Err(SettingsError::SchemaCompile(format!(
+                    "迁移 `{plugin_id}` {}→{} 未声明可逆、前向兼容或 requiresSnapshot；                     禁止进入自动升级/回滚链",
+                    step.from, step.to
+                )));
+            }
+            aggregate.reversible &= step.contract.reversible;
+            aggregate.forward_compatible &= step.contract.forward_compatible;
+            aggregate.requires_snapshot |= step.contract.requires_snapshot;
+            current = step.to;
+            steps += 1;
+            if steps > MIGRATION_STEP_LIMIT {
+                return Err(SettingsError::SchemaCompile(format!(
+                    "命名空间 `{plugin_id}` 的迁移链超过 {MIGRATION_STEP_LIMIT} 步（疑似自环），已中止"
+                )));
+            }
+        }
+        Ok(aggregate)
+    }
+
+    /// Apply migration and retain the exact pre-migration state for external commit/probation.
+    pub fn migrate_transactional(
+        &mut self,
+        plugin_id: &str,
+        to_version: &str,
+    ) -> SettingsResult<MigrationReceipt> {
+        let before = self.state_ref(plugin_id).cloned();
+        let from_version = self.data_version(plugin_id).map(str::to_string);
+        let contract = self.migration_contract(plugin_id, to_version)?;
+        let steps = self.migrate(plugin_id, to_version)?;
+        let after_version = self.data_version(plugin_id).map(str::to_string);
+        let changed = steps > 0 || from_version != after_version;
+        Ok(MigrationReceipt {
+            plugin_id: plugin_id.to_string(),
+            from_version,
+            to_version: to_version.to_string(),
+            steps,
+            changed,
+            contract,
+            before,
+        })
+    }
+
+    /// Restore the exact state captured before a transactional migration.
+    pub fn rollback_migration(&mut self, receipt: MigrationReceipt) {
+        match receipt.before {
+            Some(state) => {
+                self.states.insert(receipt.plugin_id, state);
+            }
+            None => {
+                self.states.remove(&receipt.plugin_id);
+            }
+        }
+    }
+
     /// 沿迁移链把该命名空间的**用户层**从已标注版本迁到 `to_version`。
     ///
     /// **全有或全无**：链路缺失、出现自环、或迁移结果过不了 schema 校验时，
@@ -471,6 +636,12 @@ impl SettingsStore {
                     "命名空间 `{plugin_id}` 缺少 `{current}` → `{to_version}` 的迁移步骤"
                 )));
             };
+            if !step.contract.automatic_rollback_safe() {
+                return Err(SettingsError::SchemaCompile(format!(
+                    "迁移 `{plugin_id}` {}→{} 未声明可逆、前向兼容或 requiresSnapshot；                     禁止进入自动升级/回滚链",
+                    step.from, step.to
+                )));
+            }
             data = (step.apply)(&data);
             current = step.to.clone();
             applied += 1;
@@ -734,9 +905,7 @@ mod tests {
         let mut s = store_with_audio();
         s.set_layer("p.audio", LayerKind::Builtin, json!({"volume": 10}));
         let sub = s.watch("p.audio");
-        let (_op, event) = s
-            .set_deferred("p.audio", "p.audio", "volume", &json!(50))
-            .unwrap();
+        let (_op, event) = s.set_deferred("p.audio", "p.audio", "volume", &json!(50)).unwrap();
         assert!(s.drain(sub).is_empty(), "staged mutation must not notify watchers");
         assert_eq!(s.revision(), 0);
         let committed = s.publish_committed_change(event);
@@ -748,9 +917,14 @@ mod tests {
     #[test]
     fn watcher_is_namespace_scoped() {
         let mut s = store_with_audio();
-        s.register("p.video", "1.0.0", &json!({
-            "type":"object","properties":{"brightness":{"type":"integer"}}
-        })).unwrap();
+        s.register(
+            "p.video",
+            "1.0.0",
+            &json!({
+                "type":"object","properties":{"brightness":{"type":"integer"}}
+            }),
+        )
+        .unwrap();
         let audio = s.watch("p.audio");
         let video = s.watch("p.video");
         s.set("p.audio", "p.audio", "volume", &json!(50)).unwrap();
@@ -1125,6 +1299,55 @@ mod tests {
         s.register_migration("p.app", Migration::new("1.0.0", "1.0.0", |v| v.clone()));
         let e = s.migrate("p.app", "2.0.0").unwrap_err();
         assert!(matches!(e, SettingsError::SchemaCompile(ref m) if m.contains("自环")), "{e}");
+    }
+
+    #[test]
+    fn migration_contract_defaults_to_snapshot_required() {
+        let migration = Migration::new("1", "2", |v| v.clone());
+        assert_eq!(migration.contract, MigrationContract::snapshot_required());
+        assert!(migration.contract.automatic_rollback_safe());
+    }
+
+    #[test]
+    fn migration_rejects_a_contract_with_no_rollback_or_compatibility_path() {
+        let mut s = SettingsStore::new();
+        s.register("p.app", "1.0.0", &v1_schema()).unwrap();
+        s.set("p.app", "p.app", "legacyTheme", &json!("dark")).unwrap();
+        s.register("p.app", "2.0.0", &v2_schema()).unwrap();
+        s.register_migration(
+            "p.app",
+            Migration::new("1.0.0", "2.0.0", migrate_v1_to_v2)
+                .with_contract(MigrationContract::new(false, false, false)),
+        );
+        let before = s.snapshot("p.app").unwrap();
+        let err = s.migrate_transactional("p.app", "2.0.0").unwrap_err();
+        assert!(
+            matches!(err, SettingsError::SchemaCompile(ref m) if m.contains("requiresSnapshot"))
+        );
+        assert_eq!(s.snapshot("p.app").unwrap(), before, "拒绝路径必须零副作用");
+    }
+
+    #[test]
+    fn migration_receipt_rolls_back_exact_data_and_version() {
+        let mut s = SettingsStore::new();
+        s.register("p.app", "1.0.0", &v1_schema()).unwrap();
+        s.set("p.app", "p.app", "legacyTheme", &json!("dark")).unwrap();
+        s.register("p.app", "2.0.0", &v2_schema()).unwrap();
+        s.register_migration(
+            "p.app",
+            Migration::new("1.0.0", "2.0.0", migrate_v1_to_v2)
+                .with_contract(MigrationContract::new(false, false, true)),
+        );
+        let before = s.snapshot("p.app").unwrap();
+        let receipt = s.migrate_transactional("p.app", "2.0.0").unwrap();
+        assert!(receipt.changed());
+        assert_eq!(receipt.steps(), 1);
+        assert!(receipt.contract().requires_snapshot);
+        assert_eq!(s.data_version("p.app"), Some("2.0.0"));
+        s.rollback_migration(receipt);
+        assert_eq!(s.snapshot("p.app").unwrap(), before);
+        assert_eq!(s.data_version("p.app"), Some("1.0.0"));
+        assert_eq!(s.get_key("p.app", "legacyTheme").unwrap(), Some(json!("dark")));
     }
 
     #[test]

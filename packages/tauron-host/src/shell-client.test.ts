@@ -77,6 +77,10 @@ describe('ShellClient', () => {
             families: ['shell', 'settings'],
             commands: ['host_capabilities'],
             unsupported: [],
+            enforcement: [
+              { domain: 'fs', level: 'hard', detail: 'root-handle relative I/O' },
+              { domain: 'http', level: 'unsupported', detail: 'provider not configured' },
+            ],
             pluginRuntime: false,
           },
         },
@@ -108,6 +112,7 @@ describe('ShellClient', () => {
     const result = await client.capabilities();
     expect(result.pluginRuntime).toBe(false);
     expect(result.commands).toContain('host_capabilities');
+    expect(result.enforcement.find((item) => item.domain === 'fs')?.level).toBe('hard');
     expect(client.supports('host_capabilities')).toBe(true);
     expect(backend.invocations[0]?.cmd).toBe('host_capabilities');
   });

@@ -44,10 +44,24 @@ export interface PublishResult {
 export interface EventFrame {
   /** 事件 topic（约定 `plugin:<插件id>:<事件名>`，与框架层 `eventNamespace` 一致）。 */
   topic: string;
-  /** 单调递增序号（跨通道独立）。 */
+  /** V4 A102 per sender→receiver monotonic sequence. */
   seq: number;
   /** JSON 载荷。 */
   payload: JsonValue;
+  /** V4 A102 sender principal. */
+  sender?: string;
+  /** V4 A102 receiver principal. */
+  receiver?: string;
+  /** V4 A102 monotonic state revision for state-channel publications. */
+  stateRevision?: number;
+  /** V4 A78 event id. Always present on V4 hosts; optional for N-1 source compatibility. */
+  eventId?: string;
+  /** V4 A78 root causation id shared by the full event chain. */
+  causationId?: string;
+  /** V4 A78 1-based event hop. */
+  eventHop?: number;
+  /** V4 A78 Host-enforced maximum causation depth. */
+  maxCausationDepth?: number;
 }
 
 // R5 收敛：此前的 `CallFrame`（`kind: 'response'|'progress'|'cancel'`，
@@ -81,6 +95,14 @@ export interface PendingCallInfo {
   caller?: string;
   /** 执行主体（0.4-A1 跨主体调用）：插件 id。self 档调用时等于 `pluginId`。 */
   target?: string;
+  /** V4 A77 root synchronous request id. */
+  rootCallId?: string;
+  /** V4 A77 parent request id for delegated calls. */
+  parentCallId?: string;
+  /** V4 A77 1-based bounded synchronous hop count. */
+  hopCount?: number;
+  /** V4 A88 process runtime generation captured when the call was accepted. */
+  runtimeGeneration?: number;
   /**
    * 结算状态（0.4-A1）：`pending` = 已登记等待执行方回填；`settled` = 结果已在此。
    * 只有两态——宿主不区分「执行中」（那是执行方的私事），TTL 兜底回收。

@@ -73,11 +73,15 @@ const FRAMEWORK_COMMANDS = [
   'host_events_subscribe',
   'host_events_unsubscribe',
   'host_events_drain',
+  'host_events_approve',
+  'host_events_revoke',
+  'host_events_approvals',
   'host_registry_list',
   'host_registry_admin',
-  // 流式帧（R5/P0-1）：三命令成组——缺一条就会让某条流永远等不到终帧。
+  // 流式帧（V4 A79）：open/write/grant/close 四命令成组；grant 是慢消费者背压回补。
   'host_stream_open',
   'host_stream_write',
+  'host_stream_grant',
   'host_stream_close',
   // 进程插件运行时（P0-2）：spawn + 健康/租约查询配对。
   'host_runtime_spawn',

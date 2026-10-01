@@ -272,15 +272,14 @@ describe('门禁：应用层宿主错误码 TS ↔ Rust 一致', () => {
 
   it('V4 retryClass 一致，panic 不得自动重试', () => {
     const lookup = variantToCode();
-    const retryBlock = /pub const fn retry_class\(self\)[\s\S]*?\n    \}/.exec(hostErrorSrc)?.[0] ?? '';
+    const retryBlock =
+      /pub const fn retry_class\(self\)[\s\S]*?\n    \}/.exec(hostErrorSrc)?.[0] ?? '';
     expect(retryBlock, 'retry_class() must exist').not.toBe('');
     const rustClass = new Map<string, string>();
     for (const m of retryBlock.matchAll(/Self::(E_\w+)\s*=>\s*RetryClass::(\w+)/g)) {
       const code = lookup.get(m[1]!);
       expect(code, `variant ${m[1]} has no wire code`).toBeDefined();
-      const cls = m[2]!
-        .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
-        .toLowerCase();
+      const cls = m[2]!.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
       rustClass.set(code!, cls);
     }
     const registry = JSON.parse(read('contracts/error/error-codes.json')) as {
@@ -1116,16 +1115,16 @@ function rustAuthTable(): Map<string, string> {
 }
 
 describe('门禁：能力表（命令 → 档位）TS ↔ Rust 同构', () => {
-  it('命令集合一致（插件面 18 条 + 主窗特权 6 条）', () => {
+  it('命令集合一致（插件面 19 条 + 主窗特权命令）', () => {
     const rust = rustAuthTable();
     const ts = new Map(CAPABILITIES.map((c) => [c.command, c.tier]));
     // 不写死总数（会随命令面增长而漂移）：只钉住两表**逐条相等**与结构比例。
     expect(ts.size, 'TS CAPABILITIES 条目数').toBe(rust.size);
     expect([...ts.keys()].sort(), '命令集合').toEqual([...rust.keys()].sort());
     const pluginFace = CAPABILITIES.filter((c) => c.tier !== 'privileged');
-    // 18 = 13（0.4-A1 之前）+ 跨主体调用 3 条 + 0.4 审计补登记 host_contributes_list
-    // + 0.4-W3 扩展点对账 host_contributes_reconcile。
-    expect(pluginFace.length, '插件面（self + scoped-read）命令数').toBe(18);
+    // 19 = 13（0.4-A1 之前）+ 跨主体调用 3 条 + 0.4 审计补登记 host_contributes_list
+    // + 0.4-W3 扩展点对账 host_contributes_reconcile + V4 A79 host_stream_grant。
+    expect(pluginFace.length, '插件面（self + scoped-read）命令数').toBe(19);
     expect(
       CAPABILITIES.filter((c) => c.consumer === 'plugin')
         .map((c) => c.command)
@@ -1160,6 +1159,9 @@ describe('门禁：能力表（命令 → 档位）TS ↔ Rust 同构', () => {
         .map((c) => c.command)
         .sort(),
     ).toEqual([
+      'host_events_approvals',
+      'host_events_approve',
+      'host_events_revoke',
       'host_registry_admin',
       'host_registry_install',
       'host_registry_install_preview',
@@ -1222,12 +1224,34 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
   it('事件总线帧 Frame ↔ TS EventFrame 逐字段一致', () => {
     const frame = rustStruct('crates/tauron-host/src/eventbus.rs', 'Frame');
     expect(frame.camelCase, 'Frame 必须 rename_all = "camelCase"').toBe(true);
-    expect([...frame.fields].sort()).toEqual(['payload', 'seq', 'topic']);
+    expect([...frame.fields].sort()).toEqual([
+      'causation_id',
+      'event_hop',
+      'event_id',
+      'max_causation_depth',
+      'payload',
+      'receiver',
+      'sender',
+      'seq',
+      'state_revision',
+      'topic',
+    ]);
     const ts = read('packages/tauron-host/src/events.ts');
     const m = /export interface EventFrame \{([\s\S]*?)\n\}/.exec(ts);
     expect(m, 'TS EventFrame 必须存在').not.toBeNull();
     const tsFields = [...m![1]!.matchAll(/^\s{2}(\w+)[?]*:/gm)].map((x) => x[1]!);
-    expect(tsFields.sort()).toEqual(['payload', 'seq', 'topic']);
+    expect(tsFields.sort()).toEqual([
+      'causationId',
+      'eventHop',
+      'eventId',
+      'maxCausationDepth',
+      'payload',
+      'receiver',
+      'sender',
+      'seq',
+      'stateRevision',
+      'topic',
+    ]);
     // drain 的返回类型必须是 EventFrame（不是流式 CallFrame）
     const host = read('packages/tauron-host/src/host.ts');
     expect(host).toMatch(/eventsDrain\([^)]*\): Promise<EventFrame\[\]>/);
@@ -1305,6 +1329,10 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
     const ts = read('packages/tauron-host/src/shell-client.ts');
     expect(ts).toMatch(/phaseName: string/);
     expect(ts).toMatch(/consecutiveFailures: number/);
+    expect(ts).toMatch(/health: HealthReport/);
+    expect(ts).toMatch(/liveness: 'alive' \| 'dead' \| 'unknown'/);
+    expect(ts).toMatch(/readiness: 'ready' \| 'not-ready'/);
+    expect(ts).toMatch(/degradation: 'full' \| 'degraded'/);
     expect(ts).toMatch(/disabledPlugins: DisabledPlugin\[\]/);
     expect(ts).toMatch(/requiredPlugins: string\[\]/);
     expect(ts).toMatch(/loadSource: LoadSource/);
@@ -1349,15 +1377,15 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
     // report 与 trial_enable 两条写路径都必须调用对账。
     expect(lib).toMatch(/fn cmd_recover_report[\s\S]{0,4000}reconcile_recovery_phase\(state\)/);
     expect(lib).toMatch(
-      /fn cmd_recover_trial_enable[\s\S]{0,4000}reconcile_recovery_phase\(state\)/,
+      /fn cmd_recover_trial_enable[\s\S]{0,9000}reconcile_recovery_phase\(state\)/,
     );
     // trial_enable 走 D28 `TrialEnable`（清标记 + 记独立试验预算 +
     // trialFromSafemode 置位，供插件自报错误时按 D28 回落）。改回
     // SafemodeExit = 注册表不记预算、D28 回落不可达——必须同时让本门变红。
-    expect(lib).toMatch(/fn cmd_recover_trial_enable[\s\S]{0,4000}Event::TrialEnable/);
-    expect(lib).not.toMatch(/fn cmd_recover_trial_enable[\s\S]{0,4000}Event::SafemodeExit/);
+    expect(lib).toMatch(/fn cmd_recover_trial_enable[\s\S]{0,9000}Event::TrialEnable/);
+    expect(lib).not.toMatch(/fn cmd_recover_trial_enable[\s\S]{0,9000}Event::SafemodeExit/);
     // 试启结果必须回传前置对账（诊断 + TS RecoveryTrialResult 契约字段）。
-    expect(lib).toMatch(/fn cmd_recover_trial_enable[\s\S]{0,6000}result\["phaseReconcile"\]/);
+    expect(lib).toMatch(/fn cmd_recover_trial_enable[\s\S]{0,10000}result\["phaseReconcile"\]/);
   });
 });
 
@@ -2186,10 +2214,10 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       ).toBe(false);
     }
     // 差值必须**恰好**等于插件域命令数：少减=白拿，多减=底座宿主漏功能。
-    // 23 = 19（0.4-A1 之前）+ host_call_plugin / host_call_result / host_call_take
-    //      + host_contributes_reconcile（0.4-W3）。
+    // 24 = 19（0.4-A1 之前）+ host_call_plugin / host_call_result / host_call_take
+    //      + host_contributes_reconcile（0.4-W3）+ host_stream_grant（V4 A79）。
     const pluginOnly = full.filter((c) => PLUGIN_DOMAIN.test(c));
-    expect(pluginOnly.length, '插件域命令数量异常').toBe(23);
+    expect(pluginOnly.length, '插件域命令数量异常').toBe(24);
     expect(full.length - substrate.length).toBe(pluginOnly.length);
 
     // ③ 两组集合都必须经 origin 门（收窄命令面不得绕过 R4-D2）。
@@ -2781,8 +2809,11 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(cargo, 'adapter 未依赖 tauron-settings（孤儿 crate 未激活）').toMatch(/tauron-settings/);
     const lib = read('crates/tauron-adapter/src/lib.rs');
     expect(lib, 'settings 未走 SettingsStore').toMatch(/SettingsStore/);
-    expect(lib, 'settings_set 未调用 Store::set').toMatch(
-      /\.set\([\s\S]{0,200}HOST_SETTINGS_NAMESPACE/,
+    expect(lib, 'settings_set 未走 V4 deferred transaction 写入').toMatch(
+      /set_deferred\(HOST_SETTINGS_NAMESPACE,\s*HOST_SETTINGS_NAMESPACE/,
+    );
+    expect(lib, 'settings_set 未在持久化成功后发布 committed revision').toMatch(
+      /persist_settings_doc\(state\)[\s\S]{0,500}publish_committed_change\(event\)/,
     );
 
     // 断链回归（本轮实测）：`host_settings_adopt_legacy` / `host_settings_migrate`
@@ -3099,7 +3130,8 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // 16 → 17（M8）；可选 plugin-install feature 另外增加 install + preview 两条主窗命令。
     // 17 → 20（0.4-A1：跨主体调用三命令 host_call_plugin/result/take 入插件域）。
     // 20 → 21（0.4-W3：host_contributes_reconcile 入插件域）。
-    const PLUGIN_RUNTIME_DOMAIN_SIZE = 21;
+    // 21 → 22（V4 A79：host_stream_grant 入插件域）。
+    const PLUGIN_RUNTIME_DOMAIN_SIZE = 22;
     const notInSub = [...inPlug].filter((c) => !inSub.has(c));
     expect(
       [...inSub].filter((c) => !inPlug.has(c)),

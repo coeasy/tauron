@@ -13,6 +13,11 @@
  */
 
 import { runDoctor, formatDoctorReport } from './doctor.js';
+import {
+  formatHostConformanceReport,
+  loadHostConformanceAdapter,
+  runHostConformance,
+} from './conformance.js';
 import { createApp, IMPLEMENTED_TEMPLATES } from './scaffold.js';
 import { pluginNew } from './plugin.js';
 import {
@@ -84,6 +89,8 @@ export async function runCli(
       return runDoctorCommand(options);
     case 'create':
       return createCommand(args.slice(1), options);
+    case 'conform':
+      return conformCommand(args.slice(1), options);
     case 'plugin':
       return pluginCommand(args[1], args.slice(2), options);
     case 'help':
@@ -108,6 +115,43 @@ export async function runCli(
 function runDoctorCommand(_options: CliOptions): CliResult {
   const report = runDoctor();
   return { success: true, message: formatDoctorReport(report), data: report };
+}
+
+/**
+ * V4 Host Conformance command.
+ */
+async function conformCommand(args: string[], options: CliOptions): Promise<CliResult> {
+  if (args[0] !== 'host') {
+    return {
+      success: false,
+      message: 'Usage: tauron conform host --module <adapter-module>',
+    };
+  }
+
+  const eq = args.find((arg) => arg.startsWith('--module='));
+  const spaced = args.indexOf('--module');
+  const modulePath = eq ? eq.slice('--module='.length) : spaced >= 0 ? args[spaced + 1] : undefined;
+  if (!modulePath || modulePath.startsWith('-')) {
+    return {
+      success: false,
+      message: 'Usage: tauron conform host --module <adapter-module>',
+    };
+  }
+
+  try {
+    const adapter = await loadHostConformanceAdapter(modulePath, options.cwd ?? process.cwd());
+    const report = await runHostConformance(adapter);
+    return {
+      success: report.passed,
+      message: formatHostConformanceReport(report),
+      data: report,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      message: `tauron conform host failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }
 
 /**
@@ -270,6 +314,8 @@ Usage:
 
 Commands:
   doctor              Environment diagnostics
+  conform host         Run V4 Host Conformance Kit
+                       --module <adapter-module>
   create <name>       Create a new tauron app
                       --template vanilla|react（vue/svelte 已声明但尚未实现）
   plugin new <name>   Create a new plugin

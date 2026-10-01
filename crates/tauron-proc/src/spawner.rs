@@ -56,6 +56,301 @@ pub enum ProcessStatus {
     Unknown,
 }
 
+impl ProcessStatus {
+    pub fn is_proven_alive(self) -> bool {
+        matches!(self, ProcessStatus::Alive)
+    }
+}
+
+/// V4 A97 machine-readable process isolation strength.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProcessSandboxEnforcement {
+    Unsupported,
+    Partial,
+    Hard,
+}
+
+impl ProcessSandboxEnforcement {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported",
+            Self::Partial => "partial",
+            Self::Hard => "hard",
+        }
+    }
+}
+
+/// Honest process sandbox capability descriptor.
+///
+/// A provider must not claim `Hard` unless process-tree containment and all declared security
+/// dimensions are enforced by the OS primitive it installs before exec.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessSandboxDescriptor {
+    pub enforcement: ProcessSandboxEnforcement,
+    pub process_tree_containment: bool,
+    pub filesystem_isolation: bool,
+    pub network_isolation: bool,
+    pub syscall_isolation: bool,
+    pub detail: String,
+}
+
+impl ProcessSandboxDescriptor {
+    pub fn unsupported(detail: impl Into<String>) -> Self {
+        Self {
+            enforcement: ProcessSandboxEnforcement::Unsupported,
+            process_tree_containment: false,
+            filesystem_isolation: false,
+            network_isolation: false,
+            syscall_isolation: false,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// OS-specific sandbox provider SPI.
+///
+/// `configure` is called after spawn-config validation but before `Command::spawn`. Returning an
+/// error is fail-closed: no child is created. The default Tauron provider is intentionally
+/// unsupported and leaves the command unchanged; therefore capability reporting never confuses
+/// "can spawn a child" with "child is sandboxed".
+pub trait ProcessSandboxProvider: Send + Sync {
+    fn descriptor(&self) -> ProcessSandboxDescriptor;
+    fn configure(&self, command: &mut Command, cfg: &SpawnConfig) -> ProcResult<()>;
+
+    /// Attach the just-created child to the provider-owned containment primitive.
+    ///
+    /// Called immediately after `Command::spawn` and before the child is inserted into Tauron's
+    /// runtime tables. Failure is fail-closed: CommandSpawner kills/waits the direct child and
+    /// reports spawn failure, so a half-contained runtime can never become visible as Running.
+    fn attach_spawned(&self, _child: &Child) -> ProcResult<()> {
+        Ok(())
+    }
+
+    /// Terminate the provider-owned process tree for `pid`.
+    ///
+    /// `Ok(true)` means the containment primitive accepted the termination request; the caller
+    /// still waits/reaps the direct child. `Ok(false)` means this provider has no tree boundary
+    /// for the pid and the caller should fall back to direct-child termination.
+    fn terminate_tree(&self, _pid: u32) -> ProcResult<bool> {
+        Ok(false)
+    }
+}
+
+/// Compatibility provider used by the built-in CommandSpawner until an OS sandbox is installed.
+#[derive(Debug, Default)]
+pub struct UnsupportedProcessSandboxProvider;
+
+impl ProcessSandboxProvider for UnsupportedProcessSandboxProvider {
+    fn descriptor(&self) -> ProcessSandboxDescriptor {
+        ProcessSandboxDescriptor::unsupported(
+            "direct child process only; no process-group/job-object containment, filesystem/network namespace, or syscall sandbox",
+        )
+    }
+
+    fn configure(&self, _command: &mut Command, _cfg: &SpawnConfig) -> ProcResult<()> {
+        Ok(())
+    }
+}
+
+/// Unix/macOS built-in process-tree containment.
+///
+/// Each sidecar becomes leader of a fresh POSIX process group before exec. Explicit teardown and
+/// parent-crash cleanup send SIGKILL to the negative pgid, so descendants that inherited the group
+/// cannot outlive the runtime lease. This remains `Partial`: process groups do not isolate
+/// filesystem, network, or syscalls.
+#[cfg(unix)]
+#[derive(Debug, Default)]
+pub struct UnixProcessGroupSandboxProvider;
+
+#[cfg(unix)]
+impl ProcessSandboxProvider for UnixProcessGroupSandboxProvider {
+    fn descriptor(&self) -> ProcessSandboxDescriptor {
+        ProcessSandboxDescriptor {
+            enforcement: ProcessSandboxEnforcement::Partial,
+            process_tree_containment: true,
+            filesystem_isolation: false,
+            network_isolation: false,
+            syscall_isolation: false,
+            detail: "POSIX process-group containment + group termination; filesystem/network/syscall isolation not provided".into(),
+        }
+    }
+
+    fn configure(&self, command: &mut Command, _cfg: &SpawnConfig) -> ProcResult<()> {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        Ok(())
+    }
+
+    fn terminate_tree(&self, pid: u32) -> ProcResult<bool> {
+        let pgid = i32::try_from(pid).map_err(|_| {
+            ProcError::ProcessTerminated(format!("pid {pid} cannot be represented as POSIX pid_t"))
+        })?;
+        if pgid <= 0 {
+            return Err(ProcError::ProcessTerminated(format!(
+                "refusing to signal invalid process group {pgid}"
+            )));
+        }
+        // SAFETY: negative pid targets exactly the process group created in configure().
+        let rc = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+        if rc == 0 {
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(false);
+        }
+        Err(ProcError::ProcessTerminated(format!("terminate process group {pgid} failed: {error}")))
+    }
+}
+
+/// Windows built-in process-tree containment using a per-runtime Job Object.
+///
+/// The Job Object is configured with KILL_ON_JOB_CLOSE and the spawned process is attached
+/// immediately after `Command::spawn`. Closing the sole Job handle therefore terminates the
+/// process and all descendants that remain in the job. This is still `Partial`: the standard
+/// library does not expose CREATE_SUSPENDED + primary-thread resume, so a tiny post-spawn attach
+/// race remains, and Job Objects do not provide filesystem/network/syscall isolation.
+#[cfg(windows)]
+#[derive(Default)]
+pub struct WindowsJobObjectSandboxProvider {
+    /// pid -> sole owned Job Object HANDLE encoded as usize so the provider stays Send + Sync.
+    jobs: Mutex<HashMap<u32, usize>>,
+}
+
+#[cfg(windows)]
+impl ProcessSandboxProvider for WindowsJobObjectSandboxProvider {
+    fn descriptor(&self) -> ProcessSandboxDescriptor {
+        ProcessSandboxDescriptor {
+            enforcement: ProcessSandboxEnforcement::Partial,
+            process_tree_containment: true,
+            filesystem_isolation: false,
+            network_isolation: false,
+            syscall_isolation: false,
+            detail: "Windows Job Object KILL_ON_JOB_CLOSE process-tree containment; post-spawn attach race and filesystem/network/syscall isolation remain".into(),
+        }
+    }
+
+    fn configure(&self, _command: &mut Command, _cfg: &SpawnConfig) -> ProcResult<()> {
+        Ok(())
+    }
+
+    fn attach_spawned(&self, child: &Child) -> ProcResult<()> {
+        use std::mem::size_of;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        // SAFETY: null security/name requests an unnamed Job Object with default security.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() || job == INVALID_HANDLE_VALUE {
+            return Err(ProcError::SpawnFailed(format!(
+                "CreateJobObjectW failed for pid {}: {}",
+                child.id(),
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: info points to the exact structure required by JobObjectExtendedLimitInformation.
+        let configured = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: job is a live handle owned by this function.
+            unsafe {
+                CloseHandle(job);
+            }
+            return Err(ProcError::SpawnFailed(format!(
+                "SetInformationJobObject failed for pid {}: {error}",
+                child.id()
+            )));
+        }
+
+        // SAFETY: Child owns a live process HANDLE until it is waited/dropped; Job assignment does
+        // not transfer ownership of that process handle.
+        let assigned = unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as _) };
+        if assigned == 0 {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: job is a live handle owned by this function.
+            unsafe {
+                CloseHandle(job);
+            }
+            return Err(ProcError::SpawnFailed(format!(
+                "AssignProcessToJobObject failed for pid {}: {error}",
+                child.id()
+            )));
+        }
+
+        if let Some(previous) = self.jobs.lock().insert(child.id(), job as usize) {
+            // Defensive PID-reuse cleanup. A live previous job must never outlive replacement.
+            // SAFETY: previous was minted by CreateJobObjectW and removed from the ownership map.
+            unsafe {
+                CloseHandle(previous as _);
+            }
+        }
+        Ok(())
+    }
+
+    fn terminate_tree(&self, pid: u32) -> ProcResult<bool> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+
+        let Some(raw) = self.jobs.lock().remove(&pid) else {
+            return Ok(false);
+        };
+        // KILL_ON_JOB_CLOSE makes closing our sole Job handle the tree-termination primitive.
+        // SAFETY: raw was minted by CreateJobObjectW and removed exactly once from the map.
+        let closed = unsafe { CloseHandle(raw as _) };
+        if closed == 0 {
+            return Err(ProcError::ProcessTerminated(format!(
+                "CloseHandle(JobObject) failed for pid {pid}: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsJobObjectSandboxProvider {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        for (_, raw) in self.jobs.get_mut().drain() {
+            // KILL_ON_JOB_CLOSE ensures provider teardown cannot orphan descendants.
+            // SAFETY: each raw handle is uniquely owned by the drained map entry.
+            unsafe {
+                CloseHandle(raw as _);
+            }
+        }
+    }
+}
+
+fn default_process_sandbox_provider() -> Arc<dyn ProcessSandboxProvider> {
+    #[cfg(unix)]
+    {
+        Arc::new(UnixProcessGroupSandboxProvider)
+    }
+    #[cfg(windows)]
+    {
+        Arc::new(WindowsJobObjectSandboxProvider::default())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Arc::new(UnsupportedProcessSandboxProvider)
+    }
+}
 
 /// 进程启动器（可注入）。
 ///
@@ -64,6 +359,11 @@ pub enum ProcessStatus {
 /// 返回 `Err`，**不得**返回一个假 pid（那会让租约指向不存在的进程，而
 /// `runtime_health` 会把它报成崩溃，故障点被彻底演没）。
 pub trait ProcSpawner: Send + Sync {
+    /// Honest sandbox capability. Legacy/custom spawners default to unsupported.
+    fn sandbox_descriptor(&self) -> ProcessSandboxDescriptor {
+        ProcessSandboxDescriptor::unsupported("spawner did not provide a ProcessSandboxProvider")
+    }
+
     /// 启动 sidecar。
     fn spawn(&self, cfg: &SpawnConfig) -> ProcResult<SpawnedProc>;
 
@@ -293,9 +593,10 @@ impl SinkTable {
 ///   退出路径（卸载回收 / 进程退出）都会先走 `kill`，因此这条只覆盖异常路径。
 /// - `kill` 的**正路**（真的杀掉一个活进程）在测试里未验证：验证它必须真的起一个
 ///   进程，本仓测试明确不起真进程。无需进程的路径（未知 pid / 已退出）有测试。
-/// - 进程组/作业对象、`kill` 树（孙进程不随父进程一起死）、空闲超时 kill 均**未实现**：
-///   终止只覆盖直接子进程。
-#[derive(Default)]
+/// - Unix/macOS 默认 provider 用独立 POSIX process group，Windows 默认 provider 用
+///   KILL_ON_JOB_CLOSE Job Object；三桌面平台都已有真实 process-tree containment。
+///   但 filesystem/network/syscall 隔离仍未内建，Windows 还有 post-spawn attach
+///   race，因此默认 capability 仍最多是 partial、Production 仍 fail-closed。
 pub struct CommandSpawner {
     /// pid → `Child`。持有句柄是 `try_wait` 的前提（否则只能靠平台 API 探测，
     /// 那会引入平台分支与 unsafe）。stdin/stdout 已在 `spawn` 时 `take` 出去，
@@ -310,6 +611,19 @@ pub struct CommandSpawner {
     stdin_writers: Arc<Mutex<HashMap<u32, Arc<Mutex<ChildStdin>>>>>,
     /// 帧接收器 + 关闭标记（同一把锁，见 [`SinkTable`]）。
     sinks: Arc<Mutex<SinkTable>>,
+    /// V4 A97 sandbox provider invoked before every OS spawn.
+    sandbox_provider: Arc<dyn ProcessSandboxProvider>,
+}
+
+impl Default for CommandSpawner {
+    fn default() -> Self {
+        Self {
+            children: Arc::new(Mutex::new(HashMap::new())),
+            stdin_writers: Arc::new(Mutex::new(HashMap::new())),
+            sinks: Arc::new(Mutex::new(SinkTable::default())),
+            sandbox_provider: default_process_sandbox_provider(),
+        }
+    }
 }
 
 /// 单帧字节上限（1.0-W7）。超过即判定为协议违规并断开读线程——
@@ -329,6 +643,17 @@ impl CommandSpawner {
         Self::default()
     }
 
+    /// Inject an OS-specific V4 A97 sandbox provider.
+    pub fn with_sandbox_provider(provider: Arc<dyn ProcessSandboxProvider>) -> Self {
+        let mut spawner = Self::default();
+        spawner.sandbox_provider = provider;
+        spawner
+    }
+
+    pub fn sandbox_descriptor(&self) -> ProcessSandboxDescriptor {
+        self.sandbox_provider.descriptor()
+    }
+
     /// 当前被本启动器跟踪的进程数（诊断/测试）。
     pub fn tracked(&self) -> usize {
         self.children.lock().len()
@@ -346,12 +671,17 @@ impl CommandSpawner {
 }
 
 impl ProcSpawner for CommandSpawner {
+    fn sandbox_descriptor(&self) -> ProcessSandboxDescriptor {
+        self.sandbox_provider.descriptor()
+    }
+
     fn spawn(&self, cfg: &SpawnConfig) -> ProcResult<SpawnedProc> {
         // spawn 前校验（§4.7 硬约束）：路径 / 签名 / sha256 / ABI 任一不合格
         // 都**不得**启动。校验在启动之前，因此不合格的配置连 syscall 都到不了。
         validate_spawn_config(cfg)?;
 
-        let mut child = Command::new(&cfg.binary_path)
+        let mut command = Command::new(&cfg.binary_path);
+        command
             .args(&cfg.args)
             .envs(&cfg.env)
             // stderr 承载日志（§4.7：日志走 stderr），继承宿主 stderr 即可，
@@ -361,9 +691,23 @@ impl ProcSpawner for CommandSpawner {
             // 经 stdout 回帧。stdout 由下方读线程**持续排空**，否则 sidecar 写满
             // 管道缓冲区会被阻塞死（比丢弃更糟）。
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
+            .stdout(Stdio::piped());
+
+        // V4 A97: sandbox policy is applied before the exec boundary. Provider errors are
+        // fail-closed and therefore cannot leave a partially tracked child process.
+        self.sandbox_provider.configure(&mut command, cfg)?;
+
+        let mut child = command
             .spawn()
             .map_err(|e| ProcError::SpawnFailed(format!("启动 `{}` 失败：{e}", cfg.binary_path)))?;
+
+        // V4 A97: post-spawn containment attachment must complete before this process is visible
+        // in any Tauron runtime table. A failed Job/cgroup/container attach is fail-closed.
+        if let Err(error) = self.sandbox_provider.attach_spawned(&child) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
 
         let pid = child.id();
         // 取出 stdin 写句柄（宿主写帧用）与 stdout（交给读线程排空）。
@@ -410,6 +754,7 @@ impl ProcSpawner for CommandSpawner {
         let sinks = self.sinks.clone();
         let writers = self.stdin_writers.clone();
         let children = self.children.clone();
+        let sandbox_provider = self.sandbox_provider.clone();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             let mut buf: Vec<u8> = Vec::with_capacity(256);
@@ -471,9 +816,15 @@ impl ProcSpawner for CommandSpawner {
                 // 就是钉死这个形状的源码门禁。
                 let reclaimed = children.lock().remove(&pid);
                 if let Some(mut child) = reclaimed {
-                    let still_running = matches!(child.try_wait(), Ok(None));
-                    if still_running {
-                        children.lock().insert(pid, child);
+                    match child.try_wait() {
+                        Ok(Some(_)) => {
+                            // Parent is gone; descendants may still hold the same containment
+                            // boundary. Best-effort tree teardown prevents crash orphans.
+                            let _ = sandbox_provider.terminate_tree(pid);
+                        }
+                        Ok(None) | Err(_) => {
+                            children.lock().insert(pid, child);
+                        }
                     }
                 }
             }
@@ -483,20 +834,28 @@ impl ProcSpawner for CommandSpawner {
     }
 
     fn status(&self, pid: u32) -> ProcessStatus {
-        let mut children = self.children.lock();
-        match children.get_mut(&pid) {
-            Some(child) => match child.try_wait() {
-                Ok(Some(_status)) => {
-                    children.remove(&pid);
-                    ProcessStatus::Exited
-                }
-                Ok(None) => ProcessStatus::Alive,
-                // A broken/invalid handle is not proof of life and not proof of death.
-                Err(_) => ProcessStatus::Unknown,
-            },
-            // Not tracked by this spawner: ownership/liveness is unknown.
-            None => ProcessStatus::Unknown,
+        let status = {
+            let mut children = self.children.lock();
+            match children.get_mut(&pid) {
+                Some(child) => match child.try_wait() {
+                    Ok(Some(_status)) => {
+                        children.remove(&pid);
+                        ProcessStatus::Exited
+                    }
+                    Ok(None) => ProcessStatus::Alive,
+                    // A broken/invalid handle is not proof of life and not proof of death.
+                    Err(_) => ProcessStatus::Unknown,
+                },
+                // Not tracked by this spawner: ownership/liveness is unknown.
+                None => ProcessStatus::Unknown,
+            }
+        };
+        if status == ProcessStatus::Exited {
+            // Parent exit is also a containment lifecycle boundary. Descendants must not survive
+            // merely because status() observed the direct child before the stdout EOF thread did.
+            let _ = self.sandbox_provider.terminate_tree(pid);
         }
+        status
     }
 
     fn is_alive(&self, pid: u32) -> bool {
@@ -513,28 +872,37 @@ impl ProcSpawner for CommandSpawner {
     /// 活进程）未验证**：验证它必须真的起一个进程，而本仓测试明确不起真进程
     /// （见模块头注释）。这是诚实标注的未验证部分，不是遗漏。
     fn kill(&self, pid: u32) -> ProcResult<KillOutcome> {
-        let mut children = self.children.lock();
-        let Some(mut child) = children.remove(&pid) else {
-            // 不在跟踪表里：本启动器起过的进程要么已被 `kill` 回收、要么
-            // `is_alive` 已观测到退出并把它移走。两种情况下都不存在"本启动器
-            // 还在跑的进程"，因此目标已达成，如实报 `AlreadyGone`。
+        let Some(mut child) = self.children.lock().remove(&pid) else {
             return Ok(KillOutcome::AlreadyGone);
         };
+
+        match self.sandbox_provider.terminate_tree(pid) {
+            Ok(true) => {
+                let _ = child.wait();
+                return Ok(KillOutcome::Terminated);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                // A failed containment teardown may have left the child running. Preserve the
+                // tracked handle so a later recovery attempt can retry instead of orphaning it.
+                self.children.lock().insert(pid, child);
+                return Err(error);
+            }
+        }
+
         match child.kill() {
             Ok(()) => {
-                // 必须 `wait`：Unix 上不 wait 会留下僵尸；Windows 上不 wait 会泄漏句柄。
                 let _ = child.wait();
                 Ok(KillOutcome::Terminated)
             }
             Err(e) => match child.try_wait() {
-                // `kill` 对**已自行退出**的子进程会报错。若 `try_wait` 能确认它
-                // 已经退出（并顺手回收），就按 `AlreadyGone` 如实上报，而不是
-                // 谎报成终止失败。
                 Ok(Some(_)) => Ok(KillOutcome::AlreadyGone),
-                // 仍在跑（权限不足等）或状态不明：**不得**谎报成功。
-                _ => Err(ProcError::ProcessTerminated(format!(
-                    "终止 pid {pid} 失败：{e}（进程可能仍在运行）"
-                ))),
+                _ => {
+                    self.children.lock().insert(pid, child);
+                    Err(ProcError::ProcessTerminated(format!(
+                        "终止 pid {pid} 失败：{e}（进程可能仍在运行，已保留跟踪句柄）"
+                    )))
+                }
             },
         }
     }
@@ -586,6 +954,18 @@ impl ProcSpawner for CommandSpawner {
     }
 }
 
+impl Drop for CommandSpawner {
+    fn drop(&mut self) {
+        // Final owner teardown must not abandon still-tracked sidecars. Reader threads only keep
+        // the internal tables alive, not another CommandSpawner, so every remaining pid is driven
+        // through the same tree-aware kill path.
+        let pids: Vec<u32> = self.children.lock().keys().copied().collect();
+        for pid in pids {
+            let _ = ProcSpawner::kill(self, pid);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,6 +983,129 @@ mod tests {
             },
             binary_hash: "a".repeat(64),
             abi: AbiFingerprint::now("1.98.0", "iface-hash"),
+        }
+    }
+
+    struct RejectingSandbox {
+        configured: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ProcessSandboxProvider for RejectingSandbox {
+        fn descriptor(&self) -> ProcessSandboxDescriptor {
+            ProcessSandboxDescriptor {
+                enforcement: ProcessSandboxEnforcement::Hard,
+                process_tree_containment: true,
+                filesystem_isolation: true,
+                network_isolation: true,
+                syscall_isolation: true,
+                detail: "test hard sandbox".into(),
+            }
+        }
+
+        fn configure(&self, _command: &mut Command, _cfg: &SpawnConfig) -> ProcResult<()> {
+            self.configured.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProcError::InvalidSpawnConfig("sandbox rejected before exec".into()))
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_default_provider_reports_partial_real_process_tree_containment() {
+        let spawner = CommandSpawner::new();
+        let descriptor = spawner.sandbox_descriptor();
+        assert_eq!(descriptor.enforcement, ProcessSandboxEnforcement::Partial);
+        assert!(descriptor.process_tree_containment);
+        assert!(!descriptor.filesystem_isolation);
+        assert!(!descriptor.network_isolation);
+        assert!(!descriptor.syscall_isolation);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_default_provider_reports_partial_job_object_containment() {
+        let spawner = CommandSpawner::new();
+        let descriptor = spawner.sandbox_descriptor();
+        assert_eq!(descriptor.enforcement, ProcessSandboxEnforcement::Partial);
+        assert!(descriptor.process_tree_containment);
+        assert!(!descriptor.filesystem_isolation);
+        assert!(!descriptor.network_isolation);
+        assert!(!descriptor.syscall_isolation);
+        assert!(descriptor.detail.contains("Job Object"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_object_attaches_and_tree_kill_is_exercised_on_real_process() {
+        let spawner = CommandSpawner::new();
+        let mut cfg = cfg_with_path("cmd.exe");
+        // cmd launches ping.exe as a child, so the Job Object contains a real descendant tree.
+        cfg.args = vec!["/C".into(), "ping -n 30 127.0.0.1 >NUL".into()];
+        let spawned = spawner.spawn(&cfg).expect("spawn real Windows Job Object fixture");
+        assert_eq!(spawner.status(spawned.pid), ProcessStatus::Alive);
+        assert_eq!(spawner.kill(spawned.pid).unwrap(), KillOutcome::Terminated);
+        assert_eq!(spawner.status(spawned.pid), ProcessStatus::Unknown);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_process_group_is_real_and_tree_kill_removes_the_group() {
+        let spawner = CommandSpawner::new();
+        let mut cfg = cfg_with_path("/bin/sh");
+        cfg.args = vec!["-c".into(), "sleep 30 & wait".into()];
+        let spawned = spawner.spawn(&cfg).expect("spawn real process-group fixture");
+
+        let pid = i32::try_from(spawned.pid).unwrap();
+        // SAFETY: getpgid only inspects the live child pid.
+        assert_eq!(unsafe { libc::getpgid(pid) }, pid, "child must lead its own process group");
+        assert_eq!(spawner.kill(spawned.pid).unwrap(), KillOutcome::Terminated);
+
+        let mut group_gone = false;
+        for _ in 0..200 {
+            // SAFETY: signal 0 performs existence/permission probing only.
+            let rc = unsafe { libc::kill(-pid, 0) };
+            if rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                group_gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(group_gone, "process group must not survive runtime teardown");
+    }
+
+    #[test]
+    fn sandbox_provider_runs_before_os_spawn_and_fails_closed() {
+        let configured = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let spawner = CommandSpawner::with_sandbox_provider(Arc::new(RejectingSandbox {
+            configured: configured.clone(),
+        }));
+        let cfg = cfg_with_path("definitely-not-a-real-binary");
+        let err = spawner.spawn(&cfg).unwrap_err();
+        assert!(matches!(err, ProcError::InvalidSpawnConfig(ref m) if m.contains("sandbox")));
+        assert_eq!(configured.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(spawner.tracked(), 0, "sandbox rejection occurs before child creation");
+        assert_eq!(spawner.sandbox_descriptor().enforcement, ProcessSandboxEnforcement::Hard);
+    }
+
+    #[test]
+    fn built_in_command_spawner_reports_platform_sandbox_honestly() {
+        let d = CommandSpawner::new().sandbox_descriptor();
+        #[cfg(unix)]
+        {
+            assert_eq!(d.enforcement, ProcessSandboxEnforcement::Partial);
+            assert!(d.process_tree_containment);
+            assert!(d.detail.contains("process-group"));
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(d.enforcement, ProcessSandboxEnforcement::Partial);
+            assert!(d.process_tree_containment);
+            assert!(d.detail.contains("Job Object"));
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            assert_eq!(d.enforcement, ProcessSandboxEnforcement::Unsupported);
+            assert!(!d.process_tree_containment);
+            assert!(d.detail.contains("direct child"));
         }
     }
 

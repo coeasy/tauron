@@ -14,7 +14,9 @@ use std::sync::Arc;
 use serde_json::Value;
 use tauron_host::{
     call_delivery::{CallDelivery, CallOutcome, DeliveryKind, DeliveryReceipt},
+    generation::Generation,
     registry::Registry,
+    runtime::RuntimeHandle,
     ErrorCode, HostError, HostResult,
 };
 use tauron_proc::ProcessFrameSink;
@@ -34,6 +36,51 @@ impl ProcessCallDelivery {
     pub fn new(proc_runtime: Arc<ProcRuntime>, registry: Arc<Registry>) -> Self {
         Self { proc_runtime, registry }
     }
+
+    fn runtime_for_call(
+        &self,
+        call: &tauron_host::PendingCall,
+    ) -> HostResult<Option<RuntimeHandle>> {
+        let Some(expected) = call.runtime_generation else {
+            return Ok(None);
+        };
+        let current = self.registry.live_runtime_handle_of(&call.target).ok_or_else(|| {
+            HostError::new(
+                ErrorCode::E_LEASE_EXPIRED,
+                format!(
+                    "process call {} targets generation {} but no live runtime exists",
+                    call.call_id, expected.0
+                ),
+            )
+        })?;
+        if current.generation != expected {
+            return Err(stale_process_call(
+                &call.call_id,
+                expected,
+                Some(&current),
+                "runtime generation changed before delivery/settlement",
+            ));
+        }
+        Ok(Some(current))
+    }
+}
+
+fn stale_process_call(
+    call_id: &str,
+    expected: Generation,
+    current: Option<&RuntimeHandle>,
+    reason: &str,
+) -> HostError {
+    let current = current
+        .map(|handle| format!("pid={} generation={}", handle.pid, handle.generation.0))
+        .unwrap_or_else(|| "none".to_string());
+    HostError::new(
+        ErrorCode::E_LEASE_EXPIRED,
+        format!(
+            "process call {call_id} is bound to generation {} but current runtime is {current}: {reason}",
+            expected.0
+        ),
+    )
 }
 
 impl CallDelivery for ProcessCallDelivery {
@@ -42,16 +89,20 @@ impl CallDelivery for ProcessCallDelivery {
     }
 
     fn deliver(&self, call: &tauron_host::PendingCall) -> HostResult<DeliveryReceipt> {
-        // 解析目标进程 pid（未运行 = 无运行时不投递，诚实返回未投递）。
-        let pid = match self.registry.live_pid_of(&call.target) {
-            Some(p) => p,
+        // Process calls accepted before a runtime exists remain honestly undeliverable.
+        let runtime = match self.runtime_for_call(call)? {
+            Some(runtime) => runtime,
             None => {
                 return Ok(DeliveryReceipt {
                     delivered: false,
-                    reason: Some(format!("插件 `{}` 没有运行中的 sidecar 进程", call.target)),
+                    reason: Some(format!(
+                        "插件 `{}` 没有绑定可投递的 runtime generation",
+                        call.target
+                    )),
                 })
             }
         };
+        let pid = runtime.pid;
 
         // 构造 JSON-RPC 行帧：`callId` 内嵌，供回帧关联（无需 id↔call_id 映射表）；
         // `id` 用 `seq`（单调唯一）供 sidecar 自身做请求/响应配对；`caller`/`target`
@@ -64,6 +115,7 @@ impl CallDelivery for ProcessCallDelivery {
             "callId": call.call_id,
             "caller": call.caller,
             "target": call.target,
+            "runtimeGeneration": runtime.generation,
         });
         let bytes = serde_json::to_vec(&frame).map_err(|e| {
             HostError::new(
@@ -83,8 +135,9 @@ impl CallDelivery for ProcessCallDelivery {
     }
 
     fn settle(&self, call_id: &str, outcome: CallOutcome) -> HostResult<tauron_host::PendingCall> {
-        // 进程插件的常规结算由 `ProcessFrameSinkImpl`（读线程回帧）走同一条
-        // `Registry::settle_call`；这里提供显式入口以便调用方/测试直接结算。
+        // Explicit settlement must prove the call still belongs to the active target generation.
+        let call = self.registry.peek_call(call_id)?;
+        let _ = self.runtime_for_call(&call)?;
         self.registry.settle_call(call_id, outcome)
     }
 }
@@ -105,7 +158,7 @@ impl ProcessFrameSinkImpl {
 }
 
 impl ProcessFrameSink for ProcessFrameSinkImpl {
-    fn on_frame(&self, _pid: u32, frame: &[u8]) {
+    fn on_frame(&self, pid: u32, frame: &[u8]) {
         let v: Value = match serde_json::from_slice(frame) {
             Ok(v) => v,
             Err(_) => return, // 非 JSON / 污染行：跳过
@@ -114,6 +167,29 @@ impl ProcessFrameSink for ProcessFrameSinkImpl {
             Some(c) => c.to_string(),
             None => return, // 没有 callId：无法关联，丢弃
         };
+
+        let call = match self.registry.peek_call(&call_id) {
+            Ok(call) => call,
+            Err(_) => return,
+        };
+        let Some(expected) = call.runtime_generation else {
+            eprintln!("[tauron] sidecar 回帧拒绝：callId={call_id} 没有绑定 runtimeGeneration");
+            return;
+        };
+        let current = self.registry.live_runtime_handle_of(&call.target);
+        let valid_source = current
+            .as_ref()
+            .is_some_and(|handle| handle.pid == pid && handle.generation == expected);
+        if !valid_source {
+            let err = stale_process_call(
+                &call_id,
+                expected,
+                current.as_ref(),
+                "reply pid/generation does not match the call binding",
+            );
+            eprintln!("[tauron] sidecar 回帧拒绝：{} — {}", err.code, err.message);
+            return;
+        }
 
         // `error` 字段存在 = 调用失败（`ok = false`）。
         let error = v.get("error");

@@ -19,7 +19,13 @@ import type {
   Subscription,
   TopicDescriptor,
 } from './events.js';
-import type { StreamFrame, StreamHandle, StreamKind, StreamWriteInput } from './stream.js';
+import type {
+  StreamCredit,
+  StreamFrame,
+  StreamHandle,
+  StreamKind,
+  StreamWriteInput,
+} from './stream.js';
 import type { PluginReportableEvent } from './lifecycle.js';
 
 /** 插件 → 自己 C/D 后端的调用请求。 */
@@ -236,6 +242,14 @@ export class HostClient {
     // `ready` 本身仍然 reject（`write()` 依赖它拿到真实失败原因）。
     void ready.catch(() => {});
 
+    const grant = (bytes: number): Promise<StreamCredit> => {
+      if (!Number.isSafeInteger(bytes) || bytes < 0)
+        return Promise.reject(new TypeError('grant bytes must be a non-negative safe integer'));
+      return ready.then((id) =>
+        this.call<StreamCredit>('host_stream_grant', { req: { streamId: id, bytes } }),
+      );
+    };
+
     const write = (frame: StreamWriteInput): Promise<StreamFrame> => {
       if (closeRequested) {
         return Promise.reject(new Error('openStreamHandle: 流已关闭，不得再写帧'));
@@ -251,7 +265,7 @@ export class HostClient {
       );
     };
 
-    return { ready, write, close };
+    return { ready, write, grant, close };
   }
 
   /**
@@ -268,6 +282,12 @@ export class HostClient {
         ...(frame.argsRaw !== undefined ? { argsRaw: frame.argsRaw } : {}),
       },
     });
+  }
+
+  async grantStream(streamId: string, bytes: number): Promise<StreamCredit> {
+    if (!Number.isSafeInteger(bytes) || bytes < 0)
+      throw new TypeError('grant bytes must be a non-negative safe integer');
+    return this.call<StreamCredit>('host_stream_grant', { req: { streamId, bytes } });
   }
 
   /** 传输无关的原始请求入口（{@link toHostRpc} 的 `request` 落地于此）。 */
@@ -287,12 +307,18 @@ export class HostClient {
    *
    * 返回宿主铸造的权威簿记：`takeCallResult` 用其中的 `callId` 取件。
    */
-  async callPlugin(target: string, method: string, argsJson?: JsonValue): Promise<PendingCallInfo> {
+  async callPlugin(
+    target: string,
+    method: string,
+    argsJson?: JsonValue,
+    parentCallId?: string,
+  ): Promise<PendingCallInfo> {
     return this.call<PendingCallInfo>('host_call_plugin', {
       req: {
         target,
         method,
         ...(argsJson !== undefined ? { argsJson } : {}),
+        ...(parentCallId !== undefined ? { parentCallId } : {}),
       },
     });
   }
@@ -406,9 +432,23 @@ export class HostClient {
   async eventsPublish(evt: {
     topic: string;
     payload: JsonValue;
+    /**
+     * V4 A78 parent causation context. Pass the four fields from a consumed EventFrame when
+     * publishing a derived event; omit for a new root event.
+     */
+    causation?: {
+      eventId: string;
+      causationId: string;
+      eventHop: number;
+      maxCausationDepth: number;
+    };
   }): Promise<{ delivered: number; dropped: boolean }> {
     return this.call('host_events_publish', {
-      evt: { topic: evt.topic, payload: evt.payload },
+      evt: {
+        topic: evt.topic,
+        payload: evt.payload,
+        ...(evt.causation !== undefined ? { causation: evt.causation } : {}),
+      },
     });
   }
 
@@ -507,6 +547,33 @@ export class AdminClient {
       // R2-c：管理面同属插件 webview → 宿主的边界，走同一条显式翻译。
       throw translate_at_boundary(err, 'plugin-webview→host').error;
     });
+  }
+
+  /** Approve a plugin subscriber for one private EventBus topic. */
+  async eventsApprove(subscriber: string, topic: string): Promise<void> {
+    await this.backend
+      .invoke('host_events_approve', { subscriber, topic })
+      .catch((err: unknown) => {
+        throw translate_at_boundary(err, 'plugin-webview→host').error;
+      });
+  }
+
+  /** Revoke a private-topic approval. Returns true when a grant actually existed. */
+  async eventsRevoke(subscriber: string, topic: string): Promise<boolean> {
+    return this.backend
+      .invoke<boolean>('host_events_revoke', { subscriber, topic })
+      .catch((err: unknown) => {
+        throw translate_at_boundary(err, 'plugin-webview→host').error;
+      });
+  }
+
+  /** List current private-topic approval facts for the host administration UI. */
+  async eventsApprovals(): Promise<Array<{ subscriber: string; topic: string }>> {
+    return this.backend
+      .invoke<Array<{ subscriber: string; topic: string }>>('host_events_approvals', {})
+      .catch((err: unknown) => {
+        throw translate_at_boundary(err, 'plugin-webview→host').error;
+      });
   }
 
   /** Install a verified local package after the host UI has shown and collected approval. */

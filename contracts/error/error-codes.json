@@ -84,6 +84,18 @@
     {
       "code": "E_CONTRIBUTES_DRIFT",
       "retryClass": "never"
+    },
+    {
+      "code": "E_STREAM_BACKPRESSURE",
+      "retryClass": "manual"
+    },
+    {
+      "code": "E_CALL_CYCLE",
+      "retryClass": "never"
+    },
+    {
+      "code": "E_EVENT_CAUSATION_LIMIT",
+      "retryClass": "never"
     }
   ]
 }

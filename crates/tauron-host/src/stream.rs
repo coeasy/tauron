@@ -121,6 +121,13 @@ pub const MAX_STREAMS_PER_PLUGIN: usize = 32;
 /// `ErrorCode::E_STREAM_FULL`（**不是**静默丢弃已有句柄）。
 pub const MAX_STREAMS: usize = 256;
 
+/// Per-stream initial byte credit; receiver replenishes it as data is consumed.
+pub const DEFAULT_STREAM_CREDIT_BYTES: usize = 64 * 1024;
+/// Hard cap for one stream's outstanding credit.
+pub const MAX_STREAM_CREDIT_BYTES: usize = 16 * 1024 * 1024;
+/// Accounting overhead so empty data frames still consume finite credit.
+pub const STREAM_FRAME_OVERHEAD_BYTES: usize = 32;
+
 /// 一次调用的帧载体登记项。
 struct CallBinding {
     subscriber: String,
@@ -132,6 +139,7 @@ struct StreamHandle {
     subscriber: String,
     seq: u64,
     closed: bool,
+    credit_bytes: usize,
     sink: Arc<dyn StreamSink>,
 }
 
@@ -205,10 +213,31 @@ impl StreamRegistry {
                 subscriber: subscriber.to_string(),
                 seq: 0,
                 closed: false,
+                credit_bytes: DEFAULT_STREAM_CREDIT_BYTES,
                 sink,
             },
         );
         Ok(id)
+    }
+
+    /// Receiver-owned replenishment of the producer byte window.
+    pub fn grant(&mut self, stream_id: &str, subscriber: &str, bytes: usize) -> HostResult<usize> {
+        let handle = self.handles.get_mut(stream_id).ok_or_else(|| {
+            HostError::new(ErrorCode::E_CALL_NOT_FOUND, format!("流 `{stream_id}` 不存在或已终结"))
+        })?;
+        if handle.subscriber != subscriber {
+            return Err(HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                format!("流 `{stream_id}` 属于插件 `{}`", handle.subscriber),
+            ));
+        }
+        handle.credit_bytes =
+            handle.credit_bytes.saturating_add(bytes).min(MAX_STREAM_CREDIT_BYTES);
+        Ok(handle.credit_bytes)
+    }
+
+    pub fn credit_remaining(&self, stream_id: &str) -> Option<usize> {
+        self.handles.get(stream_id).map(|h| h.credit_bytes)
     }
 
     /// 写一帧 `data`（`seq` 由宿主铸）。
@@ -246,7 +275,17 @@ impl StreamRegistry {
         args_json: Option<serde_json::Value>,
         args_raw: Option<Vec<u8>>,
     ) -> HostResult<StreamFrame> {
-        // 先把需要的东西取出并结束借用，再派发、再回收（见下）。
+        let frame_bytes = if kind == StreamKind::Data {
+            let json_bytes =
+                args_json.as_ref().and_then(|v| serde_json::to_vec(v).ok()).map_or(0, |v| v.len());
+            STREAM_FRAME_OVERHEAD_BYTES
+                .saturating_add(json_bytes)
+                .saturating_add(args_raw.as_ref().map_or(0, Vec::len))
+        } else {
+            0
+        };
+
+        // Credit check happens before seq allocation/dispatch: rejection has no partial effect.
         let (sink, seq, terminal) = {
             let handle = self.handles.get_mut(stream_id).ok_or_else(|| {
                 HostError::new(
@@ -265,6 +304,18 @@ impl StreamRegistry {
                     ErrorCode::E_CALL_NOT_FOUND,
                     format!("流 `{stream_id}` 已终结（终帧后句柄失效）"),
                 ));
+            }
+            if frame_bytes > handle.credit_bytes {
+                return Err(HostError::new(
+                    ErrorCode::E_STREAM_BACKPRESSURE,
+                    format!(
+                        "流 `{stream_id}` credit 不足：需要 {frame_bytes} bytes，剩余 {} bytes",
+                        handle.credit_bytes
+                    ),
+                ));
+            }
+            if kind == StreamKind::Data {
+                handle.credit_bytes -= frame_bytes;
             }
             // seq 先占位再派发：载体失败不回滚（见模块文档）。
             handle.seq += 1;
@@ -446,6 +497,29 @@ mod tests {
         assert_eq!(frames.len(), 4, "3 数据帧 + 1 终帧全部派发");
         assert_eq!(frames.last().unwrap().kind, StreamKind::End);
         assert!(!reg.is_open(&id), "终帧后句柄失效");
+    }
+
+    #[test]
+    fn credit_window_blocks_without_consuming_seq_and_recovers_after_grant() {
+        let sink = Arc::new(RecordingSink::default());
+        let (mut reg, id) = registry_with_sink(sink.clone());
+        let too_large = vec![1u8; DEFAULT_STREAM_CREDIT_BYTES];
+        let err = reg.write(&id, "p1", None, Some(too_large)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_STREAM_BACKPRESSURE);
+        assert!(sink.frames().is_empty());
+        assert_eq!(
+            reg.grant(&id, "p1", DEFAULT_STREAM_CREDIT_BYTES).unwrap(),
+            2 * DEFAULT_STREAM_CREDIT_BYTES
+        );
+        let f = reg.write(&id, "p1", Some(serde_json::json!({"ok": true})), None).unwrap();
+        assert_eq!(f.seq, 1, "rejected frame must not consume seq");
+    }
+
+    #[test]
+    fn credit_grant_is_bounded_and_owner_scoped() {
+        let (mut reg, id) = registry_with_sink(Arc::new(RecordingSink::default()));
+        assert_eq!(reg.grant(&id, "p1", usize::MAX).unwrap(), MAX_STREAM_CREDIT_BYTES);
+        assert_eq!(reg.grant(&id, "p2", 1).unwrap_err().code, ErrorCode::E_AUTH_DENIED);
     }
 
     #[test]

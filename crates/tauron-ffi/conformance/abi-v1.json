@@ -1,0 +1,28 @@
+{
+  "abiVersion": 1,
+  "status": {
+    "ok": 0,
+    "invalidArgument": 1,
+    "shutdown": 2,
+    "wireError": 3,
+    "panic": 4
+  },
+  "requiredSymbols": [
+    "tauron_ffi_abi_version",
+    "tauron_host_new",
+    "tauron_host_retain",
+    "tauron_host_release",
+    "tauron_host_shutdown",
+    "tauron_wire_roundtrip_json",
+    "tauron_buffer_free",
+    "tauron_error_free",
+    "tauron_result_free"
+  ],
+  "ownership": {
+    "host": "new/retain each create one reference; release exactly once per reference",
+    "buffer": "Rust-owned; free only through Tauron",
+    "error": "Rust-owned message; free only through Tauron",
+    "shutdown": "idempotent; operations fail with status=shutdown after close",
+    "callbacks": "ABI v1 invokes no user callbacks"
+  }
+}

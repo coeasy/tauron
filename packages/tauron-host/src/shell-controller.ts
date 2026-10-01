@@ -319,7 +319,11 @@ export class ShellController {
         if (!allow) return;
         approved.push(permission.permission);
       }
-      const installed = await this.admin.registryInstall(packagePath, approved, preview.reviewToken);
+      const installed = await this.admin.registryInstall(
+        packagePath,
+        approved,
+        preview.reviewToken,
+      );
       this._notifyRegistryChange();
       await this.admin.registryAdmin({ op: 'enable', id: installed.pluginId });
       const outcome = await this.client.windowCreate(installed.pluginId);

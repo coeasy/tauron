@@ -25,10 +25,19 @@ export interface HostTargetSpec {
   cpuFeatures: string[];
 }
 
+export type CapabilityEnforcementLevel = 'hard' | 'partial' | 'unsupported';
+
+export interface CapabilityEnforcement {
+  domain: string;
+  level: CapabilityEnforcementLevel;
+  detail: string;
+}
+
 export interface HostCapabilities {
   families: string[];
   commands: string[];
   unsupported: Array<{ domain: string; reason: string }>;
+  enforcement: CapabilityEnforcement[];
   pluginRuntime: boolean;
   /** Host-produced target fact; never supplied by the client. */
   target: HostTargetSpec;
@@ -533,6 +542,8 @@ export interface RuntimeSpawnProfile {
 export interface RuntimeHandle {
   pid: number;
   lease: string;
+  /** V4 A88/A90 runtime generation bound to this lease. */
+  generation: number;
 }
 
 /**
@@ -553,6 +564,13 @@ export interface ReapStats {
   lastError: string | null;
 }
 
+export interface HealthReport {
+  liveness: 'alive' | 'dead' | 'unknown';
+  readiness: 'ready' | 'not-ready';
+  degradation: 'full' | 'degraded';
+  diagnostics: string[];
+}
+
 /** sidecar 健康快照（`host_runtime_health`）。 */
 export interface RuntimeHealth {
   /** Proven alive only; false also covers the explicit unknown state. */
@@ -566,6 +584,8 @@ export interface RuntimeHealth {
   consecutiveFailures: number;
   /** 租约回收统计（全局；与上两个计数都不是一回事）。 */
   reap: ReapStats;
+  /** V4 A103 canonical liveness/readiness/degradation report. */
+  health: HealthReport;
 }
 
 /** 主窗资源配额快照（`host_resource_stats`）。 */
@@ -588,6 +608,19 @@ export interface ResourceStats {
       notifications: number;
       notificationEvictions: number;
     }>;
+  };
+  /** V4 A91 subsystem fault-boundary diagnostics. */
+  faults: {
+    settings: {
+      state: 'ready' | 'faulted' | 'reconciling' | 'quarantined';
+      generation: number;
+      lastFault: {
+        boundary: string;
+        operation: string;
+        message: string;
+        generation: number;
+      } | null;
+    };
   };
 }
 
@@ -989,8 +1022,17 @@ export class ShellClient {
    * 未知或失效租约 → `E_LEASE_EXPIRED`（租约语义：下一步是重新 spawn，
    * 而不是放弃一次 pending 调用）。
    */
-  async runtimeHealth(lease: string): Promise<RuntimeHealth> {
-    return this.call<RuntimeHealth>('host_runtime_health', { lease });
+  async runtimeHealth(
+    leaseOrHandle: string | RuntimeHandle,
+    generation?: number,
+  ): Promise<RuntimeHealth> {
+    const lease = typeof leaseOrHandle === 'string' ? leaseOrHandle : leaseOrHandle.lease;
+    const observedGeneration =
+      typeof leaseOrHandle === 'string' ? generation : leaseOrHandle.generation;
+    return this.call<RuntimeHealth>('host_runtime_health', {
+      lease,
+      ...(observedGeneration !== undefined ? { generation: observedGeneration } : {}),
+    });
   }
 
   /** 主窗配额诊断：列出全局占用与逐插件资源计数。 */
@@ -1009,12 +1051,18 @@ export class ShellClient {
    *
    * 结果用 {@link ShellClient.callTakeResult} 取件（一次性语义）。
    */
-  async callPlugin(target: string, method: string, argsJson?: JsonValue): Promise<PendingCallInfo> {
+  async callPlugin(
+    target: string,
+    method: string,
+    argsJson?: JsonValue,
+    parentCallId?: string,
+  ): Promise<PendingCallInfo> {
     return this.call<PendingCallInfo>('host_call_plugin', {
       req: {
         target,
         method,
         ...(argsJson !== undefined ? { argsJson } : {}),
+        ...(parentCallId !== undefined ? { parentCallId } : {}),
       },
     });
   }

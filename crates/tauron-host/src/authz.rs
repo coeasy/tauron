@@ -165,6 +165,12 @@ pub static COMMANDS: &[CommandAuth] = &[
         description: "写一帧（self 档，seq 由宿主铸）",
     },
     CommandAuth {
+        command: "host_stream_grant",
+        tier: AuthTier::Self_,
+        consumer: "plugin-sdk（流接收方 credit 补充）",
+        description: "补充有界 byte credit（self 档）",
+    },
+    CommandAuth {
         command: "host_stream_close",
         tier: AuthTier::Self_,
         consumer: "plugin-sdk（流式收尾）",
@@ -289,6 +295,24 @@ pub static ADMIN_COMMANDS: &[CommandAuth] = &[
         tier: AuthTier::Privileged,
         consumer: "宿主 UI 主窗（资源配额诊断）",
         description: "读取全局与逐插件资源配额占用",
+    },
+    CommandAuth {
+        command: "host_events_approve",
+        tier: AuthTier::Privileged,
+        consumer: "宿主 UI 主窗（事件权限审批）",
+        description: "批准某插件订阅一个私有 EventBus topic",
+    },
+    CommandAuth {
+        command: "host_events_revoke",
+        tier: AuthTier::Privileged,
+        consumer: "宿主 UI 主窗（事件权限审批）",
+        description: "撤销某插件订阅一个私有 EventBus topic 的审批",
+    },
+    CommandAuth {
+        command: "host_events_approvals",
+        tier: AuthTier::Privileged,
+        consumer: "宿主 UI 主窗（事件权限审批）",
+        description: "读取当前 EventBus 私有 topic 审批事实",
     },
 ];
 
@@ -760,22 +784,27 @@ mod tests {
         for c in COMMANDS.iter().chain(ADMIN_COMMANDS.iter()) {
             assert!(!c.consumer.is_empty(), "{} 缺 consumer 登记", c.command);
         }
-        assert_eq!(COMMANDS.len(), 18, "§2.1 定稿 9 条 + R7 收口补登记 4 条 + 0.4-A1 跨主体调用 3 条 + 0.4 审计补登记 host_contributes_list 1 条 + 0.4-W3 贡献对账 1 条");
-        // 主窗面包含注册表管理、sidecar 管理与 M8 配额诊断四条特权命令。
+        assert_eq!(COMMANDS.len(), 19, "既有 18 条插件命令 + V4 stream credit grant 1 条");
+        // 主窗面包含注册表管理、sidecar 管理、资源诊断与 Event Approval Broker。
         assert_eq!(
             ADMIN_COMMANDS.len(),
-            4,
-            "核心注册的主窗特权命令 4 条；adapter 可按 feature 扩展"
+            7,
+            "核心注册的主窗特权命令 7 条；adapter 可按 feature 扩展"
         );
     }
 
-    /// R7 收口：这 4 条是 `HostClient` 实际调用、且此前**完全未登记**的命令。
+    /// R7/V4 收口：这些命令是 `HostClient` 实际调用、且此前**完全未登记**的命令。
     /// 逐条断言档位与命令名，防止有人把它们塞进 `ADMIN_COMMANDS`（那会让插件面
     /// 失去自档语义）或调换顺序（TS 侧镜像表按顺序逐条比对）。
     #[test]
     fn r7_backfilled_plugin_commands_are_self_tier_and_in_order() {
-        let backfilled =
-            ["host_events_drain", "host_stream_open", "host_stream_write", "host_stream_close"];
+        let backfilled = [
+            "host_events_drain",
+            "host_stream_open",
+            "host_stream_write",
+            "host_stream_grant",
+            "host_stream_close",
+        ];
         // 紧接 `host_registry_list` 之后，顺序固定。
         let start = COMMANDS
             .iter()
@@ -814,6 +843,9 @@ mod tests {
         assert_eq!(resolve("host_runtime_spawn").unwrap().tier, AuthTier::Privileged);
         assert_eq!(resolve("host_runtime_health").unwrap().tier, AuthTier::Privileged);
         assert_eq!(resolve("host_resource_stats").unwrap().tier, AuthTier::Privileged);
+        for command in ["host_events_approve", "host_events_revoke", "host_events_approvals"] {
+            assert_eq!(resolve(command).unwrap().tier, AuthTier::Privileged, "{command}");
+        }
     }
 
     #[test]

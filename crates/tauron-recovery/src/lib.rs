@@ -145,16 +145,12 @@ pub struct SnapshotMeta {
 
 /// 恢复动作。
 ///
-/// ⚠️ **接入状态：本类型及下面整段「幂等恢复动作 / 外部副作用追踪」今天是
-/// 库内 API，没有任何生产调用方**——全仓只有本文件的单测引用它们
-/// （`tauron-adapter` 只接 `record_boot_failure*` / `trial_enable` /
-/// `BootPhase` / `PluginState` / `to_json`-`from_json`）。
-///
-/// 保留理由：它们是 §4.14「恢复动作幂等 + 外部副作用追踪」的**约定载体**
-/// （幂等键 = `plugin_id:action_kind:seq`、已执行集随快照 seq 截断），
-/// 供后续接上「实际执行恢复动作的执行器」时直接复用；但**今天的生产恢复
-/// 链路不经过它们**——判定只看标记文件与计数器，副作用不落已执行集。
-/// 因此不要据本段宣称「恢复动作已幂等」。
+/// V4 A92 production wiring: `tauron-adapter::cmd_recover_trial_enable` uses this action
+/// transaction around the real registry TrialEnable side effect. The action is begun before
+/// the side effect, aborted on rejection, and committed only after an EffectRecord is written.
+/// Idempotency remains `plugin_id:action_kind:seq`; the adapter derives seq from the persisted
+/// recovery incident context so duplicate UI requests in one incident are suppressed without
+/// blocking a later independent incident.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveryAction {
     pub plugin_id: String,
@@ -272,6 +268,9 @@ pub struct RecoveryEngine {
     snapshot_meta: Option<SnapshotMeta>,
     /// 恢复中标记（恢复自身幂等）。
     recovery_in_progress: bool,
+    /// 当前已开始但尚未提交的恢复动作。只存在内存中：进程崩溃后该动作必须
+    /// 允许重放，绝不能在外部副作用完成前被误记为 executed。
+    pending_action: Option<String>,
     /// 关键事件摘要（最旧在前，长度 ≤ [`Self::CONTEXT_CAPACITY`]）。
     context: Vec<BootContextEntry>,
 }
@@ -297,6 +296,7 @@ impl RecoveryEngine {
             executed_effects: HashSet::new(),
             snapshot_meta: None,
             recovery_in_progress: false,
+            pending_action: None,
             context: Vec::new(),
         }
     }
@@ -566,6 +566,31 @@ impl RecoveryEngine {
         Ok(())
     }
 
+    /// Roll back a staged trial-enable only when no later recovery fact replaced it.
+    ///
+    /// The adapter stages the engine state before touching the external registry. If that
+    /// external transition is rejected, it must restore the pre-action state. The compare step
+    /// is critical: a concurrent failure may already have changed the plugin to
+    /// `DisabledBySafemode`; blindly restoring the old state would erase that newer fact.
+    pub fn rollback_trial_enable_if_unchanged(
+        &mut self,
+        plugin_id: &str,
+        previous: Option<PluginState>,
+    ) -> bool {
+        if self.plugin_states.get(plugin_id).copied() != Some(PluginState::TrialEnable) {
+            return false;
+        }
+        match previous {
+            Some(state) => {
+                self.plugin_states.insert(plugin_id.to_string(), state);
+            }
+            None => {
+                self.plugin_states.remove(plugin_id);
+            }
+        }
+        true
+    }
+
     /// 记录试验启用的插件启动失败。
     ///
     /// 回落到 `disabled-by-safemode`，不累入全局计数器。
@@ -594,19 +619,21 @@ impl RecoveryEngine {
 
     // ── 幂等恢复动作 ────────────────────────────────────────────────
     //
-    // ⚠️ 整段是**无生产调用方**的约定载体（见 [`RecoveryAction`] 的接入状态
-    // 说明）：今天没有任何生产路径调用它们，`executed_actions` 在生产中恒为空。
-    // 因无插入方，`gc_executed_actions` 未被调用也**不构成活泄漏**。
+    // Production consumer: tauron-adapter's safe-mode trial-enable path. Keep this API
+    // transport-neutral; the engine owns idempotency state while the adapter owns the external
+    // registry side effect and persistence boundary.
 
     /// 检查恢复动作是否已执行（幂等去重）。
     pub fn action_executed(&self, key: &str) -> bool {
         self.executed_actions.contains(key)
     }
 
-    /// 执行恢复动作（幂等）。
+    /// 开始恢复动作（幂等）。
     ///
-    /// 返回 `Ok(true)` 表示本次执行；`Ok(false)` 表示已执行过（去重）。
-    /// 返回 `Err` 表示恢复进行中（不可重入）。
+    /// V4 语义：这里只进入 in-progress，**不**提前写 `executed_actions`。
+    /// 调用方必须把 `action.idempotency_key` 传给外部副作用，使重放本身也幂等；
+    /// 外部效果成功后再调用 `complete_recovery` 提交。若进程在两者之间崩溃，
+    /// pending_action 不持久化，下一次启动会重放，而不是错误地跳过动作。
     pub fn execute_action(&mut self, action: &RecoveryAction) -> RecoveryResult<bool> {
         if self.recovery_in_progress {
             return Err(RecoveryError::RecoveryInProgress);
@@ -614,16 +641,22 @@ impl RecoveryEngine {
         if self.executed_actions.contains(&action.idempotency_key) {
             return Ok(false);
         }
-        // 标记恢复进行中（恢复自身幂等）。
         self.recovery_in_progress = true;
-        self.executed_actions.insert(action.idempotency_key.clone());
-        // 注意：这里不立即清除 recovery_in_progress，
-        // 因为恢复动作可能有副作用需要后续调用 complete_recovery。
+        self.pending_action = Some(action.idempotency_key.clone());
         Ok(true)
     }
 
-    /// 完成恢复（清除恢复中标记）。
+    /// 提交恢复：只有到这里动作才成为 executed。
     pub fn complete_recovery(&mut self) {
+        if let Some(key) = self.pending_action.take() {
+            self.executed_actions.insert(key);
+        }
+        self.recovery_in_progress = false;
+    }
+
+    /// 放弃本次恢复尝试，不把动作标为 executed；下一轮允许安全重试。
+    pub fn abort_recovery(&mut self) {
+        self.pending_action = None;
         self.recovery_in_progress = false;
     }
 
@@ -741,6 +774,7 @@ impl RecoveryEngine {
             executed_effects,
             snapshot_meta,
             recovery_in_progress: false,
+            pending_action: None,
             context,
         })
     }
@@ -983,6 +1017,28 @@ mod tests {
     // ── 幂等恢复动作 ────────────────────────────────────────────────
 
     #[test]
+    fn trial_enable_rollback_restores_only_when_staged_state_is_unchanged() {
+        let mut e = engine_with_plugins();
+        e.record_boot_failure(None);
+        e.record_boot_failure(None);
+        assert_eq!(e.phase(), BootPhase::Safemode);
+
+        let previous = e.plugin_state("p.audio");
+        e.trial_enable("p.audio").unwrap();
+        assert!(e.rollback_trial_enable_if_unchanged("p.audio", previous));
+        assert_eq!(e.plugin_state("p.audio"), previous);
+
+        let previous_video = e.plugin_state("p.video");
+        e.trial_enable("p.video").unwrap();
+        e.record_trial_failure("p.video");
+        assert!(
+            !e.rollback_trial_enable_if_unchanged("p.video", previous_video),
+            "a newer failure state must win over rollback"
+        );
+        assert_eq!(e.plugin_state("p.video"), Some(PluginState::DisabledBySafemode));
+    }
+
+    #[test]
     fn idempotency_key_format() {
         let key = RecoveryAction::idempotency_key("p.audio", "restart", 42);
         assert_eq!(key, "p.audio:restart:42");
@@ -1017,6 +1073,24 @@ mod tests {
     }
 
     #[test]
+    fn aborted_recovery_is_replayable_and_not_marked_executed() {
+        let mut e = engine_with_plugins();
+        let key = RecoveryAction::idempotency_key("p.audio", "restart", 7);
+        let action = RecoveryAction {
+            plugin_id: "p.audio".into(),
+            action_kind: "restart".into(),
+            idempotency_key: key.clone(),
+        };
+        assert!(e.execute_action(&action).unwrap());
+        assert!(!e.action_executed(&key));
+        e.abort_recovery();
+        assert!(!e.action_executed(&key));
+        assert!(e.execute_action(&action).unwrap(), "未提交动作必须允许重放");
+        e.complete_recovery();
+        assert!(e.action_executed(&key));
+    }
+
+    #[test]
     fn action_executed_query() {
         let mut e = engine_with_plugins();
         let key = RecoveryAction::idempotency_key("p.audio", "restart", 1);
@@ -1027,8 +1101,9 @@ mod tests {
             idempotency_key: key.clone(),
         };
         assert!(e.execute_action(&action).unwrap());
-        assert!(e.action_executed(&key));
+        assert!(!e.action_executed(&key), "begin 阶段不能提前标成 executed");
         e.complete_recovery();
+        assert!(e.action_executed(&key), "只有 commit 后才算 executed");
     }
 
     // ── 外部副作用追踪 ──────────────────────────────────────────────

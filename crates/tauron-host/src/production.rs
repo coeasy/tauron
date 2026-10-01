@@ -25,8 +25,14 @@ pub struct ProductionReadiness {
     pub recovery_explicitly_unsupported: bool,
     pub install_feature_enabled: bool,
     pub install_trust_configured: bool,
+    /// A100: trusted time is required for supply-chain expiry decisions when install is enabled.
+    pub trusted_time_available: bool,
     pub audit_for_admin_operations_available: bool,
     pub writable_data_dir_available: bool,
+    /// Whether this host instance actually installs the process-plugin runtime.
+    pub process_runtime_enabled: bool,
+    /// True only when the exact process runtime uses an A97 hard sandbox provider.
+    pub hard_process_sandbox_available: bool,
     pub mock_provider_enabled: bool,
 }
 
@@ -36,6 +42,85 @@ pub struct ProductionReadiness {
 pub struct ReadinessViolation {
     pub code: &'static str,
     pub message: &'static str,
+}
+
+/// Machine-readable production self-test result (V4 A109).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductionDoctorReport {
+    pub deployment_mode: DeploymentMode,
+    pub production_safe: bool,
+    pub checks: Vec<ProductionDoctorCheck>,
+}
+
+/// One production self-test check. A failed check is release-blocking in Production.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductionDoctorCheck {
+    pub id: &'static str,
+    pub pass: bool,
+    pub required_in_production: bool,
+    pub message: &'static str,
+}
+
+/// Run the production security/readiness self-test without mutating host state.
+///
+/// Development/Test can expose warnings while remaining runnable; Production must have every
+/// required check pass before the Host advertises READY.
+pub fn doctor(mode: DeploymentMode, input: &ProductionReadiness) -> ProductionDoctorReport {
+    let checks = vec![
+        ProductionDoctorCheck {
+            id: "caller-identity",
+            pass: input.caller_identity_policy_enabled,
+            required_in_production: true,
+            message: "caller identity/origin policy is fail-closed",
+        },
+        ProductionDoctorCheck {
+            id: "recovery-durability",
+            pass: input.durable_recovery_available || input.recovery_explicitly_unsupported,
+            required_in_production: true,
+            message: "durable recovery is configured or explicitly unsupported",
+        },
+        ProductionDoctorCheck {
+            id: "install-trust",
+            pass: !input.install_feature_enabled || input.install_trust_configured,
+            required_in_production: true,
+            message: "plugin installation trust material is complete when install is enabled",
+        },
+        ProductionDoctorCheck {
+            id: "trusted-time",
+            pass: !input.install_feature_enabled || input.trusted_time_available,
+            required_in_production: true,
+            message: "plugin installation has a currently trusted time source for expiry decisions",
+        },
+        ProductionDoctorCheck {
+            id: "admin-audit",
+            pass: input.audit_for_admin_operations_available,
+            required_in_production: true,
+            message: "privileged administration has an audit sink",
+        },
+        ProductionDoctorCheck {
+            id: "durable-data-dir",
+            pass: input.writable_data_dir_available,
+            required_in_production: true,
+            message: "durable writable data directory is available",
+        },
+        ProductionDoctorCheck {
+            id: "process-sandbox",
+            pass: !input.process_runtime_enabled || input.hard_process_sandbox_available,
+            required_in_production: true,
+            message: "process runtime uses a hard OS sandbox when process plugins are enabled",
+        },
+        ProductionDoctorCheck {
+            id: "no-mock-provider",
+            pass: !input.mock_provider_enabled,
+            required_in_production: true,
+            message: "mock/test providers are absent",
+        },
+    ];
+    let production_safe =
+        mode == DeploymentMode::Production && checks.iter().all(|check| check.pass);
+    ProductionDoctorReport { deployment_mode: mode, production_safe, checks }
 }
 
 /// Validate production-only invariants.
@@ -66,6 +151,13 @@ pub fn validate(mode: DeploymentMode, input: &ProductionReadiness) -> Vec<Readin
             message: "plugin install is enabled but trust material is incomplete",
         });
     }
+    if input.install_feature_enabled && !input.trusted_time_available {
+        out.push(ReadinessViolation {
+            code: "TRUSTED_TIME_REQUIRED",
+            message:
+                "plugin install is enabled but no currently trusted time provider is available",
+        });
+    }
     if !input.audit_for_admin_operations_available {
         out.push(ReadinessViolation {
             code: "ADMIN_AUDIT_REQUIRED",
@@ -76,6 +168,12 @@ pub fn validate(mode: DeploymentMode, input: &ProductionReadiness) -> Vec<Readin
         out.push(ReadinessViolation {
             code: "DATA_DIR_REQUIRED",
             message: "production requires a writable durable data directory",
+        });
+    }
+    if input.process_runtime_enabled && !input.hard_process_sandbox_available {
+        out.push(ReadinessViolation {
+            code: "PROCESS_SANDBOX_HARD_REQUIRED",
+            message: "production process runtime requires a hard ProcessSandboxProvider",
         });
     }
     if input.mock_provider_enabled {
@@ -103,8 +201,11 @@ mod tests {
             recovery_explicitly_unsupported: false,
             install_feature_enabled: true,
             install_trust_configured: true,
+            trusted_time_available: true,
             audit_for_admin_operations_available: true,
             writable_data_dir_available: true,
+            process_runtime_enabled: true,
+            hard_process_sandbox_available: true,
             mock_provider_enabled: false,
         }
     }
@@ -127,6 +228,41 @@ mod tests {
     }
 
     #[test]
+    fn production_install_requires_trusted_time_only_when_install_is_enabled() {
+        let mut input = ready();
+        input.trusted_time_available = false;
+        let violations = validate(DeploymentMode::Production, &input);
+        assert!(
+            violations.iter().any(|v| v.code == "TRUSTED_TIME_REQUIRED"),
+            "production install must fail closed without trusted time"
+        );
+
+        input.install_feature_enabled = false;
+        assert!(
+            validate(DeploymentMode::Production, &input)
+                .iter()
+                .all(|v| v.code != "TRUSTED_TIME_REQUIRED"),
+            "hosts without installation capability must not require a time source they never use"
+        );
+    }
+
+    #[test]
+    fn production_requires_hard_process_sandbox_only_when_process_runtime_is_enabled() {
+        let mut input = ready();
+        input.hard_process_sandbox_available = false;
+        let violations = validate(DeploymentMode::Production, &input);
+        assert!(violations.iter().any(|v| v.code == "PROCESS_SANDBOX_HARD_REQUIRED"));
+
+        input.process_runtime_enabled = false;
+        assert!(
+            validate(DeploymentMode::Production, &input)
+                .iter()
+                .all(|v| v.code != "PROCESS_SANDBOX_HARD_REQUIRED"),
+            "headless/substrate-only production must not require a process sandbox it does not use"
+        );
+    }
+
+    #[test]
     fn production_allows_explicit_recovery_unsupported() {
         let mut input = ready();
         input.durable_recovery_available = false;
@@ -138,5 +274,22 @@ mod tests {
     fn production_ready_requires_every_security_fact() {
         let input = ready();
         assert!(is_production_safe(DeploymentMode::Production, &input));
+        let report = doctor(DeploymentMode::Production, &input);
+        assert!(report.production_safe);
+        assert!(report.checks.iter().all(|check| check.pass));
+    }
+
+    #[test]
+    fn doctor_reports_failed_production_facts_without_mutating_policy() {
+        let report = doctor(DeploymentMode::Production, &ProductionReadiness::default());
+        assert!(!report.production_safe);
+        assert!(report.checks.iter().any(|check| check.id == "caller-identity" && !check.pass));
+        assert!(report.checks.iter().any(|check| check.id == "admin-audit" && !check.pass));
+    }
+
+    #[test]
+    fn development_doctor_never_claims_production_safe() {
+        let report = doctor(DeploymentMode::Development, &ready());
+        assert!(!report.production_safe);
     }
 }

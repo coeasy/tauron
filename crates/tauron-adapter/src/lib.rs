@@ -23,7 +23,9 @@ pub mod tauri;
 /// 进程插件投递实现（0.4-A1：Process 形态的 `CallDelivery` + sidecar 回帧接收器）。
 pub mod process_delivery;
 
-/// WASM 插件投递实现（任务二：`PluginType::Wasm` 经 `tauron-wasm` 校验层）。
+/// WASM broker is optional in V4 minimal profile. Without it, Wasm delivery is
+/// intentionally absent and select_delivery() returns the canonical unwired result.
+#[cfg(feature = "runtime-wasm-broker")]
 pub mod wasm_delivery;
 
 /// 启动恢复的持久化与崩溃检测（平台无关，纯 std）。
@@ -67,11 +69,15 @@ use tauron_proc::{
     ProcSpawner, SpawnConfig,
 };
 use tauron_recovery::{
-    BootContextEntry, BootPhase, PluginState as RecoveryPluginState, RecoveryEngine,
+    BootContextEntry, BootPhase, EffectRecord, PluginState as RecoveryPluginState, RecoveryAction,
+    RecoveryEngine,
 };
-use tauron_settings::{Migration, SettingsError, SettingsStore};
+use tauron_settings::{
+    Migration, MigrationContract, MigrationReceipt, SettingsError, SettingsStore,
+};
 
 use crate::process_delivery::ProcessCallDelivery;
+#[cfg(feature = "runtime-wasm-broker")]
 use crate::wasm_delivery::WasmCallDelivery;
 
 /// 贡献注册条目（命令/菜单/面板/设置Tab）。
@@ -186,6 +192,13 @@ impl AdapterConfig {
         #[cfg(not(feature = "plugin-install"))]
         let install_trust_configured = true;
 
+        #[cfg(feature = "plugin-install")]
+        let trusted_time_available = self.trusted_time_provider.as_ref().is_some_and(|provider| {
+            provider.trusted_time().state == tauron_host::TimeTrustState::Trusted
+        });
+        #[cfg(not(feature = "plugin-install"))]
+        let trusted_time_available = true;
+
         tauron_host::ProductionReadiness {
             caller_identity_policy_enabled: self.caller_identity_policy_enabled
                 || !self.origin_allowlist.is_empty(),
@@ -193,8 +206,13 @@ impl AdapterConfig {
             recovery_explicitly_unsupported: self.recovery_explicitly_unsupported,
             install_feature_enabled: cfg!(feature = "plugin-install"),
             install_trust_configured,
+            trusted_time_available,
             audit_for_admin_operations_available: self.admin_audit_available,
             writable_data_dir_available: self.recovery_data_dir.is_some(),
+            // AdapterConfig describes the substrate. The process runtime is attached later,
+            // once the concrete ProcSpawner (and therefore its sandbox descriptor) is known.
+            process_runtime_enabled: false,
+            hard_process_sandbox_available: false,
             mock_provider_enabled: self.mock_provider_enabled,
         }
     }
@@ -216,6 +234,35 @@ impl AdapterConfig {
         Err(HostError::new(
             ErrorCode::E_STATE_INVALID_TRANSITION,
             format!("production readiness rejected host startup: {detail}"),
+        ))
+    }
+
+    /// Re-run production readiness once the concrete process runtime is known.
+    ///
+    /// Substrate-only/headless hosts do not need a process sandbox. The moment a
+    /// `ProcSpawner` is attached, Production requires that exact spawner to report A97
+    /// `hard` enforcement. Development/Test keep compatibility behavior.
+    fn validate_process_runtime_for_start(
+        &self,
+        descriptor: &tauron_proc::ProcessSandboxDescriptor,
+    ) -> HostResult<()> {
+        let mut readiness = self.production_readiness();
+        readiness.process_runtime_enabled = true;
+        readiness.hard_process_sandbox_available =
+            matches!(descriptor.enforcement, tauron_proc::ProcessSandboxEnforcement::Hard);
+        let violations =
+            tauron_host::validate_production_readiness(self.deployment_mode, &readiness);
+        if violations.is_empty() {
+            return Ok(());
+        }
+        let detail = violations
+            .iter()
+            .map(|v| format!("{}: {}", v.code, v.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(HostError::new(
+            ErrorCode::E_STATE_INVALID_TRANSITION,
+            format!("production plugin-runtime readiness rejected startup: {detail}"),
         ))
     }
 
@@ -255,12 +302,15 @@ impl AdapterConfig {
             // `ClientConfig` 没有 fs 根目录字段（它管注册表/数据目录）：由宿主用
             // [`AdapterConfig::with_fs_roots`] 显式配置；缺省 = 该域不可用（如实）。
             fs_allowed_roots: Vec::new(),
+            http_policy: tauron_host::NetworkPolicy::default(),
             #[cfg(feature = "plugin-install")]
             plugin_install_dir: None,
             #[cfg(feature = "plugin-install")]
             plugin_signing_keys: std::collections::BTreeMap::new(),
             #[cfg(feature = "plugin-install")]
             acl_signing_key: None,
+            #[cfg(feature = "plugin-install")]
+            trusted_time_provider: None,
         }
     }
 
@@ -278,12 +328,28 @@ impl AdapterConfig {
         self
     }
 
+    /// A100: inject the host-owned trusted-time source used by supply-chain expiry decisions.
+    #[cfg(feature = "plugin-install")]
+    pub fn with_trusted_time_provider(
+        mut self,
+        provider: Arc<dyn tauron_host::TrustedTimeProvider>,
+    ) -> Self {
+        self.trusted_time_provider = Some(provider);
+        self
+    }
+
     /// 配置 `host_fs_*` 域的允许根目录（空 = 该域不可用）。
     ///
     /// 装配期会逐个 `canonicalize`；不存在的根被忽略（见
     /// [`AdapterConfig::fs_allowed_roots`] 的语义说明）。
     pub fn with_fs_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.fs_allowed_roots = roots;
+        self
+    }
+
+    /// Configure the V4 HTTP/network scope. Default is deny-all.
+    pub fn with_http_policy(mut self, policy: tauron_host::NetworkPolicy) -> Self {
+        self.http_policy = policy;
         self
     }
 }
@@ -338,6 +404,8 @@ pub struct AdapterConfig {
     ///
     /// 装配方（生产宿主）应传宿主自己的数据/导出目录；测试传 tempdir。
     pub fs_allowed_roots: Vec<PathBuf>,
+    /// V4 A96 network scope. Empty/default is fail-closed even when a custom HTTP sink exists.
+    pub http_policy: tauron_host::NetworkPolicy,
     /// Package installation root. Installation remains unavailable when unset.
     #[cfg(feature = "plugin-install")]
     pub plugin_install_dir: Option<PathBuf>,
@@ -347,6 +415,9 @@ pub struct AdapterConfig {
     /// Host-provided ACL HMAC key. Never generated from a public constant.
     #[cfg(feature = "plugin-install")]
     pub acl_signing_key: Option<Vec<u8>>,
+    /// A100 host-owned trusted-time source. Production install requires a currently Trusted value.
+    #[cfg(feature = "plugin-install")]
+    pub trusted_time_provider: Option<Arc<dyn tauron_host::TrustedTimeProvider>>,
 }
 
 /// Result for a committed signed plugin installation.
@@ -358,6 +429,221 @@ pub struct PluginInstallResult {
     pub version: String,
     pub install_path: String,
     pub approved_permissions: Vec<String>,
+}
+
+#[cfg(feature = "plugin-install")]
+const PLUGIN_UI_ACTIVATION_FILE: &str = ".tauron-ui-activation.json";
+
+#[cfg(feature = "plugin-install")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SignedPluginActivation {
+    records: Vec<tauron_host::ActivationRecord>,
+    hmac_sha256: String,
+}
+
+#[cfg(feature = "plugin-install")]
+fn plugin_asset_activation_resource(manifest: &PluginManifest, relative: &str) -> String {
+    format!("plugin:{}@{}:asset:{}", manifest.id, manifest.version, relative)
+}
+
+#[cfg(feature = "plugin-install")]
+fn collect_plugin_activation_records(
+    plugin_dir: &std::path::Path,
+    manifest: &PluginManifest,
+) -> HostResult<Vec<tauron_host::ActivationRecord>> {
+    let mut files = Vec::<(String, std::path::PathBuf)>::new();
+    let mut dirs = vec![plugin_dir.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)
+            .map_err(|error| {
+                HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("枚举插件激活目录失败 {}: {error}", dir.display()),
+                )
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("读取插件激活目录项失败：{error}"),
+                )
+            })?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("读取插件激活文件元数据失败 {}: {error}", path.display()),
+                )
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("插件激活内容包含符号链接，拒绝激活：{}", path.display()),
+                ));
+            }
+            if metadata.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                return Err(HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("插件激活内容不是普通文件：{}", path.display()),
+                ));
+            }
+            let relative = path.strip_prefix(plugin_dir).map_err(|error| {
+                HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("插件激活路径无法归一化：{error}"),
+                )
+            })?;
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            if relative == PLUGIN_UI_ACTIVATION_FILE {
+                continue;
+            }
+            files.push((relative, path));
+        }
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut records = Vec::with_capacity(files.len());
+    for (relative, path) in files {
+        let bytes = std::fs::read(&path).map_err(|error| {
+            HostError::new(
+                ErrorCode::E_INSTALL_FAILED,
+                format!("读取插件激活内容失败 {}: {error}", path.display()),
+            )
+        })?;
+        records.push(tauron_host::ActivationRecord {
+            resource: plugin_asset_activation_resource(manifest, &relative),
+            generation: tauron_host::Generation::INITIAL,
+            content: tauron_host::ContentIdentity::from_bytes(&bytes),
+        });
+    }
+    Ok(records)
+}
+
+#[cfg(feature = "plugin-install")]
+fn write_plugin_ui_activation(
+    plugin_dir: &std::path::Path,
+    manifest: &PluginManifest,
+    key: &[u8],
+) -> HostResult<()> {
+    if manifest.entry.ui.is_none() {
+        return Ok(());
+    }
+    let records = collect_plugin_activation_records(plugin_dir, manifest)?;
+    if records.is_empty() {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "插件 activation record 为空；拒绝提交安装",
+        ));
+    }
+    let record_bytes = serde_json::to_vec(&records).map_err(|error| {
+        HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            format!("序列化插件 activation records 失败：{error}"),
+        )
+    })?;
+    let signed = SignedPluginActivation {
+        hmac_sha256: tauron_acl::hmac_sha256_hex(&record_bytes, key)?,
+        records,
+    };
+    let encoded = serde_json::to_vec_pretty(&signed).map_err(|error| {
+        HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            format!("序列化插件 activation metadata 失败：{error}"),
+        )
+    })?;
+    let path = plugin_dir.join(PLUGIN_UI_ACTIVATION_FILE);
+    let mut file =
+        std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|error| {
+            HostError::new(
+                ErrorCode::E_INSTALL_FAILED,
+                format!("创建插件 activation metadata 失败 {}: {error}", path.display()),
+            )
+        })?;
+    use std::io::Write as _;
+    file.write_all(&encoded).map_err(|error| {
+        HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            format!("写入插件 activation metadata 失败：{error}"),
+        )
+    })?;
+    file.sync_all().map_err(|error| {
+        HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            format!("同步插件 activation metadata 失败：{error}"),
+        )
+    })
+}
+
+#[cfg(feature = "plugin-install")]
+fn verify_plugin_ui_activation(
+    config: &InstallRuntimeConfig,
+    manifest: &PluginManifest,
+    plugin_dir: &std::path::Path,
+) -> HostResult<()> {
+    let key = config.acl_signing_key.as_deref().filter(|key| key.len() >= 32).ok_or_else(|| {
+        HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "缺少可验证插件 activation metadata 的宿主 HMAC 密钥",
+        )
+    })?;
+    let path = plugin_dir.join(PLUGIN_UI_ACTIVATION_FILE);
+    let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+        HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            format!("插件缺少 activation metadata {}: {error}", path.display()),
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "插件 activation metadata 不是安全的普通文件",
+        ));
+    }
+    let encoded = std::fs::read(&path).map_err(|error| {
+        HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            format!("读取插件 activation metadata 失败：{error}"),
+        )
+    })?;
+    let signed: SignedPluginActivation = serde_json::from_slice(&encoded).map_err(|error| {
+        HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            format!("解析插件 activation metadata 失败：{error}"),
+        )
+    })?;
+    let record_bytes = serde_json::to_vec(&signed.records).map_err(|error| {
+        HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            format!("序列化插件 activation records 失败：{error}"),
+        )
+    })?;
+    if !tauron_acl::hmac_sha256_matches(&record_bytes, &signed.hmac_sha256, key)? {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "插件 activation metadata HMAC 不匹配；拒绝加载可能被篡改的内容",
+        ));
+    }
+    if signed.records.iter().any(|record| record.generation != tauron_host::Generation::INITIAL) {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "插件 activation generation 与已安装版本不匹配",
+        ));
+    }
+    let current = collect_plugin_activation_records(plugin_dir, manifest)?;
+    if current != signed.records {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "插件 activation integrity 校验失败：安装后的文件集合或内容已变化",
+        ));
+    }
+    Ok(())
 }
 
 /// Validated filesystem location for an installed JS plugin's entry page.
@@ -423,6 +709,7 @@ pub fn installed_plugin_ui(
             "插件 UI 文件越出安装目录或不是普通文件",
         ));
     }
+    verify_plugin_ui_activation(config, &registered.manifest, &root)?;
     Ok(InstalledPluginUi { plugin_id: plugin_id.to_string(), entry })
 }
 
@@ -591,6 +878,16 @@ fn unsupported_body(reason: &str, fallback: Option<&str>) -> UnsupportedBody {
     }
 }
 
+/// Runtime enforcement strength for a capability domain.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CapabilityEnforcement {
+    pub domain: String,
+    /// Closed vocabulary: hard / partial / unsupported.
+    pub level: String,
+    pub detail: String,
+}
+
 /// 宿主当前实际装配的命令面与未实现能力。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -598,6 +895,8 @@ pub struct CapabilitiesBody {
     pub families: Vec<String>,
     pub commands: Vec<String>,
     pub unsupported: Vec<UnsupportedDomain>,
+    /// V4: machine-readable strength, not just available/unavailable.
+    pub enforcement: Vec<CapabilityEnforcement>,
     pub plugin_runtime: bool,
     /// V4 compile-time target fact used by ArtifactVariantResolver before any OS loader call.
     pub target: tauron_host::TargetSpec,
@@ -655,8 +954,8 @@ pub fn cmd_host_capabilities(state: &SubstrateState) -> HostResult<CapabilitiesB
             ),
             (
                 "http",
-                state.http_sink.native_supported(),
-                "未装配 HTTP 提供者：reqwest 的 TLS 后端不在离线依赖闭包内",
+                state.http_sink.native_supported() && !state.http_policy.domains.is_empty(),
+                "HTTP provider 或 V4 network scope 未配置",
             ),
             (
                 "updater",
@@ -704,10 +1003,83 @@ pub fn cmd_host_capabilities(state: &SubstrateState) -> HostResult<CapabilitiesB
                 .push(UnsupportedDomain { domain: domain.to_string(), reason: reason.to_string() });
         }
 
+        let process_sandbox = state.process_sandbox.get().cloned();
+        let (process_sandbox_level, process_sandbox_detail) = if !plugin_runtime {
+            ("unsupported", "plugin runtime is not installed".to_string())
+        } else {
+            let descriptor = process_sandbox.unwrap_or_else(|| {
+                tauron_proc::ProcessSandboxDescriptor::unsupported(
+                    "plugin runtime did not publish a process sandbox descriptor",
+                )
+            });
+            (descriptor.enforcement.as_str(), descriptor.detail)
+        };
+        if plugin_runtime && process_sandbox_level != "unsupported" {
+            families.push("process-sandbox".to_string());
+        } else {
+            unsupported.push(UnsupportedDomain {
+                domain: "process-sandbox".to_string(),
+                reason: process_sandbox_detail.clone(),
+            });
+        }
+
+        let fs_level = if state.fs_allowed_roots.is_empty() {
+            "unsupported"
+        } else {
+            match tauron_host::scoped_fs_enforcement() {
+                tauron_host::FsEnforcement::Hard => "hard",
+                tauron_host::FsEnforcement::Partial => "partial",
+                tauron_host::FsEnforcement::Unsupported => "unsupported",
+            }
+        };
+        let http_level =
+            if !state.http_sink.native_supported() || state.http_policy.domains.is_empty() {
+                "unsupported"
+            } else {
+                match state.http_sink.network_enforcement() {
+                    tauron_host::NetworkEnforcement::RedirectAndDns => "hard",
+                    tauron_host::NetworkEnforcement::UrlOnly => "partial",
+                }
+            };
+        let enforcement = vec![
+            CapabilityEnforcement {
+                domain: "fs".to_string(),
+                level: fs_level.to_string(),
+                detail: match fs_level {
+                    "hard" => "root-handle relative I/O with no-follow enforcement".to_string(),
+                    "partial" => {
+                        "platform fallback does not yet provide native reparse/junction handle validation"
+                            .to_string()
+                    }
+                    _ => "filesystem scope is not configured".to_string(),
+                },
+            },
+            CapabilityEnforcement {
+                domain: "http".to_string(),
+                level: http_level.to_string(),
+                detail: match http_level {
+                    "hard" => {
+                        "URL, redirect, DNS/private-network and credential-scope policy enforced"
+                            .to_string()
+                    }
+                    "partial" => {
+                        "provider does not prove redirect-and-DNS enforcement".to_string()
+                    }
+                    _ => "HTTP provider or network scope is not configured".to_string(),
+                },
+            },
+            CapabilityEnforcement {
+                domain: "process-sandbox".to_string(),
+                level: process_sandbox_level.to_string(),
+                detail: process_sandbox_detail,
+            },
+        ];
+
         Ok(CapabilitiesBody {
             families,
             commands: commands.into_iter().map(str::to_string).collect(),
             unsupported,
+            enforcement,
             plugin_runtime,
             target: tauron_host::current_target_spec(),
         })
@@ -738,6 +1110,9 @@ pub const SUBSTRATE_COMMANDS: &[&str] = &[
     "host_events_subscribe",
     "host_events_unsubscribe",
     "host_events_drain",
+    "host_events_approve",
+    "host_events_revoke",
+    "host_events_approvals",
     "host_i18n_t",
     "host_i18n_t_params",
     "host_i18n_set_locale",
@@ -792,6 +1167,7 @@ pub const PLUGIN_RUNTIME_COMMANDS: &[&str] = &[
     "host_recover_trial_enable",
     "host_stream_open",
     "host_stream_write",
+    "host_stream_grant",
     "host_stream_close",
     "host_runtime_spawn",
     "host_runtime_health",
@@ -1400,18 +1776,18 @@ pub struct FsWriteResult {
 /// **没有"进程内降级实现"**：`std::fs` 就是真实行为；"不可用"体现为允许根为空时
 /// 命令层的 `UnsupportedBody`（如实，不伪造）。可注入假实现用于单测。
 pub trait FsSink: Send + Sync {
-    /// 读取文件（至多 `max_bytes`）。
-    fn read(&self, path: &std::path::Path, max_bytes: u64) -> HostResult<(Vec<u8>, bool)>;
-    /// 写入文件（覆盖）。
-    fn write(&self, path: &std::path::Path, bytes: &[u8]) -> HostResult<u64>;
-    /// 列目录。
-    fn list(&self, path: &std::path::Path) -> HostResult<Vec<FsEntry>>;
-    /// 取元数据。
-    fn stat(&self, path: &std::path::Path) -> HostResult<FsStat>;
-    /// 建目录。
-    fn mkdir(&self, path: &std::path::Path, recursive: bool) -> HostResult<()>;
-    /// 删除文件或（空）目录。
-    fn remove(&self, path: &std::path::Path) -> HostResult<()>;
+    /// 读取文件（至多 `max_bytes`）。V4 A95：安全关键 I/O 接收 root-scoped handle path。
+    fn read(&self, path: &tauron_host::ScopedPath, max_bytes: u64) -> HostResult<(Vec<u8>, bool)>;
+    /// 写入文件（覆盖）。V4 A95：Unix 实现通过 openat/O_NOFOLLOW。
+    fn write(&self, path: &tauron_host::ScopedPath, bytes: &[u8]) -> HostResult<u64>;
+    /// 列目录。Unix 使用已打开 directory handle，不重新解释绝对路径。
+    fn list(&self, path: &tauron_host::ScopedPath) -> HostResult<Vec<FsEntry>>;
+    /// 取元数据。V4 A95：最终对象必须通过 root-relative handle 打开。
+    fn stat(&self, path: &tauron_host::ScopedPath) -> HostResult<FsStat>;
+    /// 建目录。Unix 使用 mkdirat；recursive 逐级 no-follow 打开/创建。
+    fn mkdir(&self, path: &tauron_host::ScopedPath, recursive: bool) -> HostResult<()>;
+    /// 删除文件或（空）目录。Unix 使用 statat(no-follow)+unlinkat。
+    fn remove(&self, path: &tauron_host::ScopedPath) -> HostResult<()>;
 }
 
 /// `std::fs` 的真实实现（**缺省**）。
@@ -1425,6 +1801,7 @@ impl StdFsSink {
     }
 }
 
+#[cfg(not(unix))]
 fn fs_io_error(op: &str, path: &std::path::Path, e: std::io::Error) -> HostError {
     HostError::new(
         ErrorCode::E_STATE_INVALID_TRANSITION,
@@ -1432,47 +1809,105 @@ fn fs_io_error(op: &str, path: &std::path::Path, e: std::io::Error) -> HostError
     )
 }
 
+fn scoped_fs_error(
+    op: &str,
+    path: &tauron_host::ScopedPath,
+    e: tauron_host::ScopedFsError,
+) -> HostError {
+    HostError::new(
+        ErrorCode::E_STATE_INVALID_TRANSITION,
+        format!("scoped filesystem `{op}` failed（{}）：{e}", path.display_path().display()),
+    )
+}
+
 impl FsSink for StdFsSink {
-    fn read(&self, path: &std::path::Path, max_bytes: u64) -> HostResult<(Vec<u8>, bool)> {
-        use std::io::Read;
-        let file = std::fs::File::open(path).map_err(|e| fs_io_error("read", path, e))?;
-        let mut buf = Vec::new();
-        // 多读 1 字节用于判定"是否被截断"。
-        let mut limited = file.take(max_bytes.saturating_add(1));
-        limited.read_to_end(&mut buf).map_err(|e| fs_io_error("read", path, e))?;
-        let truncated = buf.len() as u64 > max_bytes;
-        if truncated {
-            buf.truncate(max_bytes as usize);
+    fn read(&self, path: &tauron_host::ScopedPath, max_bytes: u64) -> HostResult<(Vec<u8>, bool)> {
+        #[cfg(unix)]
+        {
+            tauron_host::scoped_fs_read_hard(path, max_bytes)
+                .map_err(|e| scoped_fs_error("read", path, e))
         }
-        Ok((buf, truncated))
-    }
-
-    fn write(&self, path: &std::path::Path, bytes: &[u8]) -> HostResult<u64> {
-        std::fs::write(path, bytes).map_err(|e| fs_io_error("write", path, e))?;
-        Ok(bytes.len() as u64)
-    }
-
-    fn list(&self, path: &std::path::Path) -> HostResult<Vec<FsEntry>> {
-        let mut out = Vec::new();
-        for entry in std::fs::read_dir(path).map_err(|e| fs_io_error("list", path, e))? {
-            let entry = entry.map_err(|e| fs_io_error("list", path, e))?;
-            let meta = entry.metadata().map_err(|e| fs_io_error("list", path, e))?;
-            out.push(FsEntry {
-                name: entry.file_name().to_string_lossy().into_owned(),
-                path: entry.path().to_string_lossy().into_owned(),
-                is_dir: meta.is_dir(),
-                size: if meta.is_file() { meta.len() } else { 0 },
-            });
+        #[cfg(not(unix))]
+        {
+            let display = path.display_path();
+            use std::io::Read;
+            let file =
+                std::fs::File::open(&display).map_err(|e| fs_io_error("read", &display, e))?;
+            let mut buf = Vec::new();
+            let mut limited = file.take(max_bytes.saturating_add(1));
+            limited.read_to_end(&mut buf).map_err(|e| fs_io_error("read", &display, e))?;
+            let truncated = buf.len() as u64 > max_bytes;
+            if truncated {
+                buf.truncate(max_bytes as usize);
+            }
+            Ok((buf, truncated))
         }
-        // 稳定序（便于测试与前端 diff）：按名字排序。
-        out.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(out)
     }
 
-    fn stat(&self, path: &std::path::Path) -> HostResult<FsStat> {
-        let meta = std::fs::metadata(path).map_err(|e| fs_io_error("stat", path, e))?;
+    fn write(&self, path: &tauron_host::ScopedPath, bytes: &[u8]) -> HostResult<u64> {
+        #[cfg(unix)]
+        {
+            tauron_host::scoped_fs_write_hard(path, bytes)
+                .map_err(|e| scoped_fs_error("write", path, e))
+        }
+        #[cfg(not(unix))]
+        {
+            let display = path.display_path();
+            std::fs::write(&display, bytes).map_err(|e| fs_io_error("write", &display, e))?;
+            Ok(bytes.len() as u64)
+        }
+    }
+
+    fn list(&self, path: &tauron_host::ScopedPath) -> HostResult<Vec<FsEntry>> {
+        #[cfg(unix)]
+        {
+            let base = path.display_path();
+            tauron_host::scoped_fs_list_hard(path)
+                .map(|entries| {
+                    entries
+                        .into_iter()
+                        .map(|entry| FsEntry {
+                            path: base.join(&entry.name).to_string_lossy().into_owned(),
+                            name: entry.name,
+                            is_dir: entry.is_dir,
+                            size: entry.size,
+                        })
+                        .collect()
+                })
+                .map_err(|e| scoped_fs_error("list", path, e))
+        }
+        #[cfg(not(unix))]
+        {
+            let display = path.display_path();
+            let mut out = Vec::new();
+            for entry in
+                std::fs::read_dir(&display).map_err(|e| fs_io_error("list", &display, e))?
+            {
+                let entry = entry.map_err(|e| fs_io_error("list", &display, e))?;
+                let meta = entry.metadata().map_err(|e| fs_io_error("list", &display, e))?;
+                out.push(FsEntry {
+                    name: entry.file_name().to_string_lossy().into_owned(),
+                    path: entry.path().to_string_lossy().into_owned(),
+                    is_dir: meta.is_dir(),
+                    size: if meta.is_file() { meta.len() } else { 0 },
+                });
+            }
+            out.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(out)
+        }
+    }
+
+    fn stat(&self, path: &tauron_host::ScopedPath) -> HostResult<FsStat> {
+        #[cfg(unix)]
+        let meta =
+            tauron_host::scoped_fs_stat_hard(path).map_err(|e| scoped_fs_error("stat", path, e))?;
+        #[cfg(not(unix))]
+        let meta = {
+            let display = path.display_path();
+            std::fs::symlink_metadata(&display).map_err(|e| fs_io_error("stat", &display, e))?
+        };
         Ok(FsStat {
-            path: path.to_string_lossy().into_owned(),
+            path: path.display_path().to_string_lossy().into_owned(),
             is_dir: meta.is_dir(),
             is_file: meta.is_file(),
             size: if meta.is_file() { meta.len() } else { 0 },
@@ -1480,21 +1915,41 @@ impl FsSink for StdFsSink {
         })
     }
 
-    fn mkdir(&self, path: &std::path::Path, recursive: bool) -> HostResult<()> {
-        let result =
-            if recursive { std::fs::create_dir_all(path) } else { std::fs::create_dir(path) };
-        result.map_err(|e| fs_io_error("mkdir", path, e))
+    fn mkdir(&self, path: &tauron_host::ScopedPath, recursive: bool) -> HostResult<()> {
+        #[cfg(unix)]
+        {
+            tauron_host::scoped_fs_mkdir_hard(path, recursive)
+                .map_err(|e| scoped_fs_error("mkdir", path, e))
+        }
+        #[cfg(not(unix))]
+        {
+            let display = path.display_path();
+            let result = if recursive {
+                std::fs::create_dir_all(&display)
+            } else {
+                std::fs::create_dir(&display)
+            };
+            result.map_err(|e| fs_io_error("mkdir", &display, e))
+        }
     }
 
-    fn remove(&self, path: &std::path::Path) -> HostResult<()> {
-        let meta = std::fs::symlink_metadata(path).map_err(|e| fs_io_error("remove", path, e))?;
-        let result = if meta.is_dir() {
-            // **只删空目录**：递归删除是高危动作，本域不提供（调用方须自底向上删）。
-            std::fs::remove_dir(path)
-        } else {
-            std::fs::remove_file(path)
-        };
-        result.map_err(|e| fs_io_error("remove", path, e))
+    fn remove(&self, path: &tauron_host::ScopedPath) -> HostResult<()> {
+        #[cfg(unix)]
+        {
+            tauron_host::scoped_fs_remove_hard(path).map_err(|e| scoped_fs_error("remove", path, e))
+        }
+        #[cfg(not(unix))]
+        {
+            let display = path.display_path();
+            let meta = std::fs::symlink_metadata(&display)
+                .map_err(|e| fs_io_error("remove", &display, e))?;
+            let result = if meta.is_dir() {
+                std::fs::remove_dir(&display)
+            } else {
+                std::fs::remove_file(&display)
+            };
+            result.map_err(|e| fs_io_error("remove", &display, e))
+        }
     }
 }
 
@@ -1548,8 +2003,18 @@ pub trait HttpSink: Send + Sync {
     fn native_supported(&self) -> bool {
         false
     }
-    /// 发起一次请求。
-    fn request(&self, spec: &HttpRequestSpec) -> HostResult<ProviderResult<HttpResponseSpec>>;
+
+    /// Provider-side enforcement level. Production HTTP must cover redirects and DNS/private IP.
+    fn network_enforcement(&self) -> tauron_host::NetworkEnforcement {
+        tauron_host::NetworkEnforcement::UrlOnly
+    }
+
+    /// 发起一次请求。实现必须把同一个 policy 应用于每一跳 redirect 与 DNS 结果。
+    fn request(
+        &self,
+        spec: &HttpRequestSpec,
+        policy: &tauron_host::NetworkPolicy,
+    ) -> HostResult<ProviderResult<HttpResponseSpec>>;
 }
 
 /// HTTP sink 的**降级**实现（缺省）：恒返回 `UnsupportedBody`。
@@ -1561,7 +2026,11 @@ pub trait HttpSink: Send + Sync {
 pub struct UnavailableHttpSink;
 
 impl HttpSink for UnavailableHttpSink {
-    fn request(&self, _spec: &HttpRequestSpec) -> HostResult<ProviderResult<HttpResponseSpec>> {
+    fn request(
+        &self,
+        _spec: &HttpRequestSpec,
+        _policy: &tauron_host::NetworkPolicy,
+    ) -> HostResult<ProviderResult<HttpResponseSpec>> {
         Ok(ProviderResult::Unsupported(unsupported_body(
             "未装配 HTTP 提供者（reqwest 的 TLS 后端 hyper-tls/hyper-rustls 不在离线缓存中）",
             Some("注入自定义 HttpSink 实现"),
@@ -1870,6 +2339,10 @@ pub struct SubstrateState {
     /// Reverse topological order for deterministic shutdown.
     pub service_shutdown_order: Arc<Vec<String>>,
     pub bus: Arc<Mutex<EventBus>>,
+    /// V4 A87: process-wide durable-state writer lease. When a data directory is configured,
+    /// exactly one Host process may own recovery/settings writes for that directory at a time.
+    /// Clones share the same lease handle; dropping the last SubstrateState releases the OS lock.
+    pub storage_writer_lease: Option<Arc<tauron_host::PersistentWriterLease>>,
     /// 宿主设置文档（R7-2：`tauron-settings` 的 [`SettingsStore`]，激活孤儿 crate）。
     ///
     /// **不再是裸 `HashMap`**：键的合法性、值的类型、以及跨 schema 版本的迁移
@@ -1887,6 +2360,12 @@ pub struct SubstrateState {
     pub settings_write_lock: Arc<Mutex<()>>,
     /// 设置文档的落盘位置（`None` = 纯内存，重启即丢）。
     pub settings_path: Option<std::path::PathBuf>,
+    /// V4 A93 durable generation for host-settings.json. Serialized settings mutations already
+    /// hold settings_write_lock, so this counter advances exactly once after each successful rename.
+    pub settings_generation: Arc<Mutex<u64>>,
+    /// V4 A91: settings-engine panic containment. Once faulted, ordinary settings work is
+    /// rejected until the main-window migration/reconcile path proves a durable rebuild.
+    settings_fault: Arc<Mutex<tauron_host::FaultBoundary>>,
     /// **只写不读**的兼容通知日志（R8 之前的 `host_notify` 产物）。
     ///
     /// ⚠️ **接入状态：没有任何命令返回它**——`host_notify` 返回 `void`，
@@ -1928,6 +2407,10 @@ pub struct SubstrateState {
     /// 交给插件运行时——普通字段无法在事后注入，会让底座命令读到「没注入写回口」的
     /// 副本，对账静默失效。
     pub plugin_flags: Arc<std::sync::OnceLock<Arc<dyn PluginFlagSink>>>,
+    /// V4 A97 process sandbox descriptor supplied by the installed plugin runtime.
+    /// Bottom-only hosts keep this unset; multi-plugin hosts inject it from the same ProcSpawner
+    /// that performs spawn, so capability reporting cannot drift from the execution path.
+    pub process_sandbox: Arc<std::sync::OnceLock<tauron_proc::ProcessSandboxDescriptor>>,
     /// **窗口能力**（R8 §1）：平台部分的可替换实现。
     ///
     /// 与 [`Self::plugin_flags`] 的 `OnceLock` **不同**，这里是普通 `pub` 字段：
@@ -1951,6 +2434,8 @@ pub struct SubstrateState {
     pub fs_allowed_roots: Arc<Vec<PathBuf>>,
     /// **HTTP 能力**（R9）：缺省 = [`UnavailableHttpSink`]（诚实降级）。
     pub http_sink: Arc<dyn HttpSink>,
+    /// Parsed/validated V4 network scope shared with the concrete provider.
+    pub http_policy: Arc<tauron_host::NetworkPolicy>,
     /// **更新通道能力**（R9）：缺省 = [`DistributeUpdaterSink::unconfigured`]。
     pub updater_sink: Arc<dyn UpdaterSink>,
     /// **主题注册表**（任务二：接通孤儿 crate `tauron-theme`）。
@@ -2074,6 +2559,8 @@ pub struct RuntimeHealth {
     /// 命令会再牵动能力表/授权档位/TS 镜像一整套面。要按插件看回收情况目前做不到
     /// （表里只留全局计数），如实标注。
     pub reap: ReapStats,
+    /// V4 A103 canonical liveness/readiness/degradation report.
+    pub health: tauron_host::HealthReport,
 }
 
 /// 进程插件运行时：可注入启动面 + 崩溃窗口计数。
@@ -2098,6 +2585,11 @@ impl ProcRuntime {
     /// 启动面（生产 = `std::process::Command`）。
     pub fn spawner(&self) -> &Arc<dyn ProcSpawner> {
         &self.spawner
+    }
+
+    /// V4 A97 sandbox enforcement from the exact spawner used for process execution.
+    pub fn sandbox_descriptor(&self) -> tauron_proc::ProcessSandboxDescriptor {
+        self.spawner.sandbox_descriptor()
     }
 
     /// 崩溃预算（窗口秒数 + 窗口内允许的崩溃次数上限）。
@@ -2195,6 +2687,7 @@ struct InstallRuntimeConfig {
     root: PathBuf,
     signing_keys: std::collections::BTreeMap<String, Vec<u8>>,
     acl_signing_key: Option<Vec<u8>>,
+    trusted_time_provider: Option<Arc<dyn tauron_host::TrustedTimeProvider>>,
 }
 
 impl core::ops::Deref for PluginRuntimeState {
@@ -2331,6 +2824,28 @@ impl SubstrateState {
 
         let notify_store = NotifyStore::new(512).expect("NotifyStore::new(512) should succeed");
 
+        // V4 A87: the same durable data directory is the canonical owner for recovery + settings.
+        // Acquire a real OS-backed writer lease before reading or mutating any persistent state.
+        // A second process therefore fails at construction instead of racing on JSON/marker files.
+        let storage_writer_lease = cfg.recovery_data_dir.as_ref().map(|dir| {
+            let namespace = tauron_host::StorageNamespace {
+                tenant: "local".into(),
+                application: "tauron-substrate".into(),
+                principal: "durable-state".into(),
+            };
+            let owner = format!("pid:{}", std::process::id());
+            Arc::new(
+                tauron_host::PersistentWriterLease::acquire(
+                    &dir.join(".tauron-locks"),
+                    namespace,
+                    &owner,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("[tauron] durable-state single-writer lease rejected startup: {error}")
+                }),
+            )
+        });
+
         let mut store = match cfg.recovery_data_dir.clone() {
             Some(dir) => RecoveryStore::new(dir),
             None => RecoveryStore::disabled(),
@@ -2351,15 +2866,28 @@ impl SubstrateState {
         // 设置落盘：与恢复标记共用数据目录。读不回来（首次启动 / 文件损坏）时
         // 保留空文档并**如实记录**——不静默吞掉，也不因为一个坏文件拒绝启动。
         let settings_path = cfg.recovery_data_dir.as_ref().map(|d| d.join(HOST_SETTINGS_FILE));
+        let mut settings_generation = 0;
         if let Some(path) = settings_path.as_ref() {
             match load_settings_doc(path) {
-                Ok(Some(entries)) => settings.restore(&entries),
+                Ok(Some((entries, generation))) => {
+                    settings.restore(&entries);
+                    settings_generation = generation;
+                }
                 Ok(None) => {}
-                Err(e) => eprintln!(
-                    "[tauron] 设置文档 {} 读回失败，本轮以空文档启动：{}",
-                    path.display(),
-                    e.message
-                ),
+                Err(e) => {
+                    if cfg.deployment_mode == tauron_host::DeploymentMode::Production {
+                        panic!(
+                            "[tauron] production settings durable-state validation failed for {}: {}",
+                            path.display(),
+                            e.message
+                        );
+                    }
+                    eprintln!(
+                        "[tauron] 设置文档 {} 完整性失败，本轮以空文档降级启动：{}",
+                        path.display(),
+                        e.message
+                    );
+                }
             }
         }
 
@@ -2368,9 +2896,12 @@ impl SubstrateState {
             service_startup_order: Arc::new(service_startup_order),
             service_shutdown_order: Arc::new(service_shutdown_order),
             bus: Arc::new(Mutex::new(EventBus::default())),
+            storage_writer_lease,
             settings: Arc::new(Mutex::new(settings)),
             settings_write_lock: Arc::new(Mutex::new(())),
             settings_path,
+            settings_generation: Arc::new(Mutex::new(settings_generation)),
+            settings_fault: Arc::new(Mutex::new(tauron_host::FaultBoundary::new("settings"))),
             notifications: Arc::new(Mutex::new(Vec::new())),
             notify_store: Arc::new(Mutex::new(notify_store)),
             notify_sink: Arc::new(std::sync::OnceLock::new()),
@@ -2384,6 +2915,7 @@ impl SubstrateState {
             })),
             subscription_groups: Arc::new(Mutex::new(std::collections::HashMap::new())),
             plugin_flags: Arc::new(std::sync::OnceLock::new()),
+            process_sandbox: Arc::new(std::sync::OnceLock::new()),
             // R8：三类平台能力的**降级缺省**。宿主（`tauri.rs`）在装配时替换为
             // Tauri 实现；不替换 = 进程内留痕 / 取消 / 无 OS 注册（如实降级）。
             window_sink: Arc::new(MemoryWindowSink::new()),
@@ -2399,6 +2931,7 @@ impl SubstrateState {
                 cfg.fs_allowed_roots.iter().filter_map(|p| p.canonicalize().ok()).collect(),
             ),
             http_sink: Arc::new(UnavailableHttpSink),
+            http_policy: Arc::new(cfg.http_policy.clone()),
             updater_sink: Arc::new(DistributeUpdaterSink::unconfigured()),
             themes: Arc::new(Mutex::new(tauron_theme::ThemeRegistry::default())),
         }
@@ -2454,6 +2987,11 @@ impl PluginRuntimeState {
         cfg: AdapterConfig,
         spawner: Arc<dyn ProcSpawner>,
     ) -> Self {
+        let sandbox_descriptor = spawner.sandbox_descriptor();
+        if let Err(error) = cfg.validate_process_runtime_for_start(&sandbox_descriptor) {
+            panic!("[tauron] {error}");
+        }
+
         let registry = Arc::new(Registry::new(cfg.registry.unwrap_or_default()));
         // 把租约回收接到进程执行器（P0-2 缺口一）：卸载/清除/崩溃换新都必须**真的**
         // 终止 sidecar，否则留下没人认领的孤儿进程。未注入时核心仍会摘表项，
@@ -2477,6 +3015,11 @@ impl PluginRuntimeState {
             );
         }
         let proc_runtime = Arc::new(ProcRuntime::new(spawner));
+        if substrate.process_sandbox.set(sandbox_descriptor).is_err() {
+            eprintln!(
+                "[tauron] 底座已注入 process sandbox descriptor；本次插件运行时不会覆盖既有事实"
+            );
+        }
         let deliveries = Self::default_deliveries(&substrate, &registry, &proc_runtime);
         Self {
             substrate,
@@ -2489,6 +3032,7 @@ impl PluginRuntimeState {
                 root,
                 signing_keys: cfg.plugin_signing_keys,
                 acl_signing_key: cfg.acl_signing_key,
+                trusted_time_provider: cfg.trusted_time_provider,
             }),
             #[cfg(feature = "plugin-install")]
             install_reviews: Arc::new(Mutex::new(HashMap::new())),
@@ -2519,10 +3063,13 @@ impl PluginRuntimeState {
             DeliveryKind::Process,
             Box::new(ProcessCallDelivery::new(proc_runtime.clone(), registry.clone())),
         );
-        // 任务二（接通 tauron-wasm）：Wasm 形态不再落 `UnwiredDelivery`——
-        // 投递路径现在**真的经过** `tauron-wasm` 的配置/ABI/崩溃预算校验层，
-        // 但执行层无运行时，仍诚实返回 `delivered: false`（详见模块头）。
-        map.insert(DeliveryKind::Wasm, Box::new(WasmCallDelivery::new(registry.clone())));
+        #[cfg(feature = "runtime-wasm-broker")]
+        {
+            // Broker feature only wires validation/delivery metadata. The actual WASM
+            // engine remains an on-demand runtime pack and must still report unsupported
+            // until that engine is installed/ready.
+            map.insert(DeliveryKind::Wasm, Box::new(WasmCallDelivery::new(registry.clone())));
+        }
         map
     }
 
@@ -3242,6 +3789,14 @@ fn registry_install_inner(
         let _ = std::fs::remove_dir_all(&temp_dir);
         return Err(error);
     }
+    if let Err(error) = write_plugin_ui_activation(
+        &temp_dir,
+        &manifest,
+        config.acl_signing_key.as_deref().unwrap_or_default(),
+    ) {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(error);
+    }
     std::fs::rename(&temp_dir, &final_dir).map_err(|e| {
         let _ = std::fs::remove_dir_all(&temp_dir);
         HostError::new(ErrorCode::E_INSTALL_FAILED, format!("安装目录原子提交失败：{e}"))
@@ -3319,9 +3874,25 @@ fn read_verified_package(
     let public_key = config.signing_keys.get(&envelope.kid).ok_or_else(|| {
         HostError::new(ErrorCode::E_INSTALL_FAILED, format!("未信任的签名 kid `{}`", envelope.kid))
     })?;
-    let (verified, manifest) =
+    let verification = if let Some(provider) = config.trusted_time_provider.as_deref() {
+        tauron_market::package_signature::verify_tpkg_reader_with_time(
+            &mut archive,
+            &sidecar,
+            public_key,
+            provider,
+        )
+    } else if state.deployment_mode == tauron_host::DeploymentMode::Production {
+        return Err(HostError::new(
+            ErrorCode::E_INSTALL_FAILED,
+            "production plugin installation requires a currently trusted time provider",
+        ));
+    } else {
+        // Development/Test compatibility: preserve the pre-A100 local-clock behavior when the
+        // host has not opted into a trusted-time provider.
         tauron_market::package_signature::verify_tpkg_reader(&mut archive, &sidecar, public_key)
-            .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, e.to_string()))?;
+    };
+    let (verified, manifest) =
+        verification.map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, e.to_string()))?;
     {
         use std::io::{Seek, SeekFrom};
         archive.seek(SeekFrom::Start(0)).map_err(|e| {
@@ -3737,9 +4308,38 @@ pub fn cmd_call_plugin(
     cmd: &str,
     args: serde_json::Value,
 ) -> HostResult<ProviderResult<PendingCall>> {
+    cmd_call_plugin_with_parent(state, caller, target, cmd, args, None)
+}
+
+/// V4 A77 contextual cross-principal call. Legacy callers omit parent_call_id and become roots.
+pub fn cmd_call_plugin_with_parent(
+    state: &PluginRuntimeState,
+    caller: &str,
+    target: &str,
+    cmd: &str,
+    args: serde_json::Value,
+    parent_call_id: Option<&str>,
+) -> HostResult<ProviderResult<PendingCall>> {
     guard("call_plugin", || {
-        let call = state.registry.call_begin_cross(caller, target, caller, cmd, args)?;
-        state.deliver_call(&call)
+        let call = state.registry.call_begin_cross_with_parent(
+            caller,
+            target,
+            caller,
+            cmd,
+            args,
+            parent_call_id,
+        )?;
+        match state.deliver_call(&call) {
+            Ok(ProviderResult::Value(value)) => Ok(ProviderResult::Value(value)),
+            Ok(ProviderResult::Unsupported(body)) => {
+                let _ = state.registry.call_cancel(&call.call_id);
+                Ok(ProviderResult::Unsupported(body))
+            }
+            Err(error) => {
+                let _ = state.registry.call_cancel(&call.call_id);
+                Err(error)
+            }
+        }
     })?
 }
 
@@ -3922,6 +4522,25 @@ pub fn cmd_stream_write(
     })?
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamCredit {
+    pub stream_id: String,
+    pub credit_bytes: usize,
+}
+
+pub fn cmd_stream_grant(
+    state: &PluginRuntimeState,
+    subscriber: &str,
+    stream_id: &str,
+    bytes: usize,
+) -> HostResult<StreamCredit> {
+    guard("stream_grant", || {
+        let credit_bytes = state.registry.stream_grant(stream_id, subscriber, bytes)?;
+        Ok(StreamCredit { stream_id: stream_id.to_string(), credit_bytes })
+    })?
+}
+
 /// `host_stream_close`：发终帧并使句柄失效（self 档）。
 ///
 /// `kind` 只接受 `end` / `error`（闭集）：`data` 不是终帧，用它关流会让接收方
@@ -4007,6 +4626,18 @@ pub fn cmd_runtime_spawn(
     profile: &RuntimeSpawnProfile,
 ) -> HostResult<RuntimeHandle> {
     guard("runtime_spawn", || {
+        if state.deployment_mode == tauron_host::DeploymentMode::Production
+            && !matches!(
+                state.proc_runtime.sandbox_descriptor().enforcement,
+                tauron_proc::ProcessSandboxEnforcement::Hard
+            )
+        {
+            return Err(HostError::new(
+                ErrorCode::E_STATE_INVALID_TRANSITION,
+                "production runtime spawn requires hard ProcessSandboxProvider enforcement",
+            ));
+        }
+
         let id = PluginId::new(plugin_id)?;
         // 条目快照在 `runtime` 锁**之外**取（锁序 `pending → streams → runtime`；
         // `entries` 不参与该链，先取完再进 runtime 域，绝不反向）。
@@ -4236,6 +4867,38 @@ fn refuse_exhausted_crash_budget(
 /// 返回里带**全局**的租约回收留痕（`reap`）：终止失败的痕迹必须能被宿主 UI 看到，
 /// 否则"不静默吞"只是写在注释里。挂在 health 上而不是新开命令，是为了不再牵动
 /// 能力表/授权档位/TS 镜像（`RuntimeHealth` 本就是这条命令的既有返回）。
+fn runtime_health_report(
+    status: tauron_proc::ProcessStatus,
+    lifecycle: Option<tauron_host::lifecycle::State>,
+    crashes: u32,
+) -> tauron_host::HealthReport {
+    match status {
+        tauron_proc::ProcessStatus::Alive => match lifecycle {
+            Some(tauron_host::lifecycle::State::Running) => {
+                if crashes == 0 {
+                    tauron_host::HealthReport::ready()
+                } else {
+                    tauron_host::HealthReport::degraded(format!(
+                        "runtime is ready but has {crashes} recent crash(es) in its budget window"
+                    ))
+                }
+            }
+            Some(state) => tauron_host::HealthReport::alive_but_not_ready(format!(
+                "process is alive but plugin lifecycle is {state}"
+            )),
+            None => tauron_host::HealthReport::alive_but_not_ready(
+                "process is alive but plugin registry entry is missing",
+            ),
+        },
+        tauron_proc::ProcessStatus::Exited => {
+            tauron_host::HealthReport::dead("sidecar process has exited")
+        }
+        tauron_proc::ProcessStatus::Unknown => tauron_host::HealthReport::unknown(
+            "sidecar liveness could not be proven by the process provider",
+        ),
+    }
+}
+
 pub fn cmd_runtime_health(state: &PluginRuntimeState, lease: &str) -> HostResult<RuntimeHealth> {
     guard("runtime_health", || {
         let entry = state.registry.runtime_lease(lease)?;
@@ -4251,13 +4914,21 @@ pub fn cmd_runtime_health(state: &PluginRuntimeState, lease: &str) -> HostResult
             deliver_runtime_crash(state, &entry.plugin_id);
         }
 
+        let crashes = state.proc_runtime.crash_count(&entry.plugin_id);
+        let lifecycle = PluginId::new(&entry.plugin_id)
+            .ok()
+            .and_then(|id| state.registry.find(&id))
+            .map(|plugin| plugin.state.state);
+        let health = runtime_health_report(status, lifecycle, crashes);
+
         Ok(RuntimeHealth {
             alive,
             status,
             pid: entry.pid,
-            crashes: state.proc_runtime.crash_count(&entry.plugin_id),
+            crashes,
             consecutive_failures: state.recovery.lock().counter().consecutive_failures,
             reap: state.registry.runtime_reap_stats(),
+            health,
         })
     })?
 }
@@ -4341,6 +5012,13 @@ pub fn cmd_resource_stats(state: &PluginRuntimeState) -> HostResult<serde_json::
                 "streamsLimit": tauron_host::stream::MAX_STREAMS_PER_PLUGIN,
                 "subscriptionsLimit": tauron_host::eventbus::MAX_SUBSCRIPTIONS_PER_PLUGIN,
                 "plugins": plugin_rows
+            },
+            "faults": {
+                "settings": {
+                    "state": state.settings_fault.lock().state(),
+                    "generation": state.settings_fault.lock().generation(),
+                    "lastFault": state.settings_fault.lock().last_fault().cloned()
+                }
             }
         }))
     })?
@@ -4424,9 +5102,20 @@ pub fn cmd_events_publish(
     topic: &str,
     payload: serde_json::Value,
 ) -> HostResult<PublishResult> {
+    cmd_events_publish_with_causation(state, publisher, topic, payload, None)
+}
+
+/// V4 A78 event publication with an optional parent causation context.
+pub fn cmd_events_publish_with_causation(
+    state: &SubstrateState,
+    publisher: &str,
+    topic: &str,
+    payload: serde_json::Value,
+    causation: Option<&tauron_host::EventCausation>,
+) -> HostResult<PublishResult> {
     guard("events_publish", || {
         let bus = state.bus.lock();
-        bus.publish_request(publisher, topic, payload)
+        bus.publish_request_with_causation(publisher, topic, payload, causation)
     })?
 }
 
@@ -4449,6 +5138,56 @@ pub fn cmd_events_unsubscribe(state: &SubstrateState, token: &str) -> HostResult
         let bus = state.bus.lock();
         bus.unsubscribe(token)
     })?
+}
+
+/// 一条 EventBus 私有 topic 审批事实。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EventApproval {
+    pub subscriber: String,
+    pub topic: String,
+}
+
+/// 主窗批准插件订阅私有 topic。
+pub fn cmd_events_approve_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    subscriber: &str,
+    topic: &str,
+) -> HostResult<()> {
+    require_main_window(caller, "host_events_approve")?;
+    if subscriber.trim().is_empty() || topic.trim().is_empty() {
+        return Err(HostError::new(ErrorCode::E_AUTH_DENIED, "subscriber 与 topic 均不可为空"));
+    }
+    guard("events_approve", || state.bus.lock().approve(subscriber, topic))
+}
+
+/// 主窗撤销插件私有 topic 审批。幂等；返回是否真实删除。
+pub fn cmd_events_revoke_as(
+    caller: &Caller,
+    state: &SubstrateState,
+    subscriber: &str,
+    topic: &str,
+) -> HostResult<bool> {
+    require_main_window(caller, "host_events_revoke")?;
+    guard("events_revoke", || state.bus.lock().revoke(subscriber, topic))
+}
+
+/// 主窗读取全部 EventBus 审批事实。
+pub fn cmd_events_approvals_as(
+    caller: &Caller,
+    state: &SubstrateState,
+) -> HostResult<Vec<EventApproval>> {
+    require_main_window(caller, "host_events_approvals")?;
+    guard("events_approvals", || {
+        state
+            .bus
+            .lock()
+            .approvals()
+            .into_iter()
+            .map(|(subscriber, topic)| EventApproval { subscriber, topic })
+            .collect()
+    })
 }
 
 /// 按订阅者回收多选择器订阅的分组登记（§8-3 零悬挂）。
@@ -4503,6 +5242,7 @@ pub const HOST_SETTINGS_SCHEMA_V1: &str = "1.0.0";
 
 /// 设置文档的落盘文件名（放在宿主数据目录下，与恢复标记同目录）。
 pub const HOST_SETTINGS_FILE: &str = "host-settings.json";
+const HOST_SETTINGS_DURABLE_SCHEMA: &str = "tauron.host-settings/2";
 
 /// 从磁盘读回设置文档。
 ///
@@ -4510,9 +5250,9 @@ pub const HOST_SETTINGS_FILE: &str = "host-settings.json";
 /// 或解析不了（**不静默当成空文档**——那会让用户以为设置还在，其实被清了）。
 fn load_settings_doc(
     path: &std::path::Path,
-) -> HostResult<Option<Vec<(String, tauron_settings::PluginState)>>> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
+) -> HostResult<Option<(Vec<(String, tauron_settings::PluginState)>, u64)>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
             return Err(HostError::new(
@@ -4521,11 +5261,39 @@ fn load_settings_doc(
             ));
         }
     };
-    let entries: Vec<(String, tauron_settings::PluginState)> = serde_json::from_str(&text)
-        .map_err(|e| {
-            HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("设置文档 JSON 解析失败：{e}"))
-        })?;
-    Ok(Some(entries))
+
+    match tauron_host::decode_durable::<Vec<(String, tauron_settings::PluginState)>>(&bytes) {
+        Ok(envelope) => {
+            if envelope.schema != HOST_SETTINGS_DURABLE_SCHEMA {
+                return Err(HostError::new(
+                    ErrorCode::E_INVALID_MANIFEST,
+                    format!("设置文档 durable schema 不支持：{}", envelope.schema),
+                ));
+            }
+            Ok(Some((envelope.payload, envelope.generation)))
+        }
+        Err(durable_error) => {
+            // One-way legacy reader: pre-V4 files were a raw Vec<(namespace, PluginState)>.
+            // A corrupted V4 envelope cannot accidentally validate as this shape.
+            match serde_json::from_slice::<Vec<(String, tauron_settings::PluginState)>>(&bytes) {
+                Ok(entries) => Ok(Some((entries, 0))),
+                Err(legacy_error) => {
+                    let quarantined =
+                        path.with_extension(format!("json.corrupt-{}", crate::recovery::now_ms()));
+                    let quarantine_note = match std::fs::rename(path, &quarantined) {
+                        Ok(()) => format!("；已隔离到 {}", quarantined.display()),
+                        Err(error) => format!("；隔离失败：{error}"),
+                    };
+                    Err(HostError::new(
+                        ErrorCode::E_INVALID_MANIFEST,
+                        format!(
+                            "设置文档完整性校验失败：durable={durable_error}; legacy={legacy_error}{quarantine_note}"
+                        ),
+                    ))
+                }
+            }
+        }
+    }
 }
 
 /// 把设置文档写回磁盘（原子写：先写临时文件再 rename）。
@@ -4534,12 +5302,23 @@ fn load_settings_doc(
 /// 这里返回 `Err`，由 [`cmd_settings_set`] 冒泡给前端——不静默吞掉。
 fn persist_settings_doc(state: &SubstrateState) -> HostResult<()> {
     let Some(path) = state.settings_path.as_ref() else {
-        // 未配置数据目录（测试 / 底座-only 宿主）：纯内存，不是错误。
         return Ok(());
     };
     let entries = state.settings.lock().snapshot_all();
-    let json = serde_json::to_string_pretty(&entries).map_err(|e| {
-        HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("设置文档序列化失败：{e}"))
+    let next_generation = state.settings_generation.lock().saturating_add(1);
+    let envelope =
+        tauron_host::DurableEnvelope::seal(HOST_SETTINGS_DURABLE_SCHEMA, next_generation, entries)
+            .map_err(|e| {
+                HostError::new(
+                    ErrorCode::E_INVALID_MANIFEST,
+                    format!("设置文档 durable envelope 构造失败：{e}"),
+                )
+            })?;
+    let bytes = tauron_host::encode_durable(&envelope).map_err(|e| {
+        HostError::new(
+            ErrorCode::E_INVALID_MANIFEST,
+            format!("设置文档 durable envelope 编码失败：{e}"),
+        )
     })?;
 
     if let Some(dir) = path.parent() {
@@ -4550,13 +5329,23 @@ fn persist_settings_doc(state: &SubstrateState) -> HostResult<()> {
             )
         })?;
     }
-    // 原子写：临时文件 + rename，避免写到一半断电留下半截 JSON
-    //（下次启动会因解析失败而丢掉**全部**设置）。
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json.as_bytes()).map_err(|e| {
+    let mut file = std::fs::File::create(&tmp).map_err(|e| {
         HostError::new(
             ErrorCode::E_INVALID_MANIFEST,
             format!("设置文档写入失败 {}：{e}", tmp.display()),
+        )
+    })?;
+    std::io::Write::write_all(&mut file, &bytes).map_err(|e| {
+        HostError::new(
+            ErrorCode::E_INVALID_MANIFEST,
+            format!("设置文档写入失败 {}：{e}", tmp.display()),
+        )
+    })?;
+    file.sync_all().map_err(|e| {
+        HostError::new(
+            ErrorCode::E_INVALID_MANIFEST,
+            format!("设置文档同步失败 {}：{e}", tmp.display()),
         )
     })?;
     std::fs::rename(&tmp, path).map_err(|e| {
@@ -4565,6 +5354,7 @@ fn persist_settings_doc(state: &SubstrateState) -> HostResult<()> {
             format!("设置文档落位失败 {}：{e}", path.display()),
         )
     })?;
+    *state.settings_generation.lock() = next_generation;
     Ok(())
 }
 
@@ -4648,7 +5438,12 @@ fn install_host_settings_schema(store: &mut SettingsStore) {
             HOST_SETTINGS_SCHEMA_V1,
             HOST_SETTINGS_SCHEMA_V2,
             migrate_host_settings_v1_to_v2,
-        ),
+        )
+        .with_contract(MigrationContract::new(
+            false, // no reverse function is shipped
+            false, // v1 readers do not understand v2 escaped keys
+            true,  // retain the pre-migration snapshot until probation/commit
+        )),
     );
 }
 
@@ -4658,6 +5453,85 @@ fn install_host_settings_schema(store: &mut SettingsStore) {
 /// 这与 `tauron-settings` 自己的约定一致（见该 crate 的模块文档）。
 fn settings_to_host_error(e: SettingsError) -> HostError {
     HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("设置被拒：{e}"))
+}
+
+fn settings_fault_to_host_error(error: tauron_host::FaultError) -> HostError {
+    HostError::new(
+        ErrorCode::E_HOST_PANIC,
+        format!(
+            "settings fault boundary rejected work: {error}; main window must run host_settings_migrate to reconcile"
+        ),
+    )
+}
+
+fn run_settings_boundary<T>(
+    state: &SubstrateState,
+    operation: &str,
+    f: impl FnOnce() -> HostResult<T>,
+) -> HostResult<T> {
+    match state.settings_fault.lock().run(operation, f) {
+        Ok(result) => result,
+        Err(error) => Err(settings_fault_to_host_error(error)),
+    }
+}
+
+/// V4 A91 deterministic repair path for the Settings Engine.
+///
+/// A panic may have happened after an in-memory mutation. The only state we trust for recovery is
+/// the durable envelope protected by the existing checksum/generation contract. If persistence is
+/// disabled, consistency cannot be proven, so the boundary remains quarantined instead of
+/// pretending recovery succeeded.
+fn reconcile_settings_boundary(state: &SubstrateState) -> HostResult<()> {
+    {
+        let mut boundary = state.settings_fault.lock();
+        if boundary.state() == tauron_host::FaultState::Ready {
+            return Ok(());
+        }
+        boundary.begin_reconcile().map_err(settings_fault_to_host_error)?;
+    }
+
+    let attempt = guard("settings_reconcile", || -> HostResult<()> {
+        let _write = state.settings_write_lock.lock();
+        let path = state.settings_path.as_ref().ok_or_else(|| {
+            HostError::new(
+                ErrorCode::E_HOST_PANIC,
+                "settings boundary cannot be reconciled without durable state".to_string(),
+            )
+        })?;
+
+        let mut rebuilt = SettingsStore::new();
+        install_host_settings_schema(&mut rebuilt);
+        let generation = match load_settings_doc(path)? {
+            Some((entries, generation)) => {
+                rebuilt.restore(&entries);
+                generation
+            }
+            None => 0,
+        };
+
+        *state.settings.lock() = rebuilt;
+        *state.settings_generation.lock() = generation;
+        Ok(())
+    });
+
+    let result = match attempt {
+        Ok(result) => result,
+        Err(error) => Err(error),
+    };
+    let mut boundary = state.settings_fault.lock();
+    match result {
+        Ok(()) => {
+            boundary.reconcile_succeeded();
+            Ok(())
+        }
+        Err(error) => {
+            boundary.reconcile_failed();
+            Err(HostError::new(
+                ErrorCode::E_HOST_PANIC,
+                format!("settings fault reconcile failed and boundary was quarantined: {error}"),
+            ))
+        }
+    }
 }
 
 /// **接手一份旧版（v1）宿主设置文档**（R7-2：settings 可迁移）。
@@ -4692,9 +5566,16 @@ pub fn host_settings_adopt_legacy(
 ///
 /// 全有或全无：链路缺失或迁移结果过不了 schema 校验时用户层一个字节都不改，
 /// 返回 `E_INVALID_MANIFEST`（不新增错误码）。
+fn host_settings_migrate_transaction(state: &SubstrateState) -> HostResult<MigrationReceipt> {
+    state
+        .settings
+        .lock()
+        .migrate_transactional(HOST_SETTINGS_NAMESPACE, HOST_SETTINGS_SCHEMA_V2)
+        .map_err(settings_to_host_error)
+}
+
 pub fn host_settings_migrate(state: &SubstrateState) -> HostResult<usize> {
-    let mut store = state.settings.lock();
-    store.migrate(HOST_SETTINGS_NAMESPACE, HOST_SETTINGS_SCHEMA_V2).map_err(settings_to_host_error)
+    Ok(host_settings_migrate_transaction(state)?.steps())
 }
 
 /// 当前宿主设置的数据版本（诊断用；`None` = 既无数据也无标注）。
@@ -4712,13 +5593,13 @@ pub fn host_settings_revision(state: &SubstrateState) -> u64 {
 /// **线形不变**（前端契约）：入参 `key: string`，返回任意 JSON；未写过的键
 /// 返回 `Null`（不是报错）。读路径不校验 schema——缺键不是错误。
 pub fn cmd_settings_get(state: &SubstrateState, key: &str) -> HostResult<serde_json::Value> {
-    guard("settings_get", || {
+    run_settings_boundary(state, "settings_get", || {
         let path = settings_path(key);
         let store = state.settings.lock();
         let value =
             store.get_key(HOST_SETTINGS_NAMESPACE, &path).map_err(settings_to_host_error)?;
         Ok(value.unwrap_or(serde_json::Value::Null))
-    })?
+    })
 }
 
 /// `host_settings_set`：写入设置。
@@ -4731,7 +5612,7 @@ pub fn cmd_settings_set(
     key: &str,
     value: serde_json::Value,
 ) -> HostResult<()> {
-    guard("settings_set", || {
+    run_settings_boundary(state, "settings_set", || {
         if key.trim().is_empty() {
             return Err(HostError::new(
                 ErrorCode::E_INVALID_MANIFEST,
@@ -4760,7 +5641,7 @@ pub fn cmd_settings_set(
         // Watchers only observe a revision after durable persistence succeeded.
         state.settings.lock().publish_committed_change(event);
         Ok(())
-    })?
+    })
 }
 
 /// `host_settings_adopt_legacy`：把宿主磁盘上读到的旧版设置文档交给 Store。
@@ -4772,11 +5653,8 @@ pub fn cmd_settings_set(
 /// **线形**：入参 `doc: object`（键 = 设置键，值 = 设置值），返回 `()`。
 /// 非对象文档返回 `E_INVALID_MANIFEST`（不静默退化成空文档）。写入后数据版本
 /// 标注为 [`HOST_SETTINGS_SCHEMA_V1`]，[`cmd_settings_migrate`] 才知道起点。
-pub fn cmd_settings_adopt_legacy(
-    state: &SubstrateState,
-    doc: serde_json::Value,
-) -> HostResult<()> {
-    guard("settings_adopt_legacy", || {
+pub fn cmd_settings_adopt_legacy(state: &SubstrateState, doc: serde_json::Value) -> HostResult<()> {
+    run_settings_boundary(state, "settings_adopt_legacy", || {
         let _write = state.settings_write_lock.lock();
         let before = state.settings.lock().snapshot_all();
         host_settings_adopt_legacy(state, doc)?;
@@ -4785,7 +5663,7 @@ pub fn cmd_settings_adopt_legacy(
             return Err(error);
         }
         Ok(())
-    })?
+    })
 }
 
 /// `host_settings_adopt_legacy` 的**带身份判定**版本（wire 层转调的就是它）。
@@ -4813,18 +5691,19 @@ pub fn cmd_settings_adopt_legacy_as(
 /// 编译与用户数据改写，一旦 panic 必须是 `E_HOST_PANIC` 而不是把 panic  unwind
 /// 穿过 IPC 边界。
 pub fn cmd_settings_migrate(state: &SubstrateState) -> HostResult<usize> {
-    guard("settings_migrate", || {
+    reconcile_settings_boundary(state)?;
+    run_settings_boundary(state, "settings_migrate", || {
         let _write = state.settings_write_lock.lock();
-        let before = state.settings.lock().snapshot_all();
-        let steps = host_settings_migrate(state)?;
-        if steps > 0 {
+        let receipt = host_settings_migrate_transaction(state)?;
+        let steps = receipt.steps();
+        if receipt.changed() {
             if let Err(error) = persist_settings_doc(state) {
-                state.settings.lock().restore(&before);
+                state.settings.lock().rollback_migration(receipt);
                 return Err(error);
             }
         }
         Ok(steps)
-    })?
+    })
 }
 
 /// `host_settings_migrate` 的**带身份判定**版本（wire 层转调的就是它）。
@@ -5656,14 +6535,61 @@ pub fn cmd_recover_trial_enable(
             engine.register_plugin(id.as_str());
         }
         let phase_reconcile = reconcile_recovery_phase(state);
+
+        // Recovery safety policy takes precedence over action de-duplication. Once a plugin has
+        // exhausted its one-shot trial budget, a replay in the same incident must remain a hard
+        // E_PLUGIN_DISABLED rejection rather than being hidden as a de-duplicated success.
+        if state.recovery.lock().counter().trial_exhausted(id.as_str()) {
+            return Err(HostError::new(
+                ErrorCode::E_PLUGIN_DISABLED,
+                format!("插件 `{id}` 已试验失败，回落 disabled-by-safemode，不可再次试启"),
+            ));
+        }
+
         // 必须先取出结果再分支：`match state.recovery.lock().trial_enable(..)` 会让
         // 临时 guard 被临时值生命周期延长规则持有到整个 match 结束，于是错误分支里
         // 再次 `state.recovery.lock()` 就是自死锁（`parking_lot` 不重入，表现为
         // 空转而非挂起）。
+        // V4 A92: real RecoveryExecutor wiring. The incident sequence comes from the latest
+        // persisted failure context, so duplicate user clicks in one incident share a key while
+        // a later independent incident gets a new sequence.
+        let (action, should_execute) = {
+            let mut engine = state.recovery.lock();
+            let incident_seq =
+                engine.last_context().map(|entry| entry.ts).unwrap_or_else(recovery::now_ms);
+            let action = RecoveryAction {
+                plugin_id: id.as_str().to_string(),
+                action_kind: "trial-enable".to_string(),
+                idempotency_key: RecoveryAction::idempotency_key(
+                    id.as_str(),
+                    "trial-enable",
+                    incident_seq,
+                ),
+            };
+            let should_execute = engine.execute_action(&action).map_err(|e| {
+                HostError::new(
+                    ErrorCode::E_STATE_INVALID_TRANSITION,
+                    format!("恢复动作正在执行或不可开始：{e}"),
+                )
+            })?;
+            (action, should_execute)
+        };
+
+        if !should_execute {
+            let payload = recovery_boot_payload(state);
+            let mut result = payload.clone();
+            result["pluginId"] = serde_json::json!(id.as_str());
+            result["engineAction"] = serde_json::json!("trialEnable:deduplicated");
+            result["phaseReconcile"] = serde_json::to_value(phase_reconcile).unwrap_or_default();
+            return Ok(result);
+        }
+
+        let previous_plugin_state = state.recovery.lock().plugin_state(id.as_str());
         let trial = state.recovery.lock().trial_enable(id.as_str());
         match trial {
             Ok(()) => {}
             Err(tauron_recovery::RecoveryError::RestrictedInSafemode) => {
+                state.recovery.lock().abort_recovery();
                 let phase = state.recovery.lock().decide_boot_phase().as_str();
                 return Err(HostError::new(
                     ErrorCode::E_STATE_INVALID_TRANSITION,
@@ -5671,12 +6597,14 @@ pub fn cmd_recover_trial_enable(
                 ));
             }
             Err(tauron_recovery::RecoveryError::TrialExhausted(pid)) => {
+                state.recovery.lock().abort_recovery();
                 return Err(HostError::new(
                     ErrorCode::E_PLUGIN_DISABLED,
                     format!("插件 `{pid}` 已试验失败，回落 disabled-by-safemode，不可再次试启"),
                 ));
             }
             Err(e) => {
+                state.recovery.lock().abort_recovery();
                 return Err(HostError::new(
                     ErrorCode::E_STATE_INVALID_TRANSITION,
                     format!("试验性启用失败：{e}"),
@@ -5685,23 +6613,66 @@ pub fn cmd_recover_trial_enable(
         }
 
         // 试启成功后让注册表状态机跟着走 D28 试启迁移（§4.14：引擎负责判，
-        // 状态机负责执行）。插件已在运行则无需再动。注册表侧的守卫若拒绝
-        //（例如其独立试验预算已尽），以 `trialEnable:rejected` 如实回传——
-        // 下一次对账会按引擎判定再补发 `SafemodeExit` 收敛（引擎是权威，
-        // 注册表预算是纵深防御）。
-        let engine_action = if let Some(out) = state.registry.find(&id).map(|e| e.state.state) {
-            use tauron_host::lifecycle::State;
-            if out == State::Enabled || out == State::Running {
-                "alreadyEnabled".to_string()
-            } else {
-                match state.registry.report_event(&id, Event::TrialEnable) {
-                    Ok(o) => format!("trialEnable:{}", o.to.as_str()),
-                    Err(_) => "trialEnable:rejected".to_string(),
+        // 状态机负责执行）。外部副作用成功后才写 EffectRecord + commit action；
+        // 拒绝则 abort，允许同一 incident 的下一次显式请求安全重放。
+        // Apply the external registry effect. A TransitionOutcome with `illegal=true` is a
+        // rejection even though report_event itself returned Ok; treating it as committed would
+        // persist an EffectRecord for an effect that never happened.
+        let registry_effect: HostResult<(String, bool)> =
+            if let Some(out) = state.registry.find(&id).map(|e| e.state.state) {
+                use tauron_host::lifecycle::State;
+                if out == State::Enabled || out == State::Running {
+                    // Desired external state already exists; the recovery action is satisfied,
+                    // but this invocation did not create a new external effect.
+                    Ok(("alreadyEnabled".to_string(), false))
+                } else {
+                    match state.registry.report_event(&id, Event::TrialEnable) {
+                        Ok(o) if !o.illegal => Ok((format!("trialEnable:{}", o.to.as_str()), true)),
+                        Ok(o) => Err(HostError::new(
+                            ErrorCode::E_STATE_INVALID_TRANSITION,
+                            format!(
+                                "恢复试启被注册表状态机拒绝：{} -> {}",
+                                o.from.as_str(),
+                                o.to.as_str()
+                            ),
+                        )),
+                        Err(error) => Err(error),
+                    }
                 }
+            } else {
+                // Engine-only recovery remains supported for a plugin that is not yet in the
+                // runtime registry. There is no external effect to record in that case.
+                Ok(("notInRegistry".to_string(), false))
+            };
+
+        let (engine_action, external_effect_applied) = match registry_effect {
+            Ok(result) => result,
+            Err(error) => {
+                {
+                    let mut engine = state.recovery.lock();
+                    engine.rollback_trial_enable_if_unchanged(id.as_str(), previous_plugin_state);
+                    engine.abort_recovery();
+                }
+                persist_recovery_engine(state);
+                return Err(error);
             }
-        } else {
-            "notInRegistry".to_string()
         };
+
+        {
+            let mut engine = state.recovery.lock();
+            if external_effect_applied {
+                engine.record_effect(EffectRecord {
+                    effect_id: format!("registry:{}:{}", id.as_str(), action.idempotency_key),
+                    action_key: action.idempotency_key.clone(),
+                    ts: recovery::now_ms(),
+                });
+            }
+            engine.complete_recovery();
+        }
+
+        // Persist the action/effect ledger together with the recovery engine. This keeps
+        // deduplication valid across process restart, not only inside one in-memory session.
+        persist_recovery_engine(state);
 
         let payload = recovery_boot_payload(state);
         let mut result = payload.clone();
@@ -6085,34 +7056,48 @@ fn fs_unavailable() -> UnsupportedBody {
     )
 }
 
-/// **路径归属校验**：canonicalize 后必须落在某个允许根目录之内。
+/// V4 A95：把授权结果转换为“可信 root + portable relative path”。
 ///
-/// 防路径穿越（`..`）与符号链接逃逸：目标不存在时 canonicalize 其父目录再拼文件名。
-/// 拒绝时返回 [`ErrorCode::E_AUTH_DENIED`]。
-fn resolve_within_roots(roots: &[PathBuf], raw: &str) -> HostResult<PathBuf> {
-    if raw.trim().is_empty() {
-        return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "fs 路径不能为空".to_string()));
-    }
+/// 预检查只用于选择 root；真正 read/write/stat 在 Unix 通过 openat/O_NOFOLLOW
+/// 沿同一 root handle 执行，因此 check/use 期间替换 symlink 仍会被拒绝。
+fn scoped_within_roots(roots: &[PathBuf], raw: &str) -> HostResult<tauron_host::ScopedPath> {
     let candidate = PathBuf::from(raw);
-    let canonical = if candidate.exists() {
-        candidate.canonicalize().map_err(|e| fs_io_error("canonicalize", &candidate, e))?
-    } else {
-        let parent = candidate.parent().filter(|p| !p.as_os_str().is_empty()).ok_or_else(|| {
-            HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("fs 路径 `{raw}` 没有父目录"))
-        })?;
-        let file_name = candidate.file_name().ok_or_else(|| {
-            HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("fs 路径 `{raw}` 没有文件名"))
-        })?;
-        parent.canonicalize().map_err(|e| fs_io_error("canonicalize", parent, e))?.join(file_name)
-    };
-    if roots.iter().any(|r| canonical.starts_with(r)) {
-        Ok(canonical)
-    } else {
-        Err(HostError::new(
+    if !candidate.is_absolute() {
+        return Err(HostError::new(
             ErrorCode::E_AUTH_DENIED,
-            format!("fs 路径 `{raw}` 不在宿主允许根目录内（拒绝路径穿越）"),
-        ))
+            format!("fs 路径 `{raw}` 必须是允许 root 下的绝对路径"),
+        ));
     }
+
+    for root in roots {
+        if !candidate.starts_with(root) {
+            continue;
+        }
+        let relative = candidate.strip_prefix(root).map_err(|_| {
+            HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                format!("fs 路径 `{raw}` 无法转换为 root-relative path"),
+            )
+        })?;
+        let relative = if relative.as_os_str().is_empty() {
+            "."
+        } else {
+            relative.to_str().ok_or_else(|| {
+                HostError::new(
+                    ErrorCode::E_INVALID_MANIFEST,
+                    format!("fs 路径 `{raw}` 含无法在线协议表达的非 UTF-8 组件"),
+                )
+            })?
+        };
+        return tauron_host::ScopedPath::new(root.clone(), relative).map_err(|error| {
+            HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                format!("fs scoped path 拒绝 `{raw}`: {error}"),
+            )
+        });
+    }
+
+    Err(HostError::new(ErrorCode::E_AUTH_DENIED, format!("fs 路径 `{raw}` 不在宿主允许 root 内")))
 }
 
 /// `host_fs_read`：读取文本文件（允许根目录内；超限截断并如实标注）。
@@ -6126,11 +7111,11 @@ pub fn cmd_fs_read(
         if roots.is_empty() {
             return Ok(ProviderResult::Unsupported(fs_unavailable()));
         }
-        let resolved = resolve_within_roots(roots, path)?;
+        let scoped = scoped_within_roots(roots, path)?;
         let limit = max_bytes.unwrap_or(FS_MAX_READ_BYTES).min(FS_MAX_READ_BYTES);
-        let (bytes, truncated) = state.fs_sink.read(&resolved, limit)?;
+        let (bytes, truncated) = state.fs_sink.read(&scoped, limit)?;
         Ok(ProviderResult::Value(FsReadResult {
-            path: resolved.to_string_lossy().into_owned(),
+            path: scoped.display_path().to_string_lossy().into_owned(),
             text: String::from_utf8_lossy(&bytes).into_owned(),
             bytes: bytes.len() as u64,
             truncated,
@@ -6160,10 +7145,10 @@ pub fn cmd_fs_write(
         if roots.is_empty() {
             return Ok(ProviderResult::Unsupported(fs_unavailable()));
         }
-        let resolved = resolve_within_roots(roots, path)?;
-        let bytes = state.fs_sink.write(&resolved, text.as_bytes())?;
+        let scoped = scoped_within_roots(roots, path)?;
+        let bytes = state.fs_sink.write(&scoped, text.as_bytes())?;
         Ok(ProviderResult::Value(FsWriteResult {
-            path: resolved.to_string_lossy().into_owned(),
+            path: scoped.display_path().to_string_lossy().into_owned(),
             bytes,
         }))
     })?
@@ -6187,8 +7172,8 @@ pub fn cmd_fs_list(state: &SubstrateState, path: &str) -> HostResult<ProviderRes
         if roots.is_empty() {
             return Ok(ProviderResult::Unsupported(fs_unavailable()));
         }
-        let resolved = resolve_within_roots(roots, path)?;
-        state.fs_sink.list(&resolved).map(ProviderResult::Value)
+        let scoped = scoped_within_roots(roots, path)?;
+        state.fs_sink.list(&scoped).map(ProviderResult::Value)
     })?
 }
 
@@ -6209,8 +7194,8 @@ pub fn cmd_fs_stat(state: &SubstrateState, path: &str) -> HostResult<ProviderRes
         if roots.is_empty() {
             return Ok(ProviderResult::Unsupported(fs_unavailable()));
         }
-        let resolved = resolve_within_roots(roots, path)?;
-        state.fs_sink.stat(&resolved).map(ProviderResult::Value)
+        let scoped = scoped_within_roots(roots, path)?;
+        state.fs_sink.stat(&scoped).map(ProviderResult::Value)
     })?
 }
 
@@ -6235,8 +7220,8 @@ pub fn cmd_fs_mkdir(
         if roots.is_empty() {
             return Ok(ProviderResult::Unsupported(fs_unavailable()));
         }
-        let resolved = resolve_within_roots(roots, path)?;
-        state.fs_sink.mkdir(&resolved, recursive)?;
+        let scoped = scoped_within_roots(roots, path)?;
+        state.fs_sink.mkdir(&scoped, recursive)?;
         Ok(ProviderResult::Value(()))
     })?
 }
@@ -6259,8 +7244,8 @@ pub fn cmd_fs_remove(state: &SubstrateState, path: &str) -> HostResult<ProviderR
         if roots.is_empty() {
             return Ok(ProviderResult::Unsupported(fs_unavailable()));
         }
-        let resolved = resolve_within_roots(roots, path)?;
-        state.fs_sink.remove(&resolved)?;
+        let scoped = scoped_within_roots(roots, path)?;
+        state.fs_sink.remove(&scoped)?;
         Ok(ProviderResult::Value(()))
     })?
 }
@@ -6287,21 +7272,27 @@ fn validated_http_method(method: &str) -> HostResult<String> {
     }
 }
 
-/// URL scheme 白名单（仅 `http` / `https`）。
-fn validated_http_url(url: &str) -> HostResult<()> {
-    let u = url.trim();
-    if u.is_empty() {
-        return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "HTTP url 不能为空".to_string()));
-    }
-    let lower = u.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") {
-        Ok(())
-    } else {
-        Err(HostError::new(
-            ErrorCode::E_INVALID_MANIFEST,
-            format!("HTTP url `{url}` 非法：只接受 http/https scheme"),
-        ))
-    }
+fn authorize_http_url(
+    policy: &tauron_host::NetworkPolicy,
+    url: &str,
+) -> HostResult<tauron_host::AuthorizedUrl> {
+    policy.authorize_url(url).map_err(|error| {
+        let code = match error {
+            tauron_host::NetworkPolicyError::EmptyUrl
+            | tauron_host::NetworkPolicyError::InvalidUrl(_)
+            | tauron_host::NetworkPolicyError::SchemeDenied(_)
+            | tauron_host::NetworkPolicyError::HttpDenied
+            | tauron_host::NetworkPolicyError::EmbeddedCredentialsDenied
+            | tauron_host::NetworkPolicyError::HostMissing
+            | tauron_host::NetworkPolicyError::PortMissing(_)
+            | tauron_host::NetworkPolicyError::InvalidDomainRule(_)
+            | tauron_host::NetworkPolicyError::InvalidRedirectLimit => {
+                ErrorCode::E_INVALID_MANIFEST
+            }
+            _ => ErrorCode::E_AUTH_DENIED,
+        };
+        HostError::new(code, format!("HTTP network policy denied request: {error}"))
+    })
 }
 
 /// `host_http_request`：发起一次 HTTP 请求（主窗专属）。
@@ -6314,8 +7305,17 @@ pub fn cmd_http_request(
 ) -> HostResult<ProviderResult<HttpResponseSpec>> {
     guard("http_request", || {
         validated_http_method(&spec.method)?;
-        validated_http_url(&spec.url)?;
-        state.http_sink.request(spec)
+        authorize_http_url(&state.http_policy, &spec.url)?;
+        if state.http_sink.native_supported()
+            && state.http_sink.network_enforcement()
+                != tauron_host::NetworkEnforcement::RedirectAndDns
+        {
+            return Ok(ProviderResult::Unsupported(unsupported_body(
+                "HTTP provider does not enforce V4 redirect/DNS/private-network policy",
+                Some("use a provider with NetworkEnforcement::RedirectAndDns"),
+            )));
+        }
+        state.http_sink.request(spec, &state.http_policy)
     })?
 }
 
@@ -7429,19 +8429,19 @@ mod tests {
         let substrate = SubstrateState::with_adapter_config(&AdapterConfig::default());
         let base = cmd_host_capabilities(&substrate).unwrap();
         assert!(!base.plugin_runtime);
-        // 57 = 原 39 + R9 五域 15（menu 3 / tray 3 / fs 6 / http 1 / updater 2）
-        //      + 品牌/主题接通 3（host_theme_list / get / set；brand 原已存在）。
-        assert_eq!(base.commands.len(), 57);
+        // 命令数量必须由唯一清单推导；新增 substrate 命令时不得再维护第二份魔法数字。
+        assert_eq!(base.commands.len(), SUBSTRATE_COMMANDS.len());
         assert!(base.commands.contains(&"host_capabilities".to_string()));
 
         let plugin_runtime = CommandState::new();
         let full = cmd_host_capabilities(&plugin_runtime).unwrap();
         assert!(full.plugin_runtime);
         #[cfg(feature = "plugin-install")]
-        let expected = 78 + PLUGIN_INSTALL_COMMANDS.len();
+        let expected = SUBSTRATE_COMMANDS.len()
+            + PLUGIN_RUNTIME_COMMANDS.len()
+            + PLUGIN_INSTALL_COMMANDS.len();
         #[cfg(not(feature = "plugin-install"))]
-        // 78 = 60（0.4-A1 之前）+ R9 五域 15 + 品牌/主题接通 3。
-        let expected = 78;
+        let expected = SUBSTRATE_COMMANDS.len() + PLUGIN_RUNTIME_COMMANDS.len();
         assert_eq!(full.commands.len(), expected);
         assert_eq!(full.commands.iter().collect::<std::collections::HashSet<_>>().len(), expected);
         for domain in
@@ -7591,6 +8591,35 @@ mod tests {
         })
     }
 
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn explicit_suspicious_time_provider_blocks_install_before_side_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("plugins");
+        let (package, verifying_key) = signed_install_fixture(dir.path(), "com.install.time");
+        let mut signing_keys = std::collections::BTreeMap::new();
+        signing_keys.insert("fixture-key".to_string(), verifying_key.to_bytes().to_vec());
+        let state = PluginRuntimeState::with_adapter_config(
+            AdapterConfig {
+                plugin_install_dir: Some(install_root.clone()),
+                plugin_signing_keys: signing_keys,
+                acl_signing_key: Some(vec![0x5a; 32]),
+                ..AdapterConfig::default()
+            }
+            .with_trusted_time_provider(Arc::new(
+                tauron_host::SystemTimeProvider::new(tauron_host::TimeTrustState::Suspicious),
+            )),
+        );
+
+        let err =
+            cmd_registry_install_preview_as(&Caller::MainWindow, &state, package.to_str().unwrap())
+                .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_INSTALL_FAILED);
+        assert!(err.message.contains("时间不可受信"), "{}", err.message);
+        assert!(!install_root.join("com.install.time").exists());
+        assert!(state.registry.find(&PluginId::new("com.install.time").unwrap()).is_none());
+    }
+
     /// 解包防护（端到端回归锁）：条目数超上限的包必须被拒绝。
     ///
     /// **强制点不在适配层**——在 `read_verified_package` → `verify_tpkg` →
@@ -7715,6 +8744,9 @@ mod tests {
         assert!(std::path::Path::new(&installed.install_path).join("src/index.js").is_file());
         assert!(std::path::Path::new(&installed.install_path).join("index.html").is_file());
         assert!(install_root.join(".acl/com.install.e2e.acl.json").is_file());
+        assert!(std::path::Path::new(&installed.install_path)
+            .join(PLUGIN_UI_ACTIVATION_FILE)
+            .is_file());
 
         cmd_registry_admin_as(
             &Caller::MainWindow,
@@ -7723,6 +8755,8 @@ mod tests {
             RegistryAdminOp::Enable,
         )
         .unwrap();
+        let ui = installed_plugin_ui(&state, "com.install.e2e").unwrap();
+        assert_eq!(ui.entry.file_name().and_then(|name| name.to_str()), Some("index.html"));
         let pending =
             cmd_plugin_call(&state, "plugin-com.install.e2e", None, "hello", serde_json::json!({}))
                 .unwrap();
@@ -7741,6 +8775,105 @@ mod tests {
         assert!(!install_root.join("com.install.e2e").exists());
         assert!(!install_root.join(".acl/com.install.e2e.acl.json").exists());
         assert!(state.registry.find(&PluginId::new("com.install.e2e").unwrap()).is_none());
+    }
+
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn installed_plugin_ui_rejects_content_and_activation_metadata_tampering() {
+        use sha2::{Digest, Sha256};
+
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("plugins");
+        let (package, verifying_key) = signed_install_fixture(dir.path(), "com.install.integrity");
+        let state = install_state(install_root.clone(), &verifying_key);
+        cmd_registry_install_as(
+            &Caller::MainWindow,
+            &state,
+            package.to_str().unwrap(),
+            &["store:allow-get".into()],
+        )
+        .unwrap();
+        cmd_registry_admin_as(
+            &Caller::MainWindow,
+            &state,
+            "com.install.integrity",
+            RegistryAdminOp::Enable,
+        )
+        .unwrap();
+
+        assert!(installed_plugin_ui(&state, "com.install.integrity").is_ok());
+        let plugin_dir = install_root.join("com.install.integrity");
+
+        // Referenced JS is part of the activation set even though the window entry is index.html.
+        let js_path = plugin_dir.join("src/index.js");
+        let original_js = std::fs::read(&js_path).unwrap();
+        std::fs::write(&js_path, b"export const activate = () => 'tampered';").unwrap();
+        let js_error = installed_plugin_ui(&state, "com.install.integrity").unwrap_err();
+        assert_eq!(js_error.code, ErrorCode::E_INSTALL_FAILED);
+        assert!(js_error.message.contains("integrity"));
+        std::fs::write(&js_path, original_js).unwrap();
+        assert!(installed_plugin_ui(&state, "com.install.integrity").is_ok());
+
+        let ui_path = plugin_dir.join("index.html");
+        let tampered = b"<!doctype html><html><body>tampered</body></html>";
+        std::fs::write(&ui_path, tampered).unwrap();
+        let content_error = installed_plugin_ui(&state, "com.install.integrity").unwrap_err();
+        assert_eq!(content_error.code, ErrorCode::E_INSTALL_FAILED);
+        assert!(content_error.message.contains("integrity"));
+
+        // Even if an attacker edits the matching digest record, the HMAC covers the complete
+        // ordered activation set and cannot be forged without the host secret.
+        let activation_path = plugin_dir.join(PLUGIN_UI_ACTIVATION_FILE);
+        let mut activation: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&activation_path).unwrap()).unwrap();
+        let records = activation["records"].as_array_mut().unwrap();
+        let ui_record = records
+            .iter_mut()
+            .find(|record| {
+                record["resource"]
+                    .as_str()
+                    .is_some_and(|resource| resource.ends_with(":asset:index.html"))
+            })
+            .expect("index.html activation record");
+        ui_record["content"]["sha256"] = serde_json::json!(hex::encode(Sha256::digest(tampered)));
+        ui_record["content"]["size"] = serde_json::json!(tampered.len() as u64);
+        std::fs::write(&activation_path, serde_json::to_vec_pretty(&activation).unwrap()).unwrap();
+        let metadata_error = installed_plugin_ui(&state, "com.install.integrity").unwrap_err();
+        assert_eq!(metadata_error.code, ErrorCode::E_INSTALL_FAILED);
+        assert!(metadata_error.message.contains("HMAC"));
+    }
+
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn installed_plugin_ui_rejects_injected_files_after_activation() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("plugins");
+        let (package, verifying_key) = signed_install_fixture(dir.path(), "com.install.injected");
+        let state = install_state(install_root.clone(), &verifying_key);
+        cmd_registry_install_as(
+            &Caller::MainWindow,
+            &state,
+            package.to_str().unwrap(),
+            &["store:allow-get".into()],
+        )
+        .unwrap();
+        cmd_registry_admin_as(
+            &Caller::MainWindow,
+            &state,
+            "com.install.injected",
+            RegistryAdminOp::Enable,
+        )
+        .unwrap();
+        assert!(installed_plugin_ui(&state, "com.install.injected").is_ok());
+
+        std::fs::write(
+            install_root.join("com.install.injected/injected.js"),
+            b"window.pwned = true;",
+        )
+        .unwrap();
+        let error = installed_plugin_ui(&state, "com.install.injected").unwrap_err();
+        assert_eq!(error.code, ErrorCode::E_INSTALL_FAILED);
+        assert!(error.message.contains("integrity"));
     }
 
     #[cfg(feature = "plugin-install")]
@@ -8463,6 +9596,66 @@ mod tests {
     /// `trial_from_safemode` 不置位，该插件自行上报错误时走不到 D28 回落
     /// （与引擎的试验判定各自为政）；若不前置对账，刚装载、尚未被标记的
     /// 插件停在 `Installed`，试启事件会撞非法迁移。
+    #[test]
+    fn recovery_trial_enable_action_is_deduplicated_in_same_incident() {
+        let state = CommandState::new();
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
+        for _ in 0..2 {
+            cmd_recover_report(&state, "failure", None).unwrap();
+        }
+        let first = cmd_recover_trial_enable(&state, "com.a").unwrap();
+        assert_ne!(first["engineAction"], "trialEnable:deduplicated");
+        let second = cmd_recover_trial_enable(&state, "com.a").unwrap();
+        assert_eq!(second["engineAction"], "trialEnable:deduplicated");
+        let engine = state.recovery.lock();
+        let effect_id_prefix = "registry:com.a:";
+        let serialized = engine.to_json().to_string();
+        assert!(
+            serialized.contains(effect_id_prefix),
+            "effect ledger must be persisted in engine state"
+        );
+    }
+
+    #[test]
+    fn recovery_trial_enable_rolls_back_engine_when_registry_rejects_trial() {
+        let state = CommandState::new();
+        let id = PluginId::new("com.a").unwrap();
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
+
+        // Exhaust only the registry-side D28 trial budget. Do not report these failures through
+        // the recovery adapter; the engine intentionally still has an unused trial budget.
+        let entered = state.registry.report_event(&id, Event::SafemodeEnter).unwrap();
+        assert!(!entered.illegal);
+        for _ in 0..tauron_host::lifecycle::MAX_TRIAL_ATTEMPTS {
+            let trial = state.registry.report_event(&id, Event::TrialEnable).unwrap();
+            assert!(!trial.illegal);
+            let failed = state.registry.report_event(&id, Event::ErrorRetryable).unwrap();
+            assert!(!failed.illegal);
+        }
+
+        // Independently move the recovery engine into safemode. Reconcile sees the registry
+        // already disabled-by-safemode, so the next TrialEnable reaches the registry budget gate.
+        for _ in 0..2 {
+            cmd_recover_report(&state, "failure", None).unwrap();
+        }
+        assert_eq!(
+            state.recovery.lock().plugin_state("com.a"),
+            Some(RecoveryPluginState::DisabledBySafemode)
+        );
+
+        let err = cmd_recover_trial_enable(&state, "com.a").unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_STATE_INVALID_TRANSITION);
+        assert_eq!(
+            state.recovery.lock().plugin_state("com.a"),
+            Some(RecoveryPluginState::DisabledBySafemode),
+            "registry rejection must roll the staged engine TrialEnable back"
+        );
+        assert!(
+            !state.recovery.lock().is_recovery_in_progress(),
+            "rejected recovery action must not leave the executor stuck in-progress"
+        );
+    }
+
     #[test]
     fn cmd_recover_trial_enable_drives_registry_trial_state() {
         let state = CommandState::new();
@@ -9915,6 +11108,36 @@ mod tests {
     // ────────────────────────────────────────────────────────────
 
     #[test]
+    fn settings_fault_boundary_blocks_work_and_migrate_reconciles_from_durable_state() {
+        let t = tempfile::tempdir().unwrap();
+        let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+        cmd_settings_set(&state, "plugin:p.theme", serde_json::json!("dark")).unwrap();
+
+        let fault = state.settings_fault.lock().run("forced-test-panic", || panic!("boom"));
+        assert!(matches!(fault, Err(tauron_host::FaultError::Panicked { .. })));
+        assert_eq!(state.settings_fault.lock().state(), tauron_host::FaultState::Faulted);
+        assert_eq!(
+            cmd_settings_get(&state, "plugin:p.theme").unwrap_err().code,
+            ErrorCode::E_HOST_PANIC
+        );
+
+        // Existing main-window migrate command is the repair/reconcile surface; it rebuilds the
+        // settings engine from the durable envelope before allowing ordinary work again.
+        assert_eq!(cmd_settings_migrate_as(&Caller::MainWindow, &state).unwrap(), 0);
+        assert_eq!(state.settings_fault.lock().state(), tauron_host::FaultState::Ready);
+        assert_eq!(cmd_settings_get(&state, "plugin:p.theme").unwrap(), serde_json::json!("dark"));
+    }
+
+    #[test]
+    fn settings_fault_without_durable_state_is_quarantined_not_faked_ready() {
+        let state = CommandState::new();
+        let _ = state.settings_fault.lock().run("forced-test-panic", || panic!("boom"));
+        let err = cmd_settings_migrate(&state).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_HOST_PANIC);
+        assert_eq!(state.settings_fault.lock().state(), tauron_host::FaultState::Quarantined);
+    }
+
+    #[test]
     fn settings_are_backed_by_a_store_with_a_registered_schema() {
         // 裸 HashMap 过不了这三条：没有注册表、没有数据版本、没有迁移步。
         let state = CommandState::new();
@@ -10009,6 +11232,71 @@ mod tests {
             serde_json::json!("dark"),
             "迁移后的值必须跨进程可读"
         );
+    }
+
+    #[test]
+    fn host_settings_migration_declares_snapshot_required_contract() {
+        let state = CommandState::new();
+        host_settings_adopt_legacy(&state, serde_json::json!({"plugin:p.theme": "dark"})).unwrap();
+        let contract = state
+            .settings
+            .lock()
+            .migration_contract(HOST_SETTINGS_NAMESPACE, HOST_SETTINGS_SCHEMA_V2)
+            .unwrap();
+        assert!(!contract.reversible);
+        assert!(!contract.forward_compatible);
+        assert!(contract.requires_snapshot);
+    }
+
+    #[test]
+    fn settings_migration_persist_failure_restores_v1_data_and_version() {
+        let t = tempfile::tempdir().unwrap();
+        let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+        // A87 now validates/locks the data directory at construction. Inject the persistence
+        // failure at the settings temp-file boundary instead, so this test still targets A101
+        // rollback rather than failing earlier in storage ownership setup.
+        std::fs::create_dir(t.path().join("host-settings.json.tmp")).unwrap();
+
+        // Use the non-persisting core adoption path so the failure is injected specifically at
+        // migration commit, not while staging the legacy document.
+        host_settings_adopt_legacy(
+            &state,
+            serde_json::json!({"plugin:p.theme": "dark", "lang": "zh-CN"}),
+        )
+        .unwrap();
+        let before = state.settings.lock().snapshot(HOST_SETTINGS_NAMESPACE).unwrap();
+
+        let err = cmd_settings_migrate(&state).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST);
+        assert_eq!(
+            state.settings.lock().snapshot(HOST_SETTINGS_NAMESPACE).unwrap(),
+            before,
+            "durable commit failure must restore exact pre-migration state"
+        );
+        assert_eq!(host_settings_data_version(&state).as_deref(), Some(HOST_SETTINGS_SCHEMA_V1));
+    }
+
+    #[test]
+    fn settings_durable_envelope_detects_tamper_and_quarantines_file() {
+        let t = tempfile::tempdir().unwrap();
+        {
+            let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+            cmd_settings_set(&state, "secure", serde_json::json!("value")).unwrap();
+        }
+        let path = t.path().join(HOST_SETTINGS_FILE);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["payload"][0][1]["user"] = serde_json::json!({"secure": "tampered"});
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        // Development degrades to an empty in-memory document but must quarantine the corrupt
+        // persistent copy instead of treating it as a valid first-run state.
+        let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+        assert_eq!(cmd_settings_get(&state, "secure").unwrap(), serde_json::Value::Null);
+        assert!(std::fs::read_dir(t.path()).unwrap().filter_map(Result::ok).any(|entry| entry
+            .file_name()
+            .to_string_lossy()
+            .contains("host-settings.json.corrupt-")));
     }
 
     #[test]
@@ -10720,6 +12008,8 @@ mod tests {
         assert_eq!(snapshot["global"]["subscriptions"]["used"], 1);
         assert_eq!(snapshot["global"]["notifications"]["used"], 1);
         assert_eq!(snapshot["global"]["notifications"]["evictedTotal"], 0);
+        assert_eq!(snapshot["faults"]["settings"]["state"], "ready");
+        assert!(snapshot["faults"]["settings"]["generation"].as_u64().unwrap() >= 1);
         assert_eq!(snapshot["perPlugin"]["plugins"][0]["pluginId"], "p.stats");
         assert_eq!(snapshot["perPlugin"]["plugins"][0]["pendingCalls"], 1);
         assert_eq!(snapshot["perPlugin"]["plugins"][0]["streams"], 1);
@@ -10846,6 +12136,27 @@ mod tests {
         // 未被过滤的插件照常装上（证明拦住它的是过滤器，不是别的原因）。
         let ok = serde_json::to_string(&test_manifest("com.allowed")).unwrap();
         assert!(install_plugin_from_json(&state, &ok).is_ok());
+    }
+
+    #[test]
+    fn durable_data_dir_has_exactly_one_process_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = AdapterConfig {
+            recovery_data_dir: Some(dir.path().to_path_buf()),
+            ..AdapterConfig::default()
+        };
+
+        let first = SubstrateState::with_adapter_config(&cfg);
+        assert!(first.storage_writer_lease.is_some());
+
+        let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            SubstrateState::with_adapter_config(&cfg)
+        }));
+        assert!(second.is_err(), "same durable data dir must reject a second writer");
+
+        drop(first);
+        let third = SubstrateState::with_adapter_config(&cfg);
+        assert!(third.storage_writer_lease.is_some(), "lease must recover after owner drop");
     }
 
     #[test]
@@ -11436,6 +12747,8 @@ mod tests {
             frame["callId"], call.call_id,
             "帧上的 callId 必须与 pending 表一致（回帧据此关联）"
         );
+        assert_eq!(call.runtime_generation, Some(handle.generation));
+        assert_eq!(frame["runtimeGeneration"], serde_json::json!(handle.generation.0));
 
         // 回帧侧：模拟 sidecar 写回结果帧 → sink 结算。
         let sink = fake.sink_of(handle.pid).expect("spawn 后必须已登记 stdout 帧接收器");
@@ -11450,6 +12763,57 @@ mod tests {
         let settled = state.registry.peek_call(&call.call_id).expect("调用应仍在表里");
         assert_eq!(settled.state, tauron_host::registry::CallState::Settled);
         assert_eq!(settled.result, Some(serde_json::json!({ "done": true })));
+    }
+
+    #[test]
+    fn process_reply_from_old_generation_cannot_settle_call_after_runtime_replacement() {
+        let (state, fake) = process_state("com.example.gen", Some("svc"));
+        enabled_process_plugin(&state, "com.example.gen");
+        let first = cmd_runtime_spawn(&state, "com.example.gen", &valid_profile()).unwrap();
+
+        let res = cmd_call_plugin(
+            &state,
+            "main",
+            "com.example.gen",
+            "doThing",
+            serde_json::json!({ "x": 1 }),
+        )
+        .unwrap();
+        let call = match res {
+            ProviderResult::Value(call) => call,
+            ProviderResult::Unsupported(body) => panic!("unexpected unsupported: {}", body.reason),
+        };
+        assert_eq!(call.runtime_generation, Some(first.generation));
+        let old_sink = fake.sink_of(first.pid).expect("first runtime sink");
+
+        // Replace the runtime generation while the old call is still pending.
+        state.registry.runtime_mark_crashed(&first.lease).unwrap();
+        let second = cmd_runtime_spawn(&state, "com.example.gen", &valid_profile()).unwrap();
+        assert!(second.generation > first.generation);
+
+        let reply = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": call.seq,
+            "callId": call.call_id,
+            "result": { "stale": true },
+        });
+        let bytes = serde_json::to_vec(&reply).unwrap();
+
+        // A late frame from the old pid is rejected.
+        old_sink.on_frame(first.pid, &bytes);
+        assert_eq!(
+            state.registry.peek_call(&call.call_id).unwrap().state,
+            tauron_host::registry::CallState::Pending
+        );
+
+        // The new runtime cannot steal the old call either: generation mismatch still rejects it.
+        let new_sink = fake.sink_of(second.pid).expect("second runtime sink");
+        new_sink.on_frame(second.pid, &bytes);
+        assert_eq!(
+            state.registry.peek_call(&call.call_id).unwrap().state,
+            tauron_host::registry::CallState::Pending
+        );
+        state.registry.call_cancel(&call.call_id).unwrap();
     }
 
     /// 「非 Process 插件被拒」：结构化失败码 + **启动面一次都不许被调用** + 无租约。
@@ -11535,6 +12899,8 @@ mod tests {
         let health = cmd_runtime_health(&state, &handle.lease).unwrap();
         assert_eq!(health.pid, handle.pid);
         assert!(health.alive, "fake 未标记死亡 → 必须报存活");
+        assert_eq!(health.health, tauron_host::HealthReport::ready());
+        assert!(health.health.can_accept_work());
         assert_eq!(health.crashes, 0);
         assert_eq!(health.consecutive_failures, 0);
         assert_eq!(
@@ -11650,6 +13016,27 @@ mod tests {
         assert_ne!(err.code, ErrorCode::E_CALL_NOT_FOUND, "租约边界必须与 pending call 边界分开");
     }
 
+    #[test]
+    fn alive_process_is_not_ready_when_plugin_lifecycle_is_not_running() {
+        // RuntimeCrash intentionally revokes the runtime lease, so it cannot model the distinct
+        // A103 state "process probe is still Alive while control-plane lifecycle is not Running".
+        // Lock that mapping directly here; command-level ready/dead tests below still prove
+        // cmd_runtime_health routes real probe + lifecycle facts through this helper.
+        let health = runtime_health_report(
+            tauron_proc::ProcessStatus::Alive,
+            Some(tauron_host::lifecycle::State::Enabled),
+            0,
+        );
+        assert_eq!(health.liveness, tauron_host::Liveness::Alive);
+        assert_eq!(health.readiness, tauron_host::Readiness::NotReady);
+        assert_eq!(health.degradation, tauron_host::Degradation::Degraded);
+        assert!(!health.can_accept_work());
+        assert!(
+            health.diagnostics.iter().any(|line| line.contains("ENABLED")),
+            "diagnostics must expose the lifecycle fact that blocks readiness"
+        );
+    }
+
     /// 崩溃：投递 `RuntimeCrash`（状态机真的吃了它）+ `consecutiveFailures` +1
     /// + `CrashTracker` 记一次，且**重复轮询不得重复计数**。
     #[test]
@@ -11669,6 +13056,9 @@ mod tests {
 
         let health = cmd_runtime_health(&state, &handle.lease).unwrap();
         assert!(!health.alive, "被标记死亡的 pid 必须报不存活");
+        assert_eq!(health.health.liveness, tauron_host::Liveness::Dead);
+        assert_eq!(health.health.readiness, tauron_host::Readiness::NotReady);
+        assert!(!health.health.can_accept_work());
         assert_eq!(health.crashes, 1, "崩溃必须记进 CrashTracker");
         assert_eq!(
             health.consecutive_failures, 1,
@@ -11767,6 +13157,7 @@ mod tests {
     fn runtime_health_serializes_camel_case() {
         let h = RuntimeHealth {
             alive: false,
+            status: tauron_proc::ProcessStatus::Exited,
             pid: 7,
             crashes: 2,
             consecutive_failures: 1,
@@ -11777,12 +13168,14 @@ mod tests {
                 failures: 1,
                 last_error: Some("拒绝访问".to_string()),
             },
+            health: tauron_host::HealthReport::dead("sidecar process has exited"),
         };
         let v = serde_json::to_value(&h).unwrap();
         assert_eq!(
             v,
             serde_json::json!({
                 "alive": false,
+                "status": "exited",
                 "pid": 7,
                 "crashes": 2,
                 "consecutiveFailures": 1,
@@ -11792,6 +13185,12 @@ mod tests {
                     "alreadyGone": 1,
                     "failures": 1,
                     "lastError": "拒绝访问"
+                },
+                "health": {
+                    "liveness": "dead",
+                    "readiness": "not-ready",
+                    "degradation": "degraded",
+                    "diagnostics": ["sidecar process has exited"]
                 }
             })
         );
@@ -12933,8 +14332,7 @@ mod tests {
         }
 
         #[test]
-        fn http_request_validates_then_degrades_honestly() {
-            let state = CommandState::new();
+        fn http_request_is_scope_checked_then_degrades_honestly() {
             let ok = HttpRequestSpec {
                 method: "get".into(),
                 url: "https://example.com".into(),
@@ -12943,20 +14341,37 @@ mod tests {
                 timeout_ms: None,
                 max_bytes: None,
             };
-            // 参数合法 → 缺省 UnavailableHttpSink 如实 Unsupported（不伪造响应）。
+
+            // V4 默认 fail-closed：即使 URL 语法合法，没有 domain scope 也不能发请求。
+            let denied = CommandState::new();
+            assert_eq!(cmd_http_request(&denied, &ok).unwrap_err().code, ErrorCode::E_AUTH_DENIED);
+
+            let cfg = AdapterConfig::default().with_http_policy(
+                tauron_host::NetworkPolicy::public_https(vec![tauron_host::DomainRule::exact(
+                    "example.com",
+                )]),
+            );
+            let scoped = CommandState::with_adapter_config(cfg);
+            // scope 合法，但缺省 UnavailableHttpSink 仍如实 Unsupported（不伪造响应）。
             assert!(matches!(
-                cmd_http_request(&state, &ok).unwrap(),
+                cmd_http_request(&scoped, &ok).unwrap(),
                 ProviderResult::Unsupported(_)
             ));
+
             let bad_method = HttpRequestSpec { method: "DELETE".into(), ..ok.clone() };
             assert_eq!(
-                cmd_http_request(&state, &bad_method).unwrap_err().code,
+                cmd_http_request(&scoped, &bad_method).unwrap_err().code,
                 ErrorCode::E_INVALID_MANIFEST
             );
             let bad_url = HttpRequestSpec { url: "file:///etc/passwd".into(), ..ok.clone() };
             assert_eq!(
-                cmd_http_request(&state, &bad_url).unwrap_err().code,
+                cmd_http_request(&scoped, &bad_url).unwrap_err().code,
                 ErrorCode::E_INVALID_MANIFEST
+            );
+            let outside = HttpRequestSpec { url: "https://other.example.net".into(), ..ok.clone() };
+            assert_eq!(
+                cmd_http_request(&scoped, &outside).unwrap_err().code,
+                ErrorCode::E_AUTH_DENIED
             );
         }
 
@@ -13400,6 +14815,43 @@ mod v4_production_config_tests {
         assert!(error.message.contains("CALLER_IDENTITY_POLICY_REQUIRED"));
         assert!(error.message.contains("ADMIN_AUDIT_REQUIRED"));
         assert!(error.message.contains("DATA_DIR_REQUIRED"));
+        #[cfg(feature = "plugin-install")]
+        assert!(error.message.contains("TRUSTED_TIME_REQUIRED"));
+    }
+
+    #[test]
+    fn production_process_runtime_rejects_the_default_unsupported_sandbox() {
+        let cfg =
+            AdapterConfig::default().with_deployment_mode(tauron_host::DeploymentMode::Production);
+        let descriptor = tauron_proc::ProcessSandboxDescriptor::unsupported("test");
+        let error = cfg
+            .validate_process_runtime_for_start(&descriptor)
+            .expect_err("production process runtime must require hard sandbox enforcement");
+        assert!(error.message.contains("PROCESS_SANDBOX_HARD_REQUIRED"));
+    }
+
+    #[test]
+    fn development_process_runtime_keeps_compatibility_with_unsupported_sandbox() {
+        let cfg = AdapterConfig::default();
+        let descriptor = tauron_proc::ProcessSandboxDescriptor::unsupported("test");
+        assert!(cfg.validate_process_runtime_for_start(&descriptor).is_ok());
+    }
+
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn production_install_time_trust_is_explicit_and_current() {
+        let cfg = AdapterConfig::default();
+        assert!(!cfg.production_readiness().trusted_time_available);
+
+        let trusted = cfg.clone().with_trusted_time_provider(Arc::new(
+            tauron_host::SystemTimeProvider::new(tauron_host::TimeTrustState::Trusted),
+        ));
+        assert!(trusted.production_readiness().trusted_time_available);
+
+        let suspicious = cfg.with_trusted_time_provider(Arc::new(
+            tauron_host::SystemTimeProvider::new(tauron_host::TimeTrustState::Suspicious),
+        ));
+        assert!(!suspicious.production_readiness().trusted_time_available);
     }
 
     #[test]
@@ -13425,7 +14877,6 @@ mod v4_service_graph_wiring_tests {
         assert!(state.service_startup_order.iter().any(|id| id == "provider"));
     }
 }
-
 
 #[cfg(test)]
 mod v4_settings_transaction_tests {

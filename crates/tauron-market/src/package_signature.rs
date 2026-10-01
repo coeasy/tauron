@@ -22,7 +22,10 @@
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauron_host::manifest::{embedded_permission_index, PluginManifest};
+use tauron_host::{
+    manifest::{embedded_permission_index, PluginManifest},
+    SystemTimeProvider, TimeTrustState, TrustedTimeProvider,
+};
 
 use crate::{
     error::{MarketError, MarketResult},
@@ -133,13 +136,6 @@ pub fn parse_issued_at_utc_secs(input: &str) -> Option<i64> {
     Some(days * 86400 + hour * 3600 + minute * 60 + second)
 }
 
-fn now_epoch_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PackageSignature {
@@ -191,12 +187,28 @@ pub fn verify_tpkg_reader<R>(
 where
     R: std::io::Read + std::io::Seek,
 {
+    let provider = SystemTimeProvider::new(TimeTrustState::Trusted);
+    verify_tpkg_reader_with_time(reader, sidecar_json, trusted_public_key, &provider)
+}
+
+/// A100 provider-aware package verifier. Supply-chain expiry decisions fail closed whenever
+/// the provider cannot currently prove trusted time.
+pub fn verify_tpkg_reader_with_time<R>(
+    reader: R,
+    sidecar_json: &str,
+    trusted_public_key: &[u8],
+    time_provider: &dyn TrustedTimeProvider,
+) -> MarketResult<(PackageSignature, PluginManifest)>
+where
+    R: std::io::Read + std::io::Seek,
+{
     use std::io::Read;
 
     const HASH_BUFFER_BYTES: usize = 64 * 1024;
     const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 
-    let signature = verify_package_signature(sidecar_json, trusted_public_key)?;
+    let signature =
+        verify_package_signature_with_time(sidecar_json, trusted_public_key, time_provider)?;
     let mut zip = zip::ZipArchive::new(reader)
         .map_err(|e| MarketError::ManifestFormat(format!("ZIP 解析失败：{e}")))?;
     if zip.is_empty() || zip.len() > MAX_ENTRIES || zip.len() != signature.files.len() {
@@ -335,6 +347,17 @@ pub fn verify_package_signature(
     sidecar_json: &str,
     trusted_public_key: &[u8],
 ) -> MarketResult<PackageSignature> {
+    let provider = SystemTimeProvider::new(TimeTrustState::Trusted);
+    verify_package_signature_with_time(sidecar_json, trusted_public_key, &provider)
+}
+
+/// A100 provider-aware signature verification. The provider is consulted at the exact
+/// supply-chain decision point rather than only once at host startup.
+pub fn verify_package_signature_with_time(
+    sidecar_json: &str,
+    trusted_public_key: &[u8],
+    time_provider: &dyn TrustedTimeProvider,
+) -> MarketResult<PackageSignature> {
     let sidecar: PackageSignature = serde_json::from_str(sidecar_json)
         .map_err(|e| MarketError::ManifestFormat(e.to_string()))?;
     if sidecar.algorithm != "ed25519" {
@@ -352,7 +375,18 @@ pub fn verify_package_signature(
             sidecar.issued_at
         ))
     })?;
-    let now = now_epoch_secs();
+    let trusted = time_provider.trusted_time();
+    if trusted.state != TimeTrustState::Trusted {
+        return Err(MarketError::TimeUntrusted(format!(
+            "time provider state is {:?}",
+            trusted.state
+        )));
+    }
+    let now = trusted
+        .now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| MarketError::TimeUntrusted("trusted time predates UNIX_EPOCH".into()))?
+        .as_secs() as i64;
     if issued > now + MAX_CLOCK_SKEW_SECS {
         return Err(MarketError::SignatureInvalid(format!(
             "签发时间 `{}` 在未来（超出允许的时钟偏移 {} 秒）",
@@ -483,6 +517,54 @@ mod tests {
             "aa".repeat(32),
             "bb".repeat(32)
         )
+    }
+
+    #[derive(Debug)]
+    struct FixedTime(tauron_host::TrustedTime);
+
+    impl TrustedTimeProvider for FixedTime {
+        fn trusted_time(&self) -> tauron_host::TrustedTime {
+            self.0
+        }
+    }
+
+    fn fixed_time(state: TimeTrustState, epoch: i64) -> FixedTime {
+        FixedTime(tauron_host::TrustedTime {
+            now: std::time::UNIX_EPOCH + std::time::Duration::from_secs(epoch as u64),
+            state,
+        })
+    }
+
+    #[test]
+    fn untrusted_time_fails_closed_before_expiry_decision() {
+        let spki = decode_hex(PUBLIC_KEY_SPKI_HEX).unwrap();
+        let provider = fixed_time(
+            TimeTrustState::Suspicious,
+            parse_issued_at_utc_secs("2026-09-30T00:00:00Z").unwrap(),
+        );
+        assert!(matches!(
+            verify_package_signature_with_time(&fixture(), &spki, &provider),
+            Err(MarketError::TimeUntrusted(_))
+        ));
+    }
+
+    #[test]
+    fn trusted_provider_controls_expiry_decision() {
+        let spki = decode_hex(PUBLIC_KEY_SPKI_HEX).unwrap();
+        let near = fixed_time(
+            TimeTrustState::Trusted,
+            parse_issued_at_utc_secs("2026-09-30T00:00:00Z").unwrap(),
+        );
+        assert!(verify_package_signature_with_time(&fixture(), &spki, &near).is_ok());
+
+        let far_future = fixed_time(
+            TimeTrustState::Trusted,
+            parse_issued_at_utc_secs("2040-09-30T00:00:00Z").unwrap(),
+        );
+        assert!(matches!(
+            verify_package_signature_with_time(&fixture(), &spki, &far_future),
+            Err(MarketError::SignatureInvalid(_))
+        ));
     }
 
     #[test]

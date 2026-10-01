@@ -29,8 +29,7 @@ export interface Capability {
  * 框架服务命令面（计划 §2.1，D1/D2/D15/D16 修订后定稿）。
  *
  * - 13 条插件命令：12 条 `self` + 1 条 `scoped-read`
- * - 4 条主窗特权命令：`host_registry_admin`、`host_runtime_spawn` / `host_runtime_health`
- *   （进程管理）与 `host_resource_stats`（跨插件资源占用快照）
+ * - 主窗特权命令包含注册表/运行时/资源诊断与 Event Approval Broker 管理面
  * - `host_grant_request` 已按 D16 在 v1 删除
  * - `host_call_begin` 已按 D2 被 `host_plugin_call` 取代
  *
@@ -153,6 +152,12 @@ export const CAPABILITIES: readonly Capability[] = [
     description: '向已开流写入一帧（self 档）',
   },
   {
+    command: 'host_stream_grant',
+    tier: 'self',
+    consumer: 'plugin',
+    description: '接收方为流补充有界 byte credit（V4 A79；self 档）',
+  },
+  {
     command: 'host_stream_close',
     tier: 'self',
     consumer: 'plugin',
@@ -194,6 +199,24 @@ export const CAPABILITIES: readonly Capability[] = [
     tier: 'privileged',
     consumer: 'main-window',
     description: '读取全局及逐插件资源配额占用，仅主窗可见',
+  },
+  {
+    command: 'host_events_approve',
+    tier: 'privileged',
+    consumer: 'main-window',
+    description: '批准插件订阅私有 EventBus topic；仅主窗审批面可调用',
+  },
+  {
+    command: 'host_events_revoke',
+    tier: 'privileged',
+    consumer: 'main-window',
+    description: '撤销插件私有 EventBus topic 审批；仅主窗审批面可调用',
+  },
+  {
+    command: 'host_events_approvals',
+    tier: 'privileged',
+    consumer: 'main-window',
+    description: '列出当前私有 EventBus topic 审批事实；仅主窗审批面可调用',
   },
 ] as const;
 

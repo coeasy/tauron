@@ -90,15 +90,28 @@ pub fn canonical_bytes(grant_set: &GrantSet) -> HostResult<Vec<u8>> {
     })
 }
 
-pub fn sign(grant_set: &GrantSet, key: &[u8]) -> HostResult<String> {
+pub fn hmac_sha256_hex(bytes: &[u8], key: &[u8]) -> HostResult<String> {
     if key.is_empty() {
-        return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "签名密钥不可为空"));
+        return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "HMAC 密钥不可为空"));
     }
-    let bytes = canonical_bytes(grant_set)?;
-    let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|e| HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("签名密钥无效：{e}")))?;
-    mac.update(&bytes);
+    let mut mac = HmacSha256::new_from_slice(key).map_err(|e| {
+        HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("HMAC 密钥无效：{e}"))
+    })?;
+    mac.update(bytes);
     Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+pub fn hmac_sha256_matches(bytes: &[u8], signature: &str, key: &[u8]) -> HostResult<bool> {
+    if signature.is_empty() {
+        return Ok(false);
+    }
+    let expected = hmac_sha256_hex(bytes, key)?;
+    Ok(constant_time_eq(signature.as_bytes(), expected.as_bytes()))
+}
+
+pub fn sign(grant_set: &GrantSet, key: &[u8]) -> HostResult<String> {
+    let bytes = canonical_bytes(grant_set)?;
+    hmac_sha256_hex(&bytes, key)
 }
 
 /// 验签。失败分两类：
@@ -106,15 +119,10 @@ pub fn sign(grant_set: &GrantSet, key: &[u8]) -> HostResult<String> {
 /// - 签名与内容不符（**被篡改**）→ [`ErrorCode::E_FORBIDDEN_PERMISSION`]
 pub fn verify(signed: &SignedGrantSet, key: &[u8]) -> HostResult<()> {
     let bytes = canonical_bytes(&signed.grant_set)?;
-    let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|e| HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("签名密钥无效：{e}")))?;
-    mac.update(&bytes);
-    let expected = hex::encode(mac.finalize().into_bytes());
-
     if signed.signature.is_empty() {
         return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "授予集缺少签名"));
     }
-    if !constant_time_eq(signed.signature.as_bytes(), expected.as_bytes()) {
+    if !hmac_sha256_matches(&bytes, &signed.signature, key)? {
         return Err(HostError::new(
             ErrorCode::E_FORBIDDEN_PERMISSION,
             format!(
@@ -300,6 +308,15 @@ mod tests {
             approved_at_unix: 1_700_000_000,
             approver: "user".into(),
         }
+    }
+
+    #[test]
+    fn generic_hmac_helpers_detect_tampering() {
+        let bytes = b"activation-record";
+        let signature = hmac_sha256_hex(bytes, KEY).unwrap();
+        assert!(hmac_sha256_matches(bytes, &signature, KEY).unwrap());
+        assert!(!hmac_sha256_matches(b"activation-record-tampered", &signature, KEY).unwrap());
+        assert!(!hmac_sha256_matches(bytes, "", KEY).unwrap());
     }
 
     #[test]

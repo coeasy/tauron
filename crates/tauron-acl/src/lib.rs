@@ -21,6 +21,6 @@ pub mod grant;
 pub use approval::{build_approval_rows, draft_grant_set, validate_grants, ApprovalRow};
 pub use diff::{diff, GrantDiff, ScopeChange};
 pub use grant::{
-    canonical_bytes, sign, verify, AclStore, GrantEntry, GrantSet, SignedGrantSet,
-    GRANT_SET_SCHEMA_VERSION,
+    canonical_bytes, hmac_sha256_hex, hmac_sha256_matches, sign, verify, AclStore, GrantEntry,
+    GrantSet, SignedGrantSet, GRANT_SET_SCHEMA_VERSION,
 };

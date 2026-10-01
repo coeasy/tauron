@@ -157,6 +157,9 @@ pub struct HostCallPluginReq {
     /// JSON 载荷（→ 核心 `args`）。
     #[serde(default)]
     pub args_json: Option<serde_json::Value>,
+    /// V4 A77 parent request when this call delegates while handling another call.
+    #[serde(default)]
+    pub parent_call_id: Option<String>,
 }
 
 /// `host_call_result` 的 `req` 载荷（执行方回填结果，0.4-A1）。
@@ -192,12 +195,24 @@ pub struct HostLifecycleEvt {
     pub reason: Option<String>,
 }
 
+/// V4 A78 event causation context carried by a consumed parent frame.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostEventCausation {
+    pub event_id: String,
+    pub causation_id: String,
+    pub event_hop: u16,
+    pub max_causation_depth: u16,
+}
+
 /// `host_events_publish` 的 `evt` 载荷。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostEventPublish {
     pub topic: String,
     pub payload: serde_json::Value,
+    #[serde(default)]
+    pub causation: Option<HostEventCausation>,
 }
 
 /// `host_events_subscribe` 的选择器（与 TS `EventSelector` 同形）。
@@ -390,6 +405,13 @@ pub struct HostStreamWriteReq {
     pub args_raw: Option<Vec<u8>>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostStreamGrantReq {
+    pub stream_id: String,
+    pub bytes: usize,
+}
+
 /// `host_stream_close` 线格式：`{ req: { streamId, kind } }`。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -420,6 +442,14 @@ pub fn wire_stream_write(
         req.args_json.clone(),
         req.args_raw.clone(),
     )
+}
+
+pub fn wire_stream_grant(
+    state: &CommandState,
+    subscriber: &str,
+    req: &HostStreamGrantReq,
+) -> HostResult<crate::StreamCredit> {
+    crate::cmd_stream_grant(state, subscriber, &req.stream_id, req.bytes)
 }
 
 /// `host_stream_close` 线格式 → 核心。
@@ -460,7 +490,19 @@ pub fn wire_events_publish(
     publisher: &str,
     evt: &HostEventPublish,
 ) -> HostResult<PublishResult> {
-    crate::cmd_events_publish(state, publisher, &evt.topic, evt.payload.clone())
+    let causation = evt.causation.as_ref().map(|ctx| tauron_host::EventCausation {
+        root_id: ctx.causation_id.clone(),
+        parent_id: Some(ctx.event_id.clone()),
+        depth: ctx.event_hop,
+        budget: ctx.max_causation_depth,
+    });
+    crate::cmd_events_publish_with_causation(
+        state,
+        publisher,
+        &evt.topic,
+        evt.payload.clone(),
+        causation.as_ref(),
+    )
 }
 
 /// `host_events_subscribe` 线格式 → 核心（多选择器 = 分组订阅）。
@@ -639,12 +681,13 @@ pub fn host_call_plugin(
             )));
         }
     };
-    crate::cmd_call_plugin(
+    crate::cmd_call_plugin_with_parent(
         &state,
         &caller,
         &req.target,
         &req.method,
         req.args_json.unwrap_or(serde_json::Value::Null),
+        req.parent_call_id.as_deref(),
     )
     .map_err(to_tauri_err)
 }
@@ -718,6 +761,16 @@ pub fn host_stream_write(
     wire_stream_write(&state, &subscriber, &req).map_err(to_tauri_err)
 }
 
+#[tauri::command]
+pub fn host_stream_grant(
+    state: State<'_, PluginRuntimeState>,
+    window: TauriCallerSource,
+    req: HostStreamGrantReq,
+) -> Result<crate::StreamCredit, TauriError> {
+    let subscriber = subscriber_of(window.label()).map_err(to_tauri_err)?;
+    wire_stream_grant(&state, &subscriber, &req).map_err(to_tauri_err)
+}
+
 /// `host_stream_close`：发终帧并使句柄失效（self 档）。
 #[tauri::command]
 pub fn host_stream_close(
@@ -755,7 +808,7 @@ pub fn host_runtime_spawn(
     crate::cmd_runtime_spawn_as(&caller, &state, &plugin_id, &profile).map_err(to_tauri_err)
 }
 
-/// `host_runtime_health`：按 lease 查询进程健康（线格式 `{ lease }`）。
+/// `host_runtime_health`：按 lease 查询进程健康（V4 线格式 `{ lease, generation? }`）。
 ///
 /// 未知 / 失效租约 → `E_LEASE_EXPIRED`（租约语义，不是 `E_CALL_NOT_FOUND`）。
 ///
@@ -766,8 +819,13 @@ pub fn host_runtime_health(
     state: State<'_, PluginRuntimeState>,
     window: TauriCallerSource,
     lease: String,
+    generation: Option<u64>,
 ) -> Result<RuntimeHealth, TauriError> {
     let caller = window.caller().map_err(to_tauri_err)?;
+    if let Some(generation) = generation {
+        // V4 A90: reject a stale generation before health probing can mutate crash accounting.
+        state.registry.runtime_lease_versioned(&lease, generation).map_err(to_tauri_err)?;
+    }
     crate::cmd_runtime_health_as(&caller, &state, &lease).map_err(to_tauri_err)
 }
 
@@ -839,6 +897,40 @@ pub fn host_events_drain(
         }
     };
     crate::cmd_events_drain(&state, &subscriber, &kind).map_err(to_tauri_err)
+}
+
+/// `host_events_approve`：主窗批准插件订阅私有 topic。
+#[tauri::command]
+pub fn host_events_approve(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    subscriber: String,
+    topic: String,
+) -> Result<(), TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_events_approve_as(&caller, &state, &subscriber, &topic).map_err(to_tauri_err)
+}
+
+/// `host_events_revoke`：主窗撤销插件订阅私有 topic 的审批。
+#[tauri::command]
+pub fn host_events_revoke(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+    subscriber: String,
+    topic: String,
+) -> Result<bool, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_events_revoke_as(&caller, &state, &subscriber, &topic).map_err(to_tauri_err)
+}
+
+/// `host_events_approvals`：主窗列出当前审批事实。
+#[tauri::command]
+pub fn host_events_approvals(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+) -> Result<Vec<crate::EventApproval>, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_events_approvals_as(&caller, &state).map_err(to_tauri_err)
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -2791,6 +2883,9 @@ macro_rules! tauron_substrate_handler {
             $crate::tauri::host_events_subscribe,
             $crate::tauri::host_events_unsubscribe,
             $crate::tauri::host_events_drain,
+            $crate::tauri::host_events_approve,
+            $crate::tauri::host_events_revoke,
+            $crate::tauri::host_events_approvals,
             // i18n 域
             $crate::tauri::host_i18n_t,
             $crate::tauri::host_i18n_t_params,
@@ -2872,6 +2967,9 @@ macro_rules! tauron_plugin_handler {
             $crate::tauri::host_events_subscribe,
             $crate::tauri::host_events_unsubscribe,
             $crate::tauri::host_events_drain,
+            $crate::tauri::host_events_approve,
+            $crate::tauri::host_events_revoke,
+            $crate::tauri::host_events_approvals,
             $crate::tauri::host_i18n_t,
             $crate::tauri::host_i18n_t_params,
             $crate::tauri::host_i18n_set_locale,
@@ -2932,6 +3030,7 @@ macro_rules! tauron_plugin_handler {
             // （缺 close）或无法开流（缺 open），因此由门禁锁死「三缺一即失败」。
             $crate::tauri::host_stream_open,
             $crate::tauri::host_stream_write,
+            $crate::tauri::host_stream_grant,
             $crate::tauri::host_stream_close,
             // 进程插件运行时（P0-2）：**成对**注册——只有 spawn 没有 health 就
             // 无法发现 sidecar 崩溃（崩溃检测是轮询式的），只有 health 没有
@@ -3347,6 +3446,24 @@ mod wire_tests {
         .unwrap();
         assert_eq!(evt.topic, "com.example.x.ready");
         assert_eq!(evt.payload, serde_json::json!({ "ok": true }));
+        assert!(evt.causation.is_none());
+
+        let chained: HostEventPublish = serde_json::from_value(serde_json::json!({
+            "topic": "com.example.x.ready",
+            "payload": { "ok": true },
+            "causation": {
+                "eventId": "evt-parent",
+                "causationId": "evt-root",
+                "eventHop": 3,
+                "maxCausationDepth": 8
+            }
+        }))
+        .unwrap();
+        let causation = chained.causation.unwrap();
+        assert_eq!(causation.event_id, "evt-parent");
+        assert_eq!(causation.causation_id, "evt-root");
+        assert_eq!(causation.event_hop, 3);
+        assert_eq!(causation.max_causation_depth, 8);
     }
 
     #[test]

@@ -4,24 +4,25 @@ import { MockBackend } from './backend.js';
 import { CAPABILITIES, capabilityMatrix, capabilityOf, isAvailable } from './capabilities.js';
 
 describe('CAPABILITIES（计划 §2.1 命令面镜像）', () => {
-  it('共 24 条：18 条插件命令 + 6 条主窗特权命令', () => {
-    expect(CAPABILITIES).toHaveLength(24);
+  it('共 28 条：19 条插件命令 + 9 条主窗特权命令', () => {
+    expect(CAPABILITIES).toHaveLength(28);
   });
 
-  it('插件命令 18 条，其中 scoped-read 恰好 2 条（host_registry_list / host_contributes_list）', () => {
+  it('插件命令 19 条，其中 scoped-read 恰好 2 条（host_registry_list / host_contributes_list）', () => {
     const plugin = CAPABILITIES.filter((c) => c.consumer === 'plugin');
-    expect(plugin).toHaveLength(18);
+    expect(plugin).toHaveLength(19);
     expect(plugin.filter((c) => c.tier === 'scoped-read')).toEqual([
       expect.objectContaining({ command: 'host_registry_list' }),
       expect.objectContaining({ command: 'host_contributes_list' }),
     ]);
-    // 审计补登记：插件侧的流式三连 + 事件取件泵此前**没有任何档位**，
-    // 而 `HostClient` 已在调用它们（脚手架的能力白名单也因此拒绝这 4 个名字）。
+    // 审计补登记：插件侧流式 open/write/grant/close + 事件取件泵都必须有档位，
+    // 否则 HostClient 能调用但能力白名单/授权表不承认，形成半通链路。
     expect(plugin.map((c) => c.command)).toEqual(
       expect.arrayContaining([
         'host_events_drain',
         'host_stream_open',
         'host_stream_write',
+        'host_stream_grant',
         'host_stream_close',
       ]),
     );
@@ -32,6 +33,9 @@ describe('CAPABILITIES（计划 §2.1 命令面镜像）', () => {
     // P0-2/M8 起 privileged 有管理、运行时和资源诊断命令；集合仍是**闭集**，
     // 任何新增特权命令都必须显式改这里（增量可见）。
     expect(priv.map((c) => c.command).sort()).toEqual([
+      'host_events_approvals',
+      'host_events_approve',
+      'host_events_revoke',
       'host_registry_admin',
       'host_registry_install',
       'host_registry_install_preview',
@@ -80,17 +84,17 @@ describe('isAvailable / capabilityMatrix', () => {
     expect(isAvailable(backend, 'totally-unknown')).toBe(false);
   });
 
-  it('capabilityMatrix 覆盖全部 24 条命令', () => {
+  it('capabilityMatrix 覆盖全部 28 条命令', () => {
     const backend = new MockBackend({
       capabilities: CAPABILITIES.map((c) => c.command),
     });
     const matrix = capabilityMatrix(backend);
-    expect(Object.keys(matrix)).toHaveLength(24);
+    expect(Object.keys(matrix)).toHaveLength(28);
     expect(Object.values(matrix).every(Boolean)).toBe(true);
   });
 
   it('插件 webview 视图看不到主窗特权命令（含 P0-2 进程运行时）', () => {
-    // 模拟：插件 webview 只注册了 18 条插件命令。
+    // 模拟：插件 webview 只注册了 19 条插件命令。
     const pluginCaps = CAPABILITIES.filter((c) => c.consumer === 'plugin').map((c) => c.command);
     const backend = new MockBackend({ capabilities: pluginCaps, pluginId: 'com.example.x' });
     const matrix = capabilityMatrix(backend);
@@ -98,7 +102,7 @@ describe('isAvailable / capabilityMatrix', () => {
     // 进程执行原语：插件侧必须不可见（可见 = 任何插件都能起别人的 sidecar）。
     expect(matrix['host_runtime_spawn']).toBe(false);
     expect(matrix['host_runtime_health']).toBe(false);
-    expect(Object.values(matrix).filter(Boolean)).toHaveLength(18);
+    expect(Object.values(matrix).filter(Boolean)).toHaveLength(19);
   });
 
   it('capabilityOf 查无则 undefined', () => {

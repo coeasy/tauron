@@ -16,11 +16,14 @@
 //! 完成，避免 parking_lot 非重入导致的死锁。域内锁序见 [`Registry`] 的文档
 //! （`pending → streams → runtime → active_order`）。
 
+use crate::admission::{AdmissionController, AdmissionError, ResourceKind, ResourceLimit};
 use crate::call_delivery::CallOutcome;
+use crate::call_graph::{CallGraph, CallGraphError};
 use crate::call_state::{AtomicCallState, CallTerminalState};
 use crate::error::{ErrorCode, HostError, HostResult};
+use crate::generation::Generation;
 use crate::lifecycle::{transition, Event, PluginState, State, TransitionOutcome};
-use crate::manifest::{PermissionIndex, PluginId, PluginIdentity, PluginManifest};
+use crate::manifest::{PermissionIndex, PluginId, PluginIdentity, PluginManifest, PluginType};
 use crate::runtime::{RuntimeHandle, RuntimeLease, RuntimeTable};
 use crate::stream::{StreamFrame, StreamKind, StreamRegistry, StreamSink};
 use parking_lot::{Mutex, RwLock};
@@ -33,6 +36,10 @@ use uuid::Uuid;
 
 /// 单插件同时挂起的调用上限。宿主总上限仍由 `RegistryConfig::max_pending_calls` 控制。
 pub const MAX_PENDING_PER_PLUGIN: usize = 100;
+/// A single principal may retain at most one full-size V4 wire frame worth of pending call args.
+pub const MAX_PENDING_BYTES_PER_PRINCIPAL: u64 = crate::wire::DEFAULT_MAX_WIRE_BYTES as u64;
+/// Global pending-call args budget: eight full-size V4 wire frames across all principals.
+pub const MAX_PENDING_BYTES_GLOBAL: u64 = MAX_PENDING_BYTES_PER_PRINCIPAL * 8;
 
 /// 缺省配置（计划 §4.1 的数值约束）。
 pub fn default_config() -> RegistryConfig {
@@ -206,11 +213,27 @@ pub struct PendingCall {
     pub caller: String,
     /// 执行主体：插件 id。`self` 档调用时等于 `plugin_id`。
     pub target: String,
+    /// Root request in the synchronous call graph. For top-level calls this equals call_id.
+    #[serde(rename = "rootCallId")]
+    pub root_call_id: String,
+    /// Parent request when this call was initiated while handling another call.
+    #[serde(rename = "parentCallId", skip_serializing_if = "Option::is_none")]
+    pub parent_call_id: Option<String>,
+    /// 1-based bounded synchronous hop count.
+    #[serde(rename = "hopCount")]
+    pub hop_count: u16,
+    /// V4 A88 generation of the target process runtime captured when the call was accepted.
+    /// Non-process calls, or process calls accepted before a runtime exists, keep this empty.
+    #[serde(rename = "runtimeGeneration", skip_serializing_if = "Option::is_none")]
+    pub runtime_generation: Option<Generation>,
     /// 调用状态：等待执行方回填 / 已结算。
     pub state: CallState,
     /// V4 terminal arbiter shared by every clone. Exactly one completion/cancel/timeout/failure wins.
     #[serde(skip)]
     terminal: Arc<AtomicCallState>,
+    /// V4 A80 hierarchical admission reservation. Released only when this table entry is removed.
+    #[serde(skip)]
+    admission_token: Option<String>,
     /// 执行方回填的结果载荷（仅 `Settled` 且成功时）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
@@ -242,6 +265,7 @@ impl PendingCall {
         created_at: Instant,
         expires_at: Instant,
     ) -> Self {
+        let root_call_id = call_id.clone();
         Self {
             call_id,
             plugin_id,
@@ -249,8 +273,13 @@ impl PendingCall {
             args,
             caller,
             target,
+            root_call_id,
+            parent_call_id: None,
+            hop_count: 1,
+            runtime_generation: None,
             state: CallState::Pending,
             terminal: Arc::new(AtomicCallState::new()),
+            admission_token: None,
             result: None,
             error_code: None,
             seq,
@@ -314,6 +343,10 @@ pub struct Registry {
     config: RegistryConfig,
     entries: RwLock<HashMap<PluginId, PluginEntry>>,
     pending: Mutex<HashMap<String, PendingCall>>,
+    /// V4 A80 hierarchical call admission. Kept separate from pending and never nested with it.
+    admission: Mutex<AdmissionController>,
+    /// V4 A77 synchronous call graph. Cleaned on settle/cancel/timeout/teardown.
+    call_graph: Mutex<CallGraph>,
     /// 流句柄表 + 调用帧载体表（R5）。
     streams: Mutex<StreamRegistry>,
     /// 进程插件运行时租约表（P0-2）：`plugin_id ↔ lease ↔ pid`。
@@ -328,12 +361,35 @@ pub struct Registry {
     next_token: AtomicU64,
 }
 
+fn call_graph_error(error: CallGraphError) -> HostError {
+    HostError::new(ErrorCode::E_CALL_CYCLE, format!("V4 call graph rejected request: {error}"))
+}
+
+fn call_admission_error(error: AdmissionError) -> HostError {
+    HostError::new(
+        ErrorCode::E_CALL_PENDING_FULL,
+        format!("V4 call admission rejected request: {error}"),
+    )
+}
+
 impl Registry {
     pub fn new(config: RegistryConfig) -> Self {
+        let mut admission = AdmissionController::default();
+        admission.set_limit(
+            ResourceKind::Calls,
+            ResourceLimit {
+                global_count: config.max_pending_calls as u64,
+                per_principal_count: MAX_PENDING_PER_PLUGIN as u64,
+                global_bytes: MAX_PENDING_BYTES_GLOBAL,
+                per_principal_bytes: MAX_PENDING_BYTES_PER_PRINCIPAL,
+            },
+        );
         Self {
             config,
             entries: RwLock::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
+            admission: Mutex::new(admission),
+            call_graph: Mutex::new(CallGraph::default()),
             streams: Mutex::new(StreamRegistry::new()),
             runtime: Mutex::new(RuntimeTable::new()),
             active_order: Mutex::new(Vec::new()),
@@ -636,6 +692,20 @@ impl Registry {
         cmd: &str,
         args: serde_json::Value,
     ) -> HostResult<PendingCall> {
+        self.call_begin_cross_with_parent(caller, target, quota_owner, cmd, args, None)
+    }
+
+    /// V4 A77 contextual cross-principal call. Parentage is accepted only when the caller is
+    /// the current target of the parent call, preventing guessed call IDs from forging ancestry.
+    pub fn call_begin_cross_with_parent(
+        &self,
+        caller: &str,
+        target: &str,
+        quota_owner: &str,
+        cmd: &str,
+        args: serde_json::Value,
+        parent_call_id: Option<&str>,
+    ) -> HostResult<PendingCall> {
         let entry = self.require(&PluginId::new(target).map_err(|_| {
             HostError::new(
                 ErrorCode::E_UNKNOWN_PLUGIN,
@@ -651,18 +721,12 @@ impl Registry {
         if cmd.trim().is_empty() {
             return Err(HostError::new(ErrorCode::E_AUTH_DENIED, "调用命令为空"));
         }
+
         let mut pending = self.pending.lock();
         let plugin_pending = pending.values().filter(|call| call.plugin_id == quota_owner).count();
         if pending.len() >= self.config.max_pending_calls
             || plugin_pending >= MAX_PENDING_PER_PLUGIN
         {
-            // 表满时先做 TTL GC：僵尸条目（前端已超时却从未 callEnd 的调用）
-            // 不得永久占用容量位——否则一次永久挂起累积起来就会把表占满，
-            // 使后续所有调用永久 `E_CALL_PENDING_FULL`（ADR-04 的挂起会累积）。
-            //
-            // 只在**满时**驱逐：稳态（表未满）不做 GC，保证 `call_status` 对
-            // 过期条目仍报 `E_CALL_TIMEOUT` 而非 `E_CALL_NOT_FOUND`——
-            // 两者可重试性不同（前者可重试），语义不能塌缩。
             drop(pending);
             self.gc_expired();
             pending = self.pending.lock();
@@ -680,10 +744,54 @@ impl Registry {
                 ),
             ));
         }
-        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
+
+        let parent_root = if let Some(parent_id) = parent_call_id {
+            let parent = pending.get(parent_id).ok_or_else(|| {
+                HostError::new(
+                    ErrorCode::E_CALL_CYCLE,
+                    format!("parent call `{parent_id}` 不存在或已结束"),
+                )
+            })?;
+            if parent.target != caller {
+                return Err(HostError::new(
+                    ErrorCode::E_AUTH_DENIED,
+                    format!("caller `{caller}` 不是 parent call `{parent_id}` 的执行主体"),
+                ));
+            }
+            Some(parent.root_call_id.clone())
+        } else {
+            None
+        };
+        drop(pending);
+
+        let args_bytes = serde_json::to_vec(&args)
+            .map_err(|error| {
+                HostError::new(
+                    ErrorCode::E_INVALID_MANIFEST,
+                    format!("call args could not be measured for admission: {error}"),
+                )
+            })?
+            .len() as u64;
+        let admission_token = self
+            .admission
+            .lock()
+            .admit(quota_owner, ResourceKind::Calls, 1, args_bytes)
+            .map_err(call_admission_error)?;
+
         let call_id = Uuid::new_v4().to_string();
+        let hop_count = match self.call_graph.lock().begin(&call_id, parent_call_id, caller, target)
+        {
+            Ok(depth) => depth,
+            Err(error) => {
+                self.admission.lock().release(&admission_token);
+                return Err(call_graph_error(error));
+            }
+        };
+        let root_call_id = parent_root.unwrap_or_else(|| call_id.clone());
+
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let now = Instant::now();
-        let call = PendingCall::new(
+        let mut call = PendingCall::new(
             call_id.clone(),
             quota_owner.to_string(),
             cmd.to_string(),
@@ -694,6 +802,29 @@ impl Registry {
             now,
             now + self.config.pending_ttl,
         );
+        call.root_call_id = root_call_id;
+        call.parent_call_id = parent_call_id.map(str::to_string);
+        call.hop_count = hop_count;
+        call.runtime_generation = if entry.manifest.plugin_type == PluginType::Process {
+            self.runtime.lock().live_handle_of_plugin(target).map(|handle| handle.generation)
+        } else {
+            None
+        };
+        call.admission_token = Some(admission_token.clone());
+
+        let mut pending = self.pending.lock();
+        let plugin_pending = pending.values().filter(|item| item.plugin_id == quota_owner).count();
+        if pending.len() >= self.config.max_pending_calls
+            || plugin_pending >= MAX_PENDING_PER_PLUGIN
+        {
+            drop(pending);
+            self.call_graph.lock().end(&call_id);
+            self.admission.lock().release(&admission_token);
+            return Err(HostError::new(
+                ErrorCode::E_CALL_PENDING_FULL,
+                "pending call 容量在并发受理期间达到上限",
+            ));
+        }
         pending.insert(call_id, call.clone());
         Ok(call)
     }
@@ -745,7 +876,12 @@ impl Registry {
         if expired {
             let call = pending.remove(call_id).expect("checked pending call exists");
             let _ = call.terminal.try_finish(CallTerminalState::TimedOut);
+            let admission_token = call.admission_token.clone();
             drop(pending);
+            if let Some(token) = admission_token {
+                self.admission.lock().release(&token);
+            }
+            self.call_graph.lock().end(call_id);
             self.streams.lock().close_for_call(
                 call_id,
                 StreamKind::Error,
@@ -770,7 +906,12 @@ impl Registry {
                 format!("pending call `{call_id}` 已有终态，重复结束被拒"),
             ));
         }
+        let admission_token = call.admission_token.clone();
         drop(pending);
+        if let Some(token) = admission_token {
+            self.admission.lock().release(&token);
+        }
+        self.call_graph.lock().end(call_id);
         self.streams.lock().close_for_call(call_id, terminal, reason);
         Ok(call)
     }
@@ -778,42 +919,72 @@ impl Registry {
     /// **窗口关闭清理**（ADR-04）：一次清空该插件的全部 pending 条目。
     /// 不清理会导致 JS 侧 `invoke()` 永久挂起。返回清除数量。
     pub fn call_end_all(&self, id: &PluginId) -> usize {
-        let removed = {
+        let (removed_ids, admission_tokens) = {
             let mut pending = self.pending.lock();
-            let before = pending.len();
-            pending.retain(|_, c| {
-                if c.plugin_id == id.as_str() {
-                    let _ = c.terminal.try_finish(CallTerminalState::Failed);
-                    false
-                } else {
-                    true
+            let ids: Vec<String> = pending
+                .iter()
+                .filter(|(_, call)| {
+                    call.plugin_id == id.as_str()
+                        || call.caller == id.as_str()
+                        || call.target == id.as_str()
+                })
+                .map(|(call_id, _)| call_id.clone())
+                .collect();
+            let mut admission_tokens = Vec::new();
+            for call_id in &ids {
+                if let Some(call) = pending.remove(call_id) {
+                    let _ = call.terminal.try_finish(CallTerminalState::Failed);
+                    if let Some(token) = call.admission_token {
+                        admission_tokens.push(token);
+                    }
                 }
-            });
-            before - pending.len()
+            }
+            (ids, admission_tokens)
         };
-        // 同一订阅者的流整组回收（补 `error` 终帧 + 原因）：窗口没了，接收方
-        // 也就不用再等了——不补的话那些流会永远挂在「等 next frame」上。
+        {
+            let mut admission = self.admission.lock();
+            for token in admission_tokens {
+                admission.release(&token);
+            }
+        }
+        self.call_graph.lock().clear_principal(id.as_str());
         self.streams.lock().close_for_subscriber(id.as_str());
-        removed
+        removed_ids.len()
     }
 
     /// TTL GC：回收全部过期条目。返回回收数量（计划 §4.1：必须有 TTL GC）。
     pub fn gc_expired(&self) -> usize {
         let now = Instant::now();
-        let expired: Vec<String> = {
+        let (expired, admission_tokens): (Vec<String>, Vec<String>) = {
             let mut pending = self.pending.lock();
             let ids: Vec<String> = pending
                 .iter()
                 .filter(|(_, c)| c.expires_at <= now)
                 .map(|(id, _)| id.clone())
                 .collect();
+            let mut tokens = Vec::new();
             for id in &ids {
                 if let Some(call) = pending.remove(id) {
                     let _ = call.terminal.try_finish(CallTerminalState::TimedOut);
+                    if let Some(token) = call.admission_token {
+                        tokens.push(token);
+                    }
                 }
             }
-            ids
+            (ids, tokens)
         };
+        {
+            let mut admission = self.admission.lock();
+            for token in admission_tokens {
+                admission.release(&token);
+            }
+        }
+        {
+            let mut graph = self.call_graph.lock();
+            for call_id in &expired {
+                graph.end(call_id);
+            }
+        }
         let mut streams = self.streams.lock();
         for call_id in &expired {
             streams.close_for_call(
@@ -849,7 +1020,10 @@ impl Registry {
         call.state = CallState::Settled;
         call.result = outcome.result;
         call.error_code = outcome.error_code;
-        Ok(call.clone())
+        let settled = call.clone();
+        drop(pending);
+        self.call_graph.lock().end(call_id);
+        Ok(settled)
     }
 
     /// 取走一次结算结果（0.4-A1 的回执取件步骤）。
@@ -872,6 +1046,11 @@ impl Registry {
                     format!("pending call `{call_id}` 取走时消失（并发回收）"),
                 )
             })?;
+            let admission_token = taken.admission_token.clone();
+            drop(pending);
+            if let Some(token) = admission_token {
+                self.admission.lock().release(&token);
+            }
             Ok(taken)
         } else {
             Ok(call.clone())
@@ -879,8 +1058,12 @@ impl Registry {
     }
 
     /// 目标插件当前**存活**的进程 pid（进程插件投递用，A3）；无存活租约返回 `None`。
+    pub fn live_runtime_handle_of(&self, plugin_id: &str) -> Option<RuntimeHandle> {
+        self.runtime.lock().live_handle_of_plugin(plugin_id)
+    }
+
     pub fn live_pid_of(&self, plugin_id: &str) -> Option<u32> {
-        self.runtime.lock().live_handle_of_plugin(plugin_id).map(|h| h.pid)
+        self.live_runtime_handle_of(plugin_id).map(|handle| handle.pid)
     }
 
     /// 只读取回一次 pending call 的快照（结算/取件前的授权判定用，不改状态）。
@@ -946,6 +1129,19 @@ impl Registry {
             ));
         }
         self.streams.lock().open(call_id, subscriber)
+    }
+
+    pub fn stream_grant(
+        &self,
+        stream_id: &str,
+        subscriber: &str,
+        bytes: usize,
+    ) -> HostResult<usize> {
+        self.streams.lock().grant(stream_id, subscriber, bytes)
+    }
+
+    pub fn stream_credit_remaining(&self, stream_id: &str) -> Option<usize> {
+        self.streams.lock().credit_remaining(stream_id)
     }
 
     /// 写一帧 `data`（`host_stream_write`），`seq` 由宿主铸。
@@ -1025,6 +1221,16 @@ impl Registry {
         self.pending.lock().values().filter(|call| call.plugin_id == plugin_id).count()
     }
 
+    #[cfg(test)]
+    fn call_admission_usage(&self) -> (u64, u64) {
+        self.admission.lock().usage(ResourceKind::Calls)
+    }
+
+    #[cfg(test)]
+    fn call_admission_usage_for(&self, principal: &str) -> (u64, u64) {
+        self.admission.lock().principal_usage(principal, ResourceKind::Calls)
+    }
+
     // ────────────────────────────────────────────────────────────
     // 进程插件运行时租约（P0-2）
     //
@@ -1062,6 +1268,25 @@ impl Registry {
                 ),
             )
         })
+    }
+
+    /// V4 A90 versioned runtime lookup. A valid opaque lease with an old generation is still stale.
+    pub fn runtime_lease_versioned(
+        &self,
+        lease: &str,
+        generation: u64,
+    ) -> HostResult<RuntimeLease> {
+        self.runtime
+            .lock()
+            .get_versioned(lease, crate::generation::Generation(generation))
+            .ok_or_else(|| {
+                HostError::new(
+                    ErrorCode::E_LEASE_EXPIRED,
+                    format!(
+                        "运行时句柄 `{lease}` generation={generation} 已失效或不是当前 generation；需要重新 spawn"
+                    ),
+                )
+            })
     }
 
     /// 确保某插件有运行时租约：**已有活租约则原样返回既有 lease（幂等）**，
@@ -1669,6 +1894,121 @@ mod tests {
         r.call_begin(&id, "b", serde_json::json!({})).unwrap();
         let e = r.call_begin(&id, "c", serde_json::json!({})).unwrap_err();
         assert_eq!(e.code, ErrorCode::E_CALL_PENDING_FULL);
+    }
+
+    #[test]
+    fn contextual_cross_call_rejects_cycles_and_spoofed_parentage() {
+        let r = Registry::default();
+        let a = r.install(&index(), manifest("com.example.a", None)).unwrap();
+        let b = r.install(&index(), manifest("com.example.b", None)).unwrap();
+        enable(&r, &a);
+        enable(&r, &b);
+
+        let root =
+            r.call_begin_cross("main", a.as_str(), "main", "root", serde_json::json!({})).unwrap();
+        assert_eq!(root.root_call_id, root.call_id);
+        assert_eq!(root.hop_count, 1);
+
+        let child = r
+            .call_begin_cross_with_parent(
+                a.as_str(),
+                b.as_str(),
+                a.as_str(),
+                "delegate",
+                serde_json::json!({}),
+                Some(&root.call_id),
+            )
+            .unwrap();
+        assert_eq!(child.root_call_id, root.call_id);
+        assert_eq!(child.parent_call_id.as_deref(), Some(root.call_id.as_str()));
+        assert_eq!(child.hop_count, 2);
+
+        let cycle = r
+            .call_begin_cross_with_parent(
+                b.as_str(),
+                a.as_str(),
+                b.as_str(),
+                "cycle",
+                serde_json::json!({}),
+                Some(&child.call_id),
+            )
+            .unwrap_err();
+        assert_eq!(cycle.code, ErrorCode::E_CALL_CYCLE);
+
+        let spoof = r
+            .call_begin_cross_with_parent(
+                b.as_str(),
+                a.as_str(),
+                b.as_str(),
+                "spoof",
+                serde_json::json!({}),
+                Some(&root.call_id),
+            )
+            .unwrap_err();
+        assert_eq!(spoof.code, ErrorCode::E_AUTH_DENIED);
+
+        r.settle_call(
+            &child.call_id,
+            CallOutcome { ok: true, result: Some(serde_json::json!("ok")), error_code: None },
+        )
+        .unwrap();
+        let missing_parent = r
+            .call_begin_cross_with_parent(
+                b.as_str(),
+                a.as_str(),
+                b.as_str(),
+                "late",
+                serde_json::json!({}),
+                Some(&child.call_id),
+            )
+            .unwrap_err();
+        assert_eq!(missing_parent.code, ErrorCode::E_CALL_CYCLE);
+    }
+
+    #[test]
+    fn call_admission_reservation_tracks_bytes_until_terminal_removal() {
+        let r = Registry::default();
+        let id = r.install(&index(), manifest("com.example.a", None)).unwrap();
+        enable(&r, &id);
+
+        let call = r.call_begin(&id, "work", serde_json::json!({ "payload": "abc" })).unwrap();
+        let (global_count, global_bytes) = r.call_admission_usage();
+        let (owner_count, owner_bytes) = r.call_admission_usage_for(id.as_str());
+        assert_eq!((global_count, owner_count), (1, 1));
+        assert!(global_bytes > 0);
+        assert_eq!(global_bytes, owner_bytes);
+
+        r.settle_call(
+            &call.call_id,
+            CallOutcome { ok: true, result: Some(serde_json::json!("done")), error_code: None },
+        )
+        .unwrap();
+        assert_eq!(r.call_admission_usage().0, 1, "settled-but-not-taken still owns its slot");
+
+        r.take_call(&call.call_id).unwrap();
+        assert_eq!(r.call_admission_usage(), (0, 0));
+        assert_eq!(r.call_admission_usage_for(id.as_str()), (0, 0));
+    }
+
+    #[test]
+    fn call_admission_is_released_by_cancel_timeout_and_owner_teardown() {
+        let cfg = RegistryConfig { pending_ttl: Duration::from_millis(1), ..default_config() };
+        let r = Registry::new(cfg);
+        let id = r.install(&index(), manifest("com.example.a", None)).unwrap();
+        enable(&r, &id);
+
+        let canceled = r.call_begin(&id, "cancel", serde_json::json!({ "n": 1 })).unwrap();
+        r.call_cancel(&canceled.call_id).unwrap();
+        assert_eq!(r.call_admission_usage(), (0, 0));
+
+        r.call_begin(&id, "timeout", serde_json::json!({ "n": 2 })).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(r.gc_expired(), 1);
+        assert_eq!(r.call_admission_usage(), (0, 0));
+
+        r.call_begin(&id, "teardown", serde_json::json!({ "n": 3 })).unwrap();
+        assert_eq!(r.call_end_all(&id), 1);
+        assert_eq!(r.call_admission_usage(), (0, 0));
     }
 
     #[test]
@@ -2457,6 +2797,23 @@ mod tests {
         assert_eq!(err.code, ErrorCode::E_INSTALL_FAILED);
         assert_eq!(r.runtime_len(), 0, "启动失败绝不得留下租约");
         assert!(r.runtime_handle_of(&id).is_none());
+    }
+
+    #[test]
+    fn versioned_runtime_lookup_rejects_old_generation() {
+        let r = Registry::default();
+        let id = r.install(&index(), manifest("com.example.proc", None)).unwrap();
+        let (first, _) = r.runtime_ensure_lease(&id, || Ok(11)).unwrap();
+        assert!(r.runtime_lease_versioned(&first.lease, first.generation.0).is_ok());
+
+        r.runtime_mark_crashed(&first.lease).unwrap();
+        let (second, _) = r.runtime_ensure_lease(&id, || Ok(12)).unwrap();
+        assert!(second.generation > first.generation);
+        assert_eq!(
+            r.runtime_lease_versioned(&second.lease, first.generation.0).unwrap_err().code,
+            ErrorCode::E_LEASE_EXPIRED
+        );
+        assert!(r.runtime_lease_versioned(&second.lease, second.generation.0).is_ok());
     }
 
     #[test]

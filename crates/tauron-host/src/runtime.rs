@@ -24,7 +24,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+
+use crate::generation::{Generation, GenerationHandle, GenerationRegistry};
 
 /// 终止能力的抽象（**宿主核心不认识进程**：`tauron-host` 不依赖 `tauron-proc`）。
 ///
@@ -91,6 +92,8 @@ pub struct RuntimeHandle {
     pub pid: u32,
     /// 租约 token。
     pub lease: String,
+    /// V4 A88/A90 active generation bound to this lease.
+    pub generation: Generation,
 }
 
 /// 租约条目（宿主内部，不跨 IPC——`Instant` 不可序列化，也不该外泄）。
@@ -102,6 +105,8 @@ pub struct RuntimeLease {
     pub plugin_id: String,
     /// 操作系统进程号。
     pub pid: u32,
+    /// V4 A88 generation active when this runtime was registered.
+    pub generation: Generation,
     /// 登记时刻（诊断用）。
     pub started_at: Instant,
     /// 这次死亡是否**已经被记录过**。
@@ -119,6 +124,8 @@ pub struct RuntimeTable {
     leases: HashMap<String, RuntimeLease>,
     /// plugin_id → lease（"一个插件至多一条租约"的索引）。
     by_plugin: HashMap<String, String>,
+    /// V4 A88/A90 active-generation authority; runtime lease tokens are generation lease tokens.
+    generations: GenerationRegistry,
     /// 终止能力（装配层注入；未注入 = 无法终止，按失败留痕）。
     reaper: Option<Arc<dyn LeaseReaper>>,
     /// 回收留痕。
@@ -164,8 +171,8 @@ impl RuntimeTable {
     /// 某插件当前的租约句柄（**不论是否已崩溃**）。
     pub fn handle_of_plugin(&self, plugin_id: &str) -> Option<RuntimeHandle> {
         let lease = self.by_plugin.get(plugin_id)?;
-        let e = self.leases.get(lease)?;
-        Some(RuntimeHandle { pid: e.pid, lease: e.lease.clone() })
+        let e = self.get(lease)?;
+        Some(RuntimeHandle { pid: e.pid, lease: e.lease.clone(), generation: e.generation })
     }
 
     /// 某插件**仍在跑**的租约句柄（已标崩溃的租约不算）。
@@ -188,7 +195,20 @@ impl RuntimeTable {
 
     /// 按 lease 取条目。
     pub fn get(&self, lease: &str) -> Option<RuntimeLease> {
-        self.leases.get(lease).cloned()
+        let entry = self.leases.get(lease)?.clone();
+        let handle = GenerationHandle {
+            resource: entry.plugin_id.clone(),
+            generation: entry.generation,
+            token: entry.lease.clone(),
+        };
+        self.generations.validate(&handle).ok()?;
+        Some(entry)
+    }
+
+    /// Strong V4 A90 lookup: both opaque lease token and caller-observed generation must match.
+    pub fn get_versioned(&self, lease: &str, generation: Generation) -> Option<RuntimeLease> {
+        let entry = self.get(lease)?;
+        (entry.generation == generation).then_some(entry)
     }
 
     /// 登记一条租约并铸 lease token。
@@ -199,7 +219,15 @@ impl RuntimeTable {
         if self.by_plugin.contains_key(plugin_id) {
             self.remove_plugin(plugin_id);
         }
-        let lease = Uuid::new_v4().to_string();
+
+        let generation = self.generations.activate(plugin_id);
+        let generation_handle = self
+            .generations
+            .lease(plugin_id)
+            .expect("runtime generation was activated immediately before lease");
+        let lease = generation_handle.token;
+        debug_assert_eq!(generation_handle.generation, generation);
+
         self.by_plugin.insert(plugin_id.to_string(), lease.clone());
         self.leases.insert(
             lease.clone(),
@@ -207,11 +235,12 @@ impl RuntimeTable {
                 lease: lease.clone(),
                 plugin_id: plugin_id.to_string(),
                 pid,
+                generation,
                 started_at: Instant::now(),
                 crash_recorded: false,
             },
         );
-        RuntimeHandle { pid, lease }
+        RuntimeHandle { pid, lease, generation }
     }
 
     /// 标记该租约的进程已崩溃。
@@ -220,6 +249,7 @@ impl RuntimeTable {
     /// - `Some(false)`：之前已标记过（重复轮询，不得重复计数）；
     /// - `None`：租约不存在（调用方报 `E_LEASE_EXPIRED`）。
     pub fn mark_crashed(&mut self, lease: &str) -> Option<bool> {
+        self.get(lease)?;
         let e = self.leases.get_mut(lease)?;
         if e.crash_recorded {
             Some(false)
@@ -236,8 +266,9 @@ impl RuntimeTable {
     pub fn remove_plugin(&mut self, plugin_id: &str) -> Option<RuntimeHandle> {
         let lease = self.by_plugin.remove(plugin_id)?;
         let e = self.leases.remove(&lease)?;
+        self.generations.release(&lease);
         self.terminate(e.pid);
-        Some(RuntimeHandle { pid: e.pid, lease: e.lease })
+        Some(RuntimeHandle { pid: e.pid, lease: e.lease, generation: e.generation })
     }
 
     /// 回收**仍在跑**的租约：已标崩溃的租约**不动**（进程早已死透，租约要留给
@@ -294,6 +325,21 @@ mod tests {
         // 未知租约必须取不到（而不是猜一个）。
         assert!(t.get("no-such-lease").is_none());
         assert!(t.handle_of_plugin("com.example.other").is_none());
+    }
+
+    #[test]
+    fn runtime_generation_advances_and_old_handle_becomes_stale() {
+        let mut t = RuntimeTable::new();
+        let first = t.register("p", 10);
+        assert_eq!(first.generation, Generation::INITIAL);
+        assert!(t.get_versioned(&first.lease, first.generation).is_some());
+
+        let second = t.register("p", 11);
+        assert_eq!(second.generation, first.generation.next());
+        assert_ne!(second.lease, first.lease);
+        assert!(t.get(&first.lease).is_none());
+        assert!(t.get_versioned(&second.lease, first.generation).is_none());
+        assert!(t.get_versioned(&second.lease, second.generation).is_some());
     }
 
     #[test]
