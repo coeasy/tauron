@@ -588,6 +588,11 @@ export function generateFiles(config: ScaffoldConfig): Map<string, string> {
   const files = new Map<string, string>();
 
   files.set('package.json', generatePackageJson(config));
+  // pnpm 11+ denies dependency lifecycle scripts by default. esbuild installs a
+  // platform-specific binary through postinstall and is required by Vite/Vitest.
+  // Explicitly allow only esbuild so a fresh pnpm install works without weakening
+  // pnpm's build-script protections for every other dependency.
+  files.set('pnpm-workspace.yaml', 'allowBuilds:\n  esbuild: true\n');
   files.set('tsconfig.json', generateTsconfig(config));
   files.set('.gitignore', generateGitignore());
   files.set('vite.config.ts', generateViteConfig(config));

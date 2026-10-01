@@ -743,6 +743,7 @@ describe('generateFiles', () => {
     };
     const files = generateFiles(config);
     expect(files.has('package.json')).toBe(true);
+    expect(files.get('pnpm-workspace.yaml')).toContain('esbuild: true');
     expect(files.has('tsconfig.json')).toBe(true);
     expect(files.has('.gitignore')).toBe(true);
     expect(files.has('index.html')).toBe(true);

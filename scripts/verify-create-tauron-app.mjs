@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Exercise the built create-tauron-app executable before publishing it.
-import { spawnSync } from 'node:child_process';
+import { execSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -36,11 +36,17 @@ try {
 
   for (const file of [
     'package.json',
+    'pnpm-workspace.yaml',
     'src-tauri/Cargo.toml',
     'src-tauri/src/main.rs',
     'src-tauri/tauri.conf.json',
   ]) {
     if (!existsSync(join(target, file))) throw new Error(`Generated starter is missing ${file}.`);
+  }
+
+  const pnpmWorkspace = readFileSync(join(target, 'pnpm-workspace.yaml'), 'utf8');
+  if (!/^\s*esbuild:\s*true\s*$/m.test(pnpmWorkspace)) {
+    throw new Error('Generated pnpm-workspace.yaml must allow the esbuild install script.');
   }
 
   const generatedPackage = JSON.parse(readFileSync(join(target, 'package.json'), 'utf8'));
@@ -50,6 +56,12 @@ try {
   }
   if (!cargoManifest.includes('tauron-adapter = { version = "=1.0.2"')) {
     throw new Error('Generated starter does not pin tauron-adapter to 1.0.2.');
+  }
+
+  if (process.env.TAURON_INSTALL_PREFLIGHT === '1') {
+    execSync('pnpm install --no-frozen-lockfile', { cwd: target, stdio: 'inherit' });
+    execSync('pnpm add @tauron/ui@1.0.2', { cwd: target, stdio: 'inherit' });
+    execSync('pnpm run build', { cwd: target, stdio: 'inherit' });
   }
 
   console.log(
