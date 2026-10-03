@@ -13,7 +13,8 @@
 | [multi-plugin-substrate-roadmap.md](./multi-plugin-substrate-roadmap.md) | 0.3 优化改进方案：成熟度记分卡、残差清单、S/M/X 改进项、轮次编排 | 历史方案（§2 残差表已过期，见其顶部复核横幅） |
 | [capability-closure-plan.md](./capability-closure-plan.md) | 0.4 能力收口方案：A1–A8 + 轮 19–29；**仅 A1–A3 已落地** | 历史方案（A4–A8 由下方 1.0 方案接管） |
 | [full-architecture-refactor-plan.md](./full-architecture-refactor-plan.md) | 1.0 全量架构重评估与重构方案：实测缺陷清单、W1–W10 工作流、轮 30–41 编排 | 前瞻计划（V4 之前的主线） |
-| [v4-industrial-gap-closure-plan.md](./v4-industrial-gap-closure-plan.md) | V4 工业级缺口收口方案：A01–A110 与 §134/§136/§141 逐项「已落 / 部分 / 未落」台账、F1–F5 危险缺口、Batch 0–6' 编排与推迟清单 | **当前前瞻计划**（对外措辞与发布判据以这份为准） |
+| [v4-industrial-gap-closure-plan.md](./v4-industrial-gap-closure-plan.md) | V4 工业级缺口收口方案：A01–A110 与 §134/§136/§141 逐项「已落 / 部分 / 未落」台账、F1–F5 危险缺口、Batch 0–6' 编排与推迟清单 | **当前执行台账**（对外措辞与发布判据以这份为准） |
+| [../Tauron-Architecture-Competitive-Analysis-Optimization-Plan-V5.md](../Tauron-Architecture-Competitive-Analysis-Optimization-Plan-V5.md) | V5 竞分析与优化方案：七 Plane 目标架构、RuntimeDriver / HostTransport / Manifest V3 契约、Phase A–G 优先级与退出门槛、能力诚实分级 | **对照基线**（轮 13 起的新增工作对照此方案；前瞻方案，不描述现状） |
 | [../api/command-surface.md](../api/command-surface.md) | 命令面**全量**参考：85 条 `host_*` 的业务形参 / 返回 / 档位与判定 / feature 门 / 前端落点 | **生成物**（`pnpm command-surface:gen`，CI `command-surface:check` 复算，勿手改） |
 | [../integration/incremental-adoption.md](../integration/incremental-adoption.md) | 三档装配指南：只取底座 / 底座 + 插件运行时 / 完整客户端 | 集成方入口 |
 | [../api/plugin-development-guide.md](../api/plugin-development-guide.md) | 插件开发指南：类型、清单、权限词表、宿主命令面、错误码、生命周期状态机、sidecar ABI、CLI 的真实边界 | 插件作者入口 |

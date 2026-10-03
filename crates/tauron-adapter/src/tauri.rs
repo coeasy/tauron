@@ -1952,18 +1952,11 @@ impl crate::WindowSink for TauriWindowSink {
                 if let Some(install_root) = state.install_config_root() {
                     let plugin_id = &spec.label["plugin-".len()..];
                     let installed = crate::installed_plugin_ui(&state, plugin_id)?;
-                    let relative =
-                        installed.entry.strip_prefix(install_root.as_path()).map_err(|e| {
-                            HostError::new(
-                                ErrorCode::E_INSTALL_FAILED,
-                                format!("插件 UI 越出安装目录：{e}"),
-                            )
-                        })?;
-                    let entry = relative
-                        .strip_prefix(plugin_id)
-                        .unwrap_or(relative)
-                        .to_string_lossy()
-                        .replace('\\', "/");
+                    let entry = crate::plugin_window_asset_relative(
+                        install_root,
+                        plugin_id,
+                        &installed.entry,
+                    )?;
                     tauri::WebviewUrl::CustomProtocol(make_plugin_asset_url(plugin_id, &entry)?)
                 } else {
                     tauri::WebviewUrl::App(std::path::PathBuf::from(&spec.url))

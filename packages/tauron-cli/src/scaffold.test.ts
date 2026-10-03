@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createApp, IMPLEMENTED_TEMPLATES } from './scaffold.js';
+import { CLI_VERSION, PUBLISHED_NPM_VERSION } from './version.js';
 import type { AppConfig } from './types.js';
 
 const OPTS = { verbose: false, dryRun: false, force: false };
@@ -32,6 +33,22 @@ describe('createApp', () => {
     const result = createApp(baseConfig, OPTS);
     const pkg = JSON.parse(result.files['package.json']!);
     expect(pkg.dependencies['@tauron/core']).toBeDefined();
+  });
+
+  it('registry 依赖钉「已发布版本」，不钉 CLI 自身版本（轮 16）', () => {
+    // 此前这里钉 `^${CLI_VERSION}`：仓库源码 1.1.0 而 npm `latest` 只有 1.0.2，
+    // 生成的工程 `npm install` 第一步就 ETARGET——照着 README 走的用户在
+    // 「创建应用」之后立刻撞墙，属于前后端贯通的真断链。
+    const result = createApp({ ...baseConfig, template: 'react' }, OPTS);
+    const pkg = JSON.parse(result.files['package.json']!);
+    for (const name of ['@tauron/core', '@tauron/types', '@tauron/adapter-react']) {
+      expect(pkg.dependencies[name], `${name} 缺依赖`).toBe(`^${PUBLISHED_NPM_VERSION}`);
+    }
+    expect(PUBLISHED_NPM_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+    // README 必须同时报两个版本号，否则「钉了旧版、模板按新版写」这件事
+    // 只有读源码的人知道。
+    expect(result.files['README.md']).toContain(PUBLISHED_NPM_VERSION);
+    expect(result.files['README.md']).toContain(CLI_VERSION);
   });
 
   it('generates tauron.config.ts', () => {

@@ -2468,8 +2468,15 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       /meta\.publisher != subscriber && !meta\.is_public/,
     );
     expect(bus, '退订后必须作废队列里该 topic 的待取帧').toMatch(
-      /self\.drop_queued\(subscriber, topic\)\s*;\s*\n\s*had_grant/,
+      // 轮 17：`drop_queued` 与返回的 `had_grant` 之间现在夹了一句 grants 回收。
+      // 断言的实质是**顺序**（作废必须在返回之前），不是相邻两行——故给出 120 字符
+      // 的上限，既容得下插入的一句，也不让文件后段无关的 `had_grant` 蒙过去。
+      /self\.drop_queued\(subscriber, topic\)\s*;[\s\S]{0,120}?\n\s*had_grant/,
     );
+    expect(
+      (bus.match(/self\.reclaim_grant_when_unapproved\(subscriber\);/g) ?? []).length,
+      'grants 版本行的回收必须同时挂在 revoke 的两个出口（幂等重试 + 正常撤销）',
+    ).toBe(2);
     expect(bus, '幂等重放的 revoke 也必须作废竞态残留帧').toMatch(
       /即使授权行已不存在（幂等重试）也再作废一次队列/,
     );
@@ -2704,17 +2711,27 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       /ErrorKind::NotFound => return Ok\(None\)/,
     );
 
-    // ④ 消费点在装配路径上，且**一次性**：消费即作废。
+    // ④ 消费点在装配路径上，且**一次性**：消费即作废；健康启动也必须回执掉镜像。
     const askAt = lib.indexOf('path.with_file_name(HOST_SETTINGS_ROLLBACK_FILE)');
     expect(askAt, '启动装配没有问回滚镜像（磁盘快照仍是孤儿）').toBeGreaterThan(-1);
     expect(lib.slice(askAt, askAt + 1200), '镜像消费后未作废（一次性语义丢失）').toMatch(
       /clear_settings_rollback_image\(&rollback_path\)/,
     );
     expect(lib, '按镜像恢复必须如实记录，不能静默改写用户数据').toMatch(/已按 A101 从迁移回滚镜像/);
+    // 轮 16 R3 改判后镜像有三个作废出口：装配期按镜像恢复之后、迁移落盘失败时、
+    // **健康启动读到好数据时的回执**。第三个出口是语义变更的核心——镜像的保护窗
+    // 是「迁移提交 → 首次证明可读」，一旦读到就说明新状态可用，再留着它只会在
+    // 下次损坏时把用户回滚到迁移前的旧版本。
+    // 轮 17：判定面限定在**生产区**（`mod tests` 之前）。轮 16 的口径把整文件都数进
+    // 去，于是「给作废函数补一个单测」会让消费点计数从 3 变 5 —— 门禁红得毫无道理，
+    // 而这种红教人的是「别给生产语义加测试」。测试里的调用不是消费点。
+    const testsAt = lib.search(/^#\[cfg\(test\)\]\r?\nmod tests \{$/m);
+    if (testsAt < 0) throw new Error('adapter lib.rs 的测试模块锚点消失，消费点计数失去边界');
+    const productionLib = lib.slice(0, testsAt);
     expect(
-      (lib.match(/clear_settings_rollback_image\(&/g) ?? []).length,
-      '作废出口的消费点漂移（装配消费 + 迁移落盘失败）',
-    ).toBe(2);
+      (productionLib.match(/clear_settings_rollback_image\(&/g) ?? []).length,
+      '作废出口的消费点漂移（装配消费 + 迁移落盘失败 + 健康启动回执）',
+    ).toBe(3);
 
     // ⑤ 救不回来时仍是原来的 fail-closed 口径：生产档 panic 前缀逐字不改（外部日志/监控
     // 按它聚合），且镜像也坏时两半原因都要报。
@@ -4100,6 +4117,367 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     for (const f of ['crates/tauron-adapter/src/lib.rs', 'crates/tauron-adapter/src/tauri.rs']) {
       const src = read(f);
       expect(src, `${f} 出现 todo!/unimplemented! 占位`).not.toMatch(/todo!\(|unimplemented!\(/);
+    }
+  });
+
+  it('轮 13：module-maturity 台账与文件系统/Cargo/文档三方同源（V5 §46.2）', () => {
+    type CrateEntry = {
+      adapterDependency: string | null;
+      overviewWiring: 'wired' | 'partial' | 'unwired' | null;
+      ownersTable: string | null;
+    };
+    const ledger = JSON.parse(read('contracts/module-maturity.json')) as {
+      schemaVersion: number;
+      crates: Record<string, CrateEntry>;
+      packages: Record<string, { name: string; private?: boolean; layer: 'framework' | 'app' }>;
+    };
+    expect(ledger.schemaVersion, 'module-maturity.json 缺 schemaVersion').toBe(1);
+
+    // ① 收录集合与文件系统逐一对账——「15 crates / 20 packages」这类计数谎报
+    //    从此刻意不可再犯：加一个目录不改台账就红。
+    const crateDirs = readdirSync(join(workspaceRoot, 'crates')).sort();
+    expect(Object.keys(ledger.crates).sort(), 'crates/ 目录集合与台账不一致').toEqual(crateDirs);
+    const pkgDirs = readdirSync(join(workspaceRoot, 'packages')).sort();
+    expect(Object.keys(ledger.packages).sort(), 'packages/ 目录集合与台账不一致').toEqual(pkgDirs);
+
+    // ② package.json 的 name/private 与台账一致（README 树与两层表靠它对齐）。
+    for (const [dir, meta] of Object.entries(ledger.packages)) {
+      const pkg = JSON.parse(read(`packages/${dir}/package.json`)) as {
+        name: string;
+        private?: boolean;
+      };
+      expect(pkg.name, `${dir} 的包名与台账不一致`).toBe(meta.name);
+      expect(Boolean(pkg.private), `${dir} 的 private 与台账不一致`).toBe(Boolean(meta.private));
+    }
+
+    // ③ adapterDependency 从 tauron-adapter/Cargo.toml **反推**：默认依赖 /
+    //    optional+具体 feature / 不在表内。文档再声称「已接线」也不作数，以表为准。
+    const toml = read('crates/tauron-adapter/Cargo.toml');
+    const depsSection = /\[dependencies\][\s\S]*?(?=\n\[|$)/.exec(toml)?.[0] ?? '';
+    expect(depsSection.length, '未解析到 tauron-adapter 的 [dependencies]').toBeGreaterThan(0);
+    for (const [crate, meta] of Object.entries(ledger.crates)) {
+      if (crate === 'tauron-adapter') continue;
+      const line = new RegExp(`^${crate}\\s*=\\s*[^\\n]*`, 'm').exec(depsSection)?.[0] ?? null;
+      let derived: string | null = null;
+      if (line) {
+        if (/optional\s*=\s*true/.test(line)) {
+          let feat: string | null = null;
+          for (const m of toml.matchAll(/^([\w-]+)\s*=\s*\[([^\]]*)\]/gm)) {
+            if ((m[2] ?? '').includes(`dep:${crate}`)) feat = m[1] ?? null;
+          }
+          expect(feat, `${crate} 是 optional 但没有 feature 引用 dep:${crate}`).not.toBeNull();
+          derived = `feature:${feat}`;
+        } else {
+          derived = 'default';
+        }
+      }
+      expect(
+        meta.adapterDependency,
+        `${crate} 的依赖形态与 tauron-adapter/Cargo.toml 不一致（账面/代码漂移）`,
+      ).toBe(derived);
+    }
+
+    // ④ overview.md 接线表的逐 crate 判定必须等于台账（轮 13 的漂移就在这张表）。
+    //    解析按**中文标签**取判定，不按 emoji——emoji 的变体选择符（U+FE0F）在
+    //    不同编辑路径下时有时无，把它写进正则会造出「行明明在表里、解析说没有」
+    //    的假红（本轮实测踩过）。
+    const overview = read('docs/architecture/overview.md');
+    const labelMap = new Map<string, string>();
+    for (const line of overview.split(/\r?\n/)) {
+      if (!line.startsWith('> |')) continue;
+      const cell =
+        /\*\*(已接线|部分接线|未接线)\*\*\s*\|\s*((?:`tauron-[a-z0-9-]+`)(?:\s*\/\s*`tauron-[a-z0-9-]+`)*)\s*\|/.exec(
+          line,
+        );
+      if (!cell) {
+        // 防假绿：行首是表格、单元格里有判定词、却没解析出 crate 列——说明形状变了。
+        if (line.includes('接线') && line.includes('`tauron-')) {
+          throw new Error(`接线表行无法解析 crate 列：${line.slice(0, 60)}…`);
+        }
+        continue;
+      }
+      for (const c of (cell[2] ?? '').split('/')) {
+        labelMap.set(c.trim().replace(/`/g, ''), (cell[1] ?? '').trim());
+      }
+    }
+    expect(labelMap.size, 'overview 接线表解析为 0 行（正则失配，防假绿）').toBeGreaterThanOrEqual(
+      10,
+    );
+    const sym = { wired: '已接线', partial: '部分接线', unwired: '未接线' } as const;
+    for (const [crate, meta] of Object.entries(ledger.crates)) {
+      const expected = meta.overviewWiring ? sym[meta.overviewWiring] : null;
+      expect(labelMap.get(crate) ?? null, `overview.md 接线表与台账对 ${crate} 判定不一致`).toBe(
+        expected,
+      );
+    }
+
+    // ⑤ canonical-owners 0.3 归置表的状态必须等于台账。
+    const owners = read('docs/architecture/canonical-owners.md');
+    const placement = owners.slice(
+      owners.indexOf('## 0.3 crate 归置决策'),
+      owners.indexOf('## 依据'),
+    );
+    expect(placement.length, '未定位到 0.3 归置表').toBeGreaterThan(100);
+    for (const [crate, meta] of Object.entries(ledger.crates)) {
+      const row = new RegExp('^\\| `' + crate + '` \\| ([^|]+) \\|', 'm').exec(placement);
+      expect(!!row, `0.3 归置表对 ${crate} 的收录与台账不一致`).toBe(meta.ownersTable !== null);
+      if (meta.ownersTable !== null) {
+        expect(row![1]!.trim(), `0.3 归置表 ${crate} 状态与台账不同步`).toBe(meta.ownersTable);
+      }
+    }
+
+    // ⑥ README 结构树与竞品分析的计数必须与台账同源（两处本轮刚错过账）。
+    const readme = read('README.md');
+    const total = pkgDirs.length;
+    const appCount = Object.values(ledger.packages).filter((p) => p.layer === 'app').length;
+    expect(readme, 'README 结构树的包总数与台账不一致').toContain(`npm 包（${total} 个目录`);
+    expect(readme, 'README 框架层计数与台账不一致').toContain(
+      `# ── 框架层（${total - appCount} 个）──`,
+    );
+    expect(readme, 'README 应用层计数与台账不一致').toContain(`# ── 应用层（${appCount} 个）──`);
+    for (const dir of [...pkgDirs, ...crateDirs]) {
+      expect(readme, `README 结构树漏了目录 ${dir}（新增模块必须同步结构树与台账）`).toMatch(
+        new RegExp(`[├└]── ${dir}/`),
+      );
+    }
+    const comp = read('docs/competitive-analysis/competitive-analysis.md');
+    expect(comp, '竞品分析的技术架构 crate 计数与台账不一致').toContain(
+      `${crateDirs.length} crates`,
+    );
+    expect(comp, '竞品分析的包目录计数与台账不一致').toContain(`${total} 个包目录`);
+
+    // ⑦ V5 §46.3：Universal Protocol 之前**冻结**根 `host_*` 命令面（85 = 底座 61 +
+    //    运行时 22 + 安装 2）。新增命令只允许「修复 / 补 guard / 必要 handshake」，
+    //    且必须显式改这条断言——让「85 悄悄长到 100+」在 CI 里不可能无声发生。
+    //    数字本身的真伪由 CI `command-surface:check` 对代码复算，这里冻结的是**上限**。
+    const surface = read('docs/api/command-surface.md');
+    const surfaceCount = (surface.match(/^\| `host_[a-z0-9_]+` \|/gm) ?? []).length;
+    expect(surfaceCount, '命令面行数解析为 0（生成物形状变了，先修门禁再谈新增）').toBeGreaterThan(
+      0,
+    );
+    expect(surfaceCount, 'V5 §46.3 冻结：新增根 host_* 命令必须显式过账').toBe(85);
+  });
+
+  it('轮 16/17：npm 包消费者状态与台账同源（孤儿包不得无声增殖）', () => {
+    // 轮 13 把 **crate** 的接线状态钉进了台账；npm 包这一侧却仍然只靠文档叙述。
+    // 本轮全包扫描查出六个「只有测试/文档在引用」的包（adapter-svelte、adapter-vue、
+    // app-contract-kit、dual-world、framework、shell-matrix）——它们里有的 README
+    // 写得像已经接进应用。与其逐条修文案，不如把「谁真的 import 了它」变成可复算
+    // 的事实：状态只有三种，新增包不登记就红，登记错了也对不上。
+    //
+    //   repo-consumed  = 仓内有**非测试**源码 import 它
+    //   reference-only = 仓内没有任何非测试源码 import（公开发给接入方，如实登记）
+    //   entry-point    = 面向用户的入口（有 bin，或本身是私有测试包）——不适用前者
+    //
+    // 轮 17 独立复查把判定收紧了三刀，因为**旧口径能绿着说谎**（实测，非推演）：
+    // ① `src.includes("from '<name>")` 是**前缀**匹配——`@tauron/ui` 会命中
+    //    `@tauron/ui-primitives` 的一句注释，于是「零真 import」的包被判 repo-consumed；
+    // ② 只认 `from`——副作用/子路径 import（`examples/minimal-app/src/main.ts`
+    //    的 `import '@tauron/ui/wc'`）这条**真消费**看不见，反过来也可能把已接线的
+    //    包错钉成 reference-only；
+    // ③ **生成器模板串**里的 `from '@tauron/adapter-react'` 被当成消费者——
+    //    `@tauron/cli` 自己并不依赖 adapter-react，模板宿主也不会因此装上它。
+    // 现在只认「注释剥离后的 import/export/require specifier」∧「消费方自己的
+    // package.json 真声明了该依赖」。第三条把 `@tauron/adapter-react` 如实改判为
+    // reference-only（与 adapter-vue/svelte 同档）。
+    type ConsumerStatus = 'repo-consumed' | 'reference-only' | 'entry-point';
+    const CONSUMER_STATUSES: ConsumerStatus[] = ['repo-consumed', 'reference-only', 'entry-point'];
+    type PkgMeta = {
+      name: string;
+      private?: boolean;
+      layer: 'framework' | 'app';
+      consumerStatus?: ConsumerStatus;
+    };
+    const ledger = JSON.parse(read('contracts/module-maturity.json')) as {
+      packages: Record<string, PkgMeta>;
+    };
+
+    const skipDirs = new Set(['node_modules', 'dist', 'target', 'coverage']);
+    const collect = (dir: string, out: string[] = []): string[] => {
+      for (const entry of readdirSync(resolve(workspaceRoot, dir), { withFileTypes: true })) {
+        if (skipDirs.has(entry.name)) continue;
+        const rel = `${dir}/${entry.name}`;
+        if (entry.isDirectory()) collect(rel, out);
+        else if (/\.(ts|tsx|js|mjs)$/.test(entry.name) && !/\.(test|spec)\./.test(entry.name)) {
+          out.push(rel);
+        }
+      }
+      return out;
+    };
+    // 只认「包自己的 src/」与「示例的 src/」里的 import：测试文件里出现包名只证明
+    // 它被自检覆盖，不证明有生产消费方；README/文档同理（否则任何自述都算消费者）。
+    const sources = [
+      ...collect('packages').filter((p) => /^packages\/[^/]+\/src\//.test(p)),
+      ...collect('examples').filter((p) => /^examples\/[^/]+\/src\//.test(p)),
+    ].map((p) => ({ p, src: read(p) }));
+    expect(sources.length, '消费者扫描的源码集合为空（目录形状变了，先修门禁）').toBeGreaterThan(
+      50,
+    );
+
+    const ownerOf = (sourcePath: string): string => sourcePath.split('/').slice(0, 2).join('/');
+    const depsCache = new Map<string, Record<string, string>>();
+    const declaredDepsOf = (sourcePath: string): Record<string, string> => {
+      const owner = ownerOf(sourcePath);
+      if (!depsCache.has(owner)) {
+        let pkg: {
+          dependencies?: Record<string, string>;
+          peerDependencies?: Record<string, string>;
+          devDependencies?: Record<string, string>;
+        } = {};
+        try {
+          pkg = JSON.parse(read(`${owner}/package.json`));
+        } catch {
+          pkg = {};
+        }
+        depsCache.set(owner, {
+          ...(pkg.dependencies ?? {}),
+          ...(pkg.peerDependencies ?? {}),
+          ...(pkg.devDependencies ?? {}),
+        });
+      }
+      return depsCache.get(owner) as Record<string, string>;
+    };
+    const specifiersOf = (src: string): string[] => {
+      const body = stripComments(src);
+      const out: string[] = [];
+      for (const m of body.matchAll(/(?:\bfrom|\bimport|\bexport)\s*\(?\s*['"]([^'"]+)['"]/g)) {
+        out.push(m[1] as string);
+      }
+      for (const m of body.matchAll(/\brequire\s*\(\s*['"]([^'"]+)['"]/g)) {
+        out.push(m[1] as string);
+      }
+      return out;
+    };
+
+    const consumersOf = (pkgDir: string, name: string): string[] => {
+      const hits: string[] = [];
+      for (const source of sources) {
+        if (source.p.startsWith(`packages/${pkgDir}/`)) continue;
+        // specifier 必须**恰好**是包名或其子路径：`@tauron/ui` 不得命中
+        // `@tauron/ui-primitives`
+        if (
+          !specifiersOf(source.src).some((spec) => spec === name || spec.startsWith(`${name}/`))
+        ) {
+          continue;
+        }
+        if (!(name in declaredDepsOf(source.p))) continue;
+        const owner = ownerOf(source.p);
+        if (!hits.includes(owner)) hits.push(owner);
+      }
+      return hits.sort();
+    };
+
+    const counted: Record<ConsumerStatus, number> = {
+      'repo-consumed': 0,
+      'reference-only': 0,
+      'entry-point': 0,
+    };
+    for (const [dir, meta] of Object.entries(ledger.packages)) {
+      const status = meta.consumerStatus;
+      if (!status) {
+        throw new Error(`${meta.name} 缺 consumerStatus：新增 npm 包必须显式登记消费者状态`);
+      }
+      // 轮 17：未知状态一律炸掉。旧实现把不认识的字符串丢进 `else`，于是
+      // 台账里打错一个词（或将来加第四种状态忘了改判定）就退化成
+      // 「只要有 bin 或 private 就通过」——那是最省事的假绿路径。
+      if (!(CONSUMER_STATUSES as string[]).includes(status)) {
+        throw new Error(
+          `${meta.name} 的 consumerStatus="${status}" 不在枚举内（${CONSUMER_STATUSES.join(' | ')}）`,
+        );
+      }
+      counted[status] = (counted[status] ?? 0) + 1;
+      const consumers = consumersOf(dir, meta.name);
+      if (status === 'repo-consumed') {
+        expect(
+          consumers.length,
+          `${meta.name} 台账记为 repo-consumed，但仓内没有任何非测试源码 import 它（断链或谎报）`,
+        ).toBeGreaterThan(0);
+      } else if (status === 'reference-only') {
+        expect(
+          consumers,
+          `${meta.name} 台账记为 reference-only，但 ${consumers.join(', ')} 已经在 import 它——请改判并补接线说明`,
+        ).toEqual([]);
+      } else {
+        const pkg = JSON.parse(read(`packages/${dir}/package.json`)) as {
+          bin?: Record<string, string>;
+          private?: boolean;
+        };
+        expect(
+          Boolean(pkg.private) || Object.keys(pkg.bin ?? {}).length > 0,
+          `${meta.name} 记为 entry-point，但它既非私有包也没有 bin 字段`,
+        ).toBe(true);
+        // 轮 17：`bin` 指向的文件必须真存在——否则「入口包」是靠一个跑不起来的
+        // 字段认证出来的，而 publish 脚本之外的任何门禁都不会去看它。
+        for (const [command, target] of Object.entries(pkg.bin ?? {})) {
+          expect(
+            existsSync(resolve(workspaceRoot, `packages/${dir}`, target)),
+            `${meta.name} 的 bin「${command}」指向 ${target}，该文件不存在`,
+          ).toBe(true);
+        }
+      }
+    }
+    // 三种状态都必须有人占位：某个状态突然归零，多半是台账被误删了一列。
+    for (const [status, n] of Object.entries(counted)) {
+      expect(n, `台账里 ${status} 一档为空（状态表被改坏了）`).toBeGreaterThan(0);
+    }
+  });
+
+  it('轮 17：registry 现值是两个 CLI 包的单一真源', () => {
+    // 轮 16 把「仓库源码版本」与「registry 已发布版本」拆成两个事实：脚手架的 pin
+    // 若跟着 CLI 自己的版本走，用户在 registry 抬上去之前 `npm install` 就是 ETARGET
+    // ——按 README 走第二步的人拿到的是装不上的工程，这是前后端贯通意义上的真断链。
+    //
+    // 拆完**必须**有门禁钉住，否则删掉 package.json 里那个字段会静默退回 CLI 版本
+    // （`version.ts` 的 `?? pkg.version` 兜底），bug 原地复活而全仓全绿——轮 17 独立
+    // 复查实测到的正是这条：没有任何门禁读过它。
+    const SEMVER = /^\d+\.\d+\.\d+$/;
+    const published = new Map<string, { name: string; version: string; published: string }>();
+    for (const dir of ['tauron-cli', 'tauron-app-cli']) {
+      const pkg = JSON.parse(read(`packages/${dir}/package.json`)) as {
+        name: string;
+        version: string;
+        tauron?: { publishedNpmVersion?: string };
+      };
+      const value = pkg.tauron?.publishedNpmVersion;
+      if (!value) {
+        throw new Error(`${pkg.name} 缺 tauron.publishedNpmVersion：未发布状态没有事实来源`);
+      }
+      if (!SEMVER.test(value)) {
+        throw new Error(`${pkg.name} 的 publishedNpmVersion="${value}" 不是三段版本号`);
+      }
+      published.set(dir, { name: pkg.name, version: pkg.version, published: value });
+    }
+    const values = new Set([...published.values()].map((p) => p.published));
+    expect(values.size, `两个 CLI 对「registry 现值」各有说法：${[...values].join(' vs ')}`).toBe(
+      1,
+    );
+
+    // 字段必须真的被代码读——留着 JSON key 而没人读，等于没有事实来源
+    for (const [dir, source] of [
+      ['tauron-cli', 'packages/tauron-cli/src/version.ts'],
+      ['tauron-app-cli', 'packages/tauron-app-cli/src/framework-version.ts'],
+    ] as const) {
+      // 现值只能从 package.json 取，不能抄进代码。判据先剥注释：这几个文件的
+      // **注释**里合法地提到过 1.0.2（记录踩坑现场），把它当成写死会误报。
+      const code = stripComments(read(source));
+      expect(
+        code.includes('publishedNpmVersion'),
+        `${dir} 的 package.json 有 publishedNpmVersion，但 ${source} 没读它`,
+      ).toBe(true);
+      expect(
+        new RegExp(`=\\s*['"]${published.get(dir)!.published}['"]`).test(code),
+        `${source} 把 registry 现值写死成了字面量（只能从 package.json 取）`,
+      ).toBe(false);
+    }
+
+    // 文档叙述的 registry 现值必须与字段同源：轮 16 之前 README 与代码各说各话，
+    // 接入方按哪一份都会踩坑。
+    const [registryValue] = [...values];
+    for (const doc of ['README.md', 'docs/api/plugin-development-guide.md']) {
+      expect(
+        read(doc).includes(registryValue as string),
+        `${doc} 里没有 registry 现值 ${registryValue}：文档与 package.json 不同源`,
+      ).toBe(true);
     }
   });
 

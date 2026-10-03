@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runCli } from './cli.js';
+import { runCli, doctorCommandResult } from './cli.js';
 import type { CliOptions } from './types.js';
 import { CLI_VERSION } from './version.js';
 
@@ -49,6 +49,40 @@ describe('runCli', () => {
     expect(result.message).toContain('tauron doctor');
     // doctor 真实派生 6 个工具链探测进程，高载机器上整测可达数十秒。
   }, 60_000);
+
+  it('doctor 的 fail 探测项必须翻成非零退出码（轮 16）', () => {
+    // 此前 `runDoctorCommand` 无条件 `success: true`，而同一条报告里会打印
+    // 「✗ N check(s) failed — please fix before continuing」：报告说坏、
+    // 退出码说好，CI 里 `tauron doctor` 的结论等于被自动放弃。
+    const base = {
+      nodeVersion: 'v20.0.0',
+      npmVersion: '10',
+      pnpmVersion: '9',
+      cargoVersion: null,
+      rustcVersion: null,
+      tauriCliVersion: null,
+      os: 'test',
+      platform: 'test x64',
+    };
+    const ok = doctorCommandResult({
+      ...base,
+      checks: [{ name: 'Node.js', status: 'pass', message: 'v20' }],
+    });
+    expect(ok.success).toBe(true);
+
+    const warnOnly = doctorCommandResult({
+      ...base,
+      checks: [{ name: 'Rust Toolchain', status: 'warn', message: 'not found' }],
+    });
+    expect(warnOnly.success).toBe(true);
+
+    const failed = doctorCommandResult({
+      ...base,
+      checks: [{ name: 'Node.js', status: 'fail', message: 'Node.js not found' }],
+    });
+    expect(failed.success).toBe(false);
+    expect(failed.message).toContain('check(s) failed');
+  });
 
   // 轮 13 修正：此前这两条只调生成器就返回 "Created app/plugin …"，而
   // `scaffold.ts` / `plugin.ts` **从不碰文件系统**——命令是纯谎报。
@@ -189,11 +223,13 @@ describe('runCli', () => {
     expect(result.success).toBe(false);
   });
 
-  it('runs plugin publish command（无 manifest 路径：只提示先 new）', async () => {
+  it('runs plugin publish command（无 manifest 路径：如实失败并提示先 new）', async () => {
     const result = await runCli(['plugin', 'publish']);
     // 这里只覆盖"没有 tauron.plugin.json"的分支；**真发布路径**（有包时不得谎报
     // 上传成功）在 plugin-sign.test.ts 里断言。
-    expect(result.success).toBe(true);
+    // 轮 16：该分支改为 `success: false`——命令没发出任何东西却返回 0 退出码，
+    // 会让 `tauron plugin publish && 下一步` 在无人发布任何东西时继续走下去。
+    expect(result.success).toBe(false);
     expect(result.message).toContain('tauron.plugin.json');
   });
 

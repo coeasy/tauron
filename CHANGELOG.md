@@ -79,6 +79,26 @@
   三条数组条数、孤儿命令必须为 0、两份人写文档不得再自称全量、判定列含真实
   `require_*` / 过滤函数、feature 列与 tauri.rs 属性逐条同源、「代码层无判定」按**名字**
   成清单且每条必须在自己函数的 `///` 注释里给出理由。
+- **模块成熟度机读台账与三方同源门禁（V5 §46.2，轮 13）**：新增
+  `contracts/module-maturity.json`——16 个 crate（`adapterDependency` 取
+  default / `feature:plugin-install` / `feature:runtime-wasm-broker` / null，
+  加 `overviewWiring`、`ownersTable`）+ 21 个包目录（层级 + private）。
+  `wire-gate` 新增用例把它与 `crates/`、`packages/` 目录清单、各 `package.json`、
+  `tauron-adapter/Cargo.toml` 依赖表、`overview.md` 接线表、`canonical-owners.md`
+  0.3 归属表、README/competitive-analysis 计数**逐项对账**——台账不是「声明了但没人读」
+  的表，任何一侧漂移即 CI 红。Stable/Preview 分级刻意**不入**台账：那需要
+  conformance 证据（V5 Phase A 出口条件），原因写在台账 `purpose` 字段。
+- **命令面 85 条冻结门禁（V5 §46.3，轮 13）**：`wire-gate` 断言
+  command-surface.md 根 `host_*` 行计数恒 85，新增命令必须显式过账——兑现 V5
+  「Universal Protocol 完成前不再新增 root host_*」的冻结令（本轮确实零新增）。
+- **包级消费者状态门禁（npm 侧反孤儿，轮 16）**：轮 13 只把 **crate** 的接线状态
+  钉进台账，npm 包这一侧仍靠文档叙述。本轮全包扫描发现六个「只有测试/README 在
+  引用」的包，于是给 `contracts/module-maturity.json` 的每个包加
+  `consumerStatus: repo-consumed | reference-only | entry-point`，并由 `wire-gate`
+  按**真实 import** 复算：只认 `packages/*/src` 与 `examples/*/src` 里的**非测试**
+  源文件（测试与文档都不算消费者，否则自述就能把自己判成已接线）。判错即红——
+  `reference-only` 的包一旦被人 import 就要求改判并补接线说明，`entry-point` 必须
+  真的有 `bin` 或 `private`。判定结果与 `overview.md` 的说明段同源。
 
 ### Changed
 
@@ -178,6 +198,181 @@
   新增 `wire-gate`「示例能力文件不得冒充按命令授权，且必须与 adapter 的 opt-in 口径
   同源」把这条描述与两份 `Cargo.toml`、README 的条数钉在一起。
 
+- **六处文档把已接线的组件写成未接线/桩（V5 §46.1 触发，轮 13 逐行复核改判）**：
+  按 `crates/tauron-adapter/Cargo.toml` 实测，brand / theme / distribute 早已是
+  **默认依赖**（b2659c0 引入），且三条链路都有真实命令体与前端消费点
+  （`cmd_brand_info` env→`tauron-brand`→`BrandInfo`；`SubstrateState.themes` 持
+  `tauron_theme::ThemeRegistry`，`cmd_theme_*_as` 三条进主窗面；
+  `DistributeUpdaterSink::check_for_update` 进 updater 命令）。据此修正：
+  `overview.md` 接线表与依赖图、`canonical-owners.md`「轮 13 复核」全量重测表、
+  `competitive-analysis.md` 四行、`app-layer-wire.md` 品牌条目、
+  `incremental-adoption.md` §5 三行、两份计划文档的计数加「写作时点快照」标注。
+  其中 `incremental-adoption.md` 的「`host_brand_info` 桩：恒 `{}`」是**双重错误**
+  ——该描述从未为真（它一直返回 `UnsupportedBody`），负向谎报与夸大同罪：
+  接入方按文档就不会去用一条能用的链路。`canonical-owners` 轮 10/11/12 的
+  依赖表只记孤儿激活增量、漏报默认依赖，也已在轮 13 复核节写明并全量重测。
+- **门禁的两类解析缺陷会静默漏行，已按根因修复（轮 13 红→绿实录）**：
+  ① overview 接线表标签单元格里的 emoji 带变体选择符（U+FE0F），文本匹配逐行漏掉
+  带 emoji 的行——根因修复为**标签单元格纯文本化**（全表去 emoji），门禁只依赖
+  文字；② 标识符正则 `[a-z-]+` / `[a-z_]+` 匹配不到含数字的 `tauron-i18n` /
+  `host_i18n_*`（首轮只解析到 8/16 行、79/85 条），改为 `[a-z0-9-]+` /
+  `[a-z0-9_]+`，并配「解析条数为 0 即失败 + 行数下限」防假绿断言。
+
+- **`take_call` 取件后 `call_bindings` 永久滞留（轮 16 R1，真无界增长）**：
+  生产终局是「reply → settle → 发起方 take」，`host_call_end` 只是可选的细帧确认，
+  仓内 SDK 主路径**不调它**。settle+take 之后 pending 行已不存在，迟到的
+  `host_call_end` 只会拿到 `E_CALL_NOT_FOUND`，所以 `call_bindings` 的既有回收点
+  （`end_call` / `call_cancel`）在主路径上一次都不会触发：每个带 channel 的完成调用
+  留一行 sink 绑定（连同活的 IPC sink 引用）。`gc_expired` 只扫 pending 表看不见它，
+  `MAX_STREAMS` 只数句柄不构成容量闸——按调用次数无界增长。取件处补上
+  `close_for_call`（与 `end_call` 同款锁序：pending 已释放，streams 单独取），
+  顺带保证忘关的流在取件时补终帧，接收方不永远等。回归
+  `settled_take_call_sweeps_stream_binding_like_end`。
+- **`PolicyAuthority.grants` 只有插入点、没有删除点（轮 16 R2）**：approve/revoke
+  各写一次版本行，而 `dispose_subscriber` 清了 approvals / queues / subs / ordering
+  却独独漏掉它——按主体无界滞留，且「行还在」意味着卸载后残留主体的版本语义。
+  新增 `forget(principal)`（`policy.rs:69`）并在 dispose 里独立取锁调用。
+  删除语义按 **fail-closed** 定：`grant_version` 回落 0 后，该主体此前签发的
+  DecisionToken 因版本不等判 `StaleGrant`，**不是**「没版本 = 没人管」的放行——
+  这一点由 `dispose_subscriber_clears_policy_grant_row_fail_closed` 直接断言
+  旧 token 的校验结果，而不是只断言行被删。
+- **A101 回滚镜像的一次性语义此前只做了一半（轮 16 R3 改判）**：原口径是
+  「镜像只保到下一次成功消费」，但实现里只有坏文档兜底路径会删它，
+  **健康启动读得动时镜像原地留着**——于是它相对不断前进的正式文档永远陈旧，
+  未来任何一次无关损坏都会「好心」把用户带回任意久远的过去。补上第三个出口
+  （`with_adapter_config` 健康载入即 `clear_settings_rollback_image`），
+  一次性语义的完整形式是「消费即删 ∧ 回执即删 ∧ 健康载入即删」；
+  相应的 `a101_…` 测试断言由「健康重启不得消费镜像」反写为健康重启即回执。
+- **`install_config` 存原始路径串，插件窗口必然 `E_INSTALL_FAILED`（轮 16 C6）**：
+  `tauri.rs` 的 `window_create` 对 `plugin-*` 标签做
+  `installed.entry.strip_prefix(state.install_config_root())`，而 `entry` 在
+  `installed_plugin_ui` 里已过 `canonicalize`，状态里存的却是集成方**原样**传入的根。
+  多一个 `.`、相对路径、符号链接、Windows 8.3 短名任一形态都让两个串不同形 →
+  前缀剥离失配。与 `fs_allowed_roots` 用同一条规则收口：装配时存 canonical 权威副本
+  （目录此刻尚不存在则按原样保留，安装/读取两侧仍各自 canonicalize，语义不变）。
+  CI 的干净临时目录踩不到这个坑，所以回归 `install_config_root_is_canonical_so_window_asset_prefix_matches`
+  刻意用 `<root>/./plugins` 这种不同形输入。
+- **`tauron plugin publish` 在什么都没发布时返回 `success: true`（轮 16 C1）**：
+  缺 `tauron.plugin.json` 与缺 `.tgz` 两条前置分支都报成功，于是
+  `tauron plugin publish && next-step` 会照常往下走。命令没发出任何东西就不该有
+  0 退出码，两条改判 `success: false` 并在 `data` 里补 `published: false`
+  （提示文案保持原样，仍指向 `plugin new` / `plugin pack`）。
+- **`tauron doctor` 报告说坏、退出码说好（轮 16 C3）**：`runDoctorCommand` 无条件
+  `success: true`，而 `formatDoctorReport` 会打印「✗ N check(s) failed — please fix
+  before continuing」——CI 里诊断结论被退出码直接抹掉。抽出 `doctorCommandResult`
+  按 `status === 'fail'` 计数决定 `success`，warn/skip 仍不改判（它们是提示不是失败）。
+- **`doctor` 的工作区探测指向不存在的目录（轮 16 C4，负向谎报）**：
+  按 `packages/core`、`packages/ui`、`packages/cli` 找包，而本仓目录名是
+  `tauron-host` / `tauron-ui` / `tauron-app-cli`（`@tauron/*` 只是包名），
+  三个包**永远**报「缺少包」；更糟的是 `tauron-app init` 出的应用根本没有
+  `packages/` 工作区，对它报 warn 会把正常应用说成坏。改为探真路径，
+  且非框架仓整项 `skip` 并写明「本项不适用」。
+- **脚手架生成的工程按 README 走第二步就装不上（轮 16 C2，前后端贯通真断链）**：
+  `generatePackageJson` 把 `@tauron/plugin-sdk` 钉在 `CLI_VERSION` 上，而本轮实测
+  CLI 是 1.1.0、npm registry `latest` 仍是 1.0.2 → `npm install` 直接 `ETARGET`。
+  这不是文档瑕疵：仓库源码版本与已发布 npm 版本是两个事实，必须各有其主。
+  `@tauron/cli/package.json` 新增 `tauron.publishedNpmVersion`（当前 1.0.2），
+  `version.ts` 导出 `PUBLISHED_NPM_VERSION` 供脚手架与 README 片段使用，
+  发版时抬这一个数字即可；两者一致时说明文案自动收敛为「两者一致」。
+- **38 处文档行号引用漂移，旧门禁一条都没抓到（轮 16 根因修复）**：轮 16 在
+  `lib.rs` 等五个 Rust 文件里插入代码后，`v4-industrial-gap-closure-plan.md` 等文档
+  的 `file.rs:NNN` 引用整体下移。`check-doc-line-refs.mjs` 只判「路径解析得到、
+  行号在范围内、区间不整段空行」，于是**指向一个合法但无关的行**完全通过——
+  这类引用比不写引用更糟（读者按它跳过去）。两处收口：① 把这五个高频改动文件里的
+  引用改成**符号锚点**（`` `run_settings_boundary:6170` `` 这种，门禁要求符号字面落在
+  被指区间内，行号漂移即红）；② 给检查器加一条判定：`path.ext:NNN` 的**起点行**若整行
+  只有括号/逗号/引号/空白，即使行号有效也按不可核对判失败（代码增删后整体下移的引用
+  几乎总是以「跳到一个 `}`」的形式露馅）。开发过程中曾写过一版
+  `check-doc-ref-drift.mjs` 想直接比对 HEAD 行内容，实测把已修正的引用报成 38 条漂移
+  ——口径本身不成立，已删除而不是留着当噪音门禁。
+  诚实边界：六份文档实测仍有 **148 处 `path.ext:NNN` 数字引用**（135 处集中在
+  缺口方案本身，11 处在 `incremental-adoption.md`，其余散在接口文档；
+  多数落在本轮未改动的文件），它们只受「范围 + 非空 + 非纯标点」这三条弱判定；
+  段落里续写的裸 `:NNNN` 没有文件名头，解析器**根本不读**，属于已知未覆盖口径。
+- **轮 16 的包级消费者门禁是「绿着说谎」（轮 17 R-Gate，本轮首查）**：那条
+  `consumerStatus` 判定用**裸子串**匹配包名，于是注释里一句「曾经在这里
+  import 过 `@tauron/adapter-react`」、README 片段、甚至测试里构造的字符串都算
+  「消费者」。它报绿的口径比它守护的事实更宽——把三个 adapter 包钉成 `repo-consumed`
+  的假事实完全可以过门禁。现在三件事必须同时成立才算消费者：① 解析出的
+  `from` / `import(...)` / `export ... from` / `require(...)` **说明符**本身等于包名或
+  它的子路径；② 源文件的 `package.json` 真的声明了这个依赖；③ 台账判定与枚举
+  一致（写了不认识的 `consumerStatus` 直接抛，而不是 `.includes()` 静默放行）。
+  顺带钉上「`bin` 指向的文件必须真存在」——此前 `@tauron/cli` 的 bin 若漂走，
+  门禁照样绿。**结果是一次真改判**：`@tauron/adapter-react` 从 `repo-consumed`
+  如实降回 `reference-only`（它与 vue/svelte 一样只有本包测试可达，
+  `full-architecture-refactor-plan.md` 的「❌ 仅本包测试可达」同一口径），
+  `competitive-analysis.md` §2.2「多 UI 框架适配 = ✅ 已接线」那句谎随之改成
+  分包判定。三条红灯探针（伪造 import 注释 / 删掉 `dependencies` 声明 /
+  写一个枚举外的状态）逐条见红见绿。
+- **registry 现值只有一个 CLI 有主（轮 17 C2 续，同一类断链在另一个包重生）**：
+  轮 16 把 `@tauron/cli` 的脚手架钉到 `tauron.publishedNpmVersion`，但
+  `@tauron/app-cli` 的 `create` 仍把 `@tauron/*` 与 crates.io 依赖钉在**尚未发布**的
+  1.1.0 —— 集成方按 README 走第二步就是 `ETARGET` / cargo 解析失败。现在
+  `PUBLISHED_FRAMEWORK_VERSION` 从 `package.json.tauron.publishedNpmVersion` 读
+  （实测 1.0.2），registry 模式（未传 `--tauron-path`）在 init 与 CLI 输出里都打
+  「⚠ registry 现值是 1.0.2，本工程钉的是尚未发布的 1.1.0，现在装不上；
+  请用 `--tauron-path`」，`verify-create-tauron-app.mjs` 的离线分支同时说明自己
+  只验形状不验安装。**没有**把钉降到 1.0.2：那只是把「装不上」换成「装上但编译
+  不过」（模板代码按 1.1.0 的 API 写）。新门禁「轮 17：registry 现值是两个 CLI 包的
+  单一真源」把三件事钉住：两个 CLI 的数字必须一致、源码里不得再出现 `= '1.0.2'`
+  字面量、README 与插件开发指南必须写到该现值。
+- **`tauron-app-cli doctor` 的工作区判定此前永远走不到 `fail`（轮 17 C4 续）**：
+  轮 16 修对了探测目录，但「框架仓缺工作区包」仍只报 `warn`，而任何带
+  `packages/` 的第三方 monorepo 都会被误当成框架仓。现在用
+  `crates/tauron-adapter/Cargo.toml` 当指纹：不是框架仓 → 本项不适用（skip），
+  是框架仓而缺包 → **fail**（并让 `(await doctor(dir)).ok === false`）。两条新测试。
+- **grant 版本号在回收后可被重放（轮 17 R2 续，真缺陷）**：轮 16 给
+  `PolicyAuthority` 补了 `forget`，但版本号仍**按主体自增** —— 删行即回落 0，
+  下一次 approve 又回到 1；而 `validate_scoped` 不比对 nonce，于是「dispose 前用
+  v1 签的 token」会在「dispose + 重新 approve（又是 v1）」那一刻重新有效。
+  今天这条路径走不到（token 在同一次 `subscribe` 里铸完即用），但它把「回收 =
+  fail-closed」变成了一句要看调用点才成立的话。改为**全局单调发号器**
+  （`grant_sequence`，`saturating_add`），性质由结构保证。测试
+  `grant_version_is_never_reused_after_forget`。
+- **`dispose_subscriber` 的 grants 回收有 TOCTOU（轮 17 R2 续）**：轮 16 把
+  `policy.lock().forget()` 取在 approvals/queues 临界区**之外**，与并发 `approve`
+  交错时可以清掉一条刚点亮的授权。现在 `forget` 移进 approvals 临界区内，
+  锁序 approvals→policy 与 `approve` 一侧完全一致（本仓的「锁不嵌套」模型不受影响）。
+- **revoke 侧仍然在 `grants` 里留行（轮 17 R2 续）**：轮 16 只回收 dispose 一条路。
+  `cmd_events_approve_as` 接受管理员给的任意 subscriber 串，旧实现每见一个新串就
+  永久留一行（`MAX_APPROVALS` 只数审批行，管不到版本表）。现在 revoke 的**两个出口**
+  都过 `reclaim_grant_when_unapproved`，且只在「该主体一条审批都不剩」时删行——
+  还剩审批就删行等于把别的 topic 上仍然有效的授权打成 `StaleGrant`，**过度回收
+  同样是缺陷**（反向断言写在同一条测试里）。门禁把两处调用点数成 `2`，少一处即红。
+- **删不掉的回滚镜像会被 `let _ = remove_file` 咽下（轮 17 R3 续）**：权限、占用、
+  目标是个目录这类错误原样消失，留下的正是本函数要防的那件事——一份还能被后续
+  读回的陈旧镜像。改为 remove 失败即 `rename` 成 `{name}.discarded-{now_ms}`
+  挪出固定文件名（镜像的可消费性来自文件名），两条路都走不通才 `eprintln!` 留痕。
+  测试用**目录**冒充「存在但删不掉」（`remove_file` 对目录在两个平台上都报非
+  `NotFound` 的错，跨平台稳定），并钉住幂等：第二次作废不得把副本再搬一次。
+- **`window_create` 在一条更窄的路径上保留了 C6 的原 bug（轮 17 C6 续）**：轮 16
+  让装配存 canonical 副本，但「装配时目录还不存在 → 按原样保留」这条分支里，
+  比较点两侧仍不同形（`entry` 一路 canonical，存储根是原样串），症状仍是
+  「装得上、开不了窗口」。现在取径判定收进唯一出口 `plugin_window_asset_relative`
+  （可单测，不再散在 `tauri.rs` 的 `#[cfg]` 块里），比较点自己 canonicalize 一次，
+  失败退回原值 ⇒ 与 entry 不同形 ⇒ 照 `E_INSTALL_FAILED` 拒绝，**不放行**。
+  两条新测试：用 `..` 段构造**跨平台真实**失配（`.` 段不算——`Path` 按组件比较会
+  忽略它，这个前提此前写在注释里是错的），以及越权/根消失双 fail-closed。
+- **`grant_count()` 是轮 16 自己留下的孤儿公开 API（轮 17 自查）**：只有测试在调它，
+  与本仓 `13bfa59` 清过的那一类「ledger 里登记了却没人读的公开面」同形。删除它，
+  判据改用 `grant_version`——版本取自全局发号器、最小值是 1，所以「版本 0」与
+  「行不存在」是同一件事，不需要额外表面积。
+- **A101 消费点计数把测试调用算成了生产消费点（轮 17 门禁精度）**：轮 16 的判定扫
+  整文件，于是本轮给 `clear_settings_rollback_image` 补两个单测之后门禁自己变红
+  （`expected 5 to be 3`）——这种红教人的是「别给生产语义加测试」。现在计数面
+  限定在 `mod tests` 之前的生产区，锚点找不到即抛（防正则失配的假绿）；
+  「`drop_queued` 之后必须回到 `had_grant`」从**相邻两行**放宽成 **120 字符内保持
+  顺序**，容得下本轮插入的那句 grants 回收，也不给无关文本让路。
+- **本轮代码插入让 57 处文档行号引用整体下移（轮 17 工具收口）**：给
+  `check-doc-line-refs.mjs` 加 `--fix`——只在候选文件的 ±150 行窗口内找到**唯一最近**
+  的符号解时才改写数字，多解、越窗、以及起点是标点的 `path.ext:NNN` 一律留红给人判
+  （机器猜一个数字上去等于把门禁换成谎报器）。本轮 `--fix` 重锚 57 条，人工修 2 条：
+  `adapter/lib.rs:2915-2932`（装配期 panic，实际在 `:3125-3140`）与
+  `adapter/lib.rs:1849-1877`（`StdFsSink` 退化重检，实际在 `impl FsSink for
+  StdFsSink:2030-2050`）——**这两条不是本轮漂的，是轮 16 写下时就指错了**
+  （跳到托盘类型与 `SpawnerReaper`），被轮 16 新加的「起点行不得只有标点」判定
+  在本轮第二次运行时抓出，是那条判定至今最值钱的一次生效。
+
 轮 10 门禁实测（数字取自本轮同一次运行的日志，非回忆）：
 `cargo fmt --all -- --check` clean；
 `cargo clippy --workspace --all-targets -- -D warnings` 与
@@ -263,7 +458,157 @@ fmt 后代码复算过一遍）：
   代码↔文档的同步由 `command-surface:check` 承担——而该 CI 步骤的存在本身由
   `wire-gate` 钉住（`ci.yml` 含 `pnpm command-surface:check`），删掉复算步骤即红。
 
+轮 13 门禁实测（本轮代码改动面为文档/台账/TS 门禁，Rust 零改动；下列数字取自
+本轮**同一次运行**的日志）：
+
+- `pnpm -C packages/tauron-contract-tests test` rc=0（Test Files 2 passed /
+  **Tests 165 passed**，较轮 12 的 164 净增 1 即 module-maturity 同源门禁）；
+  `pnpm -C packages/tauron-contract-tests typecheck` rc=0。
+- `pnpm command-surface:check` rc=0：「85 commands（底座 61 / 运行时 22 / 安装 2），
+  孤儿命令 0，未归类 0，无代码层判定 9」——轮 13 零新增根命令，冻结断言与生成物
+  校验双绿。
+- `pnpm docs:check` rc=0：「6 个文档，198 条引用 OK」。
+- **红灯探针（防假绿，本轮实跑）**：篡改台账 `tauron-brand overviewWired→"partial"`
+  → `AssertionError: overview.md 接线表与台账对 tauron-brand 判定不一致:
+  expected '已接线' to be '部分接线'`，还原后绿。同源门禁开发过程中的两次红
+  （emoji 变体选择符漏行、`[a-z-]+` 匹配不到 `tauron-i18n`）见 Fixed。
+
+轮 14 复核（独立复查轮 13，同日均已完成；详见缺口方案「轮 14 复核」段）：
+门禁逐段复核通过（0.3 slice 边界、单行依赖假设 fail-loud、冻结计数双源一致）；
+发现并修正 `multi-plugin-substrate-roadmap.md` §S4 的三处残留谎报
+（brand「恒 `{}` 是桩」/ theme「等待消费者」/ distribute「不进客户端运行时」）；
+`tauron-ffi`「零仓内消费者是设计使然」复核为真（CI 专属 `cargo test -p tauron-ffi`
++ C11/ASan conformance harness）。修正后复跑：contract-tests rc=0（165 passed）、
+`pnpm docs:check` rc=0、prettier 改动文件全 OK；Rust 侧轮 13/14 零改动。
+
+轮 15 发布条件终审（同日全量复跑；下列数字全部取自本轮日志）：
+
+- Rust 全 rc=0：`cargo fmt --all -- --check`；
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` 与
+  `cargo clippy -p tauron-adapter --features tauri,plugin-install --all-targets --locked -- -D warnings`；
+  `cargo test --workspace --locked`（**37 个 test target / 1458 passed / 0 failed**）；
+  特性矩阵 check：`--no-default-features`、`--all-features --all-targets`、
+  示例 `--features substrate-only` 均 rc=0；`tauron-adapter --lib`
+  tauri **300** / plugin-install **289** / 双特性 **323**、`tauron-shell --features tauri` **72**
+  （与轮 12 完全一致，Rust 零改动可证）。
+- TypeScript：`pnpm -r build` / `--no-bail typecheck` / `--no-bail test` / `pnpm lint`
+  均 rc=0。**format:check 首跑红**——轮 13 新增的
+  `contracts/module-maturity.json` 与 `wire-gate.test.ts` 未过 prettier；
+  `--write` 修复后 rc=0，contract-tests 复跑 **165 passed**。教训成文：
+  新文件入库前必须过 format 门禁，而不是只格式化「改动过的老文件」。
+- 发布脚本全 rc=0：version-sync「26 处版本号全部为 1.1.0」、
+  Public Surface Ledger「85 public commands, no orphan metadata」、Target Matrix、
+  Release Evidence 静态输入、No-Lock-Across-Await「42 Rust source files」、
+  command-surface:check「85 commands」、docs:check「198 条引用 OK」、
+  `pnpm publish:npm -- --check`「可发布包 20 个；通过校验 20 个；失败 0 个」
+  （**未真的发布**）。
+- **NSIS 安装包重建成功**（`examples/minimal-app`，`pnpm tauri build --bundles nsis`
+  rc=0）：`Tauron Minimal App_1.1.0_x64-setup.exe`，**3.39 MiB**，
+  release 编译 1m 42s Finished。诚实边界：本轮验证到「出包」，
+  未在本机做静默安装/首启 smoke（安装器行为与轮 12 同配置）。
+
+轮 16 门禁实测（本轮 Rust 有实质改动，下列数字全部取自本轮**同一次运行**的日志）：
+
+- Rust 全 rc=0：`cargo fmt --all -- --check`；
+  `cargo clippy --workspace --all-targets -- -D warnings` 与
+  `cargo clippy -p tauron-adapter --features tauri --all-targets -- -D warnings`；
+  `cargo test --workspace --locked`（**37 个 test target / 1460 passed / 0 failed**，
+  较轮 15 的 1458 净增 2 = R1 的 `settled_take_call_sweeps_stream_binding_like_end`
+  与 R2 的 `dispose_subscriber_clears_policy_grant_row_fail_closed`）；
+  `cargo check -p tauron-adapter --no-default-features` 与
+  `cargo check --workspace --all-targets --all-features` 均 rc=0。
+- 特性矩阵（`--lib` 单跑，验证新增测试在两套 cfg 下都真被执行）：
+  `tauron-host` **399**、`tauron-adapter --features plugin-install` **290**（轮 15 为 289，
+  +1 即 C6 的 `install_config_root_is_canonical_…`）、`--features tauri` **300**（与轮 15 一致，
+  该测试在 tauri-only 下被 cfg 门控）、`--features tauri,plugin-install` **324**（轮 15 为 323）、
+  `tauron-shell --features tauri` **72**。
+- TypeScript：`pnpm run verify` rc=0，其中 `@tauron/contract-tests`
+  **166 passed**（2 个 test file，`wire-gate.test.ts` 单文件 **145**）——较轮 15 的 165
+  净增 1，即本轮新增的包级 `consumerStatus` 门禁（见 Added「包级消费者状态门禁」）。
+- 发布脚本全 rc=0：`pnpm docs:check`「6 个文档，**232 条引用** OK」
+  （轮 15 为 198 条：本轮把裸数字引用换成符号锚点后解析数上升，非文档篇幅膨胀；
+  写作时点中间值为 229，本轮 16 的说明段自身又新增 3 条锚点，最终复跑为 232）、
+  `pnpm command-surface:check`「85 commands（底座 61 / 运行时 22 / 安装 2），
+  孤儿命令 0，未归类 0，无代码层判定 9」（85 冻结断言未动）；
+  `pnpm version:check`「26 处版本号全部为 1.1.0」；`pnpm format:check`
+  「All matched files use Prettier style」。
+- **红→绿实录**：符号锚点化前 `docs:check` 报出的漂移（`lib.rs` 段 +24 行、
+  `eventbus.rs` +6、`registry.rs` +6/+12、`policy.rs` +12 造成的整体下移）
+  逐条按 `git show HEAD:<file>` 的块内容匹配重定位后转绿；重写过程中我自己写错的
+  两个锚点（`load_settings_rollback_image` 多写 5 行、`trusted_clock_enforces_expiry`
+  多写 1 行）与一处历史遗留的 `ci.yml` 数字引用（落在空行）也被新判定抓出来，
+  属门禁首次生效现场。
+
+轮 17 门禁实测（独立复查轮 16；本轮 Rust 与 TS 两侧门禁都有实质改动，
+下列数字全部取自本轮**同一次运行**的日志）：
+
+- Rust 全 rc=0：`cargo fmt --all -- --check` clean；
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` clean（无
+  warning 行输出）；`cargo test --workspace --locked` **37 个 test target /
+  1463 passed / 0 failed**（轮 16 为 1460，净增 3 = 轮 17 的 2 条 host 测试 +
+  1 条不受特性门控的 adapter 测试）。
+- 特性矩阵（`--lib` 单跑）：`tauron-host` **401**（轮 16 为 399，+2 =
+  `grant_version_is_never_reused_after_forget` 与
+  `revoke_of_last_approval_reclaims_grant_row`）、
+  `tauron-adapter --features plugin-install` **293**（轮 16 为 290，+3 =
+  `window_asset_relative_strips_a_raw_root_left_by_the_first_install`、
+  `window_asset_relative_fails_closed_on_escape_and_vanished_root`、
+  `undeletable_rollback_image_is_moved_out_of_the_load_path`）、
+  `--features tauri` **301**（轮 16 为 300，+1 = 那条不受特性门控的镜像测试）、
+  `--features tauri,plugin-install` **327**（轮 16 为 324）。
+- TypeScript：`pnpm run verify`（build → typecheck → test）中
+  `@tauron/contract-tests` **167 passed**（轮 16 为 166，净增 1 = 新门禁
+  「轮 17：registry 现值是两个 CLI 包的单一真源」；`wire-gate.test.ts` 一条
+  测试名随之改标「轮 16/17」）、`@tauron/app-cli` **334 passed / 11 files**、
+  `pnpm -r --no-bail typecheck` 全包 Done、`pnpm lint`（`--max-warnings 0`）rc=0。
+- 发布脚本全 rc=0：`pnpm docs:check`「6 个文档，**235 条引用** OK」（本轮实测分类：
+  149 条 `path.ext:NNN` + 86 条符号锚定，另有 33 处裸 `:NNNN` 续写不被解析；轮 16 日志
+  记为 232，本轮末次更正把两处**轮 16 写下时就指错目标**的 `adapter/lib.rs` 数字引用
+  换成可核对锚点——启动 panic 在 `adapter/lib.rs:3125-3140`（实际 panic 行 3137），
+  非 Unix 退化重检在 `impl FsSink for StdFsSink:2030-2050`，计数因此 233 → 235）、
+  `pnpm command-surface:check`「85 commands（底座 61 / 运行时 22 / 安装 2），
+  孤儿命令 0，未归类 0，无代码层判定 9」（85 冻结断言未动）、
+  `pnpm version:check`「26 处版本号全部为 1.1.0」、
+  `npx prettier --check .`「All matched files use Prettier code style」。
+- **红灯实录（本轮两次自然红 + 三次人为探针）**：① 消费者门禁收紧后
+  `@tauron/adapter-react` 立刻报 `repo-consumed` 与实测不符——那是要改判的
+  事实，不是要放宽的门禁；② 补完 adapter 单测后 `wire-gate` 自己红
+  （`expected 5 to be 3`）与 revoke 顺序断言红（插入一句合法回收即失配），
+  两条都是**门禁精度缺陷**，按上文修判定面而不是回退测试；③ 三条探针逐条见红：
+  临时改名一处 `reclaim_grant_when_unapproved` → 「grants 版本行的回收必须同时挂在
+  revoke 的两个出口: expected 1 to be 2」；在生产区加一行含
+  `clear_settings_rollback_image(&` 的文本 → 「作废出口的消费点漂移: expected 5 to be 3」
+  （顺带证明计数面确实只扫生产区）；把 `@tauron/app-cli` 的
+  `publishedNpmVersion` 改成 1.0.3 → 「两个 CLI 对『registry 现值』各有说法：
+  1.0.2 vs 1.0.3」。三处还原后 `contract-tests` 复跑 167 全绿，
+  且 `grep` 确认探针文本零残留。
+
 ### Docs
+
+- **轮 18 发布终审：把两条已改行为的用户契约补进接口文档**（代码零改动，本轮只跑门禁
+  与补文档）：① `tauron doctor` / `tauron-app doctor` 的**退出码是契约**——有 `fail` 项
+  即 exit 1，`warn` / `skip` 只提示不改判；此前只有内部方案文档写着，`plugin-development-guide.md`
+  与两个 CLI 的 README 都还在把 `doctor` 当成「打印报告」的工具宣传。判据由测试撑着
+  （`doctorCommandResult` 的 ok/warn/fail 三分支、`doctor.test.ts` 的 `skip` 与缺包判
+  fail 三条回归）。② `plugin_install_dir` 的「包路径必须落在 root 之下」怎么判：装配期取
+  canonical 副本、取径侧在**比较点**再 canonicalize 一次，于是 `..` 段／符号链接／
+  Windows 8.3 短名真换目录时判 `E_INSTALL_FAILED`，而 `<root>/./plugins`（多一个 `.` 段）
+  **不算失配**——`Path` 按组件比较会忽略它；首装目录尚不存在时按原样存储、由取径侧兜住。
+  同轮把「各轮日志里的门禁数字**在提交前不可从 git 复算**」这条边界登记进缺口方案
+  （HEAD 当时仍是轮 12 的 `305e2d6`，轮 13–17 全在工作区）。
+- **安装包重建（轮 18）**：`pnpm -C examples/minimal-app tauri build` rc=0，产物已是当前
+  源码的产物——NSIS `Tauron Minimal App_1.1.0_x64-setup.exe` 3,559,081 B、
+  MSI `Tauron Minimal App_1.1.0_x64_en-US.msi` 5,410,816 B（轮 15 的 NSIS 为 3,558,752 B）。
+  仍未签名、未公证，SmartScreen / Gatekeeper 的拦截口径见
+  [`examples/minimal-app/README.md`](./examples/minimal-app/README.md)，不变。
+
+- **轮 17 文档一致性**：`competitive-analysis.md` §2.2「多 UI 框架适配」从
+  「✅ 已接线（adapter-react / vue / svelte / ui-primitives）」改为**分包判定**
+  （三包 `reference-only`、`ui-primitives` `repo-consumed`），与
+  `contracts/module-maturity.json` 和收紧后的消费者门禁同源；
+  `check-doc-line-refs.mjs` 的 `--fix` 用法与「只改唯一最近解」的边界写进门头注释；
+  缺口方案新增「轮 17 复核」段，把本轮 8 处修复、1 处孤儿 API 自查、
+  2 处门禁精度缺陷与 4 条**如实登记**的残留口径一并入账。
 
 - **V4 工业级缺口对照审计**：新增
   [`docs/architecture/v4-industrial-gap-closure-plan.md`](./docs/architecture/v4-industrial-gap-closure-plan.md)，
@@ -300,6 +645,16 @@ fmt 后代码复算过一遍）：
   位于 `#[tauri::command]` **上方**、档位写成全限定路径
   `tauron_host::authz::AuthTier::X`、判定藏在 `admin_gate` / `visible_notifications` /
   `scoped_within_roots` 等非 `cmd_` helper 里，必须按调用链遍历而不是只看命令体。
+- **V5 方案入库为「对照基线」并逐条落实 §46（轮 13）**：
+  `docs/Tauron-Architecture-Competitive-Analysis-Optimization-Plan-V5.md` 进仓库与
+  两处文档索引（README、`docs/architecture/README.md`），口径明确标注**前瞻方案、
+  不描述现状**。§46.1（状态文档同步）、§46.2（machine ledger）、§46.3（命令面冻结）
+  三条全部落地（见 Added/Fixed）。`v4-industrial-gap-closure-plan.md` 新增
+  「轮 13 执行状态」段，并**如实登记轮 13 未做**：V5 Phase A–G 前瞻项
+  （adapter 按域拆分、RuntimeDriver SPI / HostProtocol envelope、真 sidecar E2E
+  fixtures、Manifest V3、LocalHost 第二官方 host、WASM 真执行引擎、observe 层与
+  SLO 趋势基线、N-1 协议兼容、ledger 生成 Markdown）全部是路线图，未假落地；
+  V4 台账性质在文档地图里同步改标「当前执行台账」。
 
 ### Added
 

@@ -23,7 +23,10 @@ tauron-app theme    generate [--output <file>] [--css] 生成主题 JSON / CSS �
 tauron-app plugin   new | create | dev | pack | sign | check | audit
 ```
 
-所有命令支持 `--key=value` 与 `--key value` 两种参数语法。
+所有命令支持 `--key=value` 与 `--key value` 两种参数语法。`tauron-app doctor`
+的退出码是契约：**探测结论 `ok` 为假即 exit 1**；「工作区包就位」一项在**非框架仓**
+（`tauron-app init` 出的应用、或第三方 monorepo）如实报 `skip`，既不谎报缺包、
+也不因缺包而判 fail。
 
 ### new / create —— 一键脚手架
 

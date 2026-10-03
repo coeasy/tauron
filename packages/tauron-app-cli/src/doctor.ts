@@ -223,9 +223,27 @@ function checkPermissionIndex(dir: string): DoctorCheck {
 }
 
 function checkWorkspacePackages(dir: string): DoctorCheck {
-  const corePkg = path.join(dir, 'packages', 'core', 'package.json');
-  const uiPkg = path.join(dir, 'packages', 'ui', 'package.json');
-  const cliPkg = path.join(dir, 'packages', 'cli', 'package.json');
+  // 目录名是 `tauron-*`，包名才是 `@tauron/*`（轮 16 修正：此前按 `packages/core`
+  // 这类不存在的目录探测，三个包永远报「缺少包」——诊断谎报负向漂移）。
+  //
+  // 轮 17 两处收口：
+  // ① 「是不是框架仓」的判据换成 **`crates/tauron-adapter/Cargo.toml` 指纹**，
+  //    不再用「有没有 packages/ 目录」。后者会把自带 `packages/` 的第三方 monorepo
+  //    当成坏框架仓报缺包——那又是一次负向谎报。
+  // ② 真框架仓里缺工作区包是**真坏**，报 `warn` 等于让 doctor 的退出码永远是 0
+  //    （`ok = summary.fail === 0`）。改判 `fail`，缺包才能被 CI 接住。
+  const isFrameworkRepo = pathExists(path.join(dir, 'crates', 'tauron-adapter', 'Cargo.toml'));
+  if (!isFrameworkRepo) {
+    return {
+      name: '工作区包',
+      status: 'skip',
+      message: '非 Tauron 框架仓（无 crates/tauron-adapter），本项不适用',
+    };
+  }
+  const packagesRoot = path.join(dir, 'packages');
+  const corePkg = path.join(packagesRoot, 'tauron-host', 'package.json');
+  const uiPkg = path.join(packagesRoot, 'tauron-ui', 'package.json');
+  const cliPkg = path.join(packagesRoot, 'tauron-app-cli', 'package.json');
   const packages = [
     { name: '@tauron/host', path: corePkg },
     { name: '@tauron/ui', path: uiPkg },
@@ -237,9 +255,9 @@ function checkWorkspacePackages(dir: string): DoctorCheck {
   }
   return {
     name: '工作区包',
-    status: 'warn',
-    message: `缺少包：${missing.map((p) => p.name).join(', ')}`,
-    fix: '确保在仓库根目录运行 tauron-app doctor',
+    status: 'fail',
+    message: `框架仓缺少工作区包：${missing.map((p) => p.name).join(', ')}`,
+    fix: '确保在仓库根目录运行 tauron-app doctor；若确实裁掉了包，请一并更新本项判据',
   };
 }
 

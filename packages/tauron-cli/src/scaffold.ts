@@ -22,7 +22,7 @@
  */
 
 import type { AppConfig, CliOptions } from './types.js';
-import { CLI_VERSION } from './version.js';
+import { CLI_VERSION, PUBLISHED_NPM_VERSION } from './version.js';
 
 /** 已实现的模板。`vue` / `svelte` 在 `AppConfig` 里已声明但**尚无骨架实现**。 */
 export const IMPLEMENTED_TEMPLATES = ['vanilla', 'react'] as const;
@@ -51,11 +51,16 @@ export function createApp(config: AppConfig, _options: CliOptions): AppScaffoldR
         typecheck: 'tsc --noEmit',
       },
       dependencies: {
-        '@tauron/core': `^${CLI_VERSION}`,
-        '@tauron/types': `^${CLI_VERSION}`,
+        // 钉 registry 已发布版本，不钉 CLI_VERSION：轮 16 实测 registry `latest`
+        // 是 1.0.2 而仓库源码是 1.1.0，钉后者会让生成的工程 `npm install` 直接
+        // ETARGET（模板用到的 createTauriBackend / invokePlugin / listenEvent /
+        // isTauri 与 adapter-react 的 TauronProvider / usePluginId 在 1.0.2 的
+        // d.ts 里逐个查过都在）。
+        '@tauron/core': `^${PUBLISHED_NPM_VERSION}`,
+        '@tauron/types': `^${PUBLISHED_NPM_VERSION}`,
         ...(isReact
           ? {
-              '@tauron/adapter-react': `^${CLI_VERSION}`,
+              '@tauron/adapter-react': `^${PUBLISHED_NPM_VERSION}`,
               react: '^18.3.1',
               'react-dom': '^18.3.1',
             }
@@ -342,6 +347,11 @@ npm test
 
 - 依赖 \`@tauron/core\` 的信封协议（\`plugin_invoke\` / \`plugin_cancel\` / \`plugin_emit\`）；
 - 需要宿主侧已注册命令面（见 tauron 的 \`tauron-shell\` / \`tauron-adapter\`）；
-- \`@tauron/*\` 的 npm 现值是 **1.0.2**，落后于本仓库源码；插件开发请用 \`workspace:*\` 或 \`file:\` 依赖。
+- 本工程的 \`@tauron/*\` 依赖钉在 **npm 已发布版本 ${PUBLISHED_NPM_VERSION}**（可直接
+  \`npm install\`）。生成模板的 CLI 版本是 ${CLI_VERSION}${
+    CLI_VERSION === PUBLISHED_NPM_VERSION
+      ? '，两者一致。'
+      : `，**领先于** registry 版本——模板代码按 ${CLI_VERSION} 源码写，若在 ${PUBLISHED_NPM_VERSION} 上出现 API 缺口，请把 \`devDependencies\` 改用 \`workspace:*\` 或 \`file:\` 指向本仓库对应目录。`
+  }
 `;
 }

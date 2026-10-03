@@ -125,12 +125,17 @@ backend.adoptCapabilities(caps.commands); // 拒空 / 拒缺 host_capabilities
 宏：底座 **61** + 插件运行时 **22** = **83** 条；`plugin-install` 另 **2** 条为
 **opt-in**（`default = []`），接入方显式开启后共 **85** 条）：
 
+以下三项在**本仓里有真实消费者**（`examples/minimal-app/src/main.ts` 逐条 `new`），
+因此可以直接当"接上就能用"的参考实现读：
+
 - `ShellClient` / `ShellController` — 标题栏动作、主题、更新事件路由（已接线）
 - `AutoUpdateClient` — 检查/下载/安装/重启状态机 + 定时自动检查
 - `DialogClient` — 文件对话框 / 消息框 / 剪贴板
-- `DeepLinkClient` — 协议注册 + `deep-link` 事件分发（OS 回调经 Rust
-  `tauron_adapter::tauri::deliver_deep_link` 双管道投递：Tauri 原生事件 + EventBus）
-- `WindowState` — 窗口几何持久化（恢复/保存，越界钳制）
+
+`DeepLinkClient`（`host_deep_link_*`）与 `WindowState`（`host_window_*`）也在同一
+命令族上工作，但**本仓示例不调用它们**——它们和下一节的库级 API 一样是
+**面向接入方宿主应用**的参考实现，各自有单测。轮 16 前它们混在本节列表里，
+读起来像"示例已经接上"，那是不实的接线声称（见下一节表格）。
 
 > **启动编排不在本包**：曾经有一个 `bootstrap()`（7 阶段启动编排：配置 → 动效 →
 > splash → 插件拓扑注册 → …），但它**只被自己的测试引用**，且是 `@tauron/host`
@@ -152,6 +157,8 @@ backend.adoptCapabilities(caps.commands); // 拒空 / 拒缺 host_capabilities
 | `toHostRpc(client)` | 把 `HostClient` 适配成传输无关的 `HostRpc`（`stream` / `event` / `subscribe`），换 IPC 后端时业务代码不动（方案 R5） | 复用既有命令，不新增 |
 | `MemoryTransport` | 纯进程内 `HostTransport`：给非 Tauri 壳 / 嵌入式宿主 / 测试复用同一套客户端协议 | 无 IPC（命令名仍必须是 `host_*`，构造时校验） |
 | `FrameSink` | 流式帧的落地口（`HostClient` 内部与 `MemoryTransport` 共用） | `host_stream_*` |
+| `DeepLinkClient` / `createDeepLinkClient` | 注册深链接协议并分发 `deep-link` 事件；OS 回调由 Rust `tauron_adapter::tauri::deliver_deep_link` 双管道投递（Tauri 原生事件 + EventBus） | `host_deep_link_register`（注册）＋ `deep-link` 主题（投递） |
+| `WindowState` / `createWindowState` | 窗口几何的**前端**持久化：读写 `localStorage`（键可配，越界钳制后回写），再落到窗口 | `host_window_set_position` / `host_window_set_size` / `host_window_maximize` |
 
 > 判断"是不是断链"的口径：上面每一项的**能力**在线上都有对应命令或是纯本地逻辑；
 > 真正没有线上入口的东西会在表里写「无命令」，不会假装接了。

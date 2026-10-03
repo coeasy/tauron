@@ -201,7 +201,11 @@ label 集合，留空展开为 `["main"]`，轮 10）、`registry`、`required_p
     `DegradedValue`；`write` 返回 `UnsupportedBody` 并说明进程内回退；
   - `host_deep_link_register` 保留内部事件路由，但无 OS provider 时返回
     `UnsupportedBody`，fallback 为 `internal-event-routing`；
-  - `host_brand_info` 返回 `UnsupportedBody`，品牌数据尚未接入；
+  - `host_brand_info`：配置了 env 来源（`TAURON_BRAND_CONFIG_JSON` /
+    `TAURON_BRAND_CONFIG`）时走 `tauron-brand` 校验链返回真实 `BrandInfo`；未配置时
+    如实返回 `UnsupportedBody{reason:"brand provider is not configured"}`。
+    （**轮 13 更正**：本节此前写「品牌数据尚未接入」——错；`cmd_brand_info` 在 1.0
+    收口就已从恒桩改为真实实现，对账见 canonical-owners.md「轮 13 复核」）；
   - `host_market_*` 返回有类型的 `simulated` 标记；AutoUpdateClient 不把模拟结果
     显示为可用更新，也不继续下载/安装；
   - `filters`/`defaultPath`/`confirmLabel`/`cancelLabel`/`endpoints`/`pubkey`
@@ -688,6 +692,8 @@ translate_at_boundary(err, boundary): {
 | --- | --- | --- |
 | 卸载 / 清除（`host_registry_admin`） | 订阅 + 反向索引 + 队列 + **topic 声明** + pending | **适配器自动**（`cmd_registry_admin` 迁移成功后调 `dispose_publisher` / `dispose_subscriber`） |
 | 窗口销毁 | 该插件的订阅 + 反向索引 + 队列 + pending（**不动 topic 声明**） | **宿主装配方**：App Builder 的 `on_window_event(Destroyed)` → `tauron_adapter::tauri::cleanup_closed_window` |
+| 调用**取件终局**（`take_call` 取到已 settle 的结果） | 该 `call_id` 的流式绑定（IPC sink）+ 未关的 stream 补 `end` 帧 | 适配器自动（轮 16 R1，见下） |
+| 订阅者销毁（`dispose_subscriber`） | 顺序账本该主体的行 + **授权表该 principal 的行** | 适配器自动（轮 16 R2，见下） |
 | 表满时的 TTL GC | 过期 pending 条目（§8） | 适配器自动 |
 | 队列溢出 | 见下（Event/State 丢最旧；Request 报错） | 适配器自动 |
 
@@ -702,6 +708,20 @@ translate_at_boundary(err, boundary): {
   label 解析出的 id 含 `:`，`PluginId::new` 直接拒绝，不在身份模型内。
 - **窗口关闭不回收 topic 声明**：声明留到卸载才回收，否则窗口重开时发布者
   会因「topic 未声明」被静默丢弃。
+- **取件即终局（轮 16 R1）**：带 JS channel 的 `host_plugin_call` 会在
+  `call_bindings` 里插一行活的 IPC sink。它的常规回收点只有 `end_call` /
+  `call_cancel` / `dispose` / 过期 GC（后两者只覆盖 pending 态），而**生产路径**
+  是 settle→take：`take_call` 之后 pending 行已经没了，迟到的 `host_call_end`
+  只会拿到 `E_CALL_NOT_FOUND`（SDK 的 `callEnd` 在本仓没有生产调用点）。所以
+  `take_call` 的 Settled 分支必须自己 `close_for_call(..., End, None)`，否则
+  **每一个带 channel 的完成调用都永久滞留一行 sink**——GC 看不见它，这张表也
+  没有容量闸。行为测试：`settled_take_call_sweeps_stream_binding_like_end`。
+- **授权行随订阅者一起回收（轮 16 R2）**：`PolicyAuthority.grants` 以 principal
+  为键、由 approve/revoke 递增，此前**只增不减**；`dispose_subscriber` 清了
+  顺序账本却漏了它，反复装/卸会在授权表里堆死行。补 `forget(principal)` 后
+  语义是 **fail-closed**：被销毁主体的 `grant_version` 回落到 0，它手里未过期
+  的 `DecisionToken` 一律判 `StaleGrant`——「回收」不会意外放行任何东西。
+  行为测试：`dispose_subscriber_clears_policy_grant_row_fail_closed`。
 - **禁用不回收**：`disable` 之后仍可 `enable`，订阅与声明必须原样保留。
 - **各表都有上限（`window` 不是无限增长维度）**：`topics` 超限走
   `evict_overflow`、单插件队列有 `MAX_QUEUE=1000`、pending 有

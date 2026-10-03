@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { main } from './cli.js';
+import { FRAMEWORK_VERSION, PUBLISHED_FRAMEWORK_VERSION } from './framework-version.js';
 
 describe('plugin pack CLI', () => {
   const previousExitCode = process.exitCode;
@@ -101,6 +102,19 @@ describe('app scaffold CLI（一键路径）', () => {
         dependencies: Record<string, string>;
       };
       expect(frontend.dependencies['@tauron/host']).toBe('1.1.0');
+
+      // 轮 17：registry 模式的 pin 落在未发布版本时，输出必须把「现在装不上」和两条
+      // 可走的路说出来。生成的工程钉源码版本是对的（降到 registry 现值反而编译不过），
+      // 错的是让它静默失败。发版后两值相等，本断言自动反转为「不得出现警告」。
+      const printed = (console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .map((args) => args.join(' '))
+        .join('\n');
+      if (PUBLISHED_FRAMEWORK_VERSION === FRAMEWORK_VERSION) {
+        expect(printed).not.toContain('尚未发布');
+      } else {
+        expect(printed).toContain('尚未发布');
+        expect(printed).toContain('--tauron-path');
+      }
 
       // 装配必须是真装配，不是裸 Builder
       const mainRs = fs.readFileSync(path.join(target, 'src-tauri', 'src', 'main.rs'), 'utf8');

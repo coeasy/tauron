@@ -1062,6 +1062,12 @@ impl Registry {
             if let Some(token) = admission_token {
                 self.admission.lock().release(&token);
             }
+            // 轮 16 R1：取件即终局。`call_bindings` 的唯一其他常规回收点是
+            // `end_call`/`call_cancel`，而 settle+take 之后 pending 行已不存在，
+            // 迟到的 `host_call_end` 只会拿到 E_CALL_NOT_FOUND——不在此处清扫，
+            // 每个带 channel 的完成调用都永久滞留一行 sink（gc 看不见、表无容量闸）。
+            // 锁序与 end_call 同款：pending 已释放，streams 单独取。
+            self.streams.lock().close_for_call(call_id, StreamKind::End, None);
             Ok(taken)
         } else {
             Ok(call.clone())
@@ -2244,6 +2250,38 @@ mod tests {
         assert!(!r.stream_call_bound(&call.call_id), "载体登记随调用回收");
         assert!(!r.stream_is_open(&stream), "句柄随调用失效");
         assert_eq!(r.stream_len(), 0, "句柄表不留残留");
+    }
+
+    /// 轮 16 R1：生产终局是「reply→settle，发起方 take」——`host_call_end` 是可选的
+    /// 细帧确认，仓内 SDK 主路径不调它。settle+take 若不回收 `call_bindings`，
+    /// 每个带 channel 的调用都会永久滞留一行（连同活 IPC sink）：`gc_expired`
+    /// 只扫 pending 表，而行已被 take 拿走。表也没有容量闸（`MAX_STREAMS`
+    /// 只数 handles），等于按调用次数无界增长。
+    #[test]
+    fn settled_take_call_sweeps_stream_binding_like_end() {
+        let r = Registry::default();
+        let id = r.install(&index(), manifest("com.example.a", None)).unwrap();
+        enable(&r, &id);
+        let sink = rec();
+        let call = r.call_begin(&id, "a", serde_json::json!({})).unwrap();
+        r.stream_bind(&call.call_id, "com.example.a", sink.clone()).unwrap();
+        let stream = r.stream_open(&call.call_id, "com.example.a").unwrap();
+
+        r.settle_call(&call.call_id, CallOutcome { ok: true, result: None, error_code: None })
+            .unwrap();
+        let taken = r.take_call(&call.call_id).unwrap();
+        assert_eq!(taken.state, CallState::Settled);
+
+        assert!(
+            !r.stream_call_bound(&call.call_id),
+            "settle+take 即终局：call_bindings 不得滞留（含 IPC sink 引用）"
+        );
+        assert!(!r.stream_is_open(&stream), "句柄必须随取件失效");
+        let frames = sink.frames.lock().unwrap().clone();
+        assert!(
+            frames.iter().any(|f| f.kind == StreamKind::End),
+            "与 end_call 同款：忘关的流在取件时补终帧，接收方不永远等"
+        );
     }
 
     #[test]

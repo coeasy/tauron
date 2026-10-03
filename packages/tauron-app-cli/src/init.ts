@@ -7,7 +7,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { generateClientConfig } from './client-config.js';
-import { FRAMEWORK_VERSION } from './framework-version.js';
+import {
+  FRAMEWORK_VERSION,
+  PUBLISHED_FRAMEWORK_VERSION,
+  REGISTRY_PIN_IS_PUBLISHED,
+} from './framework-version.js';
 import { ensureDir, writeFile, pathExists, toPosixRelative } from './fs-operations.js';
 
 // ── 类型 ──
@@ -319,6 +323,15 @@ export async function initProject(config: InitConfig = {}): Promise<InitResult> 
         ? `Tauron 来源：registry 固定版本 ${FRAMEWORK_VERSION}`
         : `Tauron 来源：本地源码 ${tauronRoot}`,
     );
+    // 轮 17：pin 与 registry 现值不一致时**必须说出来**。生成的工程钉的是源码版本
+    // （降到 1.0.2 更糟：装得上但面向 1.1.0 API 的生成码编译不过），所以发版之前
+    // registry 模式的 `npm install` / `cargo` 一定失败。不说，用户拿到的是一个
+    // 静默坏掉的工程；说了，他有两步可走（`--tauron-path` 或等发版）。
+    if (tauronRoot === null && !REGISTRY_PIN_IS_PUBLISHED) {
+      steps.push(
+        `⚠ registry 上 @tauron/* 与 crates.io 的现值是 ${PUBLISHED_FRAMEWORK_VERSION}，本工程钉的是**尚未发布**的 ${FRAMEWORK_VERSION}：npm install / cargo 现在会失败。请用 --tauron-path 指向本仓库源码，或等 ${FRAMEWORK_VERSION} 发布后再跑。`,
+      );
+    }
 
     // 3. Cargo path 以 src-tauri/Cargo.toml 为基准；registry 模式 pin 到同版本。
     const depValue =

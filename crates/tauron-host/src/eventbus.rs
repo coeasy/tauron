@@ -600,7 +600,9 @@ impl EventBus {
         // 只有「他人声明且非公共」的订阅归授权表管，才随撤销一起消失。公共/自属档
         // 的授权依据不是审批表，撤销一条冗余审批不得顺手掐掉合法订阅。
         if !meta.is_some_and(|meta| meta.publisher != subscriber && !meta.is_public) {
-            return self.approvals.lock().remove(&key).is_some();
+            let had = self.approvals.lock().remove(&key).is_some();
+            self.reclaim_grant_when_unapproved(subscriber);
+            return had;
         }
         let had_grant = {
             let mut approvals = self.approvals.lock();
@@ -623,7 +625,26 @@ impl EventBus {
         // 即使授权行已不存在（幂等重试）也再作废一次队列：那条「发布方在撤销前就
         // 解析到 token」的竞态窗口，正是靠这最后一次作废封住的。
         self.drop_queued(subscriber, topic);
+        self.reclaim_grant_when_unapproved(subscriber);
         had_grant
+    }
+
+    /// 撤销后的回收（轮 17）：主体一条审批都不剩时，连 `grants` 行一起删。
+    ///
+    /// 轮 16 的 `forget` 只挂在 `dispose_subscriber`（关窗 / 卸载）上，于是还留着
+    /// 一条不需要 dispose 的增长路径：管理面对**任意** subscriber 串 approve→revoke
+    /// 循环（`cmd_events_approve_as` 接受管理员给的字串），每次首条 approve 都留下
+    /// 一行版本，revoke 只 bump 不删——表就按「历史见过的主体数」增长，而
+    /// `MAX_APPROVALS` 管的是审批行数、管不到它。
+    ///
+    /// 只在「最后一条审批消失」时回收：提前 forget 会把这个主体在**其他 topic**上
+    /// 仍然有效的授权一起打成 `StaleGrant`，那是把回收做成了越权拒绝。
+    /// 锁序仍是 approvals→policy，与 `approve`/`dispose_subscriber` 同一方向。
+    fn reclaim_grant_when_unapproved(&self, subscriber: &str) {
+        if self.approvals.lock().keys().any(|(approved, _)| approved == subscriber) {
+            return;
+        }
+        self.policy.lock().forget(subscriber);
     }
 
     /// 作废某订阅者某 topic 的全部待取帧（三类通道）。
@@ -1098,8 +1119,17 @@ impl EventBus {
             let _ = self.unsubscribe(token);
         }
         {
+            // 轮 16 R2 + 轮 17 收口：approve/revoke 会在 PolicyAuthority.grants 里
+            // 按主体留版本行，此前它没有任何 dispose 兄弟——清除订阅者时必须一并回收
+            // （fail-closed 语义见 `PolicyAuthority::forget`）。
+            //
+            // 回收必须**落在 approvals 临界区内**：`approve` 是「持 approvals → 取
+            // policy」的原子对，若这里出临界区再单独取 policy，并发的 approve 能在
+            // 两个窗口之间插进一条审批 + 一行 grants，dispose 就把刚插的行删掉、
+            // 留下「有审批无版本行」的错位。锁序 approvals→policy 与全模块一致。
             let mut a = self.approvals.lock();
             a.retain(|(sub, _), _| sub != subscriber);
+            self.policy.lock().forget(subscriber);
         }
         let mut qs = self.queues.lock();
         qs.retain(|(sub, _), _| sub != subscriber);
@@ -1468,6 +1498,72 @@ mod tests {
         let version = b.policy.lock().grant_version("com.b");
         b.approve("com.b", "plugin:com.a:private").unwrap();
         assert_eq!(b.policy.lock().grant_version("com.b"), version);
+    }
+
+    /// 轮 16 R2：`grants` 表此前只有插入点（approve/revoke），任何 dispose 都不清它——
+    /// 按主体无界滞留。清除必须 fail-closed：旧 token 不能因为「行没了」而复活。
+    #[test]
+    fn dispose_subscriber_clears_policy_grant_row_fail_closed() {
+        let b = bus(16);
+        declare(&b, "com.a", "plugin:com.a:private", false);
+        b.approve("com.b", "plugin:com.a:private").unwrap();
+        let token = b.policy.lock().decide_scoped(
+            "com.b",
+            PRIVATE_SUBSCRIBE_OPERATION,
+            "plugin:com.a:private",
+        );
+        assert!(b.policy.lock().grant_version("com.b") > 0);
+
+        b.dispose_subscriber("com.b");
+        assert_eq!(b.policy.lock().grant_version("com.b"), 0, "grants 行随订阅者回收");
+        assert!(
+            matches!(
+                b.policy.lock().validate_scoped(
+                    &token,
+                    "com.b",
+                    PRIVATE_SUBSCRIBE_OPERATION,
+                    "plugin:com.a:private",
+                ),
+                Err(DecisionError::StaleGrant { .. })
+            ),
+            "被清除主体的在途 token 必须判 stale，而不是当无版本放行"
+        );
+    }
+
+    /// 轮 17：dispose 之外的第二条回收路径——approve→revoke 循环不得在
+    /// `PolicyAuthority.grants` 里留行。`cmd_events_approve_as` 接受管理员给的
+    /// 任意 subscriber 串，旧实现每见一个新串就永久留一行（`MAX_APPROVALS` 只数
+    /// 审批行、管不到版本表）。同时钉住反向过度回收：还有审批在手时不得提前删。
+    #[test]
+    fn revoke_of_last_approval_reclaims_grant_row() {
+        let b = bus(16);
+        declare(&b, "com.a", "plugin:com.a:private", false);
+        declare(&b, "com.c", "plugin:com.c:private", false);
+
+        b.approve("com.b", "plugin:com.a:private").unwrap();
+        assert!(
+            b.policy.lock().grant_version("com.b") > 0,
+            "首条 approve 建行（版本 ≥1 ⇔ 行存在：版本取自全局发号器）"
+        );
+
+        b.approve("com.b", "plugin:com.c:private").unwrap();
+        let version = b.policy.lock().grant_version("com.b");
+        assert!(version > 0);
+        assert!(b.revoke("com.b", "plugin:com.a:private"));
+        let after_first_revoke = b.policy.lock().grant_version("com.b");
+        assert!(
+            after_first_revoke > version,
+            "撤销本身要抬版本（旧 token 作废），但**不得删行**：还剩一条审批，\
+             删行等于把别的 topic 上仍然有效的授权打成 StaleGrant。版本仍 >0 即行仍在\
+             （本表的最小版本是 1，版本 0 与「行不存在」同义）"
+        );
+
+        assert!(b.revoke("com.b", "plugin:com.c:private"));
+        assert_eq!(
+            b.policy.lock().grant_version("com.b"),
+            0,
+            "最后一条审批消失即回收版本行：表里不留历史主体"
+        );
     }
 
     #[test]

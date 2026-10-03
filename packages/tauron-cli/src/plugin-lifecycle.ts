@@ -233,6 +233,11 @@ export function pluginSign(_options: CliOptions): CliResult {
  *
  * 真发布路径：由 `@tauron/market` 的客户端能力 + 宿主 `host_market_*` 命令承担
  * （当前适配层那三条也是 simulated 桩，见 `docs/architecture/app-layer-wire.md` §3）。
+ *
+ * 轮 16 补：前置条件分支（缺 manifest / 缺 .tgz）此前返回 `success: true`，
+ * 让 `tauron plugin publish && next-step` 在**什么都没发布**时继续往下走。
+ * 命令没发出任何东西就不该有 0 退出码，故两条也改判 `success: false`
+ * （消息保持原样，仍然提示先 `plugin new` / `plugin pack`）。
  */
 export function pluginPublish(_options: CliOptions): CliResult {
   const cwd = process.cwd();
@@ -240,10 +245,10 @@ export function pluginPublish(_options: CliOptions): CliResult {
 
   if (!existsSync(manifestPath)) {
     return {
-      success: true,
+      success: false,
       message:
         'Plugin publish: no tauron.plugin.json found. Run "tauron plugin new" to create a plugin first.',
-      data: { registryUrl: null, entry: null },
+      data: { registryUrl: null, entry: null, published: false },
     };
   }
 
@@ -253,9 +258,9 @@ export function pluginPublish(_options: CliOptions): CliResult {
 
   if (!existsSync(packagePath)) {
     return {
-      success: true,
+      success: false,
       message: `Plugin publish: package '${packageName}' not found. Run "tauron plugin pack" first.`,
-      data: { registryUrl: null, entry: null },
+      data: { registryUrl: null, entry: null, published: false },
     };
   }
 

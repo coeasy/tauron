@@ -894,6 +894,30 @@ pub fn installed_plugin_ui(
     Ok(InstalledPluginUi { plugin_id: plugin_id.to_string(), entry })
 }
 
+/// 由已安装的 UI 绝对路径反推插件窗口的资产相对路径（`window_create` 的取径侧）。
+///
+/// 为什么要在**比较点**再 canonicalize 一次：`entry` 出自 [`installed_plugin_ui`]，
+/// 一路都是 canonical 的；而装配期存进状态的根**可能**还是集成方原样传入的串——
+/// 首次安装时目录还不存在，那边的 canonicalize 只能按原样保留。两个串不同形时
+/// `strip_prefix` 必然失配（`..` 段、符号链接、Windows 的 `\\?\` 长前缀与 8.3 短名
+/// 都算；纯 `./` 段不算——`Path` 按组件比较，会忽略它），
+/// 表现是「装得上、打不开窗口」。canonicalize 失败（目录又被删了）就退回原值：
+/// 那样与 `entry` 不同形，照走 `E_INSTALL_FAILED` 拒绝，**不会**放行越出安装根的路径。
+#[cfg(feature = "plugin-install")]
+#[cfg_attr(not(feature = "tauri"), allow(dead_code))] // 唯一生产调用点在 tauri 侧的 `window_create`
+pub(crate) fn plugin_window_asset_relative(
+    install_root: &std::path::Path,
+    plugin_id: &str,
+    entry: &std::path::Path,
+) -> HostResult<String> {
+    let root = install_root.canonicalize().unwrap_or_else(|_| install_root.to_path_buf());
+    let relative = entry.strip_prefix(root.as_path()).map_err(|e| {
+        HostError::new(ErrorCode::E_INSTALL_FAILED, format!("插件 UI 越出安装目录：{e}"))
+    })?;
+    let relative = relative.strip_prefix(plugin_id).unwrap_or(relative);
+    Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
 #[cfg(feature = "plugin-install")]
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -3142,6 +3166,15 @@ impl SubstrateState {
                 Ok(Some((entries, generation))) => {
                     settings.restore(&entries);
                     settings_generation = generation;
+                    // 轮 16 R3（A101 收口）：**健康载入即回执**。回滚镜像只保
+                    // 「迁移提交 → 文档第一次被证明读得动」这个窗口；此后它相对
+                    // 不断前进的正式文档永远是陈旧的，留着 = 未来任何一次无关损坏
+                    // 都会「好心」把用户带回任意久远的过去。一次性语义的完整形式
+                    // 是「消费即删 ∧ 回执即删」。
+                    let rollback_path = path.with_file_name(HOST_SETTINGS_ROLLBACK_FILE);
+                    if rollback_path.exists() {
+                        clear_settings_rollback_image(&rollback_path);
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -3364,12 +3397,30 @@ impl PluginRuntimeState {
             proc_runtime,
             deliveries: Arc::new(deliveries),
             #[cfg(feature = "plugin-install")]
-            install_config: cfg.plugin_install_dir.map(|root| InstallRuntimeConfig {
-                root,
-                signing_keys: cfg.plugin_signing_keys,
-                acl_signing_key: cfg.acl_signing_key,
-                trusted_time_provider: cfg.trusted_time_provider,
-            }),
+            install_config: match cfg.plugin_install_dir {
+                // 轮 16：装成 **canonical 权威副本**（与 `fs_allowed_roots` 同一
+                // 条规则：见本文件对允许根目录的 canonicalize 注释）。
+                // 存原始串时，`installed_plugin_ui` 返回的 `entry`（canonicalize 过）
+                // 与 `install_config_root()`（原始串）不同形，`window_create` 对
+                // `plugin-*` 标签做的 `entry.strip_prefix(root)` 必然失配 →
+                // E_INSTALL_FAILED。集成方给相对路径、经 env 变量传入、或路径里
+                // 含符号链接 / Windows 8.3 短名时会踩到；CI 的干净临时目录踩不到。
+                // 目录此刻尚不存在（首次安装才创建）时按原样保留——**但这句话本身
+                // 不构成保证**：轮 17 复查指出 `window_create` 拿的是这个存储值，而
+                // `entry` 已 canonical 过，所以比较点自己也得 canonicalize 一次
+                // （见 [`plugin_window_asset_relative`]），否则「首装 + 目录当时不存在」
+                // 就把原 bug 原样保留在一条更窄的路径上。
+                Some(raw_root) => {
+                    let root = raw_root.canonicalize().unwrap_or_else(|_| raw_root.clone());
+                    Some(InstallRuntimeConfig {
+                        root,
+                        signing_keys: cfg.plugin_signing_keys,
+                        acl_signing_key: cfg.acl_signing_key,
+                        trusted_time_provider: cfg.trusted_time_provider,
+                    })
+                }
+                None => None,
+            },
             #[cfg(feature = "plugin-install")]
             install_reviews: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -5957,8 +6008,29 @@ fn load_settings_rollback_image(
 /// `SubstrateState` 构造里按路径作废，那时还没有 `state`；② 迁移落盘失败并 rewind 内存
 /// 之后。留着已消费的镜像，下一次偶然的读失败会把用户带回更久以前的状态；迁移失败后留着
 /// 它，等于在磁盘上伪造一次没发生过的迁移。
+///
+/// 轮 17：**删不掉不等于不用管**。`let _ = remove_file(path)` 会把权限/占用/目标是个目录
+/// 这类错误原样咽下，结果正是本函数要防的那件事——一份可被后续读回的陈旧镜像。
+/// 镜像的可消费性来自**固定文件名**，所以删除失败就把它改名挪开（改名后
+/// `load_settings_rollback_image` 再也找不到它），两条路都走不通时才留一行痕迹。
 fn clear_settings_rollback_image(path: &std::path::Path) {
-    let _ = std::fs::remove_file(path);
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(remove_error) => {
+            let name =
+                path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let discarded =
+                path.with_file_name(format!("{name}.discarded-{}", crate::recovery::now_ms()));
+            if let Err(rename_error) = std::fs::rename(path, &discarded) {
+                eprintln!(
+                    "[tauron] 设置回滚镜像作废失败且挪开也失败（删除：{remove_error}；改名：{rename_error}）：\
+                     它仍在 {} 上，后续读损坏时可能被当成回滚点消费",
+                    path.display()
+                );
+            }
+        }
+    }
 }
 
 /// 宿主设置文档的**当前**（v2）schema 版本。
@@ -10074,6 +10146,109 @@ mod tests {
 
     #[cfg(feature = "plugin-install")]
     #[test]
+    fn install_config_root_is_canonical_so_window_asset_prefix_matches() {
+        // 轮 16 R-C6：`tauri.rs` 的 `window_create` 对 `plugin-*` 标签做的是
+        // `installed.entry.strip_prefix(state.install_config_root())`，而 `entry`
+        // 在 `installed_plugin_ui` 里已过 `canonicalize`。此前状态里存的是集成方
+        // **原样**传入的根，两个串不同形（多一个 `.`、相对路径、符号链接、
+        // Windows 8.3 短名都算）时 strip_prefix 失败 → 插件窗口 E_INSTALL_FAILED。
+        let dir = tempfile::tempdir().unwrap();
+        let real_root = dir.path().join("plugins");
+        std::fs::create_dir_all(&real_root).unwrap();
+        let raw_root = real_root.parent().unwrap().join(".").join("plugins");
+        assert_ne!(
+            raw_root,
+            real_root.canonicalize().unwrap(),
+            "测试前提：原始串与 canonical 串不同形"
+        );
+
+        let (package, verifying_key) = signed_install_fixture(dir.path(), "com.install.canonical");
+        let state = install_state(raw_root, &verifying_key);
+        let stored = state.install_config_root().cloned().expect("install root 应已装配");
+        assert_eq!(
+            stored,
+            stored.canonicalize().unwrap(),
+            "install_config_root 必须是 canonical 权威副本，否则插件窗口路径前缀对不上"
+        );
+
+        cmd_registry_install_as(
+            &Caller::MainWindow,
+            &state,
+            package.to_str().unwrap(),
+            &["store:allow-get".into()],
+        )
+        .expect("canonical 根下安装应成功");
+        cmd_registry_admin_as(
+            &Caller::MainWindow,
+            &state,
+            "com.install.canonical",
+            RegistryAdminOp::Enable,
+        )
+        .unwrap();
+        let ui = installed_plugin_ui(&state, "com.install.canonical").unwrap();
+        assert!(
+            ui.entry.strip_prefix(&stored).is_ok(),
+            "window_create 用的前缀剥离必须成立：{:?} vs {:?}",
+            ui.entry,
+            stored
+        );
+    }
+
+    /// 轮 17 R-C6 续：装配期「目录当时不存在 → 按原样保留」这条更窄的路径。
+    ///
+    /// 用 `..` 段构造失配——它在**所有**平台上都让 `Path` 的组件比较不同形（纯 `.` 段
+    /// 会被忽略，Windows 的 `\\?\` 前缀只在 Windows 上成立，都不能当跨平台前提）。
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn window_asset_relative_strips_a_raw_root_left_by_the_first_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_root = dir.path().join("plugins");
+        std::fs::create_dir_all(&real_root).unwrap();
+        let raw_root = real_root.join("..").join("plugins");
+        let canon_root = real_root.canonicalize().unwrap();
+        assert_ne!(raw_root, canon_root, "测试前提：原样串与 canonical 串不同形");
+
+        // 测试前提的另一半：不 canonicalize 就比较，正是轮 16 修掉的那个失败。
+        let entry = canon_root.join("p1").join("ui").join("index.html");
+        assert!(
+            entry.strip_prefix(&raw_root).is_err(),
+            "若这条断言红，说明本例没构造出真实失配，测试失效"
+        );
+
+        assert_eq!(
+            plugin_window_asset_relative(&raw_root, "p1", &entry).unwrap(),
+            "ui/index.html",
+            "首装留下的原样根不得让已装好的插件窗口报「越出安装目录」"
+        );
+    }
+
+    /// 同一入口的失效侧：越出安装根、以及根又消失时，都必须**拒绝**而不是放行。
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn window_asset_relative_fails_closed_on_escape_and_vanished_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_root = dir.path().join("plugins");
+        std::fs::create_dir_all(&real_root).unwrap();
+        let canon_root = real_root.canonicalize().unwrap();
+
+        let outside = canon_root.parent().unwrap().join("elsewhere").join("ui.html");
+        let escaped = plugin_window_asset_relative(&real_root, "p1", &outside).unwrap_err();
+        assert_eq!(escaped.code, ErrorCode::E_INSTALL_FAILED);
+        assert!(escaped.message.contains("越出安装目录"));
+
+        // 根在比较时已被删除：canonicalize 失败退回原样串 → 与 canonical 的 entry 不同形
+        // → 拒绝。退回原值只是退回旧行为，不是放行。
+        let entry = canon_root.join("p1").join("index.html");
+        let vanished = dir.path().join("no-such-install-root");
+        assert_eq!(
+            plugin_window_asset_relative(&vanished, "p1", &entry).unwrap_err().code,
+            ErrorCode::E_INSTALL_FAILED,
+            "根不可用时宁可开不了窗口，也不能把任意路径当插件资产"
+        );
+    }
+
+    #[cfg(feature = "plugin-install")]
+    #[test]
     fn installed_plugin_ui_rejects_content_and_activation_metadata_tampering() {
         use sha2::{Digest, Sha256};
 
@@ -12934,23 +13109,8 @@ mod tests {
             assert!(image.exists(), "requiresSnapshot 的迁移必须留下磁盘回滚镜像");
         }
 
-        // ── 第 2 轮：健康重启。文档读得动，镜像**不**出场（它只在坏文档时兜底）。
-        {
-            let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
-            assert_eq!(
-                host_settings_data_version(&state).as_deref(),
-                Some(HOST_SETTINGS_SCHEMA_V2)
-            );
-            // 迁移后是转义键：带点的键要靠 `settings_path` 编码才读得出来。
-            assert_eq!(
-                cmd_settings_get(&state, "plugin:p.theme").unwrap(),
-                serde_json::json!("navy")
-            );
-            assert!(image.exists(), "健康重启不得消费镜像");
-        }
-
-        // ── 第 3 轮：模拟「迁移之后第一次落盘把文档写坏了」→ 重启必须回到迁移前，
-        //    而不是把用户设置清空（非生产档）或拒绝启动。
+        // ── 第 2 轮：模拟「迁移之后第一次落盘把文档写坏了」→ 重启必须回到迁移前，
+        //    而不是把用户设置清空（非生产档）或拒绝启动。这正是镜像守护的窗口。
         std::fs::write(&doc, b"{ not a durable envelope").unwrap();
         {
             let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
@@ -12983,6 +13143,75 @@ mod tests {
             cmd_settings_set(&state, "plugin:p.theme", serde_json::json!("crimson")).unwrap();
             assert!(doc.exists(), "恢复后第一次写必须重建正式文档");
         }
+
+        // ── 第 3 轮（轮 16 R3 改判）：健康重启 = **回执**。第 2 轮的文档已重建
+        //    并被证明读得动，第二份镜像必须退场——旧断言「健康重启不得消费镜像」
+        //    保不住任何东西：镜像自此相对不断前进的正式文档永远陈旧，未来任何一次
+        //    无关损坏都会把它当救命稻草，把用户带回任意久远的过去。
+        {
+            let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+            assert_eq!(
+                host_settings_data_version(&state).as_deref(),
+                Some(HOST_SETTINGS_SCHEMA_V2)
+            );
+            assert_eq!(
+                cmd_settings_get(&state, "plugin:p.theme").unwrap(),
+                serde_json::json!("crimson"),
+                "健康重启读到的必须是最新值"
+            );
+            assert!(!image.exists(), "健康启动必须回执掉镜像");
+        }
+
+        // ── 第 4 轮：回执之后再损坏 → 走「无镜像」路径：降级（开发档空文档），
+        //    而不是拿一份旧镜像静默穿越回迁移前。这就是改判买到的确定性。
+        std::fs::write(&doc, b"{ not a durable envelope").unwrap();
+        {
+            let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+            assert_eq!(
+                host_settings_data_version(&state).as_deref(),
+                None,
+                "无镜像可兜时如实降级，绝不消费陈旧镜像"
+            );
+            assert_eq!(
+                cmd_settings_get(&state, "plugin:p.theme").unwrap(),
+                serde_json::Value::Null
+            );
+        }
+    }
+
+    /// 轮 17 R-A101 续：删不掉的回滚镜像必须**挪出**读取路径。
+    ///
+    /// 旧实现是 `let _ = remove_file(path)`，把权限/占用/目标是目录这类错误原样咽下，
+    /// 结果正是镜像要防的那件事：一份陈旧镜像留在固定文件名上，后续任何一次偶然的
+    /// 读损坏都会把它当救命稻草消费掉。这里用**目录**冒充「存在但删不掉」——
+    /// `remove_file` 在两个平台上都对目录报错且报的不是 `NotFound`，跨平台稳定。
+    #[test]
+    fn undeletable_rollback_image_is_moved_out_of_the_load_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join(HOST_SETTINGS_ROLLBACK_FILE);
+        std::fs::create_dir(&image).unwrap();
+        let discarded_prefix = format!("{HOST_SETTINGS_ROLLBACK_FILE}.discarded-");
+        let discarded = || -> Vec<String> {
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with(&discarded_prefix))
+                .collect()
+        };
+
+        clear_settings_rollback_image(&image);
+
+        assert!(!image.exists(), "作废后固定文件名不得留在读取路径上");
+        assert!(
+            matches!(load_settings_rollback_image(&image), Ok(None)),
+            "「没有镜像」必须是 Ok(None)，不是报错也不是可消费"
+        );
+        assert_eq!(discarded().len(), 1, "删不掉时留下可查的改名副本，且只有一份");
+
+        // 幂等：第二次作废不得把已挪走的副本再搬一次。
+        clear_settings_rollback_image(&image);
+        assert_eq!(discarded().len(), 1, "作废是幂等的");
     }
 
     #[test]

@@ -90,6 +90,10 @@ tauron --version   # tauron v1.1.0（仓库 bin；npm 全局装到的是 1.0.2�
 tauron doctor      # 环境诊断：探测 Node / pnpm / Rust / Tauri CLI
 ```
 
+`tauron doctor` 的退出码是契约的一部分：**报告里有任何 `fail` 项即 exit 1**，
+`warn` / `skip` 只提示、不改判（轮 16 之前它无条件返回 0，CI 会把「✗ N check(s) failed」
+这句诊断结论直接抹掉）。`tauron-app doctor` 同口径（`result.ok` 为假即 exit 1）。
+
 ---
 
 ## 创建插件
@@ -570,6 +574,13 @@ market/signature/archive 依赖）。因此**默认装配只有 83 条**，接�
 > **`plugin_install_dir` 未配置时安装明确不可用**（返回带原因的失败，不静默成功）。
 > 它们既不是插件可触达的命令面，也不参与 TS `CAPABILITIES` 的 1:1 镜像。
 
+**「落在 `plugin_install_dir` 之下」怎么判**（轮 16/17 定的口径，接入方传路径时要按它写）：
+装配期对 `plugin_install_dir` 取 canonical 副本，取径侧（`host_window_create` 反推插件
+UI 资产相对路径）在比较点再 canonicalize 一次，两侧同形才比。因此 `..` 段、符号链接、
+Windows 8.3 短名这类**真的换目录**的写法会被拒（`E_INSTALL_FAILED`，不静默回退）；
+`<root>/./plugins` 这种**多一个 `.` 段**的写法不算失配——`Path` 按组件比较会忽略 `.`。
+目录在装配时还不存在（首装）则按原样保留该值，判定仍由取径侧的 canonicalize 兜住。
+
 ### 底座命令（主窗专属）
 
 其余命令（`host_window_*` / `host_settings_*` / `host_notify` / `host_recover_*` /
@@ -975,7 +986,11 @@ tauron plugin publish  # ⚠️ 未实现：不会上传，也不编造商城地
 |---|---|---|
 | `pack` | 读清单、按 `includes` 列文件、算总字节数 | **不写任何归档文件**（`package: null`，只有 `plannedPackage` 名字） |
 | `sign` | 读取产物、算真实 SHA-256 摘要、把 `.sig` **真的写出来** | 不做 Ed25519 非对称签名（要真签名用 `tauron-app plugin sign`，走 `@tauron/market`） |
-| `publish` | 校验清单形状 | **不上传**、不返回商城 URL（`published: false` / `simulated: true`） |
+| `publish` | 校验清单形状 | **不上传**、不返回商城 URL（`published: false` / `simulated: true`），**退出码非 0** |
+
+`publish` 的三条分支（缺 `tauron.plugin.json` / 缺 `.tgz` / 有包但无上传客户端）
+在轮 16 之后**一律给非 0 退出码**：此前前两条返回 `success: true`（exit 0），
+`tauron plugin publish && 下一步` 会在什么都没发布时继续往下走。
 
 需要完整发布链路时，请用你自己的流水线打包，再对产物跑 `sign`，最后交给
 `tauron-app` 侧的商城客户端（`@tauron/market`，Ed25519 验签）。

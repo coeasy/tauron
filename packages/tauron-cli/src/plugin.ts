@@ -23,7 +23,7 @@
  */
 
 import type { PluginConfig, PackageManifest, CliOptions, PluginType } from './types.js';
-import { CLI_VERSION } from './version.js';
+import { CLI_VERSION, PUBLISHED_NPM_VERSION } from './version.js';
 
 /**
  * tauron 宿主清单（`tauron.plugin.json`）的线形。
@@ -178,7 +178,7 @@ export function generatePackageJson(config: PluginConfig): PackageManifest {
     type: 'module',
     main: config.type === 'process' ? 'main.js' : 'src/index.js',
     devDependencies: {
-      '@tauron/plugin-sdk': `^${CLI_VERSION}`,
+      '@tauron/plugin-sdk': `^${PUBLISHED_NPM_VERSION}`,
     },
   };
 }
@@ -368,7 +368,11 @@ ${
   }
 ## 本地依赖
 
-\`@tauron/*\` 的 npm 现值是 **1.0.2**，落后于本仓库源码；插件开发请把
-\`devDependencies\` 用 \`workspace:*\` 或 \`file:\` 指向本仓库对应目录，别装 registry 版本。
+本工程的 \`@tauron/*\` 依赖钉在 **npm 已发布版本 ${PUBLISHED_NPM_VERSION}**（可直接
+\`npm install\`）。生成它的 CLI 版本是 ${CLI_VERSION}${
+    CLI_VERSION === PUBLISHED_NPM_VERSION
+      ? '，两者一致。'
+      : `，**领先于** registry 版本；要在本仓库里开发插件，请把 \`devDependencies\` 用 \`workspace:*\` 或 \`file:\` 指向本仓库对应目录，别装 registry 版本。`
+  }
 `;
 }

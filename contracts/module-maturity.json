@@ -1,0 +1,194 @@
+{
+  "schemaVersion": 1,
+  "purpose": "V5 §46.2 的 machine ledger 最小面：模块收录、依赖形态与文档判定必须同源。轮 13 的教训是 overview / canonical-owners / 竞品分析的接线状态靠人工维护，代码早已接线（brand/theme/distribute）而账面滞后两代。本台账只收录**机械可反推**的事实——目录集合、adapter 依赖形态（Cargo.toml）、文档接线表判定（overview.md）、0.3 归置表状态（canonical-owners.md）、包元数据（package.json）、README/竞品分析里的计数——全部由 wire-gate「module-maturity 台账」逐条与真实文件对账。成熟度分级（Stable/Preview/Experimental/Unsupported）不在这里：它需要 conformance 证据背书，属 V5 Phase A 退出门槛，手写等级字段只会复制本次的谎报模式。",
+  "crates": {
+    "tauron-acl": {
+      "adapterDependency": "feature:plugin-install",
+      "overviewWiring": "partial",
+      "ownersTable": "迁移中"
+    },
+    "tauron-adapter": {
+      "adapterDependency": null,
+      "overviewWiring": null,
+      "ownersTable": null
+    },
+    "tauron-brand": {
+      "adapterDependency": "default",
+      "overviewWiring": "wired",
+      "ownersTable": "已接线"
+    },
+    "tauron-distribute": {
+      "adapterDependency": "default",
+      "overviewWiring": "wired",
+      "ownersTable": "已接线"
+    },
+    "tauron-ffi": {
+      "adapterDependency": null,
+      "overviewWiring": null,
+      "ownersTable": null
+    },
+    "tauron-host": {
+      "adapterDependency": "default",
+      "overviewWiring": "wired",
+      "ownersTable": null
+    },
+    "tauron-i18n": {
+      "adapterDependency": "default",
+      "overviewWiring": "wired",
+      "ownersTable": null
+    },
+    "tauron-market": {
+      "adapterDependency": "feature:plugin-install",
+      "overviewWiring": "partial",
+      "ownersTable": "迁移中"
+    },
+    "tauron-notify": {
+      "adapterDependency": "default",
+      "overviewWiring": "wired",
+      "ownersTable": null
+    },
+    "tauron-proc": {
+      "adapterDependency": "default",
+      "overviewWiring": "wired",
+      "ownersTable": null
+    },
+    "tauron-recovery": {
+      "adapterDependency": "default",
+      "overviewWiring": "wired",
+      "ownersTable": null
+    },
+    "tauron-schema": {
+      "adapterDependency": null,
+      "overviewWiring": null,
+      "ownersTable": null
+    },
+    "tauron-settings": {
+      "adapterDependency": "default",
+      "overviewWiring": "wired",
+      "ownersTable": null
+    },
+    "tauron-shell": {
+      "adapterDependency": null,
+      "overviewWiring": null,
+      "ownersTable": "迁移中"
+    },
+    "tauron-theme": {
+      "adapterDependency": "default",
+      "overviewWiring": "wired",
+      "ownersTable": "已接线"
+    },
+    "tauron-wasm": {
+      "adapterDependency": "feature:runtime-wasm-broker",
+      "overviewWiring": "partial",
+      "ownersTable": "部分接线"
+    }
+  },
+  "packages": {
+    "create-tauron-app": {
+      "name": "create-tauron-app",
+      "layer": "app",
+      "consumerStatus": "entry-point"
+    },
+    "tauron-adapter-react": {
+      "name": "@tauron/adapter-react",
+      "layer": "framework",
+      "consumerStatus": "reference-only"
+    },
+    "tauron-adapter-svelte": {
+      "name": "@tauron/adapter-svelte",
+      "layer": "framework",
+      "consumerStatus": "reference-only"
+    },
+    "tauron-adapter-vue": {
+      "name": "@tauron/adapter-vue",
+      "layer": "framework",
+      "consumerStatus": "reference-only"
+    },
+    "tauron-app-cli": {
+      "name": "@tauron/app-cli",
+      "layer": "app",
+      "consumerStatus": "entry-point"
+    },
+    "tauron-app-contract-kit": {
+      "name": "@tauron/app-contract-kit",
+      "layer": "app",
+      "consumerStatus": "reference-only"
+    },
+    "tauron-app-plugin-sdk": {
+      "name": "@tauron/app-plugin-sdk",
+      "layer": "app",
+      "consumerStatus": "repo-consumed"
+    },
+    "tauron-cli": {
+      "name": "@tauron/cli",
+      "layer": "framework",
+      "consumerStatus": "entry-point"
+    },
+    "tauron-contract-tests": {
+      "name": "@tauron/contract-tests",
+      "layer": "framework",
+      "private": true,
+      "consumerStatus": "entry-point"
+    },
+    "tauron-core": {
+      "name": "@tauron/core",
+      "layer": "framework",
+      "consumerStatus": "repo-consumed"
+    },
+    "tauron-dual-world": {
+      "name": "@tauron/dual-world",
+      "layer": "framework",
+      "consumerStatus": "reference-only"
+    },
+    "tauron-framework": {
+      "name": "@tauron/framework",
+      "layer": "app",
+      "consumerStatus": "reference-only"
+    },
+    "tauron-host": {
+      "name": "@tauron/host",
+      "layer": "app",
+      "consumerStatus": "repo-consumed"
+    },
+    "tauron-market": {
+      "name": "@tauron/market",
+      "layer": "framework",
+      "consumerStatus": "repo-consumed"
+    },
+    "tauron-plugin-context-contract": {
+      "name": "@tauron/plugin-context-contract",
+      "layer": "framework",
+      "consumerStatus": "repo-consumed"
+    },
+    "tauron-plugin-sdk": {
+      "name": "@tauron/plugin-sdk",
+      "layer": "framework",
+      "consumerStatus": "repo-consumed"
+    },
+    "tauron-shell-events": {
+      "name": "@tauron/shell-events",
+      "layer": "app",
+      "consumerStatus": "repo-consumed"
+    },
+    "tauron-shell-matrix": {
+      "name": "@tauron/shell-matrix",
+      "layer": "framework",
+      "consumerStatus": "reference-only"
+    },
+    "tauron-ui": {
+      "name": "@tauron/ui",
+      "layer": "app",
+      "consumerStatus": "repo-consumed"
+    },
+    "tauron-ui-primitives": {
+      "name": "@tauron/ui-primitives",
+      "layer": "app",
+      "consumerStatus": "repo-consumed"
+    },
+    "types": {
+      "name": "@tauron/types",
+      "layer": "framework",
+      "consumerStatus": "repo-consumed"
+    }
+  }
+}

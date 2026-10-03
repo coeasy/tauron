@@ -12,7 +12,7 @@
  * - tauron plugin publish — 发布插件
  */
 
-import { runDoctor, formatDoctorReport } from './doctor.js';
+import { runDoctor, formatDoctorReport, type DoctorReport } from './doctor.js';
 import {
   formatHostConformanceReport,
   loadHostConformanceAdapter,
@@ -112,10 +112,22 @@ export async function runCli(
 
 /**
  * doctor 命令
+ *
+ * 轮 16：`success` 必须跟随探测结果。此前无条件 `true`，而
+ * `formatDoctorReport` 会打印「✗ N check(s) failed — please fix before
+ * continuing」——报告说坏、退出码说好的分裂形态会让 CI 直接跳过诊断结论。
  */
+export function doctorCommandResult(report: DoctorReport): CliResult {
+  const failed = report.checks.filter((c) => c.status === 'fail');
+  return {
+    success: failed.length === 0,
+    message: formatDoctorReport(report),
+    data: report,
+  };
+}
+
 function runDoctorCommand(_options: CliOptions): CliResult {
-  const report = runDoctor();
-  return { success: true, message: formatDoctorReport(report), data: report };
+  return doctorCommandResult(runDoctor());
 }
 
 /**

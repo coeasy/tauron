@@ -37,11 +37,11 @@
 | crate | 状态 | 决策与条件 |
 | --- | --- | --- |
 | `tauron-acl` | 迁移中 | M1 前置；接入 manifest 权限审批、签名授予及 Tauri capability 物化后改为已接线。 |
-| `tauron-brand` | 迁移中 | `host_brand_info` 返回带原因的 `UnsupportedBody`；接读端并映射品牌配置后改为已接线。 |
+| `tauron-brand` | 已接线 | 轮 13 实测：`cmd_brand_info` 走 `tauron-brand` 校验链返回 `BrandInfo`；env 未配置时如实降级 `UnsupportedBody`（不再是恒桩）。 |
 | `tauron-market` | 迁移中 | M1/M7 共用取包与验签；HTTP / `.tpkg` 安装闭环前不宣称已接线。 |
-| `tauron-wasm` | 可选组件 | 不引入默认运行时；Wasm 插件明确返回 `E_PLUGIN_TYPE_NO_RUNTIME`。 |
-| `tauron-theme` | 可选组件 | 客户端主题由 UI design tokens 承担；crate 保留为可选集成。 |
-| `tauron-distribute` | 可选组件 | CI 运维组件，不进入客户端运行时依赖图。 |
+| `tauron-wasm` | 部分接线 | opt-in `runtime-wasm-broker` 已接配置校验与崩溃预算；执行层 `delivered: false` → `E_PLUGIN_TYPE_NO_RUNTIME`，不引入默认运行时。 |
+| `tauron-theme` | 已接线 | 轮 13 实测：`SubstrateState::themes` 即 `ThemeRegistry`，`host_theme_list`/`get`/`set`（仅主窗）落在它上面；UI design tokens 仍是客户端外观的另一事实源。 |
+| `tauron-distribute` | 已接线 | 轮 13 实测：updater provider 真跑 `check_for_update`（灰度 + 签名 + 崩溃门禁），`InstallationIdentity::load_or_create` 落盘；未注入 endpoint 时 fail-closed。 |
 | `tauron-shell` | 迁移中 | legacy 冻结；按本文阶段 2/3 迁移到 `tauron-host` canonical 引擎。 |
 
 迁移中状态表示决策已定但接线尚未完成，不能作为「功能可用」的证据；对应轮次完成后必须同步更新 Cargo 依赖和本表。
@@ -102,6 +102,29 @@ R7 让 **`tauron-settings` 获得第一个消费者**（`tauron-adapter`）—�
 `tauron-shell` **依旧零消费者**。轮 12 新增的客户端侧契约（`--features substrate-only`
 示例形态、capability 文件）都在**消费**侧，不改变归属：`SubstrateState` 就是底座析取的
 产物，`tauron_substrate_handler![]` 是它的命令面，两者都在 `tauron-adapter` 里。
+
+### 轮 13 复核（对照 V5 §46.1，按 Cargo.toml 全量重测）
+
+⚠️ **更正**：上面轮 10/11/12 三张表自称「依赖方向重新实测」，但它们只记录了
+**孤儿 crate 激活的增量**，不是 `crates/tauron-adapter/Cargo.toml` 的完整依赖表——
+`tauron-brand` / `tauron-theme` / `tauron-distribute` 早在 1.0 收口（b2659c0）就已进
+默认依赖。V5 §46.1 指出的正是这批账面滞后。全量重测（2026-10-03）：
+
+| 依赖 | 进表方式 | 生产消费点 |
+| --- | --- | --- |
+| `tauron-host` | 默认 | 注册表 / 事件总线 / authz / 生命周期引擎全部 |
+| `tauron-i18n` / `tauron-notify` / `tauron-recovery` | 默认 | 各自 `host_*` 域 |
+| `tauron-settings` | 默认 | `SubstrateState.settings` = `SettingsStore`（R7） |
+| `tauron-proc` | 默认 | 进程插件执行器（P0-2） |
+| `tauron-brand` | 默认 | `cmd_brand_info`：env 配置 → `tauron-brand` 校验 → `BrandInfo`；未配置如实降级 |
+| `tauron-theme` | 默认 | `SubstrateState.themes` = `ThemeRegistry` + `host_theme_list/get/set` |
+| `tauron-distribute` | 默认 | updater provider：`host_updater_check/status` 真跑 `check_for_update`；`InstallationIdentity::load_or_create` 落盘 |
+| `tauron-acl` / `tauron-market` | 可选（`plugin-install`） | 安装验签（market）与授权草稿/校验（acl） |
+| `tauron-wasm` | 可选（`runtime-wasm-broker`） | broker 的配置校验与崩溃预算；执行层诚实失败 |
+
+`tauron-shell` **依旧零 crate 消费者**（`grep tauron-shell crates/*/Cargo.toml` 仍只有它
+自己），canonical 决策未变。0.3 表已按本表同步：brand / theme / distribute 改「已接线」，
+wasm 改「部分接线」。
 
 ## 本轮的**真实**改动与**未做**（诚实披露）
 

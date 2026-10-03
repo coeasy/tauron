@@ -362,6 +362,14 @@ const instance = shell.create({
 await instance.start();
 ```
 
+> **这段代码现在只做状态编排，不拉起真实容器**：`shell-matrix` 的实例恒带
+> `simulated: true`（`src/manager.ts`），`start()` 只把状态机推到 `ready`，
+> **不会**起本地 HTTP 服务、不会开子 webview、不会加载远程 URL。所以
+> `status: 'ready'` 不等于"插件已经跑起来"——判据是那个 `simulated` 标志，
+> 细节见 `packages/tauron-shell-matrix/README.md`。本仓里真正加载插件 UI 的路径是
+> 宿主的 `host_window_create`（`plugin-*` 标签走安装目录资产协议）与
+> `@tauron/plugin-sdk` 的 `PluginBridge`。
+
 ---
 
 ## 错误处理
@@ -484,7 +492,7 @@ tauron/
 │   ├── tauron-wasm/                 # WASM Supervisor
 │   └── tauron-ffi/                  # 稳定 C ABI 所有权边界（供**非 Rust 宿主**接入 Universal Wire；
 │                                    #   仓内没有 Rust 消费者是设计使然，契约见 docs/contracts/ffi-v1.md）
-├── packages/                        # npm 包（20 个，同一个目录；下面按层分组）
+├── packages/                        # npm 包（21 个目录：20 公开 + 私有 `tauron-contract-tests`；下面按层分组）
 │   # ── 框架层（12 个）──
 │   ├── types/                       # @tauron/types — 信封/错误码/ACL/Manifest/事件
 │   ├── tauron-core/                 # @tauron/core — invoke/backend/registry/event-bus/acl/config
@@ -498,11 +506,12 @@ tauron/
 │   ├── tauron-market/               # @tauron/market — 签名/注册表
 │   ├── tauron-shell-matrix/         # @tauron/shell-matrix — 4 种 shell 形态
 │   ├── tauron-contract-tests/       # @tauron/contract-tests — TS↔Rust 跨语言门禁
-│   # ── 应用层（8 个）──
+│   # ── 应用层（9 个）──
 │   ├── tauron-host/                 # @tauron/host — 能力编排层（HostClient/TauriBackend）
 │   ├── tauron-shell-events/         # @tauron/shell-events — 壳层事件名常量（零依赖）
 │   ├── tauron-ui-primitives/        # @tauron/ui-primitives — UI 原语（零宿主依赖）
 │   ├── tauron-app-cli/              # @tauron/app-cli — 应用脚手架（bin: tauron-app）
+│   ├── create-tauron-app/           # create-tauron-app — `npm create` 入口（未 scoped；与 `tauron-app new` 同一实现）
 │   ├── tauron-app-plugin-sdk/       # @tauron/app-plugin-sdk — 应用级插件 SDK
 │   ├── tauron-app-contract-kit/     # @tauron/app-contract-kit — 应用契约套件
 │   ├── tauron-framework/            # @tauron/framework — 框架薄封装
@@ -609,6 +618,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 | [canonical 归属](./docs/architecture/canonical-owners.md) | 唯一事实源与已冻结的 legacy 门面（改这张表等于改架构） |
 | [0.3 优化改进方案](./docs/architecture/multi-plugin-substrate-roadmap.md) | 多插件框架 × 任意宿主底座：成熟度记分卡、残差清单、S/M/X 改进项与轮次编排 |
 | [V4 工业级缺口收口方案](./docs/architecture/v4-industrial-gap-closure-plan.md) | 逐条对照 V4 §134/§135/§136/§141：A01–A110 的已落 / 部分 / 未落台账、F1–F5 危险缺口、Batch 0–6' 编排与推迟清单 |
+| [V5 架构竞分析与优化方案](./docs/Tauron-Architecture-Competitive-Analysis-Optimization-Plan-V5.md) | 七 Plane 目标架构、`RuntimeDriver` / HostProtocol / Manifest V3 契约、Phase A–G 优先级与退出门槛、能力诚实分级——**轮 13 起的对照基线**（前瞻方案，不描述现状） |
 | [渐进接入指南](./docs/integration/incremental-adoption.md) | 三档装配：只取底座 / 底座 + 插件运行时 / 完整客户端 |
 | [插件开发指南](./docs/api/plugin-development-guide.md) | 创建、测试、打包、发布插件（含 CLI 各命令的真实边界） |
 | [竞品分析](./docs/competitive-analysis/competitive-analysis.md) | 竞品全景图、功能对比矩阵、头条特性兑现度标记 |

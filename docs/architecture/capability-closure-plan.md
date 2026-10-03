@@ -57,6 +57,7 @@
 
 **一句话**：Tauri 2 之上的**插件化桌面客户端基础设施**——不是一个应用，是一套给接入方
 装配「带插件生态的桌面客户端」的地基。15 个 Rust crate + 20 个 npm 包。
+（**写作时点快照**；当前仓库为 16 crates / 21 个包目录，以 canonical-owners.md「轮 13 复核」与 `contracts/module-maturity.json` 为准）
 
 ### 1.1 它对外承诺两件事
 

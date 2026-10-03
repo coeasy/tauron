@@ -8,7 +8,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { generateClientConfig } from './client-config.js';
-import { FRAMEWORK_VERSION } from './framework-version.js';
+import {
+  FRAMEWORK_VERSION,
+  PUBLISHED_FRAMEWORK_VERSION,
+  REGISTRY_PIN_IS_PUBLISHED,
+} from './framework-version.js';
 import { pluginScaffold, validatePluginConfig, validatePluginType } from './plugin.js';
 import { themeGenerate, builtinLightTheme, builtinDarkTheme } from './theme.js';
 import {
@@ -312,6 +316,14 @@ async function newAppProject(
       ? `Tauron 依赖：固定使用 registry 版本 ${FRAMEWORK_VERSION}`
       : `Tauron 源码：${tauronPath}（已写入 Cargo path 与 npm file: 依赖）`,
   );
+  // 轮 17：registry 模式下 pin 落在未发布版本时必须当场说清，否则用户按
+  // 「下一步」跑 `npm install` 只会拿到一个与本工程无关的 ETARGET。
+  if (tauronPath === undefined && !REGISTRY_PIN_IS_PUBLISHED) {
+    printInfo(
+      `⚠ registry 现值是 ${PUBLISHED_FRAMEWORK_VERSION}，${FRAMEWORK_VERSION} 尚未发布：` +
+        `npm install / cargo 现在会失败。改用 --tauron-path 指向 Tauron 源码，或等 ${FRAMEWORK_VERSION} 发布。`,
+    );
+  }
   printInfo('下一步：');
   printInfo(`  cd ${targetDir} && npm install`);
   printInfo(

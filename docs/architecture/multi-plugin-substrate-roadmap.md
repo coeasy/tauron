@@ -303,16 +303,18 @@ pub struct UnsupportedBody {
 
 | crate | 决策 | 理由 / 动作 |
 |---|---|---|
-| `tauron-acl` | **接线**（本轮） | 权限授予是 S-M1 安装链路的前置；无它，插件权限只能靠部署配置 |
-| `tauron-brand` | **接线（读端）** | `host_brand_info` 恒 `{}` 是桩；品牌配置 crate 已完整，读端接线成本低 |
-| `tauron-market` | **接线（取包）** | M-1 安装链路需要真实取包与验签；zip 净化/撤销清单已就绪 |
-| `tauron-wasm` | **标注为可选组件 + 诚实失败** | 不引入 wasm 运行时（重依赖），保留配置校验；执行路径继续 `E_PLUGIN_TYPE_NO_RUNTIME` |
-| `tauron-theme` | **标注为可选组件** | 前端主题可由 `@tauron/ui-primitives` 的 design tokens 承担，crate 侧等待消费者 |
-| `tauron-distribute` | **标注为可选组件（CI 侧）** | 灰度策略与崩溃率停发属 CI 运维，不进客户端运行时；明确定位为「CI 工具链组件」 |
+| `tauron-acl` | **接线**（本轮） | 权限授予是 S-M1 安装链路的前置；无它，插件权限只能靠部署配置。**现状口径（轮 14 补）**：仅 `plugin-install` opt-in 下被消费，判「部分接线」 |
+| `tauron-brand` | **接线（读端）** | 轮 13 实测已接线：`cmd_brand_info` 走 `tauron-brand` 校验链返回 `BrandInfo`，env 未配置时如实 `UnsupportedBody`。（旧文「`host_brand_info` 恒 `{}` 是桩」为误述——它从未返回过 `{}`，已更正） |
+| `tauron-market` | **接线（取包）** | M-1 安装链路需要真实取包与验签；zip 净化/撤销清单已就绪。**现状口径（轮 14 补）**：仅 `plugin-install` opt-in 下被消费，`host_market_*` 仍为 `simulated: true` 桩 |
+| `tauron-wasm` | **标注为可选组件 + 诚实失败** | 不引入默认 wasm 运行时（重依赖），执行路径继续 `E_PLUGIN_TYPE_NO_RUNTIME`。**现状口径（轮 13 改判）**：opt-in `runtime-wasm-broker` 已真跑配置校验与崩溃预算，判「部分接线」 |
+| `tauron-theme` | **接线（客户端命令面）** | 轮 13 实测：`SubstrateState::themes` 即 `ThemeRegistry`，`host_theme_list`/`get`/`set`（仅主窗）落在它上面；design tokens 仍是客户端外观的另一事实源（旧文「等待消费者」已不成立） |
+| `tauron-distribute` | **接线（updater provider）+ CI 侧** | 轮 13 实测：`check_for_update`（灰度 + 签名 + 崩溃门禁）与 `InstallationIdentity::load_or_create` 已进客户端更新命令，未注入 endpoint 时 fail-closed；旧文「不进客户端运行时」不再成立，CI 运维定位保留 |
 | `tauron-shell` | **阶段 2/3 迁移**（既有计划） | legacy 冻结中；按 `canonical-owners.md` 的三阶段走，不新增功能 |
 
 **不变量**：每个 crate 的状态必须是 {已接线 / 可选组件 / 迁移中} 之一，
-**不允许**存在状态未定的 crate。状态写进机器可读表，门禁校验。
+**不允许**存在状态未定的 crate。状态写进机器可读表，门禁校验
+（轮 13 起该表就是 `contracts/module-maturity.json`，由 `wire-gate` 与
+`canonical-owners.md` 0.3 表 / `overview.md` 接线表 / Cargo 三方对账）。
 
 **门禁**：「每个 crate 必须在归置表中有条目，且条目状态与 Cargo 依赖表一致」
 （例：状态 = 已接线 但 `tauron-adapter/Cargo.toml` 无依赖 → 红）。

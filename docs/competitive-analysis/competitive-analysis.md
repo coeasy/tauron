@@ -60,8 +60,8 @@
 |------|------|
 | **核心价值主张** | 为 Tauri 2 桌面应用提供完整的插件化基础设施：沙箱隔离、权限管控、插件市场、白标品牌化、多形态插件加载 |
 | **目标用户** | ① 基于 Tauri 2 开发桌面应用的团队/个人 ② 需要可扩展插件系统的客户端产品 ③ 需要白标/OEM 多品牌的企业 |
-| **核心功能** | 四种插件形态（`PluginType`：Rust/JS/WASM/Process；**代码里不存在 B+ 变体**）🟡、进程内沙箱（dual-world，fail-closed 模拟）🟡、双层 ACL ✅、插件信封协议 ✅、事件总线 ✅、CLI 工具链 🟡、插件市场 🟡、品牌化 ✅（构建期）/🟡（运行期） |
-| **技术架构** | Rust 核心（15 crates 平台无关）+ TypeScript 层（20 packages）+ Tauri 2 适配器 + Lit/React/Vue/Svelte UI |
+| **核心功能** | 四种插件形态（`PluginType`：Rust/JS/WASM/Process；**代码里不存在 B+ 变体**）🟡、进程内沙箱（dual-world，fail-closed 模拟）🟡、双层 ACL ✅、插件信封协议 ✅、事件总线 ✅、CLI 工具链 🟡、插件市场 🟡、品牌化 ✅（构建期 CI 矩阵 + 运行期 `host_brand_info` 真走 `tauron-brand` 校验；env 未配置时如实降级 `UnsupportedBody`） |
+| **技术架构** | Rust 核心（16 crates 平台无关，含 `tauron-ffi`）+ TypeScript 层（21 个包目录 = 20 公开 + 私有 `@tauron/contract-tests`）+ Tauri 2 适配器 + Lit/React/Vue/Svelte UI（registry 已发布数是另一口径：15 crate / 20 包 @1.0.2，见 §5.1 复核横幅） |
 | **差异化优势** | ① 平台无关核心（不依赖 tauri crate）✅ ② 三档授权模型 ✅ ③ 四种插件形态（仅 Js / Process 有生产执行器）🟡 ④ 商城-签名-分发链路（Ed25519 验签 + 灰度登记，UI 入口未接线）🟡 ⑤ 进程内沙箱（QuickJS-WASM 引擎未接入，当前为 fail-closed 模拟）🟡 —— 标记含义见 §〇，逐条依据见第六章 |
 
 ---
@@ -91,11 +91,11 @@
 | 多形态插件加载 | ✅ 4 形态 | ❌ 仅 Rust | ⚠️ | ⚠️ 仅 JS | ⚠️ 仅 JS | ✅ WASM | ✅ WASM | 🟡 参考实现——Js 命令面已接线且经事件总线 request 通道**真投递**；Process「真起进程 / 真探测 / 真终止」且 **stdin/stdout piped 帧回路已接线**（`crates/tauron-proc/src/spawner.rs:358-359` + 读线程 `:410`；**无真 sidecar 端到端证据**，心跳监控未实现）；wasm **无运行时**，只回诚实失败码 `E_PLUGIN_TYPE_NO_RUNTIME`（`crates/tauron-adapter/src/lib.rs` 的 `cmd_runtime_spawn`）；`PluginType` 无 B+ 变体 |
 | 安全沙箱 | ✅ 双世界+WASM | ⚠️ ACL-only | ⚠️ | ✅ 进程隔离 | ❌ | ✅ 沙箱 | ✅ 内核级 | 🟡 参考实现（`packages/tauron-dual-world/src/sandbox.ts:136` **fail closed**：返回 `ok:false` + `code:'SANDBOX_UNAVAILABLE'`，**不伪报执行成功**——轮 11 审计修正了此前"随机延迟后返回 `executed:true`"的假成功；wasm 无运行时） |
 | 双层 ACL 权限 | ✅ 静态+动态 | ✅ capabilities | ✅ | ✅ contributes | ❌ | ✅ Manifest | ✅ deny-default | ✅ 已接线（动态三档授权 `tauron_host::authz::resolve_principal`，`crates/tauron-host/src/authz.rs:409`；origin 门是唯一分发咽喉点 `origin_gate`，`crates/tauron-adapter/src/tauri.rs:1944`）；授予/审批链 `tauron-acl` 🟡 已在依赖表内，仅 `plugin-install` feature 下被调 |
-| 插件市场/商城 | ✅ 完整链路 | ❌ | ✅ | ✅ Marketplace | ✅ dshmarket | ❌ | ❌ | 🟡 参考实现（`host_market_check` 恒 `{available:false}`、`host_market_download/install` 恒 `{simulated:true}`，`crates/tauron-adapter/src/lib.rs` 的 `cmd_market_check` / `cmd_market_download` / `cmd_market_install`；`tauron-market` 现已在 `tauron-adapter` 依赖表内（`plugin-install` feature 下用于安装验签），`tauron-distribute` 仍未接线） |
-| 白标品牌化 | ✅ CI 矩阵 | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ 已接线（**构建期**：`packages/tauron-app-cli/src/brand.ts` 的 `generateCiMatrix` / `generateBrandFiles` 有测试；**运行期** `host_brand_info` 未装配 provider，如实返回 `UnsupportedBody{supported:false, reason:"brand provider is not configured"}`——`crates/tauron-adapter/src/lib.rs` 的 `cmd_brand_info`，不是空对象桩） |
-| 灰度发布 | ✅ 4 阶段 | ❌ | ✅ OTA | ❌ | ✅ Beta 通道 | ❌ | ❌ | 🟡 参考实现（`crates/tauron-distribute` 51 个测试，未进适配层依赖表，无命令面） |
+| 插件市场/商城 | ✅ 完整链路 | ❌ | ✅ | ✅ Marketplace | ✅ dshmarket | ❌ | ❌ | 🟡 参考实现（`host_market_check` 恒 `{available:false}`、`host_market_download/install` 恒 `{simulated:true}`，`crates/tauron-adapter/src/lib.rs` 的 `cmd_market_check` / `cmd_market_download` / `cmd_market_install`；`tauron-market` 现已在 `tauron-adapter` 依赖表内（`plugin-install` feature 下用于安装验签）。**`tauron-distribute` 已接线**——它卡在商城取包链，不在分发/灰度机制本身，见下一行） |
+| 白标品牌化 | ✅ CI 矩阵 | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ 已接线（**构建期**：`packages/tauron-app-cli/src/brand.ts` 的 `generateCiMatrix` / `generateBrandFiles` 有测试；**运行期**（轮 13 复核改判）：`host_brand_info` 已装配 env provider——配置了 `TAURON_BRAND_CONFIG(_JSON)` 就走 `tauron-brand` 校验链返回 `BrandInfo`，未配置如实返回 `UnsupportedBody{supported:false, reason:"brand provider is not configured"}`，不是空对象桩——`crates/tauron-adapter/src/lib.rs` 的 `cmd_brand_info`） |
+| 灰度发布 | ✅ 4 阶段 | ❌ | ✅ OTA | ❌ | ✅ Beta 通道 | ❌ | ❌ | ✅ 已接线（轮 13 复核改判：`tauron-distribute` 在 `tauron-adapter` **默认**依赖表内，updater provider 真跑 `check_for_update`——灰度 4 阶段 + 每批最小停留 + 崩溃门禁 + `InstallationIdentity::load_or_create` 落盘分桶；命令面 `host_updater_check` / `host_updater_status` 仅主窗。边界：`EndpointClient` 须由装配方注入（缺省 fail-closed），批次推进 `advance_grayscale` 是留给集成方的控制面，仓内无调用方） |
 | 事件总线 | ✅ 三通道 | ⚠️ 基础 | ✅ | ✅ | ✅ Cordis | ❌ | ❌ | ✅ 已接线（`host_events_publish/subscribe/unsubscribe/drain`，`kind` = event/request/state） |
-| 多 UI 框架适配 | ✅ R/V/S/Lit | ❌ | ⚠️ | ❌ Webview | ⚠️ React | ❌ | ❌ | ✅ 已接线（`@tauron/adapter-react` / `adapter-vue` / `adapter-svelte` / `ui-primitives`，各自 5–14 个测试文件） |
+| 多 UI 框架适配 | ✅ R/V/S/Lit | ❌ | ⚠️ | ❌ Webview | ⚠️ React | ❌ | ❌ | 🟡 分包判定（轮 17 与台账 `contracts/module-maturity.json` 对齐）：`@tauron/adapter-react` / `adapter-vue` / `adapter-svelte` 三包是 **`reference-only`** —— 各自有测试，但**本仓内零生产消费者**（`full-architecture-refactor-plan.md` §「❌ 仅本包测试可达」同一口径），面向外部集成方；`@tauron/ui-primitives` 才是 `repo-consumed`（`@tauron/ui` 依赖它）。这一判定由 `wire-gate` 的 `consumerStatus` 同源门禁把守，改台账不改文档即红 |
 | CLI 工具链 | ✅ 完整 | ⚠️ basic | ✅ | ✅ yo 生成器 | ❌ | ✅ PDK | ❌ | 🟡 部分接线：`@tauron/app-cli` 多数命令有实现与测试（`pluginSign` 已接 `@tauron/market` 的 Ed25519，2026-09-24）；`@tauron/cli` 的 `plugin sign` **已于轮 11 修正**——不再用 `hash * 31` 假摘要冒充 `ed25519`，现在算**真实 SHA-256 内容摘要**、线形如实标 `algorithm: 'sha256-digest'` + `simulated: true`，并把 `.sig` 真的写出来（`packages/tauron-cli/src/plugin-lifecycle.ts:157` 的 `pluginSign`；非对称签名不在本包内实现）。`plugin publish` 只生成端点不落网络 |
 | 跨语言契约测试 | ✅ TS↔Rust | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ 已接线（`@tauron/contract-tests` 的 `contract.test.ts` + `wire-gate.test.ts` 解析两侧源码逐调用点比对） |
 | i18n 国际化 | ✅ 插件命名空间 | ❌ | ⚠️ | ✅ | ❌ | ❌ | ❌ | ✅ 已接线（`host_i18n_*` 6 条命令实调 `tauron_i18n`；`plugin:<id>.oc.<key>` 前缀在 `cmd_i18n_load` 落地） |
@@ -310,7 +310,7 @@ tauri::Builder::default().plugin(tauron_adapter::tauri::init())
 | 版本管理 | 版本单调递增检查 |
 | 审计 | 链式 hash 审计日志 |
 
-#### 3.2.8 tauron-distribute — CI 分发运维
+#### 3.2.8 tauron-distribute — CI 分发运维 + 客户端 updater provider
 
 | 特性 | 实现 |
 |------|------|
@@ -318,6 +318,7 @@ tauri::Builder::default().plugin(tauron_adapter::tauri::init())
 | 崩溃门禁 | 5% 崩溃率阈值自动停发 |
 | 签名校验 | 发布产物签名验证 |
 | 可靠性 | 双 endpoint 发布 |
+| 客户端消费点 | **已接线**（轮 13 复核）：`tauron-adapter` 默认依赖；`host_updater_check` / `host_updater_status` 真跑 `check_for_update`，`InstallationIdentity::load_or_create` 落盘分桶；`EndpointClient` 未注入时 fail-closed |
 
 #### 3.2.9 tauron-brand — 白标品牌化
 
@@ -627,7 +628,7 @@ tauri::Builder::default().plugin(tauron_adapter::tauri::state_init())
 17. 🟡 **ABI 指纹校验** — 进程插件和 WASM 插件均做 ABI 版本兼容检查（进程侧已接线：`validate_spawn_config` 在 spawn 前真调用；WASM 侧只有 `tauron-wasm` 库内的 `validate_abi`，而该 crate **不在依赖表里**、且无 WASM 运行时）
 18. ✅ **跨语言契约测试** — TS↔Rust 协议验证，极少有框架做到（`@tauron/contract-tests`：`contract.test.ts` 比对命令名/camelCase 线格式/错误码，`wire-gate.test.ts` 解析两侧源码逐调用点比对参数形状）
 19. ✅ **插件 i18n 命名空间** — `plugin:<id>.oc.<key>` 隔离插件文案（`host_i18n_load` 在传 `pluginId` 时自动加前缀，6 条 i18n 命令实调 `tauron_i18n`）
-20. 🟡 **品牌唯一性校验** — 多品牌间标识冲突自动检测（`crates/tauron-brand` 57 个测试；未进依赖表，运行期 `host_brand_info` 未装配 provider、如实返回 `UnsupportedBody{supported:false, reason:"brand provider is not configured"}`，`crates/tauron-adapter/src/lib.rs` 的 `cmd_brand_info`）
+20. ✅ **品牌唯一性校验** — 多品牌间标识冲突自动检测（`crates/tauron-brand` 的 `validate_uniqueness`；**运行期已接线**：`tauron-brand` 在 `tauron-adapter` 默认依赖表内，`cmd_brand_info` 走其校验链，env 未配置时如实返回 `UnsupportedBody{supported:false, reason:"brand provider is not configured"}`；跨品牌 `validate_uniqueness` 本身是 crate 级 API，仓内无命令面——由集成方在多品牌装配路径上调用）
 
 ---
 

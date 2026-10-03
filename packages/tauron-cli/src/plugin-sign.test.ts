@@ -112,15 +112,18 @@ describe('pluginSign（诚实摘要，不谎报算法）', () => {
  * 脚本会据此认为发布成功并继续往下走，比"未实现"更坏。
  */
 describe('pluginPublish（不许伪造上传成功）', () => {
-  it('有 manifest 无包：提示先 pack，且不给 registryUrl', () => {
+  it('有 manifest 无包：如实失败 + 提示先 pack，且不给 registryUrl', () => {
     writeFileSync(
       join(dir, 'tauron.plugin.json'),
       JSON.stringify({ id: 'com.example.sign', name: 'Sign Demo', version: '1.0.0' }),
     );
     const result = pluginPublish(OPTS);
-    expect(result.success).toBe(true);
+    // 轮 16：前置条件不满足时**没有东西被发布**，因此不得给 0 退出码
+    // （`bin/tauron.js` 把 `success` 直接映射为 exit code）。
+    expect(result.success).toBe(false);
     expect(result.message).toContain('tauron plugin pack');
     expect(dataOf(result)['registryUrl']).toBeNull();
+    expect(dataOf(result)['published']).toBe(false);
   });
 
   it('有包时如实报未实现：不得声称已发布、不得编造商城 URL', () => {

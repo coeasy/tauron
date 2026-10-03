@@ -69,6 +69,18 @@ try {
     execSync('pnpm install --no-frozen-lockfile', { cwd: target, stdio: 'inherit' });
     execSync(`pnpm add @tauron/ui@${expectedVersion}`, { cwd: target, stdio: 'inherit' });
     execSync('pnpm run build', { cwd: target, stdio: 'inherit' });
+  } else {
+    // 轮 17：不说这句话，本脚本就是「绿着隐瞒」——它只校验了产物形状，而生成工程
+    // 的依赖 pin 落在**尚未发布**的版本上，`npm install` 现在必然 ETARGET。
+    // 安装校验需要 TAURON_INSTALL_PREFLIGHT=1（CI 默认不带，因为发版前跑它一定红）。
+    const published = cliPackage.tauron?.publishedNpmVersion ?? cliPackage.version;
+    console.log(
+      expectedVersion === published
+        ? 'note: 本次只做产物形状校验；pin 已是 registry 现值，安装校验可随时用 TAURON_INSTALL_PREFLIGHT=1 打开。'
+        : `note: 本次只做产物形状校验，**没有**跑 npm install——生成的工程钉 ${expectedVersion}，` +
+            `而 registry 现值是 ${published}（尚未发布）。这不是产物缺陷：发版后抬 app-cli 的 ` +
+            `tauron.publishedNpmVersion，安装校验即可用 TAURON_INSTALL_PREFLIGHT=1 复现。`,
+    );
   }
 
   console.log(
