@@ -583,6 +583,87 @@ fmt 后代码复算过一遍）：
   1.0.2 vs 1.0.3」。三处还原后 `contract-tests` 复跑 167 全绿，
   且 `grep` 确认探针文本零残留。
 
+- **`publish-crates.mjs` 的成功横幅少报一个 crate（轮 19）**：同一份输出先打
+  「crate 共 16 个；产物校验失败 0 个」，紧接着 `✓ --check 通过：15 个 crate 均可离线产出
+  并构建 .crate`——那个 15 是硬编码字面量，crate 集合增长后它就固定说谎。改为插值
+  `order.length`。**红灯实录**：修复前真跑打印 15；**绿灯实录**：修复后同一命令打印
+  `✓ --check 通过：16 个 crate…`，rc=0（16 个 crate 的 tarball 打包与构建全过）。
+
+- **`registry-check` 失败时不给出路（轮 19）**：`scripts/check-published-versions.mjs`
+  原样只逐条打 `✗ … is unavailable (HTTP 404)` 然后 `exit 1`；而它是 `release.yml` 里
+  创建 GitHub Release 的前置作业，红掉就没有任何公开产物，操作者却必须去读 workflow 才
+  知道下一步跑什么。补汇总：分类计数 + 缺失清单 + 补齐动作（`Publish SDK packages`
+  手动作业，需 `NPM_TOKEN` / `CARGO_REGISTRY_TOKEN`，完成后重跑失败作业）。
+  **判定条件与退出码一字未改**，只改可诊断性。实测：`1.0.2` → rc=1、`npm 0 个、
+  crates.io 1 个`、`缺 crates.io：tauron-ffi`；`1.1.0` → rc=1、36 项（npm 20 + crates.io 16）。
+
+- **轮 19 查清的发布链路事实（不改门禁，只登记）**：`tauron-ffi` **从未发布到 crates.io**
+  （1.0.2 时代漏发；它没有 `publish = false`、manifest 完整、就在发布集合第 15 位），
+  因此 `registry-check` 对**任何**版本都判红——`list_releases` 实测返回空数组，
+  `v0.1.0` / `v1.0.0` 的历史 Release run 一个公开 Release 都没产出。处置是**不放宽门禁**
+  （把漏发固化成「按已发布子集判」会让未来每次漏发自动变绿），改为 README 说清
+  「15 个可装 ≠ 16 个成员」的原因，并把 registry 发布登记为 tag 之后的必要一步。
+
+- **轮 20 复查轮 19：`registry-check` 把分支名当版本号**：`release.yml` 的该作业用
+  `"${GITHUB_REF_NAME#v}"` 作版本参数，而它的 `if` 第二条放行 `workflow_dispatch` +
+  `dry_run=false` 的**分支**运行——那时 `GITHUB_REF_NAME` 是 `main`，剥 `v` 后仍是 `main`，
+  等于对 registry 查 `@main`。同文件的 `version-check` 早就有 `GITHUB_REF_TYPE == tag`
+  回落，这扇门没有；根因是**同一条 workflow 里版本号语义两处不同源**。
+  **红灯实录**：本轮真跑 `node scripts/check-published-versions.mjs main` → rc=1、36 项全缺。
+  改为与 `version-check` 同源的判定：tag 运行剥 `v`，非 tag 运行不传参、由脚本回落到
+  根 `package.json` 的 version，把这条路径如实变成「发布前预检当前版本」。
+
+- **轮 20 复查轮 19：上一轮新加的失败汇总自己说谎**：轮 19 的分类靠事后正则
+  `/package (\S+)@\d/`，要求 `@` 后紧跟数字——版本是分支名时消息是 `…@main`，npm 的
+  「resolved unexpected version」那条根本没有 `@`，两者都归不了类，于是汇总打成
+  「**共 36 项**在 main 上不可用：**npm 0 个、crates.io 0 个**」，与自己上面 36 条 ✗ 直接矛盾。
+  根因是把身份丢在了消息里再靠文本找回：**超时/网络异常抛的是 `fetch failed` 这类别人的错误，
+  根本不带包名**，正则永远归不了类。改为身份由 `checks` 数组带着走（每项带
+  `registry` / `bucket` / `name`），「确实没发布」用 `NotPublished` 标记类抛出，✗ 行统一格式化成
+  `✗ <registry> <name>@<version>: <原因>`，汇总分「缺 X 个 / 未能核实 Y 个」两栏并各自列名。
+  **判定与退出码一字未改**。
+  **绿灯实录**：`… 1.0.2` → rc=1、`✗ crates.io tauron-ffi@1.0.2: is unavailable (HTTP 404).`、
+  「npm 缺 0 个、crates.io 缺 1 个」；`… 1.1.0` → rc=1、36 项全归类（npm 缺 20、crates.io 缺 16）；
+  无参 → rc=1、如实按 1.1.0 核验（证明分支回落取到的是版本号而不是分支名）。
+  **同一轮里还实录到一次分类漂移**：`1.0.2` 连跑三次，前两次分别把 tauron-ffi 记成
+  「未能核实」（一次超时 `The operation was aborted due to timeout`、一次 `fetch failed`），
+  第三次拿到 404 记成「缺」——旧写法这时会输出「有 1 项未能核实」而不说是哪项，新写法直接点名
+  `crates.io tauron-ffi`。波动只改「原因」，不改红判定，也不被静默算成「未发布」。
+
+- **轮 20 的方法论更正（写给下一轮）**：轮 19 用 `pnpm … | tail -5; echo rc=$?` 记 rc，
+  那读到的是 `tail` 的退出码而不是工具的。本轮五个门禁全部改为
+  `> file 2>&1; echo rc=$?` 逐个实读：`format:check` / `lint` / `docs:check`（6 个文档
+  235 条引用 OK）/ `command-surface:check`（85 commands，孤儿 0）/ `version:check`
+  （26 处 1.1.0）实测 rc 全 0；`publish:crates -- --check` rc=0 且横幅与上一行的
+  「crate 共 16 个」一致（轮 19 P3 的修复在位）。
+
+- **轮 21 产物腿门禁只数总数，数不出「哪条腿没来」**：`check-release-artifact-sizes.mjs`
+  用硬编码的 `files.length < 4` 判四条 release 腿齐不齐。总数够就放行，跟谁交的无关：
+  腿身份在 `release.yml` 的 `download-artifact` 里以 `bundle-<label>/` 目录保留
+  （`merge-multiple: false`），脚本却把它摊成一个文件数来数。**红灯实录**（本轮同一 fixture，
+  跑 `git show HEAD:` 取出的改前版本）：3 条腿、4 个文件（macOS x64 腿缺席，Windows 腿交了两份）
+  → 改前 **rc=0**，输出 `RELEASE_ARTIFACT_SIZE_METRICS files=4 aggregateBytes=4`，
+  一条腿整个丢了却全绿。**处置**：期望腿集合改为与 `contracts/target-matrix.json` 的
+  `releaseArtifact` 行同源（4 条：linux-x64 / windows-x64 / macos-arm64 / macos-x64，
+  `check-target-matrix.mjs` 已保证 workflow matrix 与该台账一致），逐腿要求「至少交出一个
+  白名单扩展名的产物」，并拒绝台账未声明的腿；顺手删掉 `|| path.endsWith('.AppImage')`
+  这一条冗余条件（`.AppImage` 本来就在 `allowed` 集合里，`extname` 已经收它）。
+  **绿灯实录**：4 腿 fixture → rc=0、`files=4`；同一 3 腿 fixture → rc=1、
+  `release leg bundle-macos-x64 没有交出任何白名单扩展名的产物（实际到场的腿：
+  bundle-linux-x64, bundle-macos-arm64, bundle-windows-x64）`，report 里
+  `legs={"bundle-linux-x64":1,"bundle-macos-arm64":1,"bundle-windows-x64":2}`；
+  多一条 `bundle-windows-arm64` → rc=1、`出现台账未声明的产物腿 …`；把目录摊平
+  （模拟 `merge-multiple: true`）→ rc=1 而不是静默通过。体积预算判定与阈值一字未改。
+
+- **轮 21 补轮 20 漏跑的门禁**：轮 20 改了 `release.yml` 却没有跑 `check-target-matrix.mjs`
+  ——它用正则在**文本**里抓 `- label:` / `platform:` 对，正是最容易被 workflow 编辑碰坏的一环。
+  本轮实跑 `node scripts/check-target-matrix.mjs --check` → **rc=0**、
+  `Target Matrix OK: linux-x64@ubuntu-22.04, windows-x64@windows-latest,
+  macos-arm64@macos-15, macos-x64@macos-15-intel`。同轮复核两条姊妹门
+  `verify-registry-consumer.mjs` / `check-registry-ownership.mjs`：都从文件系统枚举包集合、
+  都过滤 `private === true`（本仓唯一的 private 包是 `@tauron/contract-tests`），
+  没有轮 19 那类硬编码计数。
+
 ### Docs
 
 - **轮 18 发布终审：把两条已改行为的用户契约补进接口文档**（代码零改动，本轮只跑门禁

@@ -33,7 +33,10 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
   tauron 管其上的插件运行时与能力治理。
 - **可通过 registry 安装的 SDK**。20 个公开 npm 包与 15 个 Rust crate 可从公共 registry 安装
   （**registry 上的 `latest` 目前是 `1.0.2`**；本仓库的 `1.1.0` 已通过发布内容校验，
-  但尚未执行发布）。具体接入方式见[安装与使用](./docs/installation.md)。
+  但尚未执行发布）。计数别搞混：`crates/` 下有 **16** 个成员，第 16 个 `tauron-ffi`
+  **从未发布过**（1.0.2 时代漏发，不是豁免——它没有 `publish = false`，且在
+  `publish:crates` 的发布集合里），所以 registry 上只有 15 个可装。具体接入方式见
+  [安装与使用](./docs/installation.md)。
 - **当前版本为 1.1.0**。公开 API 遵循语义化版本；具体未接入的运行时与平台能力见下方成熟度说明。
 
 ### 成熟度：哪些是真的，哪些还是占位

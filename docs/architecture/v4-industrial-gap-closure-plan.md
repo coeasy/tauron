@@ -790,6 +790,78 @@ expected 5 to be 3」（同时证明计数面确实只扫生产区）；把 app-
 Batch 1' 的文档债（149 条数字引用继续收敛到符号锚点）。**代码侧达到发布条件**；
 推送、打 tag、npm/crates.io 发布是三件独立的事，各需一次新的授权。
 
+> **这条判定的覆盖面在轮 19 被证明不完整**：它只核了本地门禁，没核 CI 侧的发布链路，
+> 而后者才是「能不能真的产出一个公开 Release」。口径更正见下文轮 19。
+
+#### 轮 19 发布链路复核（2026-10-03，commit `6388953` + tag `v1.1.0` 之后）
+
+轮 18 判定「代码侧达到发布条件」后，推送 main、打 `v1.1.0` 附注 tag 并推送。tag 一推就
+暴露出**本地门禁看不见的那一段**：`release.yml` 里创建 GitHub Release 的 `release` 作业
+`needs: [build, registry-check, release-evidence]`，而 `registry-check` 跑
+`scripts/check-published-versions.mjs`——它枚举全部 20 个非 private npm 包与全部 16 个
+crate，要求每个都**已经**在 registry 上存在目标版本。
+
+| 编号 | 发现 | 判定与处置 |
+| --- | --- | --- |
+| P1 | `registry-check` 在 1.1.0 上必红 | 实测 `node scripts/check-published-versions.mjs 1.1.0` → **rc=1，36 项全缺（npm 20 + crates.io 16）**，因为 1.1.0 从未发布。这不是门禁的错：**发布顺序本来就是「先 registry，后 tag」**（`publish-sdk.yml` 是 `workflow_dispatch` 手动作业，tag 触发不了它）。处置：登记为发布前置动作，等授权执行 registry 发布后在失败处重跑。 |
+| P2 | 同一门禁对**已发布版本**也红 | 实测 `… 1.0.2` → **rc=1，35/36 通过，唯一失败是 `tauron-ffi@1.0.2` 在 crates.io 是 404**。旁证：`list_releases` 返回**空数组**——`v0.1.0`/`v1.0.0` 的历史 Release run（4m45s–8m28s）**从未产出过一个公开 Release**。 |
+| P2-判定 | 门禁该不该为此放宽？ | **不该，且这是本轮最容易做错的一步。** 核对后确认 `tauron-ffi` 无 `publish = false` 豁免、manifest 完整（description/license/include 齐备）、就在 `publish-crates.mjs` 的发布集合里（本轮日志：`crates/` 全部 16 个成员都在集合内，`tauron-ffi` 无 `publish = false`、manifest 完整；其拓扑序位次见下文轮 20 P7）。所以它是 1.0.2 时代**漏发**，不是设计上的非公开面。把门禁改成「按已发布的子集判」等于把一个漏发事故固化成长期承诺，且会让未来每个漏发都自动变绿。改为：门禁原样保留 + README 说清 15≠16 的原因 + 1.1.0 发布时带上它。 |
+| P3 | `publish-crates.mjs` 的成功横幅自己说谎 | 同一份输出里先打「crate 共 16 个；产物校验失败 0 个」，下一行是 `✓ --check 通过：**15** 个 crate 均可离线产出…`——计数是硬编码字面量，crate 从 15 涨到 16 时它就永远少报一个。改成插值 `order.length`。红灯实录（修复前的真跑）与绿灯实录（修复后 `pnpm publish:crates -- --check` → `✓ --check 通过：16 个 crate…`，rc=0）都在本轮日志里。 |
+| P4 | 门禁失败了却不告诉操作者怎么办 | 原实现只逐条打 `✗ … is unavailable (HTTP 404)` 后 `exit 1`，要理解「为什么红、下一步跑什么」必须去读 workflow。补一段汇总：分类计数 + 缺失清单 + 补齐动作（`Publish SDK packages` 手动作业，需 `NPM_TOKEN` / `CARGO_REGISTRY_TOKEN`，之后重跑失败作业）。**判定与退出码一字未改**，改的只是可诊断性。 |
+
+**本轮门禁复跑（本轮日志）**：`pnpm publish:crates -- --check` 修复前后各一次真跑（修复前
+横幅报 15、修复后报 16，两次都是 16 个 crate 打包与 tarball 构建全过、rc=0）；
+`node scripts/check-published-versions.mjs 1.0.2` → rc=1 且新汇总正确分类（`缺 crates.io：
+tauron-ffi`，npm 0 个）；`… 1.1.0` → rc=1、36 项分类为 npm 20 / crates.io 16。
+
+**登记为发布前置口径（不在本轮执行）**：`v1.1.0` tag 已在 `6388953` 上，registry 发布一旦
+完成，在 Actions 里从失败处重跑即可补出 GitHub Release；**删 tag 重打是不必要的破坏性动作**。
+
+#### 轮 20 复查轮 19 的发布链路改动（2026-10-03）
+
+轮 19 的两处改动都只由一次真跑验证过，本轮把它们当别人的代码重读一遍，查出**两个真缺陷**
+——其中一个是我自己在轮 19 引入的。
+
+| 编号 | 发现 | 判定与处置 |
+| --- | --- | --- |
+| P5 | `registry-check` 把分支名当版本号 | `release.yml` 的 `registry-check` 用 `node scripts/check-published-versions.mjs "${GITHUB_REF_NAME#v}"`，而它的 `if` 第二条允许 `workflow_dispatch` + `dry_run=false` 的**分支**运行进入；那时 `GITHUB_REF_NAME` 是 `main`，剥 `v` 之后仍是 `main`，等于对 registry 查 `@main`。同文件的 `version-check` 早就有 `GITHUB_REF_TYPE == tag` 的分支回落，这扇门没有——**同一份版本号语义在一条 workflow 里两处不同源**是根因。红灯实录（本轮真跑 `… main`）：rc=1、36 项全缺。处置：改成与 `version-check` 同源的 `if`，非 tag 运行不传参、由脚本回落到 `package.json` 的 version，把这条路径如实变成「发布前预检当前版本」。 |
+| P6 | 轮 19 新加的汇总自己说谎 | 归类靠事后正则 `/package (\S+)@\d/`——要求 `@` 后紧跟数字。版本是分支名时消息是 `…@main`，`@` 后没有数字；npm 那条「resolved unexpected version」干脆没有 `@`。两种情况都归不了类，于是汇总打成「**共 36 项**在 main 上不可用：**npm 0 个、crates.io 0 个**」，与它自己上面的 36 直接矛盾。**根因不是正则写得糙，是把身份塞进消息文本、再靠文本往回找**：超时与网络异常抛的是 `fetch failed` / `AbortError` 这类别人的错误，压根不带包名，任何正则都归类不了。处置：身份由 `checks` 每项自带（`registry` / `bucket` / `name`），「确实没发布」用 `NotPublished` 标记类抛出，✗ 行统一格式化为 `✗ <registry> <name>@<version>: <原因>`，汇总拆成「缺 N 个」与「未能核实 M 个」两栏并各自列出包名。**判定与退出码一字未改**。绿灯实录（本轮）：`… 1.0.2` → 「npm 缺 0 个、crates.io 缺 1 个」+ `✗ crates.io tauron-ffi@1.0.2: is unavailable (HTTP 404).`；`… 1.1.0` → 36 项全归类（npm 缺 20、crates.io 缺 16）；无参 → 按 1.1.0 核验，证明分支回落取到的是版本号而不是分支名。同轮实录到分类漂移：`1.0.2` 连跑三次，tauron-ffi 两次记「未能核实」（一次超时、一次 `fetch failed`）、一次记「缺」——旧写法只会说「有 1 项未能核实」而不说是哪项，新写法直接点名。 |
+| P7 | 「拓扑序第 15 位」是可复现的，但不是代码常量 | 轮 19 P2 里 `tauron-ffi` 的位次取自当时那份 `--check` 日志，而 `order` 由 `cargo metadata` 的成员顺序 + 内部依赖图算出，不是写死的序号。本轮复跑 `pnpm publish:crates -- --check`（rc=0）：**第 15 位、依赖 `tauron-host`**，与轮 19 的观测一致，因此那条说法保留；同时把「无 `publish = false`、在发布集合内」这类**代码可判定**的表述作为主证据，位次只作旁证。同一份日志再确认修复后的横幅是 `✓ --check 通过：16 个 crate…`，与上一行「crate 共 16 个」一致。 |
+
+**本轮门禁复跑（本轮日志）**：`pnpm publish:crates -- --check` rc=0，日志同时给出
+「crate 共 16 个；产物校验失败 0 个」与 `✓ --check 通过：16 个 crate…`（轮 19 P3 的修复
+仍在位），发布顺序段里 `tauron-ffi` 为第 15 位、依赖 `tauron-host`；
+`node scripts/check-published-versions.mjs`（无参）→ rc=1、「共 36 项在 **1.1.0** 上未通过核验：
+npm 缺 20 个、crates.io 缺 16 个」——这就是 P5 的绿灯：分支运行回落到的确实是版本号而不是
+分支名；`… main` → rc=1、同样 36 项但每个 ✗ 行都写成 `…@main`，即 P5 的红灯形态；
+`… 1.0.2` → rc=1、「npm 缺 0 个、crates.io 缺 1 个」+ `tauron-ffi` 点名（与轮 19 同判，
+改归类没有改变任何判定）。五个文本门禁 `pnpm format:check` / `pnpm lint` /
+`pnpm docs:check`（6 个文档 235 条引用 OK）/ `pnpm command-surface:check`（85 commands，孤儿 0）/
+`pnpm version:check`（26 处 1.1.0）逐一以 `> file 2>&1; echo rc=$?` 实读为 rc=0。
+> 轮 19 记录 rc 时用的是 `pnpm … | tail -5; echo rc=$?`——那读到的是 `tail` 的状态而非工具的
+> 状态。本轮改为 `> file 2>&1; echo rc=$?` 逐个实读，五项全 0 才是这轮的证据。
+
+#### 轮 21 发布链门禁精确化（2026-10-03）
+
+轮 20 把 `registry-check` 那一段修完之后，本轮顺着同一条 `release-evidence` 作业往下读，
+撞上第三类同一个根因的问题：**判定用的是聚合数字，而不是它声称要证的性质**。
+
+| 编号 | 发现 | 判定与处置 |
+| --- | --- | --- |
+| P8 | 产物腿门禁数得出「有几个文件」，数不出「有几条腿」 | `check-release-artifact-sizes.mjs` 用硬编码 `files.length < 4` 代表「四条 release 腿都交了产物」。腿身份在 `release.yml` 下载处是保住的（`pattern: bundle-*` + `merge-multiple: false` → `release-bundles/bundle-<label>/…`），脚本自己把它摊平成了计数。**红灯实录**（`git show HEAD:` 取出改前版本，跑同一 fixture：3 腿 / 4 文件，macOS x64 缺席、Windows 交两份）→ **rc=0**，且指标行就写着 `RELEASE_ARTIFACT_SIZE_METRICS files=4 aggregateBytes=4`：整条腿没了，门禁与指标双双好看。这与轮 19 P3（横幅硬编码 15）、P6（靠正则找回身份）是同一族——**聚合数字不能代替逐项在场**。 |
+| P8-处置 | 期望集合改为台账同源 + 逐腿在场 | 期望腿从 `contracts/target-matrix.json` 的 `releaseArtifact` 行推出（本轮实测 4 行：linux-x64 / windows-x64 / macos-arm64 / macos-x64），每条腿必须至少贡献一个白名单扩展名的产物，缺席就点名并列出实际到场的腿；出现台账未声明的腿同样判红。**体积预算与阈值一字未改**，改的是判定的粒度。顺带删掉 `\|\| path.endsWith('.AppImage')` 这条冗余条件（`.AppImage` 已在 `allowed` 集合内，`extname` 天然收它）——孤儿条件也是孤儿逻辑。report 新增 `expectedLegs` / `legs`，让证据自己带上传说与实况。 |
+| P8-边界 | 摊平会不会静默放行 | 实测把 fixture 摊平（模拟 `merge-multiple: true`）→ rc=1：每个文件名被当成一条未声明的腿，同时四条腿全部判缺。**破了也是红**，不需要再加一道防。这条隐藏约束写进了脚本注释。 |
+| P9 | 轮 20 自己漏跑了一个门禁 | 轮 20 编辑了 `release.yml` 却没跑 `check-target-matrix.mjs`，而它正是用正则在 workflow **文本**里抓 `- label:` / `platform:` 配对的（`{0,180}` 距离窗口），最容易被这类编辑碰坏。本轮补跑 → rc=0，`Target Matrix OK: linux-x64@ubuntu-22.04, windows-x64@windows-latest, macos-arm64@macos-15, macos-x64@macos-15-intel`。登记的口径：**改 `release.yml` 的轮次必须跑 target-matrix 门**，光跑 prettier 不算数。 |
+| P10 | 姊妹门是否有同类缺陷 | `verify-registry-consumer.mjs`（版本从 `Cargo.toml` + `package.json` 双读并要求一致，不一致直接抛）与 `check-registry-ownership.mjs`（枚举 `packages/`、`crates/`）都从文件系统取集合，未发现硬编码计数；两者都过滤 `private === true`，本仓唯一的 private 包是 `@tauron/contract-tests`。 |
+
+**本轮门禁复跑（本轮日志）**：改后脚本四个 fixture 逐一实跑——4 腿 → rc=0（`files=4`）；
+3 腿 → rc=1 且点名 `bundle-macos-x64`（report `legs` 为
+`{"bundle-linux-x64":1,"bundle-macos-arm64":1,"bundle-windows-x64":2}`）；多出
+`bundle-windows-arm64` → rc=1；摊平 → rc=1。改前版本对 3 腿 fixture 给 rc=0（上面 P8 的红灯）。
+`node scripts/check-target-matrix.mjs --check` → rc=0。文本门禁 `format:check` / `lint` /
+`docs:check`（6 个文档 235 条引用 OK）/ `command-surface:check` / `version:check` 五项
+`> file 2>&1; echo rc=$?` 实读 rc=0。
+
 ### Batch 1'（对齐 §135.1 Batch 1，2–3 天）
 
 - A65 Profile V2：建模 `ProductTier` × `CapabilityBundle`，与命令面子集做**一致性门禁**（新 `contracts/tier-bundles.json` + `scripts/check-tier-bundle.mjs`）；不做「声明了但没人读」的表。

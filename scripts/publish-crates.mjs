@@ -240,7 +240,8 @@ if (isCheck) {
     process.exit(1);
   }
   ok(
-    '--check 通过：15 个 crate 均可离线产出并构建 .crate，且产物 manifest 已把内部 path 依赖剥成 version。',
+    `--check 通过：${order.length} 个 crate 均可离线产出并构建 .crate，` +
+      '且产物 manifest 已把内部 path 依赖剥成 version。',
   );
   warn('注意：本次**没有真的发布**。真实发布需先按上面的顺序逐个 `cargo publish`，');
   warn('      且必须由**已配置 CARGO_REGISTRY_TOKEN 且有网络**的环境执行，本机沙箱不具备该条件。');

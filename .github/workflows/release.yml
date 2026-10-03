@@ -276,7 +276,17 @@ jobs:
         with:
           node-version: 22.23.2
       - name: npm and crates.io versions must already exist
-        run: node scripts/check-published-versions.mjs "${GITHUB_REF_NAME#v}"
+        # 版本号取法必须与上面的 version-check 同源：只有 tag 运行才能剥 `v`。
+        # `workflow_dispatch` + `dry_run=false` 的分支运行同样会命中本作业（见上面 `if`
+        # 的第二条），而那时 `GITHUB_REF_NAME` 是分支名 —— 照旧传参就是对 registry 查
+        # `@main`，36 项全红且红得莫名其妙。按「发布前预检」如实跑当前版本：
+        # 不传参，脚本自己回落到 package.json 的 version。
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            node scripts/check-published-versions.mjs "${GITHUB_REF_NAME#v}"
+          else
+            node scripts/check-published-versions.mjs
+          fi
 
   release-evidence:
     name: 生成 V4 Release Evidence
