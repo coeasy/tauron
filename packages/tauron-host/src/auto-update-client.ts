@@ -51,7 +51,11 @@ export interface UpdateInfo {
    * `{ available, simulated, version, reason }`（见 `shell-client.ts` 的
    * `MarketCheckResult`，那是与 Rust 逐字段对齐的口径），**没有** `currentVersion`。
    * 因此它标为可选——标成必填等于让类型撒谎（TS 说 `string`，运行时是 `undefined`）。
-   * 待更新源接线（路线图 M-8）后由宿主补上，或由接入方用 `host_brand_info().version` 自补。
+   * 待更新源接线（路线图 M-8）后由宿主补上。**今天没有自补的宿主 API**：
+   * `host_brand_info` 的 `BrandInfo` 里**没有** `version` 字段（它是白标身份：
+   * identifier / 协议名 / 数据目录 / 快捷方式 / 图标，不含版本）。当前版本的真相
+   * 在**接入方自己的构建元数据**里——宿主侧唯一的消费点是
+   * `ShellClient.updaterCheck(currentVersion)`，它把版本当**入参**要，而不是当结果给。
    */
   currentVersion?: string;
   /** 更新大小（字节） */

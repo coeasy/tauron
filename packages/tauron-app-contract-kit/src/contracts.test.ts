@@ -32,16 +32,18 @@ import { useInvoke } from '../../tauron-framework/src/index.js';
 // ──────────────────────────────────────────────────────────────────────────
 
 describe('契约 1：错误码全集', () => {
-  // 不写死个数：码表**只能追加**（新码一律加在末尾），写死 18 会让每次追加
-  // 都变成"改一处忘一处"的假失败。个数与顺序由下面那条逐项断言守住。
+  // 不写死个数：码表会长，写死 18 会让每次追加都变成"改一处忘一处"的假失败。
+  // 全集由下面那条按**名集合**断言守住（顺序不参与协议，见 V4 A69）。
   it('HOST_ERROR_CODES 数量不低于基线', () => {
     expect(HOST_ERROR_CODES.length).toBeGreaterThanOrEqual(18);
   });
 
-  it('HOST_ERROR_CODES 与线上协议逐项一致', () => {
-    // 与 `@tauron/host` 的 Rust `ErrorCode` 枚举同序。
-    // 任何增删/改名都必须在此显式对齐——数量断言不足以发现"换了一个码"。
-    expect([...HOST_ERROR_CODES]).toEqual([
+  it('HOST_ERROR_CODES 与线上协议同名集合一致（与声明顺序无关）', () => {
+    // 穿越 IPC 的是**码名**（Rust `ErrorCode` 的 serde 表示就是变体名），声明顺序
+    // 不进入任何一端的分流。按序比对会把「在语义相邻处插入一个新码」判成破坏兼容，
+    // 于是所有人被迫把新码堆到枚举末尾——那是让测试细节反向绑架协议（V4 A69）。
+    // 集合比对仍然钉死「一个不多、一个不少」：改名、漏名、多码都照样红。
+    const protocolCodes = [
       'E_HOST_PANIC',
       'E_UNKNOWN_PLUGIN',
       'E_AUTH_DENIED',
@@ -63,9 +65,9 @@ describe('契约 1：错误码全集', () => {
       'E_LEASE_EXPIRED',
       // 流句柄容量闸（`tauron_host::stream::MAX_STREAMS`）。
       'E_STREAM_FULL',
-      // 0.4-A1：跨主体调用的重复回填显式拒绝（枚举末尾，只能追加）。
+      // 0.4-A1：跨主体调用的重复回填显式拒绝。
       'E_CALL_ALREADY_SETTLED',
-      // 0.4-W3：贡献声明与注册不一致（枚举末尾，只能追加）。
+      // 0.4-W3：贡献声明与注册不一致。
       'E_CONTRIBUTES_DRIFT',
       // V4 A79：慢消费者导致接收方 credit 耗尽；需显式 grant 后再重试。
       'E_STREAM_BACKPRESSURE',
@@ -73,7 +75,8 @@ describe('契约 1：错误码全集', () => {
       'E_CALL_CYCLE',
       // V4 A78：事件因果链超过 maxCausationDepth。
       'E_EVENT_CAUSATION_LIMIT',
-    ]);
+    ].sort();
+    expect([...HOST_ERROR_CODES].sort()).toEqual(protocolCodes);
   });
 
   it('所有错误码以 E_ 开头', () => {

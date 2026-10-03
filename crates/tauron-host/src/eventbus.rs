@@ -242,14 +242,11 @@ impl Queue {
                 }
             }
             ChannelKind::Request => {
-                if self.frames.len() >= self.capacity
-                    || self.bytes.saturating_add(cost) > MAX_QUEUE_BYTES
-                {
-                    if self.circuit_open {
+                if let Some(rejection) = self.reliable_rejection(cost) {
+                    if matches!(rejection, EnqueueResult::DroppedCircuitOpen) {
                         self.dropped_total += 1;
-                        return EnqueueResult::DroppedCircuitOpen;
                     }
-                    return EnqueueResult::Full;
+                    return rejection;
                 }
             }
             ChannelKind::State => {
@@ -261,6 +258,26 @@ impl Queue {
         self.bytes = self.bytes.saturating_add(cost);
         self.frames.push_back((frame, cost));
         EnqueueResult::Queued
+    }
+
+    /// 可靠通道（`Request`）**入队前**的预算判据：`None` = 可以落帧，否则给出
+    /// `enqueue` 将会返回的同一种拒绝结果。
+    ///
+    /// 这是 Request 分支的唯一判据（`enqueue` 自身也走它），供「先验后投」使用：
+    /// 铸造序号、创建队列条目、把帧放进前 N 个订阅者队列都是**不可回滚的副作用**，
+    /// 一旦部分投递再报错，调用方按失败重试就会重复投递。判据必须与 `enqueue`
+    /// 严格一致，否则会预检放行、落帧被拒，接缝原样复发。
+    fn reliable_rejection(&self, cost: usize) -> Option<EnqueueResult> {
+        if cost > MAX_FRAME_BYTES {
+            return Some(EnqueueResult::TooLarge);
+        }
+        if self.frames.len() >= self.capacity || self.bytes.saturating_add(cost) > MAX_QUEUE_BYTES {
+            if self.circuit_open {
+                return Some(EnqueueResult::DroppedCircuitOpen);
+            }
+            return Some(EnqueueResult::Full);
+        }
+        None
     }
 
     /// 取走全部待投递帧（FIFO）。
@@ -276,6 +293,20 @@ impl Queue {
             self.bytes = self.bytes.saturating_sub(*cost);
         }
         popped.map(|(frame, _)| frame)
+    }
+
+    /// 摘掉本队列里属于 `topic` 的全部待取帧，并回销它们的字节记账。
+    fn remove_topic(&mut self, topic: &str) {
+        let mut freed = 0usize;
+        let pending = std::mem::take(&mut self.frames);
+        for (frame, cost) in pending {
+            if frame.topic == topic {
+                freed = freed.saturating_add(cost);
+            } else {
+                self.frames.push_back((frame, cost));
+            }
+        }
+        self.bytes = self.bytes.saturating_sub(freed);
     }
 
     fn stats(&self) -> QueueStats {
@@ -415,9 +446,16 @@ fn policy_decision_error(error: DecisionError) -> HostError {
 /// 全部内部状态用锁保护，可被多窗口并发调用。
 ///
 /// **锁顺序**：普通索引路径保持 `subs → topic_subscribers`；V4 A81 私有订阅提交
-/// 使用授权事务 `approvals (outer) → policy (short) → subs → topic_subscribers`。
+/// 使用授权事务 `approvals (outer) → policy (short) → subs → topic_subscribers`，
+/// A81 的撤销级联走同一方向（`topics` 先出临界区），出 `approvals` 之后才作废
+/// `queues`——`approvals` 与 `queues` 之间没有嵌套边。
 /// 发布路径的 A102 顺序锁固定为 `state_revisions → ordering → queues`；没有反向获取。
 /// 没有任何路径在持有 `subs/topic_subscribers` 时再获取 `approvals`，因此不会形成环。
+///
+/// 可靠发布把「预算预检 → 落帧」收进**一个** `ordering → queues` 临界区，因此它在
+/// 持锁期间只**临时**读 `subs`：`subs` 一侧从不获取 `ordering`/`queues`
+/// （`subscribe`/`unsubscribe` 只碰 `subs`/`topic_subscribers`，`dispose_subscriber`
+/// 先出 `subs` 临界区再取 `queues`），所以这条 `queues → subs` 边不构成环。
 ///
 /// 反序持有会构成死锁环。历史缺陷（已修）：
 /// - `subscribe` 曾先取 `topic_subscribers` 再取 `subs`，与 `publish` 的
@@ -534,17 +572,71 @@ impl EventBus {
         Ok(())
     }
 
-    /// 撤销一条审批（幂等）。返回本次是否真的删除了记录。
+    /// 撤销一条审批。返回值只回答「有没有真的删掉一条授权事实」（幂等重试为 `false`），
+    /// 撤销**效力**与返回值无关：只要 topic 属「他人声明且非公共」档，每次调用都会——
     ///
-    /// 撤销只阻止**后续新订阅**；既有订阅必须由管理面显式退订或在主体销毁时
-    /// 级联回收。这样授权事实与订阅资源的生命周期不会在本层暗中混为一谈。
+    /// 1. 立刻退订该 `(subscriber, topic)` 的全部既有订阅：后续 publish 解析不到
+    ///    token，帧再也没有投递目标；
+    /// 2. 作废三个通道队列里该 topic 的**待取帧**：撤销前已入队、还没被 drain 的
+    ///    内容也拿不到了。
+    ///
+    /// 公共/自属 topic 的订阅不归授权表管，撤销一条冗余审批不会掐掉它们，与
+    /// [`EventBus::subscribe`] 的授权判定同一口径。
+    ///
+    /// **锁序**：topic 元数据先出临界区，再由 `approvals` 临界区覆盖「删授权 →
+    /// bump grant → 退订」，方向与 `subscribe` 的
+    /// `topics → approvals → policy → subs → topic_subscribers` 一致，因此并发订阅
+    /// 不可能在撤销之后把 token 补回索引。作废队列帧放在出 `approvals` **之后**
+    /// 做——`queues` 与 `approvals` 之间全模块不产生嵌套边。
+    ///
+    /// **诚实边界**：与撤销**并发**的 `publish` 若在撤销前已把 token 解析成订阅者，
+    /// 仍可能在这次作废之后落一帧。管理面重放一次 revoke（幂等，效力照走）即可封住
+    /// 这条尾巴——`revoke_racing_publish_leaves_no_revoked_content_behind` 钉的就是
+    /// 这个可重放的收口。要把并发窗口本身封死，得让发布在 `queues` 临界区内重检审批表，
+    /// 那会把 `approvals` 拉进发布热路径；已登记在缺口方案 A81 行。
     pub fn revoke(&self, subscriber: &str, topic: &str) -> bool {
-        let mut approvals = self.approvals.lock();
-        let removed = approvals.remove(&(subscriber.to_string(), topic.to_string())).is_some();
-        if removed {
-            self.policy.lock().bump_grant(subscriber);
+        let meta = self.topics.read().get(topic).cloned();
+        let key = (subscriber.to_string(), topic.to_string());
+        // 只有「他人声明且非公共」的订阅归授权表管，才随撤销一起消失。公共/自属档
+        // 的授权依据不是审批表，撤销一条冗余审批不得顺手掐掉合法订阅。
+        if !meta.is_some_and(|meta| meta.publisher != subscriber && !meta.is_public) {
+            return self.approvals.lock().remove(&key).is_some();
         }
-        removed
+        let had_grant = {
+            let mut approvals = self.approvals.lock();
+            let had_grant = approvals.remove(&key).is_some();
+            if had_grant {
+                self.policy.lock().bump_grant(subscriber);
+            }
+            let tokens: Vec<String> = self
+                .subs
+                .lock()
+                .values()
+                .filter(|m| m.subscriber == subscriber && m.topic == topic)
+                .map(|m| m.token.clone())
+                .collect();
+            for token in tokens {
+                let _ = self.unsubscribe(&token);
+            }
+            had_grant
+        };
+        // 即使授权行已不存在（幂等重试）也再作废一次队列：那条「发布方在撤销前就
+        // 解析到 token」的竞态窗口，正是靠这最后一次作废封住的。
+        self.drop_queued(subscriber, topic);
+        had_grant
+    }
+
+    /// 作废某订阅者某 topic 的全部待取帧（三类通道）。
+    ///
+    /// 只持 `queues` 一把锁，不嵌套 `subs`/`approvals`。字节预算同步回销，否则被撤销
+    /// 的帧会一直占额度，「撤销」就退化成一次变相的队列扩容拒绝。
+    fn drop_queued(&self, subscriber: &str, topic: &str) {
+        let mut qs = self.queues.lock();
+        for (owner, q) in qs.iter_mut() {
+            if owner.0 == subscriber {
+                q.remove_topic(topic);
+            }
+        }
     }
 
     /// 稳定顺序列出全部审批，供宿主管理面审计/展示。
@@ -736,51 +828,66 @@ impl EventBus {
             None
         };
 
-        let mut delivered = 0usize;
-        let mut overflow = 0usize;
         let cost = frame_cost(topic, &payload);
 
-        for token in tokens {
-            let subscriber = match self.subs.lock().get(&token).map(|m| m.subscriber.clone()) {
-                Some(s) => s,
+        // 投递目标先解析干净（保持 `subs → topic_subscribers` 的既有锁序），
+        // 再统一进可靠通道预检——预检必须发生在**任何**序号铸造与队列写入之前。
+        let mut subscribers: Vec<String> = Vec::with_capacity(tokens.len());
+        for token in &tokens {
+            match self.subs.lock().get(token).map(|m| m.subscriber.clone()) {
+                Some(subscriber) => subscribers.push(subscriber),
                 None => {
                     if let Some(list) = self.topic_subscribers.lock().get_mut(topic) {
-                        list.retain(|t| t != &token);
+                        list.retain(|t| t != token);
                     }
-                    continue;
                 }
-            };
+            }
+        }
 
-            let key = (subscriber.clone(), kind);
-            let result = {
-                let mut ordering = self.ordering.lock();
-                let ordered = ordering
-                    .issue(
-                        publisher,
-                        &subscriber,
-                        causation.parent_id.as_deref().unwrap_or(&causation.root_id),
-                        state_revision,
-                        Some(&causation.root_id),
-                    )
-                    .expect("host-generated ordering metadata is monotonic");
-                let mut qs = self.queues.lock();
-                let q = qs.entry(key).or_insert_with(|| Queue::new(self.capacity));
-                let result = q.enqueue(
-                    kind,
-                    frame_with_causation(topic, payload.clone(), causation, &ordered),
-                    cost,
-                );
-                if kind == ChannelKind::Request
-                    && matches!(result, EnqueueResult::Full | EnqueueResult::TooLarge)
-                {
-                    debug_assert!(
-                        ordering.rollback_last(&ordered),
-                        "reliable request enqueue failure must roll back its unpublished sequence"
-                    );
+        // A102 锁序 `ordering → queues`：整段发布只取这两把锁并持有到投递结束，
+        // 于是「预检 → 落帧」是一个原子窗口，预检通过后不会被并发发布挤成溢出。
+        let mut ordering = self.ordering.lock();
+        let mut qs = self.queues.lock();
+
+        // **可靠通道零副作用拒绝**：`Request` 帧要么全部投递，要么一份都不投。
+        // 早期实现逐订阅者落帧、循环结束后才汇总 overflow，于是「前 N 份已入队、
+        // 第 N+1 份越界」会让调用方拿到 `E_CALL_PENDING_FULL` 却已产生**部分投递**
+        // ——调用方按「失败」重试即重复投递。单订阅者测试看不出这条接缝。
+        if kind == ChannelKind::Request {
+            let mut rejected = 0usize;
+            for subscriber in &subscribers {
+                let will_reject = match qs.get(&(subscriber.clone(), kind)) {
+                    Some(q) => q.reliable_rejection(cost).is_some(),
+                    // 队列尚未建立 == 队列为空，只有单帧上限能拒它。
+                    None => cost > MAX_FRAME_BYTES,
+                };
+                if will_reject {
+                    rejected += 1;
                 }
-                result
-            };
-            match result {
+            }
+            if rejected > 0 {
+                return PublishResult { delivered: 0, overflow: rejected, dropped: false };
+            }
+        }
+
+        let mut delivered = 0usize;
+        let mut overflow = 0usize;
+        for subscriber in subscribers {
+            let ordered = ordering
+                .issue(
+                    publisher,
+                    &subscriber,
+                    causation.parent_id.as_deref().unwrap_or(&causation.root_id),
+                    state_revision,
+                    Some(&causation.root_id),
+                )
+                .expect("host-generated ordering metadata is monotonic");
+            let q = qs.entry((subscriber, kind)).or_insert_with(|| Queue::new(self.capacity));
+            match q.enqueue(
+                kind,
+                frame_with_causation(topic, payload.clone(), causation, &ordered),
+                cost,
+            ) {
                 EnqueueResult::Queued => delivered += 1,
                 EnqueueResult::QueuedWithOverflow => {
                     delivered += 1;
@@ -850,27 +957,51 @@ impl EventBus {
         }
         let event_id = uuid::Uuid::new_v4().to_string();
         let causation = root_event_causation(&event_id);
+        let cost = frame_cost(topic, &payload);
+        let key = (target.to_string(), ChannelKind::Request);
         let mut ordering = self.ordering.lock();
+        let mut qs = self.queues.lock();
+        // 预检在**任何**副作用之前：铸造序号、创建队列条目都算副作用，被拒路径
+        // 必须一项都不留（§8-3「零悬挂队列」断言同样依赖它——被拒的投递不得留下
+        // 空队列条目；早期实现先 `entry().or_insert_with()` 再判溢出，两者都会漏）。
+        let rejection = match qs.get(&key) {
+            Some(q) => q.reliable_rejection(cost),
+            None => {
+                if cost > MAX_FRAME_BYTES {
+                    Some(EnqueueResult::TooLarge)
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(reason) = rejection {
+            return Err(match reason {
+                EnqueueResult::TooLarge => HostError::new(
+                    ErrorCode::E_CALL_PENDING_FULL,
+                    format!(
+                        "调用投递超出单帧字节上限 {MAX_FRAME_BYTES}（`{target}` 的 `{topic}`），零副作用拒绝"
+                    ),
+                ),
+                _ => HostError::new(
+                    ErrorCode::E_CALL_PENDING_FULL,
+                    format!(
+                        "调用投递队列已满，无法投递到 `{target}` 的 `{topic}`（可靠通道不可静默丢弃）"
+                    ),
+                ),
+            });
+        }
         let ordered = ordering
             .issue("host", target, &event_id, None, Some(&causation.root_id))
             .expect("host-generated ordering metadata is monotonic");
-        let mut qs = self.queues.lock();
-        let key = (target.to_string(), ChannelKind::Request);
         let q = qs.entry(key).or_insert_with(|| Queue::new(self.capacity));
-        let cost = frame_cost(topic, &payload);
-        let result = q.enqueue(
+        match q.enqueue(
             ChannelKind::Request,
             frame_with_causation(topic, payload, &causation, &ordered),
             cost,
-        );
-        if matches!(result, EnqueueResult::Full | EnqueueResult::TooLarge) {
-            debug_assert!(
-                ordering.rollback_last(&ordered),
-                "reliable inbound enqueue failure must roll back its unpublished sequence"
-            );
-        }
-        match result {
+        ) {
             EnqueueResult::Queued | EnqueueResult::QueuedWithOverflow => Ok(1),
+            // 预检与落帧处同一临界区，以下分支按不变量不可达；仍返回结构化错误，
+            // 不让 release 下的不变量破坏变成 panic 面。
             EnqueueResult::TooLarge => Err(HostError::new(
                 ErrorCode::E_CALL_PENDING_FULL,
                 format!(
@@ -1231,6 +1362,96 @@ mod tests {
     }
 
     #[test]
+    fn revoke_cascades_to_existing_subscriptions_and_queued_frames() {
+        // A81 的效力面：撤销之后「还在收帧的订阅」消失，撤销前已入队的帧也取不到。
+        // 缺这一条时 revoke 只是 new-calls-only——管理面上撤销成功，数据面继续漏。
+        let b = bus(16);
+        declare(&b, "com.a", "plugin:com.a:private", false);
+        declare(&b, "com.a", "plugin:com.a:shared", true);
+        b.approve("com.b", "plugin:com.a:private").unwrap();
+        b.subscribe("com.b", "w1", "plugin:com.a:private").unwrap();
+        b.subscribe("com.b", "w2", "plugin:com.a:private").unwrap();
+        b.subscribe("com.b", "w1", "plugin:com.a:shared").unwrap();
+        assert_eq!(b.subscription_count("com.b"), 3);
+
+        // 撤销前先把帧落进两个通道（不 drain，否则作废路径无从证明）。
+        let events = b.publish("com.a", "plugin:com.a:private", Value::from(1), ChannelKind::Event);
+        assert_eq!(events.delivered, 2, "同订阅者两个窗口各落一份");
+        b.publish_request("com.a", "plugin:com.a:private", Value::from(2)).unwrap();
+        b.publish("com.a", "plugin:com.a:shared", Value::from(3), ChannelKind::Event);
+
+        assert!(b.revoke("com.b", "plugin:com.a:private"));
+        assert_eq!(b.subscription_count("com.b"), 1, "私有订阅随撤销退订，公共订阅不受影响");
+        let leftover = b.drain("com.b", ChannelKind::Event).unwrap();
+        assert_eq!(leftover.len(), 1, "队列里只剩未被撤销的 topic");
+        assert_eq!(leftover[0].topic, "plugin:com.a:shared");
+        assert!(b.drain("com.b", ChannelKind::Request).unwrap().is_empty(), "待取的请求帧同样作废");
+
+        // 作废不是「一次性」：之后重新发布也找不到投递目标。
+        let after = b.publish("com.a", "plugin:com.a:private", Value::from(4), ChannelKind::Event);
+        assert_eq!(after.delivered, 0);
+        assert!(b.drain("com.b", ChannelKind::Event).unwrap().is_empty());
+    }
+
+    #[test]
+    fn revoke_racing_publish_leaves_no_revoked_content_behind() {
+        // A81 的 revoke × in-flight 对抗面：发布线程与撤销线程并发跑。
+        // 两条断言各守一件事：
+        // ① 锁序不成环——三个发布者都能 join 回来（成环时这条测试直接挂住）；
+        // ② 撤销与并发发布留下的那条尾巴是**可封住**的：重放一次 revoke 之后，
+        //    队列里不得再有被撤销 topic 的帧。
+        let b = std::sync::Arc::new(bus(64));
+        declare(&b, "com.a", "plugin:com.a:private", false);
+        b.approve("com.b", "plugin:com.a:private").unwrap();
+        b.subscribe("com.b", "w1", "plugin:com.a:private").unwrap();
+
+        let publishers: Vec<_> = (0..3u32)
+            .map(|i| {
+                let b = b.clone();
+                std::thread::spawn(move || {
+                    for n in 0..400 {
+                        b.publish(
+                            "com.a",
+                            "plugin:com.a:private",
+                            Value::from(i * 1000 + n),
+                            ChannelKind::Event,
+                        );
+                    }
+                })
+            })
+            .collect();
+        // 在发布仍在飞行时撤销：此时可能有 publish 已经解析出 token。
+        assert!(b.revoke("com.b", "plugin:com.a:private"));
+        for handle in publishers {
+            handle.join().expect("并发发布不得 panic");
+        }
+        assert_eq!(b.subscription_count("com.b"), 0, "并发下撤销也要退干净");
+        assert!(!b.revoke("com.b", "plugin:com.a:private"), "幂等重放只回答授权事实");
+        let leftover = b.drain("com.b", ChannelKind::Event).unwrap();
+        assert!(
+            leftover.iter().all(|frame| frame.topic != "plugin:com.a:private"),
+            "重放撤销后被撤销 topic 的帧必须已作废（实际残留 {:?}）",
+            leftover.iter().map(|f| f.topic.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn revoke_of_a_redundant_public_approval_leaves_the_subscription_intact() {
+        // 审批表可以给公共 topic 留一条冗余事实；撤销它**不该**顺手掐掉订阅——
+        // 公共/自属订阅的授权依据不是审批表（与 subscribe 同一口径）。
+        let b = bus(16);
+        declare(&b, "com.a", "plugin:com.a:shared", true);
+        b.approve("com.b", "plugin:com.a:shared").unwrap();
+        b.subscribe("com.b", "w1", "plugin:com.a:shared").unwrap();
+        b.publish("com.a", "plugin:com.a:shared", Value::from(1), ChannelKind::Event);
+
+        assert!(b.revoke("com.b", "plugin:com.a:shared"));
+        assert_eq!(b.subscription_count("com.b"), 1);
+        assert_eq!(b.drain("com.b", ChannelKind::Event).unwrap().len(), 1);
+        assert!(b.subscribe("com.b", "w2", "plugin:com.a:shared").is_ok());
+    }
+
+    #[test]
     fn approve_rejects_undeclared_topic_and_leaves_no_orphan_fact() {
         let b = bus(16);
         let e = b.approve("com.b", "plugin:com.a:ghost").unwrap_err();
@@ -1273,8 +1494,8 @@ mod tests {
         assert!(b.approvals().is_empty());
         assert!(!b.is_approved("com.b", "plugin:com.a:private"));
 
-        // 新订阅重新 fail-closed；已存在订阅由订阅生命周期负责，不在 revoke 时
-        // 隐式删除，避免授权表与资源表产生跨锁原子性假象。
+        // 撤销的两条效力：既有订阅当场消失（A81 级联），新订阅回到 fail-closed。
+        assert_eq!(b.subscription_count("com.b"), 0, "既有订阅随撤销退订");
         assert!(b.subscribe("com.b", "w2", "plugin:com.a:private").is_err());
     }
 
@@ -1298,11 +1519,12 @@ mod tests {
         let o = b.subscribe("com.b", "w1", "plugin:com.a:private").unwrap();
         assert!(!o.duplicate);
 
-        // 4) 撤销：授权事实即刻消失，重复撤销幂等
+        // 4) 撤销：授权事实即刻消失，第 3 步的既有订阅同时退订，重复撤销幂等
         assert!(b.revoke("com.b", "plugin:com.a:private"));
         assert!(!b.revoke("com.b", "plugin:com.a:private"));
         assert!(!b.is_approved("com.b", "plugin:com.a:private"));
         assert!(b.approvals().is_empty());
+        assert_eq!(b.subscription_count("com.b"), 0);
 
         // 5) 撤销后新订阅回到 fail-closed
         let e = b.subscribe("com.b", "w3", "plugin:com.a:private").unwrap_err();
@@ -1626,6 +1848,38 @@ mod tests {
         assert!(e.message.contains("不可丢弃"));
         // 前两帧完好保留。
         assert_eq!(b.drain("com.b", ChannelKind::Request).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn request_overflow_is_all_or_nothing_across_subscribers() {
+        // R3-5「零副作用拒绝」在多订阅者下的真身：早期实现逐订阅者落帧、循环结束
+        // 才汇总 overflow，于是排在前面、队列还空的订阅者**已经拿到帧**，调用方却
+        // 收到 `E_CALL_PENDING_FULL`。调用方按「失败」重试即重复投递——单订阅者
+        // 测试（上面那条）看不出这条接缝。
+        let b = bus(2);
+        declare(&b, "com.a", "plugin:com.a:x", true);
+        b.subscribe("com.b", "w1", "plugin:com.a:x").unwrap();
+        b.subscribe("com.c", "w1", "plugin:com.a:x").unwrap();
+        for _ in 0..2 {
+            b.publish_request("com.a", "plugin:com.a:x", Value::Null).unwrap();
+        }
+        // 只清空 com.b：com.c 满、com.b 空，越界发生在第二个目标上。
+        assert_eq!(b.drain("com.b", ChannelKind::Request).unwrap().len(), 2);
+
+        let e = b.publish_request("com.a", "plugin:com.a:x", Value::from(3)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::E_CALL_PENDING_FULL);
+        assert_eq!(
+            b.queue_stats("com.b", ChannelKind::Request).unwrap().depth,
+            0,
+            "被拒的发布不得给任何订阅者留下帧（部分投递 = 重试即重复）"
+        );
+
+        // 序号同样是副作用：预检在铸造序号之前完成，所以被拒的那次不占号。
+        assert_eq!(b.drain("com.c", ChannelKind::Request).unwrap().len(), 2);
+        b.publish_request("com.a", "plugin:com.a:x", Value::from(4)).unwrap();
+        let retried = b.drain("com.b", ChannelKind::Request).unwrap();
+        assert_eq!(retried.len(), 1);
+        assert_eq!(retried[0].seq, 3, "前两次成功占 1/2，被拒那次不占号 → 第三次成功仍是 3");
     }
 
     #[test]

@@ -43,13 +43,6 @@ export interface HostCapabilities {
   target: HostTargetSpec;
 }
 
-/** 窗口操作结果。 */
-export interface WindowActionResult {
-  ok: boolean;
-  code?: string;
-  message?: string;
-}
-
 /**
  * 通知记录（兼容用）。
  *
@@ -304,11 +297,27 @@ export interface I18nCleanupResult extends I18nState {
   removed: number;
 }
 
-/** 品牌信息。 */
+/**
+ * 品牌信息（`host_brand_info` 的线形返回，与 Rust `adapter::BrandInfo` 逐字段同源）。
+ *
+ * 此前这里写的是 `{ name?; version?; [key: string]: unknown }`——**两个字段都不存在
+ * 于线上**，而可选字段 + 索引签名让 `tsc` 永远不报错：读 `brandInfo().name` 只会拿到
+ * `undefined`，故障表现为「品牌没配」而不是「字段读错了」。线形是
+ * `deny_unknown_fields` 的 camelCase 结构，改名由 wire-gate 的返回值形状门禁钉住。
+ */
 export interface BrandInfo {
-  name?: string;
-  version?: string;
-  [key: string]: unknown;
+  /** 应用标识符（如 `com.tauron.standard`）。 */
+  identifier: string;
+  /** 自定义协议名。 */
+  protocolScheme: string;
+  /** 自启项名称。 */
+  autostartName: string;
+  /** 数据目录名。 */
+  dataDir: string;
+  /** 快捷键绑定（键名 → 按键序列）。 */
+  shortcuts: Record<string, string>;
+  /** 图标路径（平台字符串 → 相对路径）。 */
+  icons: Record<string, string>;
 }
 
 /** 市场检查结果（与 `UpdateInfo.available` 同名对齐；Rust 桩返回 `{available:false}`）。 */
@@ -1050,14 +1059,17 @@ export class ShellClient {
    * sidecar stdin 帧回路）；无通路时以结构化 `Unsupported` 失败。
    *
    * 结果用 {@link ShellClient.callTakeResult} 取件（一次性语义）。
+   *
+   * 返回 {@link ProviderResult}：无可用投递通路时是 `Unsupported`（无 `callId`），
+   * 必须先分流再取件——与 {@link HostClient.callPlugin} 同一约束，理由见该处文档。
    */
   async callPlugin(
     target: string,
     method: string,
     argsJson?: JsonValue,
     parentCallId?: string,
-  ): Promise<PendingCallInfo> {
-    return this.call<PendingCallInfo>('host_call_plugin', {
+  ): Promise<ProviderResult<PendingCallInfo>> {
+    return this.call<ProviderResult<PendingCallInfo>>('host_call_plugin', {
       req: {
         target,
         method,

@@ -15,6 +15,294 @@
 
 ### Added
 
+- **Production 的 origin 门必须有独立「装弹」事实（V4 §138.2 / Batch 0-1，轮 10）**：
+  `ProductionReadiness` 新增 `origin_gate_armed`，由
+  `AdapterConfig::production_readiness()` 从 `!origin_allowlist.is_empty()` **推导**——
+  宿主不能用一句声明把它点亮。配套 `productionDoctor` 的 `id: "origin-gate"` 检查项
+  （9 项里的第 2 项）、
+  启动门违规码 `ORIGIN_GATE_ARMED_REQUIRED`，以及命令分发处的
+  `ORIGIN_GATE_NOT_ARMED`。修掉的是「声明了 caller identity 但清单为空 ⇒ 自检报绿、
+  origin ACL 实际空转」这条最讽刺的洞：origin ACL 恰恰在最需要它的生产宿主上失效。
+- **主窗 label 必须由宿主声明（V4 F1 / Batch 0-2，轮 10）**：
+  `AdapterConfig::main_window_labels`（留空展开为 Tauri 约定缺省 `["main"]`）
+  经装配流向 origin 门读取的 `ShellExtState`。策略本体
+  `tauron_host::authz::production_caller_allowed` 落在 `tauron-host`，
+  因此**默认特性的 CI 作业就能测到它**（适配器安全逻辑位于 `#[cfg(feature = "tauri")]`
+  之下，默认作业不编译）。Production 下四种拒绝原因成文：
+  `ORIGIN_GATE_NOT_ARMED` / `CALLER_IDENTITY_INVALID` /
+  `MAIN_WINDOW_LABEL_NOT_DECLARED` / `ORIGIN_NOT_ALLOWED`，全部 `E_AUTH_DENIED`、
+  `retryClass: never`。开发态与测试态的兼容语义**未变**（空清单 = 不启用）。
+- **特权管理操作产出可离线复核的审计事实（V4 0-3 / F3，轮 11）**：新增
+  `tauron_host::admin_audit`——`AdminAuditRecord`（逐条 `prev_hash` 串成哈希链）+
+  `AdminAuditSink`（`DurableEnvelope` 落盘 `admin-audit.json`，512 条环形裁剪，被裁条目
+  的条数与裁剪点哈希仍进事实）+ `verify_records` / `verify_file` 离线复核入口。写口是
+  admin 分发的唯一咽喉 `record_admin_audit`，`AUDITED_ADMIN_COMMANDS` 六条
+  （`host_events_approve` / `host_events_revoke` / `host_registry_admin` /
+  `host_registry_install` / `host_registry_install_preview` / `host_runtime_spawn`）
+  **允许与拒绝都留痕**；命令名集合由 `wire-gate` 与判定代码双向对账，新增特权写操作
+  忘记登记即红。同时**删除** `AdapterConfig::with_admin_audit(bool)`：doctor 的
+  `admin-audit` 检查项改由 `AdminAuditFacts::healthy()`（落盘 ∧ 链完整 ∧ 零写失败）
+  推导，`ProductionDoctorReport` 另把读数快照（`adminAudit`）带上线，读取侧不必相信
+  一个布尔位。
+- **迁移回滚镜像：迁移失败不再吃掉上一次已知良好状态（V4 A101，轮 11）**：
+  `host_settings_migrate` 在契约要求快照时，把**迁移前**的用户层密封成
+  `host-settings.rollback.json`（schema `tauron.host-settings-rollback/1`），并且
+  **先写镜像、再写正式文档**——顺序反了就会出现「已经迁了，却没有任何东西能回滚」。
+  装配时若正式文档校验不过，会先问这份镜像：校验通过即恢复到迁移前状态并**消费即删除**
+  （一次性；留着它下一次偶然读失败会把用户带回更久以前），迁移落盘失败并在内存 rewind
+  之后同样作废。生产档的 fail-closed 前缀语义未动。
+- **Event 审批撤销有实效（V4 A81，轮 11）**：`EventBus::revoke` 不再只删一行授权——
+  对「他人声明且非公共」档，同一次调用会退订该 `(subscriber, topic)` 的全部既有订阅，
+  并经 `drop_queued` 作废三类通道队列里该 topic 的待取帧；授权行已不存在时（幂等重放）
+  仍再作废一次，用以封住「发布方在撤销前已把 token 解析成订阅者」这条竞态尾巴。
+  公共 / 自属 topic 的订阅不归审批表管，刻意不掐。`host_events_revoke` 的返回值只回答
+  「有没有真删掉一行」，与效力无关。
+- **顺序契约有了接收端判定（V4 A102，轮 11）**：发布侧 `OrderingTracker::issue` 在
+  production publish 里发号，`observe` 作为发布侧 oracle 由 `v4_host_conformance` 钉住；
+  接收侧新增 TS `EventOrderingWatcher`（`@tauron/host` `events.ts`），接进宿主 RPC 泵与
+  `@tauron/app-plugin-sdk` 插件泵两处生产消费点——异常只上报、不吞投递。
+- **发布链补上版本号生产者与文档引用核对器（轮 11）**：`scripts/version-sync.mjs`
+  （`pnpm version:check` / `version:sync`，六处落点与 `release.yml` 的 version-check
+  同源，`packages/*` 走目录枚举）；`scripts/check-doc-line-refs.mjs`
+  （`pnpm docs:check`）把文档里的 `file.rs:NNN` / `symbol:NNN` 当可执行断言复算。
+  两者都进 CI 前置步骤，并由 `wire-gate` 钉住「脚本 + 根脚本 + CI 步骤 + 文档口径」同源。
+- **命令面全量接口参考改为生成物（轮 12）**：新增
+  [`docs/api/command-surface.md`](./docs/api/command-surface.md)——85 条 `host_*` 的
+  业务形参、返回类型、档位、feature 门、函数体**实际执行**的身份判定、前端落点，
+  由 `scripts/generate-command-surface.mjs` 从 `crates/tauron-adapter/src/tauri.rs` +
+  `lib.rs` 的三条规范数组 + `tauron_host::authz` 表 + `packages/*/src` 调用点复算，
+  `pnpm command-surface:gen` 写、`pnpm command-surface:check` 只校验（CI TS 作业前置步骤）。
+  动机不是"补文档"，而是此前的**全量宣称是假的**：人写的表只覆盖 49/85 条却写着「完整」，
+  feature 门 85 行全报「无」（属性写在 `#[tauri::command]` 上方，解析器看不见），
+  判定列把所有无档位条目一律写成「主窗专属（capability `windows`）」——那句话在代码里
+  零对应（见 Fixed）。`wire-gate` 从七个方向把生成物钉回代码：命令集合双向对账、
+  三条数组条数、孤儿命令必须为 0、两份人写文档不得再自称全量、判定列含真实
+  `require_*` / 过滤函数、feature 列与 tauri.rs 属性逐条同源、「代码层无判定」按**名字**
+  成清单且每条必须在自己函数的 `///` 注释里给出理由。
+
+### Changed
+
+- **A69 / §89：错误码声明顺序不再是协议约束**（轮 10）。穿越 IPC 的一直是**码名**
+  （`ErrorCode` 未配 `rename_all`，serde 表示即变体名），而三处测试却按声明顺序比对，
+  于是代码注释开始教「新码必须追加在末尾」——测试的实现细节反向绑架了协议。
+  现在 `tauron-host` 的 `gates.test.ts` 与 `app-contract-kit` 的 `contracts.test.ts`
+  都改为**按名集合**比对（wire-gate 原本就是 sorted 比对），权威清单仍是
+  `contracts/error/error-codes.json`。集合比对仍钉死「一个不多、一个不少」：
+  改名、漏码、多码照样红。受影响文档：`docs/api/plugin-development-guide.md`、
+  `docs/architecture/app-layer-wire.md`、`capability-closure-plan.md`、
+  `full-architecture-refactor-plan.md`、`packages/tauron-host/README.md`、V4 §89。
+- **设置事务边界拆成两段，写租约成为唯一串行化点（V4 A91 × A104，轮 11）**：
+  `run_settings_boundary` 此前把 `FaultBoundary` 的边界锁跨在含磁盘 I/O 的闭包上——
+  既违反「不许跨 await/IO 持锁」，又让注释宣称的单写者语义名不副实。现在是
+  就绪判定 → 持 `settings_write_lock` 干活 → 事后 `record_panic` 两段，
+  `reconcile_settings_boundary` / `cmd_settings_set` / `cmd_settings_adopt_legacy` /
+  `cmd_settings_migrate` 四个写点全部显式取租约；并发回归
+  `concurrent_settings_writes_never_lose_a_key_or_share_a_generation` 用「去掉租约即红」
+  证明它是真的串行点，而不是注释。
+- **逐资产摘要复核进入服务路径（V4 A84，轮 11）**：插件资产请求（`tauri.rs` 的
+  `/plugin-<id>/...` 读取口）在返回字节前按登记摘要复核，篡改与越权路径分义 403/404，
+  不再只在安装时校验一次。
+- **文档口径与代码对齐（轮 11 逐行核实）**：Process 插件边界不再写「帧回路未接线、
+  退出不会连带杀子进程」（见 Fixed）；`plugin-install` 是 **opt-in**（`default = []`）
+  的口径统一到 `README`、插件开发指南与增量接入指南三处；production doctor 的检查项
+  清单写成 9 项 `id` 表（全部 `requiredInProduction`），并明确
+  `productionSafe` 在非 Production 恒为 `false`。
+
+### Removed
+
+- **`tauron_host::FairQueue`（A80 按 owner 公平调度）已删除**（轮 10 / Batch 0-4）。
+  它是零生产消费者的死类型：只有本文件单测在自证，`lib.rs` re-export 让它对外可见，
+  于是「按 owner 公平调度」看起来已落、实则没有任何调度点。接一半的轮转队列比不接
+  更危险（它会让人以为饿死已被治），故删除并按 V4「未接线公开 API 台账」登记；
+  A80 公平调度的真实缺口移入 Batch 3'，判据是「`call_begin` 按 owner 轮转 +
+  端到端饿死压测绿」而不是「类型存在」。
+- **`tauron_host::durable::MigrationSnapshot` 已删除**（轮 11 / Batch 0-4）。它与
+  `MigrationReceipt.before` 是**同一事实的两份表达**且零生产消费者；A101 需要的是带
+  schema/checksum 的持久信封，于是改由 `DurableEnvelope` 承载。`wire-gate` 反向钉
+  `pub struct MigrationSnapshot` 不得复活，`durable.rs` 只留删除史的注释。
+
+### Fixed
+
+- **stream credit 只有一套算术（A79，轮 10 / Batch 0-4）**：`StreamHandle` 的额度字段
+  改为 `admission::CreditWindow`（原 `admission.rs` 里的死类型），补额走 `grant`、
+  写帧走 `consume`，流侧不再存裸计数器。此前 `StreamRegistry` 与 `CreditWindow`
+  各有一份 saturating-add/min/clamp 逻辑，语义重复但互不相干——改一处不会让另一处红。
+  新增边界回归：恰好用光额度的帧放行，多 1 byte 即 `E_STREAM_BACKPRESSURE`
+  且**零副作用**（不占 seq、不派帧）。
+- **接口文档三处与代码不符**（轮 10 实测对账）：`E_STREAM_FULL` 的上限写作
+  `MAX_STREAMS = 1024`，实际是 `256`（宿主级）+ `MAX_STREAMS_PER_PLUGIN = 32`；
+  `AdapterConfig` 的字段清单写作「四个字段」，实际 16 个 `pub` 字段（文档改为
+  指向结构体本身并列出安全相关项）；`E_INVALID_MANIFEST` 复用约定写作
+  「三者按声明顺序比对」。
+- **三处文档把已接线的链路写成「未接线」**（轮 11 逐行核实）：Process 插件的 JSON-RPC
+  帧回路（`CommandSpawner` 早已 `Stdio::piped()` + 每进程 stdout 读线程 +
+  `ProcessFrameSinkImpl` → `settle_call`）、进程树回收
+  （`UnixProcessGroupSandboxProvider` / `WindowsJobObjectSandboxProvider` /
+  `impl Drop for CommandSpawner`）、`tauron-acl` 的依赖与安装路径消费。这类否定式
+  谎报与夸大同样致命：接入方按文档就不会去用一条**能用**的链路。同步修正
+  `plugin-install` 的 opt-in 口径（此前接入指南写「已进默认特性，故默认注册 85 条」）
+  与 origin 门拒绝原因计数（三种 → 四种）。诚实边界一并写明：仓内无可执行 sidecar，
+  真进程端到端结算与 Drop 连带回收**没有运行期证据**（缺口方案 A97 行的未验证清单）。
+
+- **9 条宣称「主窗专属」、实则零判定的命令补上代码层判定（轮 12，真越权面）**：
+  `host_window_quit`、`host_clipboard_read` / `host_clipboard_write`、
+  `host_dialog_open` / `_save` / `_message` / `_confirm`、`host_recover_boot`、
+  `host_i18n_stats` 此前在 wire 入口**没有任何身份判定**，而文档写着它们由 capability 的
+  `windows` 限制——示例能力文件的 `windows` 含 `plugin-*`，`permissions` 只有
+  `core:default`，`host_*` 又是 root 注册（裸名，不被 ACL 按命令名管辖），所以插件窗
+  实际调得到这 9 条。现在每条都有 `cmd_*_as(caller, …)` 变体，第一句即
+  `require_main_window`，判别力回归四条：插件主体拿到 `E_AUTH_DENIED`（含命令名）、
+  **拒绝发生在任何写副作用之前**（剪贴板槽位仍是被拒前的值；对话框 `kind` 的闭集校验
+  排在判定之后，表外值 + 插件主体先报越权）、主窗主体八条照常放行、
+  `quit` 走到底只剩内建 sink 的诚实降级；畸形 label（`plugin-not a valid id`）
+  归 `Invalid`  principal 直接拒，**永不降级成主窗**。
+- **「其余命令由 Tauri ACL / `origin_gate` 管辖」是错的口径，三处同步更正（轮 12）**：
+  `tauron-host/src/authz.rs` 模块文档、`packages/tauron-host/src/capabilities.ts` 的
+  scope note、`docs/api/plugin-development-guide.md`「底座命令（主窗专属）」与
+  `docs/architecture/app-layer-wire.md` 第 5 节，统一改成：origin 门只判 label +
+  origin 的**形态与来源**，capability 不给 `host_*` 按命令名授权，
+  **按命令的权限唯一落点在代码层**。特权 8 条的措辞也由「代码层判定与部署 ACL
+  双保险」更正为「判定只在代码层：改状态 / 授权的 4 条经 `admin_gate` 咽喉（判定 + 审计
+  同点），只读 4 条直接 `require_main_window` 且刻意不入审计表」。这不是文字问题：错误口径会让
+  评审者以为漏判定有兜底，从而在新增命令时不再检查——本次 9 条就是它养出来的。
+
+- **示例能力文件与 README 的 opt-in 口径同步更正（轮 12）**：
+  `examples/minimal-app/src-tauri/capabilities/default.json` 的 `description` 原写
+  「`plugin-install` 已在默认特性 → 默认 85 条」，与 `crates/tauron-adapter/Cargo.toml`
+  的 `default = []` 相反（示例是在自己的 `Cargo.toml` 里显式开启的）；现在改成如实的
+  「默认 83 条、本示例显式开启才 85 条，且 Tauri ACL **不按命令名管辖** `host_*`，
+  按命令的判定在适配器代码层」，并补一句「`windows` 含 `plugin-*` 时它不能被当成
+  「这条命令只有主窗能调」的证据」。`examples/minimal-app/README.md` 同批更正
+  （旧文写「已进默认特性 → 实际注册 80 条」，两个数都错）。生成侧的
+  `src-tauri/gen/schemas/capabilities.json` 由 `cargo build` 重新生成后一并入库。
+  新增 `wire-gate`「示例能力文件不得冒充按命令授权，且必须与 adapter 的 opt-in 口径
+  同源」把这条描述与两份 `Cargo.toml`、README 的条数钉在一起。
+
+轮 10 门禁实测（数字取自本轮同一次运行的日志，非回忆）：
+`cargo fmt --all -- --check` clean；
+`cargo clippy --workspace --all-targets -- -D warnings` 与
+`cargo clippy -p tauron-adapter --features tauri --all-targets -- -D warnings` 均 rc=0；
+`cargo test --workspace --locked` rc=0（37 个 test target，1437 passed / 0 failed），
+其中 `tauron-host --lib` 389、`tauron-adapter --lib` 258、
+`--features plugin-install` 272、`--features tauri` 287、`tauron-shell --features tauri` 72；
+`cargo check -p tauron-adapter --no-default-features`、
+`cargo check --workspace --all-targets --all-features`、
+示例工程 `--features substrate-only` 均 rc=0；
+`pnpm -r test` rc=0（20 个包，1761 passed），其中 `@tauron/contract-tests` 153 passed
+（含本轮新增 2 条；轮 11 起该口径统一写作包总数，`wire-gate.test.ts` 单文件的计数另列）；
+`pnpm -r --no-bail typecheck`、`pnpm lint`、`pnpm format:check` 均 rc=0；
+四个仓内脚本 `generate-public-surface-ledger --check`（85 条公开命令，no orphan）、
+`check-target-matrix --check`、`generate-release-evidence --check`、
+`check-no-lock-across-await`（41 个 Rust 文件）均通过。
+
+轮 11 门禁实测（下列数字取自本轮**同一次运行**的日志文件，非回忆；Windows 本地全链）：
+
+- Rust 10 步全 rc=0：`cargo fmt --all -- --check`；
+  `cargo clippy --workspace --all-targets --locked -- -D warnings`；
+  `cargo clippy -p tauron-adapter --features tauri,plugin-install --all-targets --locked -- -D warnings`；
+  `cargo test --workspace --locked`（**37 个 test target / 1454 passed / 0 failed**，
+  其中 `tauron-host --lib` 397、`tauron-adapter --lib` 267）；
+  特性矩阵 `--lib`：`--features tauri` 296、`--features plugin-install` 285、
+  `--features tauri,plugin-install` 319、`tauron-shell --features tauri` 72；
+  `cargo check -p tauron-adapter --no-default-features --locked`、
+  `cargo check --workspace --all-targets --all-features --locked`、
+  示例工程 `cargo check --manifest-path examples/minimal-app/src-tauri/Cargo.toml
+  --features substrate-only --all-targets --locked` 均 rc=0。
+- TypeScript 全 rc=0：`pnpm -r build`、`pnpm -r --no-bail typecheck`、`pnpm lint`、
+  `pnpm format:check`；`pnpm -r test` **20 个包 / 106 个 test file / 1782 passed**，
+  其中 `@tauron/contract-tests` 162（`wire-gate.test.ts` 单文件按 CI 的跑法 **141**）。
+- 本轮新增的两道门禁各自实测：`pnpm version:check` → 「26 处版本号全部为 1.1.0」；
+  `pnpm docs:check` → 「5 个文档，204 条引用」全部落在有效范围且指得到被引用符号
+  （红探针：临时注入一条 `revoke:1234` 即 exit 1）。
+- 仓内一致性与发布门禁脚本：Public Surface Ledger「85 public commands, no orphan
+  metadata」、Target Matrix、Release Evidence 静态输入
+  （`version=1.1.0, rust=1.98.0, node=22.23.2, pinnedActions=47`）、
+  No-Lock-Across-Await「OK across 42 Rust source files」（扫描 `tauron-host/src` 37 个 +
+  `tauron-adapter/src` 5 个 `.rs`；轮 10 为 41，本轮新增的 `admin_audit.rs` 自动在扫描面内）、`pnpm publish:npm -- --check` 均通过。
+
+轮 12 门禁实测（下列数字全部取自本轮**同一次运行**的日志；fmt 之后所有计数与行号引用按
+fmt 后代码复算过一遍）：
+
+- **fmt 先红后绿，并暴露第 5 类副作用**：`cargo fmt --all -- --check` 初次运行为红——
+  本轮新增的 9 个 `cmd_*_as` 与测试模块未过 rustfmt（长签名未折行、`denied!` 宏调用被
+  写成多行）。`cargo fmt --all` 后再 check 为 clean，但一次格式化把 `adapter/lib.rs` 的
+  行号整体推偏，`pnpm docs:check` 随即报出 **7 条**引用漂移
+  （`settings_commit_has_single_mirror_site` + 6 条 admin 审计测试名）。处理方式不是
+  「把数字改对」而是按轮 11 定下的引用口径**改成符号锚定**（去掉行号），
+  于是文档不再随格式化漂移：`pnpm docs:check` → 「6 个文档，198 条引用 OK」（原 205 条）。
+- Rust 全 rc=0：`cargo clippy --workspace --all-targets --locked -- -D warnings` 与
+  `cargo clippy -p tauron-adapter --features tauri,plugin-install --all-targets --locked -- -D warnings`；
+  `cargo test --workspace --locked`（**37 个 test target / 1458 passed / 0 failed**，
+  其中 `tauron-adapter --lib` 271、`tauron-host --lib` 397）；特性矩阵 `--lib`：
+  `--features tauri` 300、`--features plugin-install` 289、`--features tauri,plugin-install` 323、
+  `tauron-shell --features tauri` 72（轮 11 对应 296/285/319/72，差值即本轮新增 4 例）；
+  `cargo check -p tauron-adapter --no-default-features --locked`、
+  `cargo check --workspace --all-targets --all-features --locked`、
+  示例工程 `--features substrate-only --all-targets --locked` 均 Finished rc=0。
+- TypeScript 全 rc=0：`pnpm build`、`pnpm typecheck`、`pnpm lint`、`pnpm format:check`；
+  `pnpm -r --no-bail test` **20 个包 / 1784 passed**，其中 `@tauron/contract-tests` 164
+  （`wire-gate.test.ts` 单文件 143）。
+- 本轮新增门禁自身：`pnpm command-surface:check` → 「85 commands（底座 61 / 运行时 22 /
+  安装 2），孤儿命令 0，未归类 0，无代码层判定 9」；`pnpm version:check` → 26 处 1.1.0；
+  Public Surface Ledger「85 public commands, no orphan metadata」、Target Matrix、
+  Release Evidence 静态输入（`version=1.1.0, rust=1.98.0, node=22.23.2, pinnedActions=47`）、
+  No-Lock-Across-Await「OK across 42 Rust source files」、`pnpm publish:npm -- --check`
+  「可发布包 20 个；通过校验 20 个；失败 0 个」均 rc=0。
+- **三条红探针（本轮实跑，不是叙述）**：
+  ① 代码侧——把 `cmd_clipboard_write_as` 的 `require_main_window(caller, …)?` 换成
+  `let _ = (caller, "host_clipboard_write");`，`cargo test -p tauron-adapter --lib
+  main_window_surface_guard` → 「FAILED. 2 passed; 2 failed … 267 filtered out」
+  （`nine_…_reject_plugin_callers` 与 `denial_happens_before_any_mutation`），
+  同时 `generate-command-surface.mjs --check` rc=1「与代码不同步」；还原后 4 passed /
+  0 failed、surface rc=0。② 文档侧——把生成物里 `host_brand_info` 一行的判定改成
+  「仅主窗 `require_main_window`」，`wire-gate` → 「Tests 1 failed | 162 passed」，
+  失败信息即「host_brand_info 必须如实标成「代码层无判定」」。③ 口径侧——把能力文件
+  描述改回「Tauri ACL 按命令名管辖它们」，本轮新增的「示例能力文件不得冒充按命令授权」
+  用例即红（「Tests 1 failed | 163 passed」），还原后 164 全绿。
+  探针同时暴露一处需要写清的分工：`wire-gate` 的判定列断言是**文档自洽**（它读生成物），
+  代码↔文档的同步由 `command-surface:check` 承担——而该 CI 步骤的存在本身由
+  `wire-gate` 钉住（`ci.yml` 含 `pnpm command-surface:check`），删掉复算步骤即红。
+
+### Docs
+
+- **V4 工业级缺口对照审计**：新增
+  [`docs/architecture/v4-industrial-gap-closure-plan.md`](./docs/architecture/v4-industrial-gap-closure-plan.md)，
+  逐条对照 §134 DoD 33 项、§135 A64–A110、§136 40 门禁、§141 验收矩阵与 §138.2 的九条
+  observable gaps。结论按「代码可用 + 真实消费点 + 门禁把守」口径登记：
+  A64–A110 为**已落 15 / 部分 21 / 未落 11**，DoD 33 项为 **✅ 13 / ⚠️ 19 / ❌ 1**。
+- **§138.2 九条逐条复查并回写标注**：四条已闭合（recovery durability、RecoveryAction
+  幂等生产链、`E_HOST_PANIC = retryable`、cargo-deny advisory）；三条半闭合
+  （整包内存读、ErrorCode 顺序耦合、manifest target 粒度）；两条字面仍成立
+  （origin 空允许清单即放行、Tauri 2 是唯一正式 Host 边界）；`main protection` 属仓库设置，
+  代码侧无法闭合——已在方案里列为 Batch 0-7 的人工动作。
+- **修正 README 的 cargo-deny 口径**：旧文写「仍为 advisory」，与 `ci.yml` 的 `deny`
+  作业不符——该作业跑 `command: check --all-features`，无 `continue-on-error`，是阻断式
+  硬门禁。同步 `docs/architecture/README.md` 的技术栈表与文档地图（前瞻计划归属改指新方案）。
+- **文档引用改为符号锚定，并把「行号引用」变成可执行断言（轮 11）**：V4 缺口方案新增
+  「引用口径」段——新增或修订证据引用时优先写符号名（`fn revoke`、测试名、常量名）而不是
+  行号，因为一次 `+1330` 行的改动就让 5 条 `symbol:NNN` 指到了无关行。同时新增
+  `scripts/check-doc-line-refs.mjs`（`pnpm docs:check`，已进 CI 的 TS 作业并由 `wire-gate`
+  钉住同源）：路径按路径段子序列解析、行号必须落在文件行数内、被指的那几行必须真的含该
+  符号。另在方案里登记**第 4 类文档缺陷**（文档宣称与代码相反＝断链）的三行对账表，
+  与「夸大」和「漏写」并列。
+- **命令面文档改为「生成物 + 关键命令叙述」两层（轮 12）**：
+  `docs/api/command-surface.md` 承担全量对照（85 条逐条：形参 / 返回 / 档位 / feature 门 /
+  实际判定 / 前端落点），`docs/architecture/app-layer-wire.md` 第 3 节明确自己「只覆盖
+  关键命令，不是全量清单」，`docs/api/plugin-development-guide.md` 的表只列档位表内命令
+  并把「主窗专属」一节的机制描述改成代码层判定（见 Fixed）。README 与
+  `docs/architecture/README.md` 的文档地图同时标注该文件是**生成物、勿手改**，
+  以及两个 pnpm 入口（`command-surface:gen` / `:check`）。
+- **缺口方案新增轮 12 段（`v4-industrial-gap-closure-plan.md`）**：Batch 0 追加并落地
+  0-8「主窗 / 宿主 UI 专属面按命令补代码层判定」与 0-9「命令面接口参考由代码生成」，
+  把「文档把权限交给一条不存在的机制」登记成第 4 类缺陷的变体（成因：`authz.rs` /
+  `capabilities.ts` / 插件指南三处都写「capability `windows` 只授予 `main`」，
+  而示例能力文件的 `windows` 含 `plugin-*`）；同时记录生成器的三条解析坑——feature 属性
+  位于 `#[tauri::command]` **上方**、档位写成全限定路径
+  `tauron_host::authz::AuthTier::X`、判定藏在 `admin_gate` / `visible_notifications` /
+  `scoped_within_roots` 等非 `cmd_` helper 里，必须按调用链遍历而不是只看命令体。
+
+### Added
+
 - **V4 生产就绪线并入（三条 feature 分支合并到 main）**：`DeploymentMode` /
   `ProductionReadiness` / `production_doctor`（A109）与 **fail-closed 启动门**——
   `AdapterConfig::production()` 下 readiness 不达标时宿主直接拒绝启动（Development/Test
@@ -47,9 +335,13 @@
   `host_registry_install` 校验 token 与包哈希一致后才落盘——审批过的内容与实际
   安装内容之间的断链被闭合。
 - **命令面**：底座 `tauron_substrate_handler!` **57 → 61**，全量
-  `tauron_plugin_handler!` **78 → 83**，默认特性（含 `plugin-install` 2 条）
-  **80 → 85**；`authz` 登记档位命令 **22 → 27**（特权 4 → 8）。口径由 wire-gate
-  与 `contracts/public-surface-ledger.json`（85 条）逐名锁定。
+  `tauron_plugin_handler!` **78 → 83**；`plugin-install` 的 2 条由 1.0-W6 的「进默认特性」
+  **改回 opt-in**（V4 minimal-substrate 规则：只依赖 `tauron-adapter` 的接入方不得被
+  拉进 market/signature/archive 依赖，`crates/tauron-adapter/Cargo.toml` 现为
+  `default = []`）。所以**默认装配 83 条**，接入方显式 `features = ["plugin-install"]`
+  才是 **85** 条（示例应用属于显式开启态）。`authz` 登记档位命令 **22 → 28**
+  （插件面 20 = 18 self + 2 scoped-read，`host_capabilities` 在列；特权 4 → 8）。
+  口径由 wire-gate 与 `contracts/public-surface-ledger.json`（85 条）逐名锁定。
 
 ### Fixed
 
@@ -106,6 +398,110 @@
     `host_market_*` 的下载/安装是 `simulated` 的进程内状态推进）、设置观察队列与
     流式额度探针标为嵌入方扩展点（后者补了与 `grant` 返回值同事实的断言）、
     `tauron-ffi` 补进 README 项目结构树、`@tauron/host` README 新增「库级 API」表。
+- **轮 7 链路缺陷修复**：
+  - **设置观察的重订阅断链**：插件退订后重新 `events.subscribe` 同一 topic 时，
+    SDK 的惰性订阅把「已申请过」当作永久事实，重订阅不再向宿主申请——批准后来回的
+    订阅者收不到帧。改为按监听者集合的实时状态判定，退订即回收宿主侧订阅。
+  - **`R3-5` 的零副作用承诺此前有漏洞**：EventBus 发布路径的字节预算校验发生在
+    `enqueue` **之后**，越界帧已进队才被拒。现抽出 `reliable_rejection()` 作为
+    唯一判定源，发布前预检与落帧共用同一临界区的同一口径；被拒帧**不投递、不消耗 seq**。
+  - **`ProviderResult` 的消费侧漏判**：`UnsupportedBody` 会被当成功值渲染。补
+    `isUnsupportedBody()`，示例与接口文档改成先判再取。（同批曾加过 `isDegradedValue()`，
+    **轮 9 删除**：`DegradedValue` 两侧只有一个生产者（`host_clipboard_read`）且 TS/Rust
+    都是具名类型，取件路径 `clipboardReadDetailed()` 已按类型返回——这个守卫零消费点，
+    留着就是本轮一直在清的「有类型、有导出、没有入口」那一类。）
+  - **`BrandInfo` 无版本字段却被文档写成版本来源**：`UpdateInfo.currentVersion` 在
+    宿主侧**没有来源**，版本只能由调用方作为 `updaterCheck(currentVersion)` 的**入参**
+    给出。文档与 `auto-update-client.ts` 的注释同步更正。
+  - **灰度死逻辑**：`GrayscalePolicy` / `CrashGate` 在装配里有类型、无消费点，
+    `DistributeUpdaterSink` 现按 `InstallationIdentity` 的桶值真实判定，
+    「批次未覆盖」返回 `available=false` 且**不**标 `degraded`（运维事实 ≠ 端点故障）。
+  - V4 §33 补两节：**规格码名 ↔ 现行线名**对账（`E_REVIEW_STALE` / `E_STALE_HANDLE`
+    有承载体，`E_RUNTIME_HANDSHAKE` **无实现**）与 **P1/P2 落地判定台账**
+    （W9–W13、Manifest V3、Remote POC、Marketplace 逐条给出「落 / 半落 / 未落」与证据）。
+- **轮 8 独立复查（含两条已被推送的主干红灯门禁）**：
+  - **`pnpm lint` 与 `pnpm format:check` 在 `main` 上是红的**（被 `afa3767` 带进主干、
+    当时未复跑）：`tauri-backend.ts` 的 `FRAMEWORK_COMMANDS` 只在类型位被引用而被判
+    「仅作文档/门禁基线」，现与 `OPTIONAL_FRAMEWORK_COMMANDS` 对称导出
+    （`@tauron/host/tauri`），README 导出段同步注明「**不是**运行期能力表」；
+    `scripts/verify-registry-consumer.mjs` 等 5 个文件补 prettier 规范化。
+  - **退避阶梯走空会把 topic 永久拉黑**：`SUBSCRIBE_RETRY_DELAYS_MS` 用尽后
+    `retryCounts` 残留在阶梯长度上，后续任何重新订阅都直接落回「无延迟可用」分支——
+    等于把「管理员批准即生效」换成「必须重启插件」。现清零并在清零处写明
+    为什么不会退化成无限轮询（唯一的自动入口被 `eventListeners.has` 挡住），
+    新增回归测试 `阶梯走空后重新订阅会再走一轮（不得把 topic 永久拉黑）`。
+  - **旗舰示例不在类型门禁内**：`examples/minimal-app` 只有 `vite build`，
+    `pnpm -r typecheck` 从不编译它，`isUnsupportedBody` 漏 import 因此存活。
+    补 `typecheck` 脚本（5 处 tsc 错误当场暴露并修掉），CI 的门禁面自此覆盖示例。
+  - `host_capabilities` 进 `authz::COMMANDS` 后的计数漂移清零：`capabilities.test.ts`
+    的 30/20/30/20、wire-gate 的标题与 `SHELL_PLUGIN_FACE_ALLOW`（协商入口是宿主自述、
+    只读，显式登记并写明理由）、`plugin-development-guide` 与 `app-layer-wire` 的
+    插件面/错误码口径一并统一到 20 self-side + 8 特权 / 24 个错误码变体。
+  - `@tauron/types` 的 motion 家族在公共入口不可达（`validateConfig` 却在校验它）：
+    补进 barrel；删掉两侧零消费的死类型 `RegisteredCommand`（SDK）与
+    `WindowActionResult`（宿主侧，且与 `@tauron/ui-primitives` 同名异形状）。
+- **轮 9 发布前终审（门禁实照 + 文档口径对账）**：
+  - **全门禁本机复跑（2026-10-02 同一次运行采集）**：`pnpm -r build` / `typecheck` /
+    `lint` / `format:check` 均 exit 0；`pnpm -r test` **1759 passed / 0 failed**
+    （20 包 / 104 文件）；wire-gate **130 passed**；`cargo fmt` / `clippy --locked -D warnings`
+    exit 0；`cargo test --workspace --locked --lib --tests` **1426 passed / 0 failed**
+    （21 个测试二进制，12 条 feature 门控用例 filtered out）；feature 矩阵 5 项全 exit 0
+    （`plugin-install` **269**、`tauri`-adapter **285**、`tauri`-shell **72**、
+    `--all-features` check、`--no-default-features` check）；四个契约脚本门禁
+    （ledger 85 / target-matrix / release-evidence / no-lock-across-await）与
+    `pnpm publish:npm -- --check`（20 包）全绿。**唯一红灯**是
+    `node scripts/verify-registry-consumer.mjs`：`npm ETARGET create-tauron-app@1.1.0`
+    ——**发布态**门禁（1.1.0 尚未 `--publish`），不是主干坏了。
+  - **测试计数口径统一到「执行结果」**：README 徽章与「测试」表此前 Rust 一栏给的是
+    `#[test]` **声明数**（1299），而 competitive-analysis 给的是执行数（1264），两处互相
+    打架且都已过期。现统一为执行数（TS 1759 / Rust 1426 / wire-gate 130）并把声明数
+    （1498）作为**另一口径**注明；roadmap §0 口径段、competitive-analysis §四 表 + 脚注、
+    V4 §33 新增的「轮 9 门禁实照」表同步。
+  - **三方对账表自身写错了**：`full-architecture-refactor-plan.md` §1.3 把 TS
+    `FRAMEWORK_COMMANDS` 记成「83 条，不含 install」——实测 **85 条且含 install 两条**，
+    `OPTIONAL_FRAMEWORK_COMMANDS` 是它的**子集**（语义是「这两条不得由静态表乐观放行，
+    只能由运行期协商开门」）；同表 `authz::COMMANDS` 19 / 特权 4 也已过期，改为
+    **20（Self_ 18 + ScopedRead 2）/ 8** 并写出 8 条的构成，行号指针换成符号名。
+  - **幽灵命令名清扫**（以宏解析出的 85 条为白名单，对全仓 markdown 的 `host_*` 逐条判定）：
+    `host_settings_set_as` **不是命令**，是 Rust 内部共用写路径 `cmd_settings_set_as`
+    （`app-layer-wire.md` 产帧范围段已改口径）；`host_menu_on_select` 是 roadmap 的**提案名**、
+    从未注册，且 `MenuSink` 只有 `set_menu` / `popup` / `reset` / `native_supported`——
+    「选中项回传宿主」这条回调链**仍是缺口**，已在原文标注别去找实现；
+    `host_settings_changed`（refactor-plan P1-6 旧命名）补注现行线名 `host:settings:changed`；
+    `host_call_begin` / `host_grant_request` 两侧都不存在、且已有回归门禁钉住，无需改动。
+  - **轮 7 自己引入的孤儿守卫回收**：`isDegradedValue()` 全仓零消费点（`DegradedValue`
+    两侧都是具名类型，唯一生产者 `host_clipboard_read` 已被 TS 类型覆盖），删掉函数与
+    `@tauron/host` 导出——这正是轮 5–8 一直在清的那类「有类型、有导出、没有入口」。
+  - **默认特性口径复发清零**：roadmap §0 基线表仍写「`plugin-install` 另注册 2 条且
+    **默认开启** → 85 条」，与 1.1 的 `tauron-adapter` `default = []` 冲突，改为 opt-in 表述。
+  - **发布状态全线对账（registry 现值 vs 仓库版本）**：逐个 `npm view <包> version` 量得
+    20 个公开包的 `latest` **全是 1.0.2**，逐个 `cargo add <crate> --dry-run` 量得
+    crates.io 上 **15 个** `tauron-*` = 1.0.2，`tauron-ffi`（2026-09-29 才进 workspace）
+    **一个版本都没有**。而 README / installation / competitive-analysis / plugin-guide /
+    两个包 README 还成片写着「20 个 npm 包已发布…Rust crate 尚在验收」「`@tauron/cli`
+    尚未发布（`private: true`）」（该包今天既不发 `private`、npm 上也有 1.0.2）与
+    「`@tauron/cli@1.1.0` 已发布到 npm」——三处互相打架且都把第三方指向装不到的坐标。
+    现统一为「registry 现值 1.0.2 / 仓库 1.1.0 已备好未发布」，点名 `@1.1.0` 的示例
+    改成 `@latest` + 警示。**同一批把 `check-published-versions.mjs 1.1.0` 与
+    `verify:registry-consumer` 的红灯归因为发布态**：前者逐包 404、后者 `ETARGET`，
+    健康路径用 `TAURON_VERIFY_VERSION=1.0.2` 重跑同一条脚本证明（5 步全过、exit 0）。
+    另外实测 `git show 4e5c37f:crates/tauron-adapter/Cargo.toml` 确认 **1.0.2 的
+    `default = ["plugin-install"]`（85 条）与 1.1.0 的 `default = []`（83 条）行为不同**，
+    已在 competitive-analysis §5.1 写明「装得到，但装到的是旧行为」。
+  - **版本字面量漂移点清扫 + 单一真源**（发布链路自己的「孤儿/漂移」类缺陷）：
+    `@tauron/app-cli` 的三个生成器（`scaffold.ts` / `init.ts` / `plugin.ts`）各写一份
+    `const FRAMEWORK_VERSION = '1.1.0'`，`@tauron/cli` 的 `--version` 与 `--help` 文案
+    写死 `tauron v1.1.0`，其生成的 `package.json` 又把依赖写成 `^1.1.0` 字面量，
+    `verify-create-tauron-app.mjs` 再硬编码断言一遍 `1.1.0`——发版时漏改任一处，
+    产物会**安静地**指向旧版本并「构建通过」。现：app-cli 三条 pin 收敛到
+    `src/framework-version.ts` 单点，新增 `framework-version.test.ts`（7 条）把它钉在
+    本包 / 仓库根 / `Cargo [workspace.package]` / `@tauron/host` 四个版本号上，并断言
+    生成产物里的三条 pin 全部取自该真源；tauron-cli 新增 `src/version.ts` 从**本包
+    `package.json`** 读版本，`--version` / `--help` / 生成依赖都走它；
+    `verify-create-tauron-app.mjs` 的期望值改取 `cliPackage.version`。顺带把
+    `UpdaterStore` 的 `currentVersion` 默认值从 `'1.1.0'` 改成 `'0.0.0'`——那个字段语义是
+    **宿主应用自己的版本**，用 SDK 版本兜底既报错信息又每次发版漂移（全仓无消费者依赖
+    该默认值，测试都是显式传参）。
 
 ## [1.0.2] - 2026-09-28
 

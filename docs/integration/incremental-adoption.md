@@ -118,9 +118,12 @@ foreach ($m in 'tauron_substrate_handler','tauron_plugin_handler') {
 }
 # 输出（2026-10-01 复核；R9 五域 + 品牌/主题 + 1.1 审批/自检命令接通后）：
 # tauron_substrate_handler = 61
-# tauron_plugin_handler = 85   ← 83 + 2 条 plugin-install（cfg-gated，宏体带 #[cfg]）
-# 注：plugin-install 自 1.0-W6 起**已进 tauron-adapter 的默认特性**（Cargo.toml:21），
-# 故默认构建的 `tauron_plugin_handler!` 实际注册 85 条；`default-features = false` 时为 83 条。
+# tauron_plugin_handler = 85   ← 宏体内 83 + 2 条 plugin-install（cfg-gated，宏体带 #[cfg]）
+# 注：`plugin-install` 是 **opt-in**（`crates/tauron-adapter/Cargo.toml` 的 `default = []`，
+# V4 minimal-substrate 规则），故**默认构建实际注册 83 条**；接入方显式
+# `features = ["plugin-install"]` 才是 85 条。宏体计数法数的是**源码文本**，
+# 天然包含 cfg-gated 的 2 条，所以它给出的是「开启态」上限，别读成默认值。
+# （1.0-W6 曾把它进默认特性，1.1 已改回 opt-in。）
 ```
 
 另有**门禁**持续守住这两个数字之间的关系（不靠人眼）：
@@ -187,7 +190,11 @@ fn main() {
 - `tauron_adapter::SubstrateState` / `tauron_adapter::AdapterConfig` —— 均为 crate 根的 `pub struct`（`crates/tauron-adapter/src/lib.rs`）
 - `SubstrateState::with_adapter_config(cfg: &AdapterConfig) -> Self` —— `crates/tauron-adapter/src/lib.rs`
 - `tauron_adapter::tauron_substrate_handler![]` —— `#[macro_export]`，`crates/tauron-adapter/src/tauri.rs`（宏名 `tauron_substrate_handler`）
-- `AdapterConfig::default()` —— 派生 `Default`（四个字段：`registry` / `recovery_data_dir` / `required_plugins` / `origin_allowlist`，全部 `pub`）
+- `AdapterConfig::default()` —— 派生 `Default`。字段以 `crates/tauron-adapter/src/lib.rs`
+  的结构体为准（16 个 `pub` 字段，别在这里数）；档 1 真正会用到的是
+  `registry` / `recovery_data_dir` / `required_plugins` / `origin_allowlist`，
+  Production 另需 `main_window_labels`（可信主窗 label，留空 = `["main"]`）
+  与安全事实位（`caller_identity_policy_enabled` / `admin_audit_available` 等）
 
 > ⚠️ **不要**在档 1 用 `state_init()` / `init()`：它们注册的是 `PluginRuntimeState`
 > （含注册表），与「一分插件状态都不建」相矛盾；两者**互斥**，同时 `manage` 会
@@ -226,9 +233,10 @@ const shell = new ShellClient({ backend }); // 底座面：settings/i18n/notify/
 ```
 
 核对的 API：`TauriBackend` 的构造参数 `{ commandPrefix?: string }`
-（`packages/tauron-host/src/tauri-backend.ts:142`，默认 `'plugin:tauron|'`）；
-`HostClient({ backend })`（`packages/tauron-host/src/host.ts:81`）；
-`ShellClient({ backend })`（`packages/tauron-host/src/shell-client.ts:287`）。
+（`packages/tauron-host/src/tauri-backend.ts` 的 `constructor(options)`，默认
+`'plugin:tauron|'`）；`HostClient({ backend })`（`packages/tauron-host/src/host.ts`
+的 `export class HostClient`）；`ShellClient({ backend })`
+（`packages/tauron-host/src/shell-client.ts` 的 `export class ShellClient`）。
 
 UI 取 **`@tauron/ui-primitives`**（只依赖 `@tauron/shell-events`），
 **不要**取 `@tauron/ui`——后者的 `PluginManagerStore` 走 `host_registry_list/admin`
@@ -368,10 +376,18 @@ tauri::Builder::default()
 
 > **两种形态互斥**：同时用会重复 `manage::<PluginRuntimeState>` 而 panic
 > （[app-layer-wire.md §1](../architecture/app-layer-wire.md)）。
-> `AdapterConfig` 是唯一能配 `origin_allowlist` / `registry` / `required_plugins` /
-> `recovery_data_dir` 的入口；缺省入口等价于 `AdapterConfig::default()`。
+> `AdapterConfig` 是唯一能配 `origin_allowlist` / `main_window_labels` / `registry` /
+> `required_plugins` / `recovery_data_dir` 的入口；缺省入口等价于 `AdapterConfig::default()`。
+> ⚠️ **Production 下 `origin_allowlist` 不得为空**：空清单=origin 门未装弹，
+> 装配阶段就被 `ORIGIN_GATE_ARMED_REQUIRED` 拒绝（轮 10）。`main_window_labels`
+> 留空展开为 `["main"]`；多窗宿主里**其它**想调宿主命令的窗口必须显式声明，
+> 否则在 Production 会被 `MAIN_WINDOW_LABEL_NOT_DECLARED` 拒掉。
 > ⚠️ `examples/minimal-app/src-tauri/src/main.rs` 与
-> `Cargo.toml` 的注释此前写的「45 条」是**过时注释**，轮 11 已就地修正为 **54 条**；此后经 R9 五域（menu/tray/fs/http/updater）与品牌/主题接通，当前命令总数为 **底座 61 / 全量 83**（= 底座 + 插件运行时 22；1.1 向底座进 Event 审批 3 条 + 生产就绪自检 1 条，向插件运行时进流式 credit 1 条）；`plugin-install` feature 另注册 2 条，且**该 feature 已进默认**（`Cargo.toml:21`，1.0-W6），故**默认构建实际注册 85 条**，`default-features = false` 时为 83 条
+> `Cargo.toml` 的注释此前写的「45 条」是**过时注释**，轮 11 已就地修正为 **54 条**；此后经 R9 五域（menu/tray/fs/http/updater）与品牌/主题接通，当前命令总数为 **底座 61 / 全量 83**（= 底座 + 插件运行时 22；1.1 向底座进 Event 审批 3 条 + 生产就绪自检 1 条，向插件运行时进流式 credit 1 条）；`plugin-install` feature 另注册 2 条，且该 feature 是 **opt-in**：`crates/tauron-adapter/Cargo.toml`
+> 的 `default = []`（1.1 的 V4 合并按 minimal-substrate 规则把它从 1.0-W6 的默认特性里改了回来），
+> 所以只开 `tauri` 命令桥的宿主是 **83 条**，显式 `features = ["plugin-install"]` 才是 **85 条**。
+> 示例应用属显式开启那一类（`examples/minimal-app/src-tauri/Cargo.toml` 的
+> `default = ["plugin-install", "runtime-wasm-broker"]`），因此它的安装包注册 85 条
 > （doc 里记录过的口径漂移已清零，不再只是"标注过时"）。
 
 ### 3.3 TS 侧
@@ -452,13 +468,14 @@ const health = await shell.runtimeHealth(handle.lease);                 // → {
 
 | 能力 | 现状 | 证据 |
 |---|---|---|
-| sidecar 的 stdin/stdout JSON-RPC 帧回路 | **未接线**（stdout 走 `Stdio::null()`，sidecar 收不到请求也回不了帧） | `crates/tauron-proc/src/spawner.rs:81-85` |
-| 进程组 / 作业对象 / kill 树、空闲超时 kill | **未实现**（终止只覆盖直接子进程） | `crates/tauron-proc/src/spawner.rs:93-94` |
+| sidecar 的 stdin/stdout JSON-RPC 帧回路 | **已接线**（`Stdio::piped()` + 每条进程一个 stdout 读线程 + `ProcessFrameSinkImpl` → `Registry::settle_call`）；**但无运行期证据**：仓内无可执行 sidecar、测试不起真进程 | `crates/tauron-proc/src/spawner.rs` 的 `CommandSpawner`、`crates/tauron-adapter/src/process_delivery.rs` |
+| 进程组 / 作业对象 / kill 树、空闲超时 kill | 前三者**已实现**（Unix/macOS 独立 process group、Windows `KILL_ON_JOB_CLOSE` Job Object、`CommandSpawner` 丢弃时逐个 tree-aware `kill`；两 provider 自报 `Partial`，无 fs/net/syscall 隔离，Production 因此拒接 `ProcSpawner`）；**空闲超时 kill 仍未实现** | `crates/tauron-proc/src/spawner.rs` 的 `UnixProcessGroupSandboxProvider` / `WindowsJobObjectSandboxProvider` / `impl Drop for CommandSpawner` |
 | 进程崩溃检测 | **轮询式**（无后台监控线程；不被调用的 `host_runtime_health` 不会发现死亡） | `crates/tauron-adapter/src/lib.rs` 的 `cmd_runtime_health` 文档注释 |
 | wasm 运行时 | **未实现**（`tauron-wasm` 只有配置校验/实例池/缓存/崩溃计数，无 extism 依赖），调用只回 `E_PLUGIN_TYPE_NO_RUNTIME` | `crates/tauron-wasm/Cargo.toml`；`crates/tauron-adapter/src/lib.rs` 的 `cmd_runtime_spawn` |
 | 市场监管 / 更新链 | **桩**：`host_market_check` 恒 `{available:false}`；download/install 恒 `{simulated:true}` | `crates/tauron-adapter/src/lib.rs` 的 `cmd_market_check` / `cmd_market_download` / `cmd_market_install` |
 | 品牌运行期信息 | **桩**：`host_brand_info` 恒 `{}`（构建期品牌 CI 矩阵是另一条真实链路） | `crates/tauron-adapter/src/lib.rs` 的 `cmd_brand_info` |
-| 权限授予 / 审批 / 物化为 Tauri Capability | **未接线**：`tauron-acl` 未进依赖表 | `crates/tauron-adapter/Cargo.toml` |
+| 权限授予 / 审批（安装路径） | **已接线**：`tauron-acl` 是 `plugin-install` 的可选依赖，`draft_grant_set` / `validate_grants` / `AclStore` 与 HMAC 封存都在真实安装链路里被调用 | `crates/tauron-adapter/Cargo.toml` 的 `plugin-install`；`crates/tauron-adapter/src/lib.rs` 的 `registry_install_preview_inner` / `registry_install_inner` |
+| 审批结果**物化为 Tauri Capability** | **未接线**：`AclStore::to_capability` 只有库内 API 与形态单测，宿主从不调 `add_capability`——运行时权限边界实际由代码层身份判定 + Tauri capability 清单（构建期静态）承担 | `crates/tauron-acl/src/grant.rs` 的 `to_capability` |
 | 双世界沙箱（QuickJS-WASM）、Shell 矩阵 | **参考实现**（模拟返回） | `packages/tauron-dual-world/src/sandbox.ts:134`、`packages/tauron-shell-matrix/src/manager.ts:70-88` |
 | 系统通知派发（`DispatchSink`） | **半接线，仍不推 OS**：`cmd_notify` 已按注入的 `notify_sink` 分支调 `tauron_notify::dispatch`，但仓库内**没有任何 `DispatchSink` 实现**、`notify_sink`（`OnceLock`）无人注入 | `crates/tauron-adapter/src/lib.rs` 的 `cmd_notify` / `notify_sink` |
 

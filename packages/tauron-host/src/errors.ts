@@ -5,7 +5,7 @@
 // 这里**不**定义任何 Tauri 依赖；所有错误对象都可被 JSON 序列化。
 // ──────────────────────────────────────────────────────────────────────────
 
-/** 线上错误码全集（与 Rust `ErrorCode` 枚举同序）。 */
+/** 线上错误码全集（与 Rust `ErrorCode` 的**码名集合**全等；声明顺序不属于协议，V4 A69）。 */
 export const HOST_ERROR_CODES = [
   'E_HOST_PANIC',
   'E_UNKNOWN_PLUGIN',
@@ -43,7 +43,8 @@ export const HOST_ERROR_CODES = [
    * 调用方该卸载插件；本码是**流句柄**达上限（`MAX_STREAMS`），调用方该
    * 先 `host_stream_close` 再开。
    *
-   * ⚠️ 追加码必须加在数组**末尾**：wire-gate 按声明顺序与 Rust 枚举比对。
+   * ⚠️ 位置自由：wire-gate 与 Rust 枚举按**名集合**比对（`contracts/error/error-codes.json`
+   * 是权威清单），新码请放在语义相邻处。
    */
   'E_STREAM_FULL',
   /**

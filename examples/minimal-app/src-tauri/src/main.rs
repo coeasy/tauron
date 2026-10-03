@@ -87,13 +87,35 @@ fn load_plugin_install_config() -> Option<(std::path::PathBuf, std::collections:
     Some((root, keys, acl))
 }
 
-#[cfg(all(not(feature = "substrate-only"), feature = "plugin-install"))]
+/// hex 解码（`TAURON_ACL_SIGNING_KEY` / signer key 的线形态）。
+///
+/// cfg 比 `load_plugin_install_config` 更宽一档：asset 读侧信任根只需要根目录 +
+/// ACL 密钥，与 `substrate-only` 无关。
+#[cfg(feature = "plugin-install")]
 fn decode_hex(raw: &str) -> Option<Vec<u8>> {
     if raw.is_empty() || raw.len() % 2 != 0 { return None; }
     raw.as_bytes().chunks_exact(2).map(|pair| {
         let value = std::str::from_utf8(pair).ok()?;
         u8::from_str_radix(value, 16).ok()
     }).collect()
+}
+
+/// A84：asset 读侧信任根（安装根目录 + 宿主 ACL 密钥）。
+///
+/// 与 `load_plugin_install_config` **同源**：安装侧用哪个密钥密封 activation 记录，
+/// 服务侧就必须用同一个密钥认证它。拿不到就没有可信摘要可言，此时**不注册**
+/// asset 协议（并把原因如实打出来），而不是注册一个只校验路径的读侧。
+#[cfg(feature = "plugin-install")]
+fn plugin_asset_trust() -> Option<tauron_adapter::PluginAssetTrust> {
+    let root = std::env::var_os("TAURON_PLUGIN_INSTALL_DIR").map(std::path::PathBuf::from)?;
+    let key = decode_hex(std::env::var("TAURON_ACL_SIGNING_KEY").ok()?.trim())?;
+    match tauron_adapter::PluginAssetTrust::new(root, key) {
+        Ok(trust) => Some(trust),
+        Err(error) => {
+            eprintln!("[tauron] 插件 asset 信任根不可用：{}", error.message);
+            None
+        }
+    }
 }
 
 /// 示例插件的 manifest（与 `src/plugin/first.ts` 的 `name` 一致）。
@@ -117,11 +139,17 @@ const DEMO_PLUGIN_MANIFEST: &str = r#"{
 
 fn main() {
     #[cfg(feature = "plugin-install")]
-    let builder = {
-        let root = std::env::var_os("TAURON_PLUGIN_INSTALL_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("tauron-plugins"));
-        tauron_adapter::tauri::with_plugin_asset_protocol(tauri::Builder::default(), root)
+    let builder = match plugin_asset_trust() {
+        Some(trust) => {
+            tauron_adapter::tauri::with_plugin_asset_protocol(tauri::Builder::default(), trust)
+        }
+        None => {
+            eprintln!(
+                "[tauron] 插件 asset 协议未注册：缺少 TAURON_PLUGIN_INSTALL_DIR 或有效 \
+                 TAURON_ACL_SIGNING_KEY——没有可信 activation 摘要时不服务未复核的字节"
+            );
+            tauri::Builder::default()
+        }
     };
     #[cfg(not(feature = "plugin-install"))]
     let builder = tauri::Builder::default();

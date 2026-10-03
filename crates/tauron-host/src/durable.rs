@@ -1,4 +1,10 @@
-//! V4 durable envelope and reversible migration snapshot (A93/A101).
+//! V4 durable envelope (A93).
+//!
+//! A101 的「迁移回滚快照」不在这一层：它是宿主设置的具体协议，落盘/消费都在
+//! `tauron-adapter`（`stage_settings_rollback_image` / `load_settings_rollback_image`）。
+//! 这里曾经有一个通用的 `MigrationSnapshot<T>`（before/after + `committed`），零消费者，
+//! 且与 `tauron-settings` 的 `MigrationReceipt.before` 是同一个事实的两份表达——已删除并
+//! 登记进 V4「未接线公开 API 台账」轮 11 小节。
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -75,47 +81,6 @@ pub fn decode_durable<T: Serialize + DeserializeOwned>(
     Ok(value)
 }
 
-/// Migration carries both before and after snapshots. Persisting the after-image is not allowed
-/// to destroy the rollback image until the caller explicitly commits the migration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationSnapshot<T> {
-    pub from_version: String,
-    pub to_version: String,
-    pub before: T,
-    pub after: T,
-    committed: bool,
-}
-
-impl<T: Clone> MigrationSnapshot<T> {
-    pub fn stage(
-        from_version: impl Into<String>,
-        to_version: impl Into<String>,
-        before: T,
-        migrate: impl FnOnce(&T) -> T,
-    ) -> Self {
-        let after = migrate(&before);
-        Self {
-            from_version: from_version.into(),
-            to_version: to_version.into(),
-            before,
-            after,
-            committed: false,
-        }
-    }
-
-    pub fn commit(&mut self) {
-        self.committed = true;
-    }
-
-    pub fn committed(&self) -> bool {
-        self.committed
-    }
-
-    pub fn rollback_value(&self) -> T {
-        self.before.clone()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,19 +98,5 @@ mod tests {
         let bytes = encode_durable(&envelope).unwrap();
         let decoded: DurableEnvelope<serde_json::Value> = decode_durable(&bytes).unwrap();
         assert_eq!(decoded, envelope);
-    }
-
-    #[test]
-    fn migration_keeps_rollback_snapshot_until_commit() {
-        let mut m = MigrationSnapshot::stage("1", "2", vec![1], |old| {
-            let mut next = old.clone();
-            next.push(2);
-            next
-        });
-        assert_eq!(m.rollback_value(), vec![1]);
-        assert_eq!(m.after, vec![1, 2]);
-        assert!(!m.committed());
-        m.commit();
-        assert!(m.committed());
     }
 }

@@ -2460,6 +2460,28 @@ unsupported
 其中 `tauron-contract-tests` **151 passed**、`tauron-app-plugin-sdk` **43 passed**；
 `node scripts/generate-public-surface-ledger.mjs --check` → **85 public commands, no orphan metadata**。
 
+**轮 9 门禁实照**（2026-10-02 同一次运行采集，非记忆值；轮 7/8 的改动全部在此复跑）：
+
+| 门禁 | 命令 | 实测 |
+|---|---|---|
+| TS 构建 | `pnpm -r build` | exit 0 |
+| TS 类型 | `pnpm -r typecheck` | exit 0（**含**轮 8 新补的 `examples/minimal-app`） |
+| TS Lint / 格式 | `pnpm lint` / `pnpm format:check` | exit 0 / exit 0 |
+| TS 测试 | `pnpm -r test` | exit 0，20 包 / 104 文件 **1759 passed / 0 failed** |
+| 跨语言 wire-gate | `pnpm --filter @tauron/contract-tests exec vitest run src/wire-gate.test.ts` | exit 0，**130 passed**（本包合计 151 / 2 文件） |
+| Rust 格式 / Lint | `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets --locked -- -D warnings` | exit 0 / exit 0 |
+| Rust 测试 | `cargo test --workspace --locked --lib --tests` | exit 0，21 个测试二进制 **1426 passed / 0 failed**（另有 12 条 feature 门控用例 filtered out；源码 `#[test]` 声明数 1498，差额为未编译的门控用例） |
+| Rust feature 矩阵 | `cargo check -p tauron-adapter --no-default-features` / `cargo test -p tauron-adapter --features plugin-install` / `--features tauri` / `cargo test -p tauron-shell --features tauri` / `cargo check --workspace --all-targets --all-features` | 全部 exit 0（**269 / 285 / 72 passed**） |
+| 契约脚本门禁 | `generate-public-surface-ledger.mjs --check` / `check-target-matrix.mjs --check` / `generate-release-evidence.mjs --check` / `check-no-lock-across-await.mjs` | 全部 exit 0（85 public commands, no orphan metadata；4 target；version=1.1.0；41 个 Rust 文件） |
+| 脚手架 pin 预检 | `node scripts/verify-create-tauron-app.mjs` | exit 0（轮 9 起期望值取自 `@tauron/app-cli` 自己的 `package.json`，不再硬编码版本号） |
+| 版本 pin 单一真源 | `pnpm --filter @tauron/app-cli exec vitest run src/framework-version.test.ts` | exit 0，**7 passed**——把生成器的三条 pin（`@tauron/host` / `tauron-adapter`+`tauron-shell` / `tauron.plugin.json` 的 `framework`）钉在本包、仓库根、`Cargo [workspace.package]`、`@tauron/host` 四个版本号上 |
+| npm 发布内容 | `pnpm publish:npm -- --check` | exit 0，**20 个可发布包全部通过**（未真的发布） |
+| 干净目录消费者 | `node scripts/verify-registry-consumer.mjs` | **exit 1**：`npm ETARGET — No matching version found for create-tauron-app@1.1.0` |
+
+> 最后一行是**唯一红灯**，且是**发布态**门禁而非代码缺陷：它从公共 npm registry 安装
+> `create-tauron-app@1.1.0` 建骨架，而 1.1.0 尚未 `--publish`。**发布 SDK 之前这条不可能绿**，
+> 别把它读成「主干坏了」，也别为了让它绿而回落版本号。
+
 **Exit Gate 判定**：尚未达成。三条判据里「一个 Tauron plugin 接入」（W3）与
 「无手工生命周期补丁」（W5）仍是硬缺口，基础 profile 的体积门禁（W2）也未建。
 故 1.1 对外只承诺**已落项**（能力协商 fail-closed、设置观察、安装身份灰度、资源预算），
@@ -2480,6 +2502,66 @@ unsupported
 
 **判据**：本表的每一项要么有测试、要么在代码与文档里写明「谁是消费者」。
 「有实现、无人接、也没交代」才算孤儿——那一类本轮已清零。
+
+#### 轮 10 对本台账的增减（2026-10-02）
+
+| 项 | 位置 | 处置 |
+|---|---|---|
+| `admission::CreditWindow`（A79） | `crates/tauron-host/src/admission.rs` | **从「未接线」转为「已接线」**：现在是 `StreamRegistry` 每条流句柄的字段类型（`stream.rs` 的 `credit: CreditWindow`），补额走 `grant`、写帧走 `consume`。此前流侧另有一套 saturating-add/min 算术，与原语语义重复却无消费点——**重复的那一份已被删除**，`stream.rs` 里不再有裸额度计数器 |
+| `admission::FairQueue`（A80 公平调度） | 同上 + `lib.rs` re-export | **已删除并在此登记**：零生产消费者，且本版不打算半接（接一半的轮转队列比没有更危险——它会让人以为饿死已被治）。A80 的**分层限额**那一半是活的（`AdmissionController` 由 `Registry::call_begin` 准入、全终态释放）；**按 owner 公平调度仍未落**，缺额记在 `docs/architecture/v4-industrial-gap-closure-plan.md` 的后续 Batch，门禁 `wire-gate` 反向钉住「`FairQueue` 不得复活」 |
+| `ErrorCode` 声明顺序 | `crates/tauron-host/src/error.rs`、`packages/tauron-host/src/errors.ts` | **不再是协议约束**（A69）：线上承载的是**码名**（serde 表示即变体名），三处按序比对已全部改为**按名集合**比对（`gates.test.ts`、`contracts.test.ts`、`wire-gate` 原本就是 sorted 比对）。代码注释里「新码必须追加在末尾」的教义同步删除，改为「放在语义相邻处」 |
+
+#### 轮 11 对本台账的增减（2026-10-03）
+
+| 项 | 位置 | 处置 |
+|---|---|---|
+| `durable::MigrationSnapshot<T>`（A101） | `crates/tauron-host/src/durable.rs` | **已删除并在此登记**：它与 `tauron-settings` 的 `MigrationReceipt.before` 是同一个事实的两份表达，且两份都只活在内存里——重启即失效。A101 的落点改为**宿主设置域的具体协议**：`stage_settings_rollback_image` / `load_settings_rollback_image`（`crates/tauron-adapter/src/lib.rs`）把迁移前用户层封进 `DurableEnvelope`（schema `tauron.host-settings-rollback/1`）落盘，装配在正式文档读不动时消费、消费即作废。门禁：`wire-gate`「A101 迁移回滚镜像必须落盘、先于新文档写、并在重启时被消费」（含「`MigrationSnapshot` 不得复活」的反向钉）+ adapter 三轮重启 E2E `a101_rollback_image_restores_pre_migration_state_after_a_restart` |
+| `FaultBoundary::run`（A91） | `crates/tauron-host/src/fault.rs:71` | **从生产路径退出，保留为 embedder API**：`run` 把边界锁整段扣在闭包上（类型层面强制），对含磁盘 I/O 的链路等于**用故障状态当代行化点**——轮 11 把设置族改成两段式（`ensure_ready` 判就绪 → 业务在 `settings_write_lock` 下执行 → panic 事后 `record_panic` 登记）。`run` 仍是「单临界区内捕获 panic」的正确形态（纯内存子系统应当用它），由 `fault.rs` 单测覆盖；**登记理由**：本版没有第二个生产边界可迁，接一半比不接更误导 |
+| `OrderingTracker::observe`（A102） | `crates/tauron-host/src/ordering.rs` | **定性为发布侧 oracle，不是孤儿**：生产 `publish` 走 `issue`（铸造单调元数据），`observe` 回答「这串元数据是否自洽」，由 `crates/tauron-host/tests/v4_host_conformance.rs:94-118` 钉住 duplicate/gap/revision-regression 三种判定。**接收端的真实守卫在 TS**：`EventOrderingWatcher`（`packages/tauron-host/src/events.ts`）接进两条生产取件泵（`rpc.ts` 宿主泵、`tauron-app-plugin-sdk/src/context.ts` 插件泵），异常只上报不吞投递。门禁 `wire-gate`「A102 顺序契约必须有接收端判定」把两侧 + 两个消费点 + 异常分支本体一起钉住 |
+| `ActivationRecord::verify_bytes` / `ActivationError::IntegrityMismatch`（A84） | `crates/tauron-host/src/activation.rs:41` | **从「未接线」转为「已接线」**：逐资产服务 `read_installed_plugin_asset`（`crates/tauron-adapter/src/tauri.rs:1738`）在路径判定之后、把字节交给响应之前调 `PluginAssetTrust::verify_asset`（`adapter/lib.rs:777→:811`），无密封记录与摘要不符同样拒服务，并区分 404（没有这条内容）/403（内容与安装时封的不一致） |
+| `admin_audit::{AdminAuditSink::in_memory, verify_records, verify_file}`（F3 新增面） | `crates/tauron-host/src/admin_audit.rs` | **运维/嵌入方读口，仓内消费者是测试**：生产写口是 `record_admin_audit`（`adapter/lib.rs:3738`），doctor 读 `sink.facts()`；`in_memory` 让测试与嵌入方在无盘场景复用同一套链式语义，`verify_file`/`verify_records` 是**离线复核**入口（日志可被第三方便取验证）。三个都有断言覆盖，且刻意不进命令面——审计的读口一旦上线就变成跨主体信息泄露面 |
+| `HOST_SETTINGS_ROLLBACK_FILE`（A101 新增 pub 常量） | `crates/tauron-adapter/src/lib.rs:5878` | 与 `HOST_SETTINGS_FILE`/`HOST_SETTINGS_NAMESPACE` 同一口径：命令面不暴露文件名，装配方与运维工具按常量定位磁盘事实。**必须连语义一起读**：这是**一次性**的迁移前镜像，不是备份文件——被装配消费即删除，把「迁移落盘失败」当成它存在的证明也不成立（那条路径会主动作废它） |
+
+### 规格码名 ↔ 现行线名（按规格名去找码会找不到）
+
+V4 正文在若干 Gate 里写了建议码名。1.1 的实现**没有新增 `E_*` 变体**
+（新增必须同时动 Rust 枚举、`Display`、TS `HOST_ERROR_CODES` 三处按序比对，
+且会让 N-1 客户端的分流表整体错位），所以语义由**现行码 + 结构化字段**承载：
+
+| 规格里的码名 | 今天谁承载这个语义 | 可复现证据 |
+|---|---|---|
+| `E_REVIEW_STALE`（§102 / V4-R2-9 Gate） | `E_INSTALL_FAILED`，message 点名 `install review token is stale or has been tampered with` / `package changed after approval` | `crates/tauron-adapter/src/lib.rs` 的 `reviewed_install_rejects_package_replaced_after_preview` |
+| `E_STALE_HANDLE`（§116 / V4-R2-14 Gate） | **库内错误**，不是线名：`tauron_host::GenerationError::StaleHandle{resource,handle,active}`（A88/A90）；`tauron_host::runtime` 与 `tauron-wasm` 的 pack lease 真实消费 `GenerationRegistry` / `PackLeaseRegistry` | `generation.rs` 的 `matches!(r.validate(&old), Err(StaleHandle{..}))` |
+| `E_RUNTIME_HANDSHAKE`（§59 扩展示例 / W10） | **没有对应实现**——仓内唯一的 handshake 是 `remote_host_reference` 的 rustls TLS 1.3 证据（`RemoteTransportEvidence::tls13`），与进程运行时的握手不是一回事 | 全仓 `handshake` 只命中 `remote_host_reference.rs` / `remote_host.rs` 与其 chaos 测试 |
+
+> 结论：前两个是**同一语义换了承载**（诚实可查），第三个是**尚未落地**（别去找码）。
+
+### P1 / P2 落地判定（2026-10-02 评估，本轮不落地）
+
+口径同上：只有「代码里能用 + 有门禁把守」才算已落。**本轮（1.1）一行都没往 P1/P2 扩**，
+下面登记的是评估结论，不是完成声明。
+
+| 项 | 判定 | 现状 | 缺口（要落必须先补的） |
+|---|---|---|---|
+| W9 RuntimeDriver | ⬜ 未落 | 三条**各自独立**的路：JS 走 webview label、进程走 `tauron_proc` + `host_runtime_*`、WASM 只有投递器（`tauron-adapter/src/wasm_delivery.rs` 真跑 `validate_plugin_config` + `WasmCrashTracker`） | 没有统一 Driver 抽象，也没有跨形态的同一份 conformance 用例集 |
+| W10 Process Runtime V2 | ⚠️ 部分 | `ProcessStatus` 三态（`Alive`/`Exited`/`Unknown`）已在 `tauron-proc`；崩溃预算、ABI 比对、租约回收（`ReapStats`）已接命令面 | 运行时握手、进程树整体回收、true sidecar E2E 未落（`E_RUNTIME_HANDSHAKE` 即其空缺） |
+| W11 Message Plane push | ⚠️ 部分 | **特定 topic 有推**：`NOTIFICATION_TOPIC`、`DEEP_LINK_TOPIC`，以及 provider 降级信令（dialog / deep-link 的 `emit`） | **事件总线本体仍是拉模型**（`host_events_drain`）；把总线改成推要解决背压与断线补投，不是加一条 `emit` |
+| W12 ResourcePolicy count + bytes | ⚠️ 部分 | 本轮 R3-5 已落**预算层**：单帧 256 KiB / 队列 2 MiB / 设置值 64 KiB / 观察队列 1 MiB / 通知 512 B + 4 KiB，超限拒绝且零副作用 | A80 的分层 `AdmissionController` 与**按 owner 公平调度**未落——今天是全局额度，饿死风险仍在 |
+| W13 WASM Runtime Pack + WIT | ⬜ 未落 | `tauron-wasm` 有实例池 / 模块缓存 / 崩溃预算 / ABI 指纹的**状态层** | 该 crate 的依赖里**没有任何 wasm 引擎**（无 wasmtime/wasmer/wasmi），因此跑不了真模块；安装路径也显式只接受 JS 插件（其余报 `E_PLUGIN_TYPE_NO_RUNTIME`）。WIT 接口层同理为空 |
+| Manifest V3 | ⬜ 未落 | 现行清单要求 `framework` range + `abi` 字段，缺失即 `E_INVALID_MANIFEST` | 全仓**没有** `manifestVersion` 字段，也就没有 V2→V3 的迁移与兼容判定 |
+| Permission Diff | ⚠️ 部分 | 扩张才重审的 diff 语义已实现（`tauron-acl` 授予 diff + TS `scopeGrew` / `requiresReapproval`） | 键粒度授权未落（审批是 **topic 粒度**，见 W7 行） |
+| Contributes 全闭环 | ✅ 已落 | `host_contributes_register` / `_list` / `_reconcile` 三条在命令面与档位表内，声明与实注册分叉报 `E_CONTRIBUTES_DRIFT`（0.4-W3） | — |
+| Plugin dependency resolver | ⬜ 未落 | §59 的依赖模型停在设计层 | 没有解析器、没有环检测入口、清单里没有依赖字段 |
+| Plugin update / rollback | ⬜ 未落 | 更新链路只有**宿主自身**的更新检查（`tauron-distribute` + 安装身份灰度分桶）；`host_market_*` 三命令仍是 `simulated` 的进程内状态推进 | 插件级 update/rollback 需要包来源、版本协商与回滚事务，全缺 |
+| Runtime Pack Manager | ⬜ 未落 | A89 的 `PackLeaseRegistry`（跨宿主 GC 租约）已在并有测试 | 没有 Pack 的获取/装配/卸载管理器，租约因此只服务于引用与状态 |
+| Publisher Trust | ⚠️ 部分 | **安装路径是真验签**：`.tpkg` + `.sig` sidecar → `tauron_market::package_signature::PackageSignature`（Ed25519）→ 失败即中止、不留半安装态；ACL 授予另有 HMAC 签名且密钥不足 32 字节直接拒 | 发布者信任链（多级证书 / 吊销 / 指纹固定策略）未落——今天只有「配了可信公钥才能装」这一层 |
+| Remote Runtime POC | ⬜ 未落（库已就位） | `tauron-host` 的 `remote_host` / `remote_host_reference`（TLS 1.3 证据、会话快照）有 chaos 测试覆盖 | **适配器没有任何消费点**：没有跨宿主连接、没有 `host_*` 命令走它。按 §33 判据这属于「有实现、无人接」，已在此处交代清楚谁是预期消费者（网络适配层） |
+| P2 Marketplace（registry / catalogue / distribution / white-label / portal） | ⬜ 未落 | 白标侧 `tauron-brand` 是真实现（标识符 / 协议名 / 数据目录 / 快捷方式 / 图标，线形见 `BrandInfo`） | registry 协议与 catalogue 全无；`host_market_*` 仍是 simulated。P2 本身按 §「全部 optional」定位，不进 1.x 发布判据 |
+
+**为什么本轮不往 P1/P2 扩**（避免被读成"顺手就能做"）：W13 与 Remote 都卡在同一个前提上
+——**先有真实执行体**（wasm 引擎 / 跨宿主传输），而那是新增重依赖 + 新命令面 + 新门禁的
+一轮工程，塞进 1.1 的收尾只会被做成 `simulated`，即 §33 反复点名的「接口在、事实不在」。
+W9/W11 则是**抽象重构**，动的是已发布命令面的形状，必须独立一轮并配兼容门禁。
 
 ---
 
@@ -5412,7 +5494,14 @@ optional feature unknown
 
 # 89. Error Registry V3：协议兼容不能依赖 Rust 枚举声明顺序
 
-当前源码明确要求：
+> **轮 10（2026-10-02）已落实本节的核心要求**：三处按声明顺序的比对
+> （`tauron-host` 的 `gates.test.ts`、`app-contract-kit` 的 `contracts.test.ts`，
+> 以及原本就 sorted 的 wire-gate）统一改为**按码名集合**比对，权威清单是
+> `contracts/error/error-codes.json`；`error.rs` / `errors.ts` 里
+> 「新码必须追加在末尾」的教义同步删除。**本节尚未落实的是下面的 codegen 形态**
+> （yaml → 多语言常量），今天仍是「四处手写、按名集合对齐」。
+
+历史上本仓的源码明确要求过：
 
 ```text
 ErrorCode 新码只能追加到 enum 末尾
@@ -8697,6 +8786,36 @@ manifest target 只有 OS 粒度
 cargo-deny 仍 advisory
 main protection 未开启
 ```
+
+> **2026-10-02 逐条复核**（明细与证据行号见
+> [`docs/architecture/v4-industrial-gap-closure-plan.md`](./architecture/v4-industrial-gap-closure-plan.md) §2）：
+> 上面九条里 **四条已闭合**——`recovery durability 可关闭`（无持久化即 Quarantined）、
+> `RecoveryAction 幂等生产链未接`（生产命令 `cmd_recover_trial_enable` + 幂等键）、
+> `E_HOST_PANIC = retryable`（`RetryClass::Never`，两侧门禁锁定）、
+> `cargo-deny 仍 advisory`（CI blocking 作业）；**三条半闭合**——`whole-package memory read`
+> （验签/解包已流式，但安装路径 RSS 从未被测）、~~`ErrorCode 顺序耦合 TS gate`~~
+> （**轮 10 已闭合**，见下）、`manifest target 只有 OS 粒度`
+> （`TargetSpec` 模型完整，但 `resolve_best` 无消费者）；**字面仍成立的是两条**——
+> ~~`origin empty allowlist = gate disabled`~~（**轮 10 在 Production 已闭合**，见下；
+> 开发态兼容语义按设计保留）与 `Tauri 2 是正式支持边界`；
+> `main protection 未开启` 属仓库设置，代码无法闭合。
+> 这份名单在九条全部转绿之前不作删除，只作上述标注。
+>
+> **轮 10（2026-10-02）把九条推到「六条已闭合」**：
+> - `ErrorCode 顺序耦合`：线上承载的是**码名**（serde 表示即变体名），顺序从来不是
+>   协议；三处按序比对（`tauron-host` 的 `gates.test.ts`、`app-contract-kit` 的
+>   `contracts.test.ts`，以及原本就 sorted 的 wire-gate）已全部改为**按名集合**比对，
+>   `error.rs` 与 `errors.ts` 里「新码必须追加在末尾」的注释一并删除。集合比对仍钉死
+>   「一个不多一个不少」，改名/漏码照样红。→ §138.2 该条转**已闭合**。
+> - `origin empty allowlist = gate disabled`：`origin_gate` 在
+>   `DeploymentMode::Production` 下改走 `authz::production_caller_allowed`——空清单
+>   判 `ORIGIN_GATE_NOT_ARMED` 直接拒，且**未声明的 label 不再自动等同主窗**
+>   （`MAIN_WINDOW_LABEL_NOT_DECLARED`）。readiness 新增**独立事实**
+>   `origin_gate_armed`（由 `!origin_allowlist.is_empty()` 推导，宿主无法伪造），
+>   doctor 多一项 `id: "origin-gate"`，启动门多一条 `ORIGIN_GATE_ARMED_REQUIRED`。
+>   「声明了 caller identity」不再等于「门已装弹」。→ §138.2 该条在**生产形态**转
+>   **已闭合**；开发态/测试态仍是「空清单 = 不启用」，这是有意保留的兼容语义，
+>   不是缺口。
 
 所以当前阶段更准确的描述是：
 

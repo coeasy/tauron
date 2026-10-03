@@ -37,7 +37,11 @@ try {
   const cargoDir = join(ROOT, 'cargo-consumer');
 
   console.log(`1/5 Create a starter with the public npm command (tauron-app@${VERSION})`);
-  run('npm', ['create', '--yes', `tauron-app@${VERSION}`, '--', appDir, '--framework', 'vanilla'], ROOT);
+  run(
+    'npm',
+    ['create', '--yes', `tauron-app@${VERSION}`, '--', appDir, '--framework', 'vanilla'],
+    ROOT,
+  );
 
   console.log('2/5 Resolve the public JavaScript packages with pnpm');
   run('pnpm', ['install', '--no-frozen-lockfile'], appDir);

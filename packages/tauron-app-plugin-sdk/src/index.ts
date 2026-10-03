@@ -18,6 +18,7 @@ export { createPluginContext } from './context.js';
 export type {
   CommandHandler,
   CommandRegisterResult,
+  DeclaredCommandHandler,
   EventListener,
   PluginContext,
   PluginDefinition,
@@ -40,5 +41,4 @@ export type {
   PluginEventListener,
   PluginHost,
   PluginLog,
-  SettingsTabRegistry as SharedSettingsTabRegistry,
 } from '@tauron/plugin-context-contract';

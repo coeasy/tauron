@@ -29,7 +29,7 @@ export type {
 } from './errors.js';
 
 export type { Backend, ChannelPort, Principal, Unlisten } from './backend.js';
-export { MockBackend } from './backend.js';
+export { MockBackend, adoptRuntimeCapabilities } from './backend.js';
 export { MemoryTransport } from './memory-transport.js';
 export type { HostTransport } from './backend.js';
 export type { MemoryCommandHandler, MemoryTransportOptions } from './memory-transport.js';
@@ -57,9 +57,12 @@ export type {
 } from './host.js';
 
 export { ShellClient, SIDECAR_ABI_CONTRACT } from './shell-client.js';
+// 已删除：`WindowActionResult`（曾在此转出）。宿主侧没有任何命令返回该形状，
+// 且它与 `@tauron/ui-primitives` 的同名类型**形状不同**（那边是
+// `{ok:true}|{ok:false,code,message}` 且有真实生产者），双份同名易被误用。
+// 窗口操作的线上形状是 `WindowCreateOutcome` / `WindowRelaunchOutcome`。
 export type {
   ShellClientOptions,
-  WindowActionResult,
   NotificationRecord,
   NotifyItem,
   NotificationsListResult,
@@ -154,12 +157,7 @@ export type {
   DownloadProgress,
 } from './auto-update-client.js';
 
-export {
-  DialogClient,
-  createDialogClient,
-  isUnsupportedBody,
-  isDegradedValue,
-} from './dialog-client.js';
+export { DialogClient, createDialogClient, isUnsupportedBody } from './dialog-client.js';
 export type {
   FileFilter,
   OpenFileOptions,
@@ -205,9 +203,10 @@ export type {
   SignedGrantSet,
 } from './grants.js';
 
-export { TOPIC_MAX_LENGTH } from './events.js';
+export { TOPIC_MAX_LENGTH, EventOrderingWatcher } from './events.js';
 export type {
   EventFrame,
+  EventOrderingViolation,
   EventSelector,
   JsonValue,
   PendingCallInfo,

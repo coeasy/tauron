@@ -49,18 +49,25 @@ try {
     throw new Error('Generated pnpm-workspace.yaml must allow the esbuild install script.');
   }
 
+  // 断言的期望值取自 CLI 自己的 package.json，不写字面量：写字面量的后果是发版后
+  // 本脚本仍在校验**上一个**版本并「通过」（与 verify-registry-consumer.mjs 同一条理由）。
+  // `framework-version.test.ts` 已把生成器的 pin 钉在这个版本上，两侧不会各说各话。
+  const expectedVersion = cliPackage.version;
   const generatedPackage = JSON.parse(readFileSync(join(target, 'package.json'), 'utf8'));
   const cargoManifest = readFileSync(join(target, 'src-tauri/Cargo.toml'), 'utf8');
-  if (generatedPackage.dependencies?.['@tauron/host'] !== '1.1.0') {
-    throw new Error('Generated starter does not pin @tauron/host to 1.1.0.');
+  if (generatedPackage.dependencies?.['@tauron/host'] !== expectedVersion) {
+    throw new Error(
+      `Generated starter does not pin @tauron/host to ${expectedVersion} ` +
+        `(got ${JSON.stringify(generatedPackage.dependencies?.['@tauron/host'])}).`,
+    );
   }
-  if (!cargoManifest.includes('tauron-adapter = { version = "=1.1.0"')) {
-    throw new Error('Generated starter does not pin tauron-adapter to 1.1.0.');
+  if (!cargoManifest.includes(`tauron-adapter = { version = "=${expectedVersion}"`)) {
+    throw new Error(`Generated starter does not pin tauron-adapter to =${expectedVersion}.`);
   }
 
   if (process.env.TAURON_INSTALL_PREFLIGHT === '1') {
     execSync('pnpm install --no-frozen-lockfile', { cwd: target, stdio: 'inherit' });
-    execSync('pnpm add @tauron/ui@1.1.0', { cwd: target, stdio: 'inherit' });
+    execSync(`pnpm add @tauron/ui@${expectedVersion}`, { cwd: target, stdio: 'inherit' });
     execSync('pnpm run build', { cwd: target, stdio: 'inherit' });
   }
 

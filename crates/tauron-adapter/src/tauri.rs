@@ -912,6 +912,9 @@ pub fn host_events_approve(
 }
 
 /// `host_events_revoke`：主窗撤销插件订阅私有 topic 的审批。
+///
+/// 返回 `true` 表示确实删掉了一条授权；撤销同时作废该 `(subscriber, topic)` 的既有
+/// 订阅与待取帧（A81），管理面因此不需要再补一次 `host_events_unsubscribe`。
 #[tauri::command]
 pub fn host_events_revoke(
     state: State<'_, SubstrateState>,
@@ -1041,22 +1044,90 @@ mod plugin_asset_protocol_tests {
     use super::read_installed_plugin_asset;
     use std::fs;
 
-    #[test]
-    fn serves_plugin_files_and_rejects_traversal_and_missing_files() {
+    const ASSET_KEY: [u8; 32] = [0x5a; 32];
+    const INDEX_HTML: &[u8] = b"<main>plugin</main>";
+
+    /// 建一个「安装完成之后」的插件目录：内容 + 与之逐字节相符的密封 activation 记录。
+    fn sealed_asset_root() -> (tempfile::TempDir, crate::PluginAssetTrust) {
         let temp = tempfile::tempdir().unwrap();
         let plugin = temp.path().join("com.example.asset");
         fs::create_dir_all(&plugin).unwrap();
-        fs::write(plugin.join("index.html"), b"<main>plugin</main>").unwrap();
+        fs::write(plugin.join("index.html"), INDEX_HTML).unwrap();
+        let records = vec![tauron_host::ActivationRecord {
+            resource: "plugin:com.example.asset@1.0.0:asset:index.html".to_string(),
+            generation: tauron_host::Generation::INITIAL,
+            content: tauron_host::ContentIdentity::from_bytes(INDEX_HTML),
+        }];
+        let record_bytes = serde_json::to_vec(&records).unwrap();
+        let sealed = serde_json::json!({
+            "records": records,
+            "hmacSha256": tauron_acl::hmac_sha256_hex(&record_bytes, &ASSET_KEY).unwrap(),
+        });
+        fs::write(
+            plugin.join(crate::PLUGIN_UI_ACTIVATION_FILE),
+            serde_json::to_vec_pretty(&sealed).unwrap(),
+        )
+        .unwrap();
         fs::write(temp.path().join("secret.txt"), b"secret").unwrap();
+        let trust =
+            crate::PluginAssetTrust::new(temp.path().to_path_buf(), ASSET_KEY.to_vec()).unwrap();
+        (temp, trust)
+    }
 
+    #[test]
+    fn serves_plugin_files_and_rejects_traversal_and_missing_files() {
+        let (temp, trust) = sealed_asset_root();
         let (body, mime) =
-            read_installed_plugin_asset(temp.path(), "/com.example.asset/index.html").unwrap();
-        assert_eq!(body, b"<main>plugin</main>");
+            read_installed_plugin_asset(&trust, "/com.example.asset/index.html").unwrap();
+        assert_eq!(body, INDEX_HTML);
         assert_eq!(mime, "text/html; charset=utf-8");
-        assert!(read_installed_plugin_asset(temp.path(), "/com.example.asset/../../secret.txt")
-            .is_err());
-        assert!(read_installed_plugin_asset(temp.path(), "/com.example.asset/missing.js").is_err());
-        assert!(read_installed_plugin_asset(temp.path(), "/../secret.txt").is_err());
+        assert!(read_installed_plugin_asset(&trust, "/com.example.asset/../../secret.txt").is_err());
+        assert!(read_installed_plugin_asset(&trust, "/com.example.asset/missing.js").is_err());
+        assert!(read_installed_plugin_asset(&trust, "/../secret.txt").is_err());
+        // 信任根指向同一个安装目录：读侧不自己另找一个根，避免两条路径口径分叉。
+        assert_eq!(trust.root(), temp.path());
+    }
+
+    /// V4 A84：路径合规只证明"在服务目录之内"，**摘要**才是能不能服务端出的判定。
+    #[test]
+    fn refuses_to_serve_bytes_that_do_not_match_the_sealed_digest() {
+        let (temp, trust) = sealed_asset_root();
+        fs::write(temp.path().join("com.example.asset/index.html"), b"<main>tampered</main>")
+            .unwrap();
+        assert_eq!(
+            read_installed_plugin_asset(&trust, "/com.example.asset/index.html").unwrap_err(),
+            tauri::http::StatusCode::FORBIDDEN
+        );
+    }
+
+    /// 安装后注入的内容没有密封记录，因此永不服务——activation 文件本身同理。
+    #[test]
+    fn refuses_to_serve_content_without_a_sealed_activation_record() {
+        let (temp, trust) = sealed_asset_root();
+        fs::write(temp.path().join("com.example.asset/injected.js"), b"window.pwned = true;")
+            .unwrap();
+        assert_eq!(
+            read_installed_plugin_asset(&trust, "/com.example.asset/injected.js").unwrap_err(),
+            tauri::http::StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            read_installed_plugin_asset(
+                &trust,
+                &format!("/com.example.asset/{}", crate::PLUGIN_UI_ACTIVATION_FILE)
+            )
+            .unwrap_err(),
+            tauri::http::StatusCode::FORBIDDEN
+        );
+    }
+
+    /// 没有 ≥32 字节宿主密钥就没有可信记录，装配方因此拿不到信任根。
+    #[test]
+    fn asset_trust_refuses_an_undersized_host_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = crate::PluginAssetTrust::new(temp.path().to_path_buf(), vec![0x5a; 31])
+            .expect_err("a 31-byte host key must not arm the asset read path");
+        assert_eq!(error.code, crate::ErrorCode::E_INSTALL_FAILED);
+        assert!(crate::PluginAssetTrust::new(temp.path().to_path_buf(), vec![0x5a; 32]).is_ok());
     }
 }
 
@@ -1320,11 +1391,16 @@ pub fn host_notifications_read(
 }
 
 /// `host_recover_boot`：启动恢复检查。
+///
+/// **代码层身份判定（轮 12）**：返回的是**应用级**恢复态势，插件侧无合法读取场景，
+/// 见 [`crate::cmd_recover_boot_as`]。`window` 由 Tauri 注入，**线形不变**。
 #[tauri::command]
 pub fn host_recover_boot(
     state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
 ) -> Result<serde_json::Value, TauriError> {
-    crate::cmd_recover_boot(&state).map_err(to_tauri_err)
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_recover_boot_as(&caller, &state).map_err(to_tauri_err)
 }
 
 /// `host_recover_report`：应用上报启动结果（恢复引擎的**驱动信号**）。
@@ -1388,6 +1464,9 @@ pub fn host_market_check(
 
 /// `host_brand_info`：品牌信息（真实实现：接孤儿 crate `tauron-brand`；未配置来源时
 /// 返回 [`crate::ProviderResult::Unsupported`]，线形与其余 provider 型命令一致）。
+///
+/// **无需身份判定（轮 12 复核）**：只读、不含任何主体相关状态，未配置来源时诚实
+/// 降级——插件读到品牌信息不构成越权面。
 #[tauri::command]
 pub fn host_brand_info(
     state: State<'_, SubstrateState>,
@@ -1405,6 +1484,12 @@ pub fn host_capabilities(
 
 /// `host_i18n_t`：翻译。
 ///
+/// `host_i18n_t`：翻译。
+///
+/// **无需身份判定（轮 12 复核）**：只读取值、一次只答一个键，是插件渲染自己界面的
+/// 正常路径；全局普查面（谁的命名空间、缺了哪些键）是 `host_i18n_stats`，那条已判
+/// 仅主窗。
+///
 /// 全部缺失时返回 key 本身（并计入缺失计数），不是空串——空串会让缺失文案
 /// 彻底隐形。缺失可观测性见 `host_i18n_stats`。
 #[tauri::command]
@@ -1413,6 +1498,9 @@ pub fn host_i18n_t(state: State<'_, SubstrateState>, key: String) -> Result<Stri
 }
 
 /// `host_i18n_t_params`：带 `{{param}}` 占位替换的翻译。
+///
+/// **无需身份判定（轮 12 复核）**：与 `host_i18n_t` 同——只读取值，插件渲染自己界面
+/// 的正常路径。
 #[tauri::command]
 pub fn host_i18n_t_params(
     state: State<'_, SubstrateState>,
@@ -1458,9 +1546,17 @@ pub fn host_i18n_load(
 }
 
 /// `host_i18n_stats`：i18n 状态与缺失键可观测性。
+///
+/// **代码层身份判定（轮 12）**：全局文案普查（含别人的命名空间与缺失键）只给主窗，
+/// 见 [`crate::cmd_i18n_stats_as`]；取值用的 `host_i18n_t` / `host_i18n_t_params`
+/// 不判（插件界面本来就要取文案）。`window` 由 Tauri 注入，**线形不变**。
 #[tauri::command]
-pub fn host_i18n_stats(state: State<'_, SubstrateState>) -> Result<serde_json::Value, TauriError> {
-    crate::cmd_i18n_stats(&state).map_err(to_tauri_err)
+pub fn host_i18n_stats(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+) -> Result<serde_json::Value, TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_i18n_stats_as(&caller, &state).map_err(to_tauri_err)
 }
 
 /// `host_i18n_cleanup_plugin`：清除一个插件的全部文案。
@@ -1627,10 +1723,14 @@ impl TauriWindowSink {
 ///
 /// Requests use `/plugin-id/relative/path`; the handler canonicalizes both the install root
 /// and target and refuses traversal, symlinks outside the plugin directory, and unknown IDs.
+///
+/// V4 A84：路径合规之后还要过 [`crate::PluginAssetTrust::verify_asset`]——服务端出的
+/// 字节必须命中一条密封的 activation 记录且摘要逐字节相符。缺了这一步时，入口页
+/// 之外的每一个资产 GET 都不受摘要复核，安装完成后篡改磁盘上的 `*.js` 会被原样服务。
 #[cfg(feature = "plugin-install")]
 pub fn with_plugin_asset_protocol<R: tauri::Runtime>(
     builder: tauri::Builder<R>,
-    root: std::path::PathBuf,
+    trust: crate::PluginAssetTrust,
 ) -> tauri::Builder<R> {
     builder.register_uri_scheme_protocol("tauron-plugin", move |_ctx, request| {
         let fail = |status| {
@@ -1645,7 +1745,8 @@ pub fn with_plugin_asset_protocol<R: tauri::Runtime>(
         {
             return fail(tauri::http::StatusCode::METHOD_NOT_ALLOWED);
         }
-        let (bytes, content_type) = match read_installed_plugin_asset(&root, request.uri().path()) {
+        let (bytes, content_type) = match read_installed_plugin_asset(&trust, request.uri().path())
+        {
             Ok(asset) => asset,
             Err(status) => return fail(status),
         };
@@ -1660,14 +1761,12 @@ pub fn with_plugin_asset_protocol<R: tauri::Runtime>(
 
 #[cfg(feature = "plugin-install")]
 fn read_installed_plugin_asset(
-    root: &std::path::Path,
+    trust: &crate::PluginAssetTrust,
     request_path: &str,
 ) -> Result<(Vec<u8>, &'static str), tauri::http::StatusCode> {
-    let path = if request_path.starts_with("/plugin-") {
-        &request_path["/plugin-".len()..]
-    } else {
-        request_path.trim_start_matches('/')
-    };
+    let path = request_path
+        .strip_prefix("/plugin-")
+        .unwrap_or_else(|| request_path.trim_start_matches('/'));
     let mut parts = path.split('/');
     let id = parts.next().filter(|id| !id.is_empty()).ok_or(tauri::http::StatusCode::NOT_FOUND)?;
     let rest = parts.collect::<Vec<_>>().join("/");
@@ -1680,6 +1779,7 @@ fn read_installed_plugin_asset(
     {
         return Err(tauri::http::StatusCode::NOT_FOUND);
     }
+    let root = trust.root();
     let install_root = root.canonicalize().map_err(|_| tauri::http::StatusCode::NOT_FOUND)?;
     let plugin_root = install_root
         .join(plugin_id.as_str())
@@ -1696,6 +1796,11 @@ fn read_installed_plugin_asset(
         return Err(tauri::http::StatusCode::NOT_FOUND);
     }
     let bytes = std::fs::read(&target).map_err(|_| tauri::http::StatusCode::NOT_FOUND)?;
+    // 路径判定只证明"在服务目录之内"；服务与否由密封摘要说了算，因此这里区分
+    // 404（根本没有这条内容）与 403（有这条路径、内容却与安装时封的不一致）。
+    trust
+        .verify_asset(plugin_id.as_str(), &rest, &bytes)
+        .map_err(|_| tauri::http::StatusCode::FORBIDDEN)?;
     let content_type = match target
         .extension()
         .and_then(|ext| ext.to_str())
@@ -2224,6 +2329,9 @@ impl crate::TraySink for TauriTraySink {
 // ──────────────────────────────────────────────────────────────────────────
 
 /// `host_window_minimize`：最小化**调用方自己**的窗口。
+///
+/// **无需身份判定（轮 12 复核）**：目标窗口是 Tauri 注入的调用方 label（不是入参），
+/// 插件只能动自己的窗口；同族的应用级动作（quit / relaunch / create）已判仅主窗。
 #[tauri::command]
 pub fn host_window_minimize(
     state: State<'_, SubstrateState>,
@@ -2233,6 +2341,8 @@ pub fn host_window_minimize(
 }
 
 /// `host_window_maximize`：最大化调用方的窗口。
+///
+/// **无需身份判定（轮 12 复核）**：目标同样是注入的调用方窗口 label。
 #[tauri::command]
 pub fn host_window_maximize(
     state: State<'_, SubstrateState>,
@@ -2242,6 +2352,8 @@ pub fn host_window_maximize(
 }
 
 /// `host_window_restore`：还原调用方的窗口（Tauri 侧为 `unmaximize`）。
+///
+/// **无需身份判定（轮 12 复核）**：目标同样是注入的调用方窗口 label。
 #[tauri::command]
 pub fn host_window_restore(
     state: State<'_, SubstrateState>,
@@ -2251,6 +2363,9 @@ pub fn host_window_restore(
 }
 
 /// `host_window_close`：关闭调用方的窗口。
+///
+/// **无需身份判定（轮 12 复核）**：目标同样是注入的调用方窗口 label——插件关不掉
+/// 邻居或主窗。销毁后的资源回收见 [`crate::cmd_window_close`] 的注释。
 #[tauri::command]
 pub fn host_window_close(
     state: State<'_, SubstrateState>,
@@ -2260,9 +2375,18 @@ pub fn host_window_close(
 }
 
 /// `host_window_quit`：退出应用（`app.exit(0)` 在 [`TauriWindowSink`] 里）。
+///
+/// **代码层身份判定（轮 12）**：quit 是**应用级**动作（一次调用关掉整个宿主），
+/// 与轮 11 判为仅主窗的 `host_window_relaunch` 同类且更彻底；同族窗口命令因为传
+/// `window.label()`（调用方自己的窗口）不需要判定。见 [`crate::cmd_window_quit_as`]。
+/// `window` 由 Tauri 注入，**线形不变**。
 #[tauri::command]
-pub fn host_window_quit(state: State<'_, SubstrateState>) -> Result<(), TauriError> {
-    crate::cmd_window_quit(&state).map_err(to_tauri_err)
+pub fn host_window_quit(
+    state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
+) -> Result<(), TauriError> {
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_window_quit_as(&caller, &state).map_err(to_tauri_err)
 }
 
 /// `host_window_relaunch`：重启应用（**仅主窗**；先对账恢复阶段、再重启）。
@@ -2312,6 +2436,9 @@ pub fn host_window_create(
 // ──────────────────────────────────────────────────────────────────────────
 
 /// `host_window_set_position`：移动窗口（真实 Tauri 操作在 sink 里）。
+///
+/// **无需身份判定（轮 12 复核）**：`x` / `y` 之外没有目标窗口入参，改的是注入的
+/// 调用方窗口——插件移动不了宿主或邻居的窗口。
 #[tauri::command]
 pub fn host_window_set_position(
     state: State<'_, SubstrateState>,
@@ -2323,6 +2450,9 @@ pub fn host_window_set_position(
 }
 
 /// `host_window_set_size`：调整窗口大小（真实 Tauri 操作在 sink 里）。
+///
+/// **无需身份判定（轮 12 复核）**：同 `host_window_set_position`——改的是注入的
+/// 调用方窗口，入参里没有目标 label。
 #[tauri::command]
 pub fn host_window_set_size(
     state: State<'_, SubstrateState>,
@@ -2334,20 +2464,28 @@ pub fn host_window_set_size(
 }
 
 /// `host_clipboard_write`：写入剪贴板（进程内）。
+///
+/// **代码层身份判定（轮 12）**：剪贴板是**一个**全局槽位（`shell_ext.clipboard`），
+/// 不分主体——插件写就是覆盖别人的内容，插件读就是读走别人的内容。判定与理由见
+/// [`crate::cmd_clipboard_read_as`]。`window` 由 Tauri 注入，**线形不变**。
 #[tauri::command]
 pub fn host_clipboard_write(
     state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
     text: String,
 ) -> Result<crate::UnsupportedBody, TauriError> {
-    crate::cmd_clipboard_write(&state, text).map_err(to_tauri_err)
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_clipboard_write_as(&caller, &state, text).map_err(to_tauri_err)
 }
 
 /// `host_clipboard_read`：读取剪贴板（进程内）。
 #[tauri::command]
 pub fn host_clipboard_read(
     state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
 ) -> Result<crate::DegradedValue<String>, TauriError> {
-    crate::cmd_clipboard_read(&state).map_err(to_tauri_err)
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_clipboard_read_as(&caller, &state).map_err(to_tauri_err)
 }
 
 /// `host_deep_link_register`：注册深链接协议。
@@ -2404,9 +2542,15 @@ pub fn host_market_install(
 }
 
 /// `host_dialog_open`：文件选择对话框；缺少 provider 时返回 `UnsupportedBody`。
+///
+/// **代码层身份判定（轮 12）**：四条对话框命令统一仅主窗——现状是桩，但线形同形，
+/// 原生 provider 一接入就变成「任何插件都能弹应用级模态 / 借原生选择器读用户磁盘」，
+/// 判定必须在接线之前就位（同 `host_market_*` / `host_updater_*` 的先例）。
+/// 见 [`crate::cmd_dialog_open_as`]。`window` 由 Tauri 注入，**线形不变**。
 #[tauri::command]
 pub fn host_dialog_open(
     state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
     multiple: Option<bool>,
     directory: Option<bool>,
     // `filters` / `defaultPath` 属线格式一部分（TS DialogClient 逐次下发）；
@@ -2414,36 +2558,57 @@ pub fn host_dialog_open(
     #[allow(unused_variables)] filters: Option<Vec<HostFileFilter>>,
     #[allow(unused_variables)] default_path: Option<String>,
 ) -> Result<crate::ProviderResult<Option<String>>, TauriError> {
-    crate::cmd_dialog_open(&state, multiple.unwrap_or(false), directory.unwrap_or(false))
-        .map_err(to_tauri_err)
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_dialog_open_as(
+        &caller,
+        &state,
+        multiple.unwrap_or(false),
+        directory.unwrap_or(false),
+    )
+    .map_err(to_tauri_err)
 }
 
 /// `host_dialog_save`：保存对话框；缺少 provider 时返回 `UnsupportedBody`。
+///
+/// **代码层身份判定（轮 12）**：仅主窗，理由同 [`crate::cmd_dialog_open_as`]——
+/// 它决定的是「往哪里写」，接原生后等于把落盘目标交给任意插件。
 #[tauri::command]
 pub fn host_dialog_save(
     state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
     default_name: Option<String>,
     #[allow(unused_variables)] filters: Option<Vec<HostFileFilter>>,
     #[allow(unused_variables)] default_path: Option<String>,
 ) -> Result<crate::ProviderResult<Option<String>>, TauriError> {
-    crate::cmd_dialog_save(&state, default_name.as_deref()).map_err(to_tauri_err)
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_dialog_save_as(&caller, &state, default_name.as_deref()).map_err(to_tauri_err)
 }
 
 /// `host_dialog_message`：消息对话框。
+///
+/// **代码层身份判定（轮 12）**：弹的是**应用级**模态——插件能借宿主的名义向用户
+/// 显示任意提示。理由同 [`crate::cmd_dialog_open_as`]。
 #[tauri::command]
 pub fn host_dialog_message(
     state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
     title: String,
     message: String,
     kind: Option<String>,
 ) -> Result<crate::ProviderResult<()>, TauriError> {
-    crate::cmd_dialog_message(&state, &title, &message, kind.as_deref()).map_err(to_tauri_err)
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_dialog_message_as(&caller, &state, &title, &message, kind.as_deref())
+        .map_err(to_tauri_err)
 }
 
 /// `host_dialog_confirm`：确认对话框；缺少 provider 时返回 `UnsupportedBody`。
+///
+/// **代码层身份判定（轮 12）**：确认框是「同意」原语——插件能借宿主名义骗取用户
+/// 同意，故仅主窗。理由同 [`crate::cmd_dialog_open_as`]。
 #[tauri::command]
 pub fn host_dialog_confirm(
     state: State<'_, SubstrateState>,
+    window: TauriCallerSource,
     title: String,
     message: String,
     // 按钮文案属线格式一部分（TS DialogClient 下发，缺省 OK/Cancel）；
@@ -2451,7 +2616,8 @@ pub fn host_dialog_confirm(
     #[allow(unused_variables)] confirm_label: Option<String>,
     #[allow(unused_variables)] cancel_label: Option<String>,
 ) -> Result<crate::ProviderResult<bool>, TauriError> {
-    crate::cmd_dialog_confirm(&state, &title, &message).map_err(to_tauri_err)
+    let caller = window.caller().map_err(to_tauri_err)?;
+    crate::cmd_dialog_confirm_as(&caller, &state, &title, &message).map_err(to_tauri_err)
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -2788,22 +2954,43 @@ macro_rules! tauri_plugin_as_host_command {
 /// **读的是 `SubstrateState`**（R1b）：origin 允许清单属底座，底座-only 宿主也装配
 /// 它；若读 `CommandState`（插件运行时态），底座-only 宿主就会被判成「未装配」而
 /// **静默跳过鉴权**——origin ACL 在正是最需要它的那类宿主上失效。
+///
+/// **轮 10 的形态分档（F1/F2）**：`Development`/`Test` 保留「空清单 = 不启用」的
+/// 兼容语义；`Production` 走
+/// [`tauron_host::authz::production_caller_allowed`]——空清单视为**门未装弹**直接拒，
+/// 且未声明的 label 不再自动等同主窗。策略本身在 `tauron-host` 里（可脱离 tauri
+/// 特性单测），这里只负责从宿主侧取真实 label 与 origin。
 fn origin_gate<R: tauri::Runtime>(invoke: &tauri::ipc::Invoke<R>) -> Result<(), HostError> {
     let state_manager = invoke.message.state();
     let Some(state) = state_manager.try_get::<SubstrateState>() else {
         return Ok(());
     };
-    let allow = state.shell_ext.lock().origin_allowlist.clone();
-    if allow.is_empty() {
-        // 未启用（缺省）：兼容既有装配。
-        return Ok(());
-    }
-    let origin = invoke
-        .message
-        .webview()
+    let (allow, main_labels) = {
+        let ext = state.shell_ext.lock();
+        (ext.origin_allowlist.clone(), ext.main_window_labels.clone())
+    };
+    let webview = invoke.message.webview();
+    let origin = webview
         .url()
         .map(|u| u.origin().ascii_serialization())
         .unwrap_or_else(|_| tauron_host::authz::ORIGIN_UNKNOWN.to_string());
+    if state.deployment_mode == tauron_host::DeploymentMode::Production {
+        let label = webview.label();
+        return tauron_host::authz::production_caller_allowed(&main_labels, &allow, label, &origin)
+            .map_err(|reason| {
+                HostError::new(
+                    tauron_host::ErrorCode::E_AUTH_DENIED,
+                    format!(
+                        "production 拒绝执行 `{}`：{reason}（label `{label}` / origin `{origin}`）",
+                        invoke.message.command()
+                    ),
+                )
+            });
+    }
+    if allow.is_empty() {
+        // 未启用（开发态缺省）：兼容既有装配。
+        return Ok(());
+    }
     if tauron_host::authz::origin_allowed(&allow, &origin) {
         return Ok(());
     }

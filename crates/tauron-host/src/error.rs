@@ -71,8 +71,8 @@ pub enum ErrorCode {
     /// （[`crate::stream::MAX_STREAMS`]），调用方该先 `host_stream_close` 再开。
     /// 与 `E_SUBSCRIPTION_FULL` 同属"容量闸"族，但对象是流而不是订阅。
     ///
-    /// ⚠️ 追加码必须加在枚举**末尾**：TS 侧 `HOST_ERROR_CODES` 按声明顺序比对
-    /// （`@tauron/contract-tests` 的 wire-gate 钉死）。
+    /// 位置上没有约束：线上传的是**码名**（本枚举的 serde 表示即变体名），
+    /// TS 侧按名集合比对（V4 A69）。新码请放在语义相邻处，不必堆到末尾。
     E_STREAM_FULL,
     /// 一次跨主体调用已被结算，重复回填被拒（0.4-A1）。
     ///
@@ -163,9 +163,9 @@ impl fmt::Display for ErrorCode {
             Self::E_PLUGIN_EXISTS => write!(f, "E_PLUGIN_EXISTS"),
             Self::E_INSTALL_FAILED => write!(f, "E_INSTALL_FAILED"),
             Self::E_PLUGIN_FILTERED => write!(f, "E_PLUGIN_FILTERED"),
-            // 新码一律**追加在末尾**：TS 侧 `HOST_ERROR_CODES` 与本 impl 逐项同序
-            // （`tauron-contract-tests` 的门禁按声明顺序比对），插在中间会让既有
-            // 客户端的分流表整体错位。
+            // 匹配顺序无关紧要：`Display` 与 serde 都产出**同一个码名**，前端按名分流。
+            // 这里的唯一要求是「每个变体都有一条」——漏一条会在 `@tauron/host` 的
+            // 门禁（`gates.test.ts`：码名集合与 Rust 枚举全等）上直接红。
             Self::E_PLUGIN_TYPE_NO_RUNTIME => write!(f, "E_PLUGIN_TYPE_NO_RUNTIME"),
             Self::E_LEASE_EXPIRED => write!(f, "E_LEASE_EXPIRED"),
             Self::E_STREAM_FULL => write!(f, "E_STREAM_FULL"),

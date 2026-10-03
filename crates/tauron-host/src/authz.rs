@@ -18,9 +18,16 @@
 //! `host_stream_write` / `host_stream_close` 这 4 条**插件面可触达**的命令此前
 //! 漏登记（`HostClient` 早就在调它们），现按实现补齐为 `self` 档。
 //!
-//! **本表的范围**（刻意不扩大）：插件可触达命令面 + 主窗管理命令。其余 34 条
-//! 底座/主窗命令（窗口、i18n、brand、notify、settings、recovery、market、
-//! dialog、clipboard 等）由 Tauri ACL / `origin_gate` 管辖，不进本表——
+//! **本表的范围**（刻意不扩大）：插件可触达命令面 + 主窗管理命令。其余底座/主窗
+//! 命令（窗口、i18n、brand、notify、settings、recovery、market、dialog、clipboard
+//! 等）不进本表——但**管辖它们的不是 Tauri ACL**：`host_*` 走应用层 root 注册
+//! （裸命令名），能力文件的 `permissions` 只有 `core:default`、`windows` 同时覆盖
+//! `main` 与 `plugin-*`（见 `examples/minimal-app/src-tauri/capabilities/default.json`），
+//! 按命令名授权这条路径在本仓不存在。真正的凭据是适配器里的**代码层判定**
+//! （`require_main_window` / `admin_gate` / 按身份过滤 / 根目录限定）或**调用方自身
+//! 作用域**（窗口几何类命令用的是注入的 caller label，不是入参 label）。
+//! 逐命令的判定实见生成的 `docs/api/command-surface.md`（`pnpm command-surface:check`
+//! 复算，没判定就如实写没判定）。
 //! 本表是「插件能碰到什么」的授权口径，不是全部命令的清单。
 //!
 //! 测试点（计划 §4.21）：低权限插件尝试 `host_registry_list` → 仅拿到可见集；
@@ -75,7 +82,8 @@ pub struct CommandAuth {
 }
 
 /// 插件侧宿主命令面（§2.1 定稿 9 条 + R7 收口补登记 4 条 + 0.4 审计补登记 1 条
-/// + 0.4-A1 调用投递 3 条 + 0.4-W3 扩展点对账 1 条 = 18 条）。
+/// + 0.4-A1 调用投递 3 条 + 0.4-W3 扩展点对账 1 条 + V4 stream credit grant 1 条
+/// + 轮 7 补登记能力协商入口 1 条 = 20 条）。
 pub static COMMANDS: &[CommandAuth] = &[
     CommandAuth {
         command: "host_plugin_call",
@@ -200,6 +208,27 @@ pub static COMMANDS: &[CommandAuth] = &[
         tier: AuthTier::Self_,
         consumer: "plugin-sdk（激活后自检贡献声明）",
         description: "对账 manifest 声明的贡献与 activate 期实际注册（分叉报 E_CONTRIBUTES_DRIFT）",
+    },
+    // ── 轮 7 补登记：能力协商入口本身 ─────────────────────────────
+    //
+    // 与 R7 收口同一类缺口：`host_capabilities` 在 `SUBSTRATE_COMMANDS` 里、
+    // 任何 webview 都能触达（`TauriBackend.BOOTSTRAP_COMMANDS` 更是把它当成
+    // 唯一的 bootstrap 面），却**没有任何档位**——按本模块的判据
+    // 「插件 webview 能摸到的命令必须有档位」，它是漏登记的那一条。
+    //
+    // 后果是可观测的：`capabilities.ts` 的 `CAPABILITIES` 是
+    // `isAvailable()` / `capabilityMatrix()` 的白名单，也是脚手架的能力白名单。
+    // 于是一条**协商成功**的命令在能力矩阵里恒为 `false`——fail-closed 的
+    // 门禁无法为「自己的入口」作证，读矩阵的人会以为宿主没实现协商。
+    //
+    // 档位 `Self_`：它只回吐「本宿主注册了哪些命令 + 各域是否可用」，不读任何
+    // 他人状态、不接受身份入参（实现只拿 `&SubstrateState`），与
+    // `host_contributes_list` 同属纯只读 introspection。
+    CommandAuth {
+        command: "host_capabilities",
+        tier: AuthTier::Self_,
+        consumer: "ShellClient.refreshCapabilities / TauriBackend.adoptCapabilities",
+        description: "拉取宿主真实命令面与域可用性（能力协商入口，fail-closed 的真相源）",
     },
     // ── 0.4-A1 调用投递闭环 ──────────────────────────────────────
     CommandAuth {
@@ -579,6 +608,60 @@ pub fn origin_allowed(allowlist: &[String], origin: &str) -> bool {
     allowlist.iter().any(|entry| normalize_origin(entry) == target)
 }
 
+/// **Production 调用方策略的唯一判定点（V4 轮 10：F1 + F2）**。
+///
+/// 两条 fail-open 在这一函数里被关掉，且它们都是**过去字面成立**的：
+///
+/// - **F2 origin 门空装弹**：[`origin_allowed`] 的「空清单 = 不启用」是开发态兼容
+///   语义，但 Production 沿用它就等于「配了身份策略 flag、清单为空」的宿主对任意
+///   origin 放行，而自检仍然绿。Production 要求清单**非空**。
+/// - **F1 未知 label 即主窗**：[`resolve_principal`] 把任何非 `plugin-` 前缀的 label
+///   判成 [`Principal::MainWindow`]，于是次级窗口/自造 label 直接拿到 admin 面。
+///   Production 要求主窗 label 必须落在装配方显式声明的集合内。
+///
+/// 判定顺序固定：先看**主体形状**（label），再看**来源**（origin）。两步都在
+/// dispatch 之前，因此不存在「命令已经跑了一半才发现身份不合法」。
+pub fn production_caller_allowed(
+    main_window_labels: &[String],
+    origin_allowlist: &[String],
+    webview_label: &str,
+    origin: &str,
+) -> Result<(), &'static str> {
+    if origin_allowlist.is_empty() {
+        return Err("ORIGIN_GATE_NOT_ARMED");
+    }
+    match resolve_principal(webview_label) {
+        // `plugin-` 前缀且 id 合法：形状判定已通过（畸形 id 走 Invalid 分支）。
+        Principal::Plugin(_) => {}
+        Principal::Invalid(_) => return Err("CALLER_IDENTITY_INVALID"),
+        Principal::MainWindow => {
+            // 只有**显式声明过**的 label 才算主窗；空集合 = 没有任何可信主窗。
+            let claimed = webview_label.trim();
+            let declared = main_window_labels
+                .iter()
+                .any(|label| label.trim() == claimed && !claimed.is_empty());
+            if !declared {
+                return Err("MAIN_WINDOW_LABEL_NOT_DECLARED");
+            }
+        }
+    }
+    if !origin_allowed(origin_allowlist, origin) {
+        return Err("ORIGIN_NOT_ALLOWED");
+    }
+    Ok(())
+}
+
+/// [`production_caller_allowed`] 的可信主窗缺省集合：Tauri 约定的 `main`。
+///
+/// 装配方未显式配置主窗标签集合（`AdapterConfig::main_window_labels`）时用它，
+/// 避免「忘了配就把所有窗口判成不可信」这种把 fail-open 翻成 fail-noise 的误伤。
+pub const DEFAULT_MAIN_WINDOW_LABELS: &[&str] = &["main"];
+
+/// 把缺省集合展开成装配用的 `Vec<String>`（装配期调用一次）。
+pub fn default_main_window_labels() -> Vec<String> {
+    DEFAULT_MAIN_WINDOW_LABELS.iter().map(|s| s.to_string()).collect()
+}
+
 #[cfg(test)]
 mod origin_acl_tests {
     use super::*;
@@ -622,6 +705,87 @@ mod origin_acl_tests {
         // 空 origin 同理。
         assert!(!origin_allowed(&list(&[""]), ""));
         assert!(!origin_allowed(&list(&["http://ok.example"]), "   "));
+    }
+
+    // ── V4 轮 10：F1 + F2 的 Production 调用方策略 ──────────────────────────
+
+    const MAIN: &[&str] = &["main"];
+
+    #[test]
+    fn production_refuses_an_unequipped_origin_gate() {
+        // F2：清单为空 = 门没装弹。Development 靠 `origin_allowed` 的兼容语义放行，
+        // Production 必须在 dispatch 之前拒绝，且拒绝原因点名装弹问题。
+        assert_eq!(
+            production_caller_allowed(&list(MAIN), &[], "main", "tauri://localhost"),
+            Err("ORIGIN_GATE_NOT_ARMED")
+        );
+    }
+
+    #[test]
+    fn production_refuses_undeclared_main_window_labels() {
+        // F1：`resolve_principal` 把任意非 plugin- label 判成 MainWindow，
+        // 因此 Production 必须额外核对装配方声明的主窗集合。
+        let allow = list(&["tauri://localhost"]);
+        assert_eq!(
+            production_caller_allowed(&list(MAIN), &allow, "settings", "tauri://localhost"),
+            Err("MAIN_WINDOW_LABEL_NOT_DECLARED")
+        );
+        assert_eq!(
+            production_caller_allowed(
+                &list(&["main", "editor"]),
+                &allow,
+                "editor",
+                "tauri://localhost"
+            ),
+            Ok(())
+        );
+        // 空声明集合 = 没有任何可信主窗（不得反向变成「全部可信」）。
+        assert_eq!(
+            production_caller_allowed(&[], &allow, "main", "tauri://localhost"),
+            Err("MAIN_WINDOW_LABEL_NOT_DECLARED")
+        );
+    }
+
+    #[test]
+    fn production_admits_declared_main_and_valid_plugin_labels() {
+        let allow = list(&["tauri://localhost"]);
+        assert_eq!(
+            production_caller_allowed(&list(MAIN), &allow, "main", "tauri://localhost"),
+            Ok(())
+        );
+        assert_eq!(
+            production_caller_allowed(
+                &list(MAIN),
+                &allow,
+                "plugin-com.example.a",
+                "tauri://localhost"
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn production_rejects_malformed_labels_and_off_list_origins() {
+        let allow = list(&["tauri://localhost"]);
+        // 畸形 plugin- label 绝不降级成主窗（与 `Caller::from_label` 同一立场）。
+        assert_eq!(
+            production_caller_allowed(&list(MAIN), &allow, "plugin-", "tauri://localhost"),
+            Err("CALLER_IDENTITY_INVALID")
+        );
+        assert_eq!(
+            production_caller_allowed(&list(MAIN), &allow, "main", "http://evil.example"),
+            Err("ORIGIN_NOT_ALLOWED")
+        );
+        // 取不到 origin 的调用方在 Production 一律拒绝（哨兵不可被清单绕过）。
+        assert_eq!(
+            production_caller_allowed(&list(MAIN), &allow, "main", ORIGIN_UNKNOWN),
+            Err("ORIGIN_NOT_ALLOWED")
+        );
+    }
+
+    #[test]
+    fn default_main_window_labels_match_tauri_convention() {
+        assert_eq!(default_main_window_labels(), list(MAIN));
     }
 }
 
@@ -790,7 +954,11 @@ mod tests {
         for c in COMMANDS.iter().chain(ADMIN_COMMANDS.iter()) {
             assert!(!c.consumer.is_empty(), "{} 缺 consumer 登记", c.command);
         }
-        assert_eq!(COMMANDS.len(), 19, "既有 18 条插件命令 + V4 stream credit grant 1 条");
+        assert_eq!(
+            COMMANDS.len(),
+            20,
+            "既有 19 条插件命令 + 轮 7 补登记的能力协商入口 host_capabilities 1 条"
+        );
         // 主窗面包含注册表管理、sidecar 管理、资源诊断、Event Approval Broker
         // 与生产就绪自检（A109）。
         assert_eq!(

@@ -20,6 +20,7 @@ import {
   DialogClient,
   AutoUpdateClient,
   ShellController,
+  isUnsupportedBody,
 } from '@tauron/host';
 import type { PendingCallInfo } from '@tauron/host';
 import { HOST_SETTINGS_CHANGED_TOPIC } from '@tauron/app-plugin-sdk';
@@ -38,9 +39,14 @@ const shell = new ShellClient({ backend });
 // `host_registry_install*` 是否存在由 Rust 侧 `cfg!(feature = "plugin-install")`
 // 推导，前端不猜。**协商失败时能力表保持 fail-closed**（只有 bootstrap 的
 // `host_capabilities` 可用），指数退避重试，而不是退回静态全集乐观撒谎。
+//
+// 协商结果同时是**装配开关**：底座形态（`--features substrate-only`）不注册插件运行时
+// 命令族，能力表里就没有它们。本窗口的插件面必须在协商落地之后再装配，否则
+// 「示例自己调用了一批没注册的命令」会把一个受支持的构建形态演成一片红色报错。
 async function negotiateCapabilities(attempt = 0): Promise<void> {
   try {
     await shell.refreshCapabilities();
+    refreshPluginFace();
   } catch (err) {
     console.warn(
       `[tauron] 能力快照拉取失败（第 ${attempt + 1} 次），能力表保持 fail-closed：`,
@@ -188,7 +194,9 @@ const commandPalette = document.querySelector('oc-command-palette') as
 
 /** 重取插件列表喂给 `<oc-plugin-manager>`（哑组件靠属性供数）。 */
 const refreshPlugins = async (): Promise<void> => {
-  if (!pluginManager) return;
+  // 能力真相门禁：底座形态没有 `host_registry_list_all`，不判就直接 invoke 只会
+  // 得到 `command not found`，把一个受支持的构建形态演成错误。
+  if (!pluginManager || !shell.supports('host_registry_list_all')) return;
   const rows = await shell.registryListAll();
   (pluginManager as HTMLElement & { plugins: unknown[] }).plugins = rows.map((row) => ({
     id: row.id,
@@ -202,7 +210,7 @@ const refreshPlugins = async (): Promise<void> => {
 
 /** 重取**插件的贡献命令**喂给 `<oc-command-palette>`（选中后由控制器投递）。 */
 const refreshCommands = async (): Promise<void> => {
-  if (!commandPalette) return;
+  if (!commandPalette || !shell.supports('host_contributes_list')) return;
   const entries = await shell.contributesList('command');
   commandPalette.commands = entries.map((entry) => ({
     id: entry.id,
@@ -210,6 +218,21 @@ const refreshCommands = async (): Promise<void> => {
     category: entry.pluginId,
   }));
 };
+
+/**
+ * 插件面装配入口（协商落地后调用；函数声明有提升，可被上方的启动序列引用）。
+ *
+ * 只装配「本宿主确实注册了」的那部分：底座形态下这两条都直接 return，
+ * 界面保持干净，而不是刷出一片 `command not found`。
+ */
+function refreshPluginFace(): void {
+  void refreshPlugins().catch((error: Error) =>
+    setStatus(`插件列表加载失败：${error.message}`, false),
+  );
+  void refreshCommands().catch(() => {
+    /* 贡献命令拉取失败不阻断插件管理（多为宿主未实现 contributes_list） */
+  });
+}
 
 const controller = new ShellController({
   backend,
@@ -227,15 +250,11 @@ const controller = new ShellController({
 });
 controller.start();
 
-void refreshPlugins().catch((error: Error) =>
-  setStatus(`插件列表加载失败：${error.message}`, false),
-);
-void refreshCommands().catch(() => {
-  /* 同上：无贡献命令时命令面板显示「无匹配命令」 */
-});
+// 插件面不在此处装配：`supports()` 在协商落地前恒为 fail-closed，此刻拉取会把
+// 受支持的底座形态演成错误。真相到达点只有协商（见上方 `negotiateCapabilities`）。
 
 el<HTMLButtonElement>('btn-command-palette').addEventListener('click', () => {
-  if (!commandPalette) return;
+  if (!commandPalette || !shell.supports('host_contributes_list')) return;
   void refreshCommands()
     .catch(() => {
       /* 打开动作不应被数据拉取失败挡住 */
@@ -283,6 +302,10 @@ void shell
 // 运行在**插件自己的 webview** 里——主窗 drain 的是自己的队列，取不到投给插件
 // 的帧；所以先点「打开插件面板窗口」，再点「跨主体调用」。
 el<HTMLButtonElement>('btn-open-plugin-window').addEventListener('click', () => {
+  if (!shell.supports('host_window_create')) {
+    log('cross-out', '当前宿主未注册插件窗口命令（底座形态），无法打开插件面板窗口');
+    return;
+  }
   void shell.windowCreate('com.example.formatter').then(
     async (out) => {
       log(
@@ -297,10 +320,20 @@ el<HTMLButtonElement>('btn-open-plugin-window').addEventListener('click', () => 
       //   2. 主窗写一条**属于该插件命名空间**的设置（宿主落盘提交后镜像到消息面）；
       //   3. 插件窗的 `onSettingsChanged` 收到该键并刷新自己的状态行。
       // 跨插件的观察（别的 `plugin:<id>…` 键）不会投给它的订阅者——SDK 按命名空间过滤。
+      //
+      // 中间那一下等待是**消息面模型**要求的，不是给生命周期打补丁：总线是拉取式，
+      // 帧只进「已存在订阅」的队列，Event 通道不补投历史。而插件订阅发生在它自己的
+      // webview 激活时，与本窗的批准动作互为竞态——SDK 对被拒订阅按退避阶梯重试
+      // （`SUBSCRIBE_RETRY_DELAYS_MS`，首个阶梯 1s），所以这里等过首个阶梯再写，
+      // 两条 race 方向都收敛。不写设置只批准 = 演示「批准了但没人观察」。
       try {
         await admin.eventsApprove('com.example.formatter', HOST_SETTINGS_CHANGED_TOPIC);
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
         await shell.settingsSet('plugin:com.example.formatter.width', 120);
-        log('cross-out', `已批准 ${HOST_SETTINGS_CHANGED_TOPIC} 并写入设置 → 插件窗应显示「设置已更新」`);
+        log(
+          'cross-out',
+          `已批准 ${HOST_SETTINGS_CHANGED_TOPIC} 并写入设置 → 插件窗应显示「设置已更新」`,
+        );
       } catch (err) {
         log('cross-out', `设置变更演示失败：${(err as Error).message}`);
       }
@@ -310,11 +343,20 @@ el<HTMLButtonElement>('btn-open-plugin-window').addEventListener('click', () => 
 });
 
 el<HTMLButtonElement>('btn-cross-call').addEventListener('click', () => {
+  if (!shell.supports('host_call_plugin') || !shell.supports('host_call_take')) {
+    log('cross-out', '当前宿主未注册跨主体调用命令（底座形态），无法发起插件间调用');
+    return;
+  }
   const code = el<HTMLInputElement>('cross-input').value;
   const run = async (): Promise<PendingCallInfo> => {
     const accepted = await shell.callPlugin('com.example.formatter', 'formatter.format', { code });
-    if (!accepted.callId) {
-      throw new Error(`宿主未受理：${accepted.errorCode ?? '（无错误码）'}`);
+    // `Unsupported`（无投递通路）与「执行方回填了失败」是两回事：前者根本没有
+    // `callId`，取件会立刻以非法入参失败。先分流，才谈得上取件。
+    if (isUnsupportedBody(accepted)) {
+      throw new Error(
+        `宿主无可用投递通路：${accepted.reason}` +
+          (accepted.fallback !== null ? `（建议：${accepted.fallback}）` : ''),
+      );
     }
     // 轮询取件：settled 取走即删；pending = 执行泵还没回帧，稍后再取。
     for (let i = 0; i < 50; i++) {

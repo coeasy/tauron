@@ -22,6 +22,7 @@
  */
 
 import type { AppConfig, CliOptions } from './types.js';
+import { CLI_VERSION } from './version.js';
 
 /** 已实现的模板。`vue` / `svelte` 在 `AppConfig` 里已声明但**尚无骨架实现**。 */
 export const IMPLEMENTED_TEMPLATES = ['vanilla', 'react'] as const;
@@ -50,11 +51,11 @@ export function createApp(config: AppConfig, _options: CliOptions): AppScaffoldR
         typecheck: 'tsc --noEmit',
       },
       dependencies: {
-        '@tauron/core': '^1.1.0',
-        '@tauron/types': '^1.1.0',
+        '@tauron/core': `^${CLI_VERSION}`,
+        '@tauron/types': `^${CLI_VERSION}`,
         ...(isReact
           ? {
-              '@tauron/adapter-react': '^1.1.0',
+              '@tauron/adapter-react': `^${CLI_VERSION}`,
               react: '^18.3.1',
               'react-dom': '^18.3.1',
             }
@@ -341,6 +342,6 @@ npm test
 
 - 依赖 \`@tauron/core\` 的信封协议（\`plugin_invoke\` / \`plugin_cancel\` / \`plugin_emit\`）；
 - 需要宿主侧已注册命令面（见 tauron 的 \`tauron-shell\` / \`tauron-adapter\`）；
-- \`@tauron/*\` 包当前**未发布到 npm**，本地开发请用 \`workspace:*\` 或 \`file:\` 依赖。
+- \`@tauron/*\` 的 npm 现值是 **1.0.2**，落后于本仓库源码；插件开发请用 \`workspace:*\` 或 \`file:\` 依赖。
 `;
 }

@@ -10,9 +10,9 @@
 
 | 形态 | 用法 | 命令面 | 插件名 |
 | --- | --- | --- | --- |
-| root 注册（全量） | `state_init()` + `tauri::generate_context` 外的 `tauron_generate_handler![]`（= `tauron_plugin_handler![]`） | 83 条（底座 61 + 插件运行时 22）；`plugin-install` 2 条**已进默认特性** → 默认 85 条 | 无（裸命令） |
+| root 注册（全量） | `state_init()` + `tauri::generate_context` 外的 `tauron_generate_handler![]`（= `tauron_plugin_handler![]`） | 默认 **83** 条（底座 61 + 插件运行时 22）；`plugin-install` 那 2 条是 **opt-in**（`crates/tauron-adapter/Cargo.toml` 的 `default = []`）→ 显式开启后 **85** 条 | 无（裸命令） |
 | **底座-only root 注册** | 自己 `manage(SubstrateState)` + `tauron_substrate_handler![]` | 61 条（不含插件运行时 22 条） | 无（裸命令） |
-| 插件注册（需 capability/ACL） | `init()` / `init_with_adapter_config(cfg)` | 同上；83 / 85 条取决于 `plugin-install`（默认开） | `tauron` |
+| 插件注册（需 capability/ACL） | `init()` / `init_with_adapter_config(cfg)` | 同上；83 / 85 条取决于接入方是否开启 `plugin-install`（**默认不开**） | `tauron` |
 
 > ⚠️ **三种形态都不是"零配置"**（轮 12 改判，此前本表把 root 形态写成"零配置"是错的）：
 > Tauri v2 的规则是**不匹配任何 capability 的 webview 完全没有 IPC 访问**（原文见
@@ -101,11 +101,22 @@ export interface HostRpc {
 
 **装配（R4-D2）**：`init_with_adapter_config(AdapterConfig { .. })` /
 `state_init_with_adapter_config(..)` 是唯一能把宿主配置交给适配器的入口——含
-`origin_allowlist`（origin 允许清单，空=不启用）、`registry`、`required_plugins`、
+`origin_allowlist`（origin 允许清单：**开发态**空=不启用，**Production** 空=门未
+装弹、启动即被 `ORIGIN_GATE_ARMED_REQUIRED` 拒绝）、`main_window_labels`（可信主窗
+label 集合，留空展开为 `["main"]`，轮 10）、`registry`、`required_plugins`、
 `recovery_data_dir`。缺省入口 `init()` / `state_init()` 等价于传
 `AdapterConfig::default()`；历史入口 `init_with_config(RegistryConfig)` 保留，
 且已改为委托到同一装配点（此前它自建 `CommandState::with_config`，**绕过了恢复
 持久化装配**，崩溃检测在该入口静默失活）。
+
+> **Production 分档（轮 10 / F1+F2）**：`origin_gate` 在
+> `DeploymentMode::Production` 下改走 `tauron_host::authz::production_caller_allowed`
+> ——label 与 origin 都取自 `Invoke`（宿主侧真实值），三种拒绝原因
+> （`ORIGIN_GATE_NOT_ARMED` / `CALLER_IDENTITY_INVALID` /
+> `MAIN_WINDOW_LABEL_NOT_DECLARED` / `ORIGIN_NOT_ALLOWED`）全部映射
+> `E_AUTH_DENIED`、`retryable: false`。开发态/测试态的兼容语义**未变**。
+> 逐条语义与宿主侧修法见
+> [插件开发指南 · `origin-gate` 检查项](../api/plugin-development-guide.md)。
 
 ## 2. 参数规则
 
@@ -117,6 +128,13 @@ export interface HostRpc {
   **不信任前端入参**（§2.1 / ADR-17）。
 
 ## 3. 关键命令线格式
+
+> **本节按标题所说，只覆盖「关键」命令**（跨主体调用、事件、流、注册表等需要讲清
+> 线形与归属判定的那一批），不是全量清单。全量 85 条的形参/返回/档位/前端落点看
+> [`docs/api/command-surface.md`](../api/command-surface.md)——那张表由
+> `pnpm command-surface:gen` 从代码生成、CI 用 `pnpm command-surface:check` 复算，
+> 所以「漏了一条命令的文档」在这份文档里是**不可能悄悄发生**的（轮 12 之前正是
+> 因为没人钉这条，本文件只覆盖 49/85 条却被指南称作「完整线格式」）。
 
 | 命令 | TS 调用（`HostClient`） | Rust 形参 | 返回 |
 | --- | --- | --- | --- |
@@ -308,7 +326,8 @@ export interface HostRpc {
   | `source` | 提交来源 | 与 `SettingsStore` 的进程内观察队列同一个提交点产出（`commit_settings_change` → `publish_committed_change`）；两份投递互不影响 |
   | `revision` | 提交序号 | 单调递增；慢消费者收敛到最新 revision 即视为追平 |
 
-  **产帧范围只有按键写路径**（`host_settings_set` / `host_settings_set_as`）。
+  **产帧范围只有按键写路径**——线上命令是 `host_settings_set`，Rust 侧的共用实现是
+  `cmd_settings_set_as`（按 `Caller` 分档，**不是**一条命令，别去命令面找它）。
   `host_settings_adopt_legacy` 与 `host_settings_migrate` 是**整份文档级**、主窗专属的
   操作，走 `set_layer` / `migrate_transactional`，**既不扇出镜像帧、也不推进
   Store revision**（`set_layer` 路径压根不产生 `ChangeEvent`）——所以订阅方在这两个
@@ -368,10 +387,19 @@ export interface HostRpc {
   - **spawn 成功即驱动状态机**：全新进程起来后由**宿主自己**投 `Event::Attach`
     （`ENABLED → RUNNING`）。进程插件没有 webview 可上报 ATTACH，不投就会出现
     「状态机说已启用、进程在跑」的不一致；幂等返回既有租约的那条路径**不重复投**。
-  - **崩溃检测是轮询式**（不调 `host_runtime_health` 就发现不了死亡），无后台监控
-    线程、无进程组/作业对象（`kill` 只覆盖直接子进程）；sidecar 的 stdin/stdout
-    JSON-RPC 帧回路**未接线**（stdout 走 `Stdio::null()`，避免接管道无人读把子进程
-    阻塞死）。以上属已披露的未接线范围，见计划「轮 10」。
+  - **崩溃检测是轮询式**（不调 `host_runtime_health` 就发现不了死亡），无后台监控线程。
+    此前本段还写着"无进程组/作业对象、`kill` 只覆盖直接子进程、stdout 走
+    `Stdio::null()` 因此帧回路未接线"——**那三条已被代码推翻**（轮 11 逐行核实，纠正记录见
+    `docs/api/plugin-development-guide.md` 的 Process 边界段与
+    `crates/tauron-proc/src/spawner.rs` 的 `CommandSpawner` 文档）：
+    - stdin/stdout 走 `Stdio::piped()`，每条 sidecar 在 `spawn` 时起独立读线程排空
+      stdout，回帧经 `ProcessFrameSinkImpl` → `Registry::settle_call` 结算（0.4-A1）；
+    - Unix/macOS 用独立 POSIX process group、Windows 用 `KILL_ON_JOB_CLOSE` Job Object
+      做进程树回收，`CommandSpawner` 丢弃时把遗留 pid 逐个走同一套 tree-aware `kill`。
+      两者都自报 `Partial`（无 fs/net/syscall 隔离），Production 因此**拒接
+      `ProcSpawner`**（`PROCESS_SANDBOX_HARD_REQUIRED`）——能力边界登记在缺口方案 A97 行。
+    - **未验证部分如实保留**：仓内无可执行 sidecar、测试不起真进程，所以真进程端到端
+      结算与 Drop 连带回收都只有契约/结构级证据，没有运行期证据（A97/A75 未验证清单）。
 - **重启与建窗（R8，两条新命令；均**仅主窗**，代码层判定见 §5）**：
 
   | 命令 | 线参数 | 返回 |
@@ -436,15 +464,27 @@ export interface HostRpc {
 
 ## 5. 能力表（命令 → 授权档位）
 
-TS `capabilities.ts` 的 `CAPABILITIES`（13 条 self/scoped-read 插件命令 + 3 条
+TS `capabilities.ts` 的 `CAPABILITIES`（20 条 self/scoped-read 插件命令 + 8 条
 privileged 主窗命令）与 Rust `authz::COMMANDS` / `ADMIN_COMMANDS` 逐命令、
 逐档位同构（`self` / `scoped-read` / `privileged` kebab-case 线名），
 由形状门禁锁定。
 
 **覆盖范围（有意如此，不是遗漏）**：本表覆盖「**插件侧可触达的命令面** + 管理命令」。
 主窗专属命令（窗口 / i18n / notify / settings / recovery / market / dialog /
-clipboard / brand 等）由 Tauri ACL 按窗口 label 管辖，不在表内。判据是**谁可能越权**：
-插件 webview 能摸到的命令必须有档位（否则授权层对它没有定义），主窗命令不存在"下放"路径。
+clipboard / brand 等）不在表内。判据是**谁可能越权**：插件 webview 能摸到的命令必须
+有档位（否则授权层对它没有定义）。
+
+> ⚠️ **「不在表内」的管辖方在轮 12 更正为「代码层判定」**。此前这里写的是「由 Tauri
+> ACL 按窗口 label 管辖」——那句在本仓不成立：`host_*` 走应用层 **root 注册**（裸命令名），
+> 唯一的能力文件 `examples/minimal-app/src-tauri/capabilities/default.json:5` 里
+> `permissions` 只有 `core:default`、`windows` 同时覆盖 `main` 与 `plugin-*`，
+> 也就是说 ACL **一条 `host_*` 都不按命令名管**。逐条核实时发现 9 条被口径称作
+> 「主窗专属」、代码里却没有任何判定的命令（`host_window_quit`、`host_clipboard_read`/
+> `write`、4 条 `host_dialog_*`、`host_recover_boot`、`host_i18n_stats`），已补
+> `require_main_window` 判定（判定先于副作用，拒绝码复用 `E_AUTH_DENIED`）。
+> 全量 85 条的逐命令判定实见生成物 `docs/api/command-surface.md`
+> （`pnpm command-surface:check` 复算；确实无需判定的命令逐条写明理由——要么目标就是
+> 注入的调用方自身，要么只读取值且不暴露跨主体拓扑）。
 轮 11 的审计**正是靠这条判据**抓出 4 条插件面命令（`host_events_drain`、
 `host_stream_open/write/close`）此前完全没有档位：`HostClient` 已在调用它们，
 而 CLI 脚手架又用本表当能力白名单（`packages/tauron-app-cli/src/scaffold.ts` 直接
@@ -469,15 +509,33 @@ clipboard / brand 等）由 Tauri ACL 按窗口 label 管辖，不在表内。�
 capability/ACL 强制（生产客户端应采用——把 8 条特权命令只授予主窗、
 不给插件 webview）；裸命令形态下 origin ACL 是唯一咽喉点。
 **轮 11 起**代码层再叠一层判定，把"特权 = 仅主窗"从"只靠部署配置"变成**代码里的真判定**。
-三类判定、两个函数（都在 `crates/tauron-adapter/src/lib.rs`，拒绝码一律是既有的
-`E_AUTH_DENIED`，不新增错误码；判定点一律在**任何副作用之前**）：
+**轮 12 更正**：那句「裸命令形态下 origin ACL 是唯一咽喉点」在当时也已经不成立——origin 门
+只判 **label + origin**（Production 模式才收紧），它不认得命令名；而示例能力文件
+`windows` 覆盖 `plugin-*`、`permissions` 只有 `core:default`，所以**命令名层面的唯一凭据
+就是下表里的判定**。
+三类判定 + 一类过滤，判定函数都在 `crates/tauron-adapter/src/lib.rs`，拒绝码一律是既有的
+`E_AUTH_DENIED`，不新增错误码；判定点一律在**任何副作用之前**。会改状态/授权/供应链的
+特权命令（即 `AUDITED_ADMIN_COMMANDS` 那 6 条，含 feature-gated 的安装 2 条）把判定与审计
+走同一个咽喉点 `admin_gate(state, caller, cmd)`（内部就是 `require_main_window` + 落一条
+`AdminAuditRecord`），所以「走没走咽喉点」是可门禁对账的事实而不是口头承诺；
+其余特权命令（`host_runtime_health` / `host_resource_stats` / `host_events_approvals` /
+`host_production_doctor`）只读、刻意不入审计表（免得读操作把真实授权事实挤出环形缓冲），
+在各自入口直接 `require_main_window`。
 
 | 判定 | 函数 | 命令 |
 | --- | --- | --- |
-| 仅主窗 | `require_main_window(caller, cmd)` | `host_registry_list_all`、`host_registry_admin`、`host_runtime_spawn`、`host_runtime_health`、`host_resource_stats`、`host_events_approve`/`revoke`/`approvals`、`host_production_doctor`、`host_settings_adopt_legacy`、`host_settings_migrate`、`host_window_relaunch`、`host_window_create`（R8）、`host_recover_trial_enable`、`host_market_check`/`download`/`install`、`host_i18n_set_locale`（切的是**全局**语言）、`host_deep_link_register`（写的是**应用级**协议） |
+| 仅主窗 | `require_main_window(caller, cmd)`（改状态的 6 条特权命令经 `admin_gate`，其余只读特权直接判） | `host_registry_list_all`、`host_registry_admin`、`host_runtime_spawn`、`host_runtime_health`、`host_resource_stats`、`host_events_approve`/`revoke`/`approvals`、`host_production_doctor`、`host_settings_adopt_legacy`、`host_settings_migrate`、`host_window_relaunch`、`host_window_create`（R8）、`host_recover_trial_enable`、`host_market_check`/`download`/`install`、`host_i18n_set_locale`（切的是**全局**语言）、`host_deep_link_register`（写的是**应用级**协议）；**轮 12 补 9 条**：`host_window_quit`（`app.exit(0)`，应用级）、`host_clipboard_read`/`write`（**一个**全局槽位，跨主体读写）、`host_dialog_open`/`save`/`message`/`confirm`（现状是桩，但线形同形，接原生即成应用级模态与磁盘路径面——按 `host_market_*` 的先例判定必须在接线前就位）、`host_recover_boot`（应用级恢复态势）、`host_i18n_stats`（全局命名空间普查） |
 | 绑定到自己的键空间 | `require_settings_key_scope(caller, key)` | `host_settings_get` / `host_settings_set`（插件只能读写 `plugin:<自己>.…`；用 `strip_prefix` + 空/`.` 判据，裸前缀比较会让 `plugin:p.a` 与 `plugin:p.ab` 互相穿透） |
 | 绑定到自己的身份 | `require_self_plugin_scope(caller, cmd, claimed)` | `host_notify`（署名）、`host_i18n_load`（命名空间归属）、`host_i18n_cleanup_plugin`（销毁目标）、`host_recover_report`（失败预算 / 故障归因）、`host_notifications_read`（只能标记**自己**的通知；`None` = 全局"全部已读"与未知 id 一律拒绝——对未知 id 放行会让返回值变成存在性预言机）——插件只能以自己名义；`None`（宿主级命名空间 / 应用级上报）对插件一律拒绝，主窗任意 |
 | **按身份过滤（不是拒绝）** | `visible_notifications(...)` | `host_notifications_list`：插件只拿到署名是自己的条目，且 `total`/`unread`/分页/`dispatchLog` 与**过滤后的可见集合同源**（只裁数组、留着全局未读数仍是泄露；`limit` 必须在过滤**之后**取，否则别人的条目会占满窗口把插件自己的挤掉）。主窗数学上等于原实现 |
+| 限定宿主允许的根目录 | `scoped_within_roots(roots, path)`（`fs_*` 的核心层） | 6 条 `host_fs_read`/`write`/`list`/`stat`/`mkdir`/`remove`：除 `require_main_window`（`cmd_fs_*_as`）之外，路径还必须落在 `AdapterConfig::fs_allowed_roots` 内；**roots 为空 → `UnsupportedBody`**（不是"全盘允许"）。两道判定叠起来才是这条命令的真实边界，只写其中一道都属于漏报 |
+
+**刻意不带判定的命令**（生成的命令面参考逐条写明理由，`wire-gate` 钉住这份清单）：
+① 目标就是**注入的调用方窗口**而不是入参 label 的窗口几何族（`host_window_close` /
+`minimize` / `maximize` / `restore` / `set_position` / `set_size`——插件关不掉、搬不动
+邻居或主窗的窗口）；② **只读取值且不暴露跨主体拓扑**的 `host_i18n_t` /
+`host_i18n_t_params`（一次答一个键；全局普查面 `host_i18n_stats` 已判仅主窗）与
+`host_brand_info`（只读、未配置时诚实降级）。
 
 为什么后两类不能一刀切成"仅主窗"：插件**本来就需要**读自己的设置、以自己名义发通知、
 装自己的文案、报自己的状态——一刀切会关掉正常功能，所以判的是"**以谁的名义**"。
@@ -520,15 +578,29 @@ capability/ACL 强制（生产客户端应采用——把 8 条特权命令只�
 宿主错误以 **JSON 对象**穿越 IPC：
 
 ```json
-{ "code": "E_CALL_TIMEOUT", "message": "call expired", "retryable": true }
+{
+  "code": "E_CALL_TIMEOUT",
+  "message": "call expired",
+  "retryable": false,
+  "retryClass": "manual"
+}
 ```
 
 - `code` 为 `E_*` 大写蛇形，**线名即 Rust 枚举变体名**（`ErrorCode` 未配
-  `rename_all`，`Display` 输出与序列化一致）；**21 个**变体与 TS
-  `HOST_ERROR_CODES` 逐名、逐序镜像。
-- `retryable` 三值（`E_CALL_TIMEOUT` / `E_HOST_PANIC` / `E_PLUGIN_FILTERED`）
-  与 Rust `ErrorCode::retryable()` 同集合；TS 侧以
-  `RETRYABLE_HOST_ERROR_CODES` 判定，两者由门禁锁定。
+  `rename_all`，`Display` 输出与序列化一致）；**24 个**变体与 TS
+  `HOST_ERROR_CODES` 按**码名集合**全等（轮 10 / V4 A69、§89：顺序不属于协议，
+  新增码放在语义相邻处即可；集合比对仍钉死「一个不多、一个不少」，改名或漏码即红）。
+- `retryClass` 是 V4 的**唯一重试判据**，四档 kebab-case 线名
+  （`never` / `manual` / `auto-idempotent` / `after-reconnect`），与 Rust
+  `ErrorCode::retry_class()` 逐项同集合。今天真实分布：
+  `manual` = `E_CALL_TIMEOUT` / `E_PLUGIN_FILTERED` / `E_STREAM_BACKPRESSURE`，
+  `after-reconnect` = `E_LEASE_EXPIRED`，其余一律 `never`；
+  `auto-idempotent` 目前**没有码落在该档**（一档存在不等于有用过）。
+- `retryable` 是**遗留兼容位**：`retryable() == (retry_class() == auto-idempotent)`，
+  因此今天**恒为 `false`**。它不再表示"这三个码可重试"——那是 V3 的口径，
+  V4 明确不把 panic / 超时标成可自动重放（`catch_unwind` 只是遏制，不是回滚证明）。
+  TS 侧 `RETRYABLE_HOST_ERROR_CODES` 同为空集，两侧由门禁锁定。
+  **新代码请读 `retryClass`，不要读 `retryable`。**
 - `message` 面向开发者/日志，**不得**作为 UI 文案或分支判断依据。
 
 Rust 侧 `to_tauri_err` 必须走 `TauriError::from(error)`（`InvokeError` 底层是

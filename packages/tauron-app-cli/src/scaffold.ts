@@ -10,6 +10,7 @@
 // ──────────────────────────────────────────────────────────────────────────
 
 import { CAPABILITIES } from '@tauron/host';
+import { FRAMEWORK_VERSION } from './framework-version.js';
 import { placeholderIconFiles } from './icon-assets.js';
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -47,7 +48,8 @@ export interface ScaffoldConfig {
    * tauron 源码检出根相对**生成工程根**的路径（可选）。
    *
    * 给出时生成本地源码 `path` / `file:` 依赖，适用于 Tauron 贡献开发；省略时
-   * 生成固定 `1.1.0` registry 依赖，适用于第三方项目。
+   * 生成固定到 **`FRAMEWORK_VERSION`**（见 `framework-version.ts`）的 registry 依赖，
+   * 适用于第三方项目。
    */
   tauronPath?: string;
 }
@@ -263,9 +265,6 @@ export function validateConfig(config: ScaffoldConfigInput): ScaffoldConfig {
 // ──────────────────────────────────────────────────────────────────────────
 // 文件生成
 // ──────────────────────────────────────────────────────────────────────────
-
-/** 框架包版本（与 @tauron/host 同源发版）。 */
-const FRAMEWORK_VERSION = '1.1.0';
 
 /** 去掉路径尾部的 `/` 与 `\`。 */
 function trimTrailingSlash(p: string): string {
@@ -819,7 +818,7 @@ fn load_plugin_install_config() -> Option<(std::path::PathBuf, std::collections:
     Some((root, keys, acl))
 }
 
-#[cfg(all(not(feature = "substrate-only"), feature = "plugin-install"))]
+#[cfg(feature = "plugin-install")]
 fn decode_hex(raw: &str) -> Option<Vec<u8>> {
     if raw.is_empty() || raw.len() % 2 != 0 { return None; }
     raw.as_bytes().chunks_exact(2).map(|pair| {
@@ -828,13 +827,35 @@ fn decode_hex(raw: &str) -> Option<Vec<u8>> {
     }).collect()
 }
 
+/// A84：插件 asset 读侧信任根。与 \`load_plugin_install_config\` 同源——安装侧用哪个
+/// 密钥密封 activation 记录，服务侧就必须用同一个密钥认证它；拿不到就不注册 asset
+/// 协议（只校验路径、不校验摘要的读侧等于没把守）。
+#[cfg(feature = "plugin-install")]
+fn plugin_asset_trust() -> Option<tauron_adapter::PluginAssetTrust> {
+    let root = std::env::var_os("TAURON_PLUGIN_INSTALL_DIR").map(std::path::PathBuf::from)?;
+    let key = decode_hex(std::env::var("TAURON_ACL_SIGNING_KEY").ok()?.trim())?;
+    match tauron_adapter::PluginAssetTrust::new(root, key) {
+        Ok(trust) => Some(trust),
+        Err(error) => {
+            eprintln!("[tauron] 插件 asset 信任根不可用：{}", error.message);
+            None
+        }
+    }
+}
+
 fn main() {
     #[cfg(feature = "plugin-install")]
-    let builder = {
-        let root = std::env::var_os("TAURON_PLUGIN_INSTALL_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("tauron-plugins"));
-        tauron_adapter::tauri::with_plugin_asset_protocol(tauri::Builder::default(), root)
+    let builder = match plugin_asset_trust() {
+        Some(trust) => {
+            tauron_adapter::tauri::with_plugin_asset_protocol(tauri::Builder::default(), trust)
+        }
+        None => {
+            eprintln!(
+                "[tauron] 插件 asset 协议未注册：缺少 TAURON_PLUGIN_INSTALL_DIR 或有效 \
+                 TAURON_ACL_SIGNING_KEY——没有可信 activation 摘要时不服务未复核的字节"
+            );
+            tauri::Builder::default()
+        }
     };
     #[cfg(not(feature = "plugin-install"))]
     let builder = tauri::Builder::default();

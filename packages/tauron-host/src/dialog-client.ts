@@ -55,20 +55,6 @@ export function isUnsupportedBody(value: unknown): value is UnsupportedBody {
   );
 }
 
-export function isDegradedValue<T = unknown>(value: unknown): value is DegradedValue<T> {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'supported' in value &&
-    value.supported === false &&
-    'reason' in value &&
-    typeof value.reason === 'string' &&
-    'fallback' in value &&
-    typeof value.fallback === 'string' &&
-    'value' in value
-  );
-}
-
 /** 文件过滤器 */
 export interface FileFilter {
   /** 过滤器名称 */

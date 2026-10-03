@@ -1,8 +1,9 @@
 // @tauron/app-plugin-sdk — PluginContext 实现。
 
+import { EventOrderingWatcher } from '@tauron/host';
 import type { HostClient } from '@tauron/host';
 import type { CommandHandler, EventListener, PluginContext } from './types.js';
-import type { JsonValue } from '@tauron/host';
+import type { EventOrderingViolation, JsonValue } from '@tauron/host';
 
 /**
  * 宿主侧事件投递入口。
@@ -17,6 +18,18 @@ export interface PluginEventSink {
   dispatchEvent(topic: string, payload: unknown): void;
   /** 释放全部事件订阅（插件卸载时调用）。 */
   disposeEvents(): Promise<void>;
+}
+
+/** 顺序异常的一行可读描述（日志出口在 `ctx.log.warn`，不再开第二条通道）。 */
+function describeViolation(violation: EventOrderingViolation): string {
+  switch (violation.kind) {
+    case 'duplicate':
+      return `重复投递 sender=${violation.sender} receiver=${violation.receiver} seq=${violation.seq}`;
+    case 'gap':
+      return `丢帧 sender=${violation.sender} receiver=${violation.receiver} 期望 seq=${violation.expected} 实收 seq=${violation.actual}`;
+    case 'revision-regression':
+      return `状态 revision 倒退 previous=${violation.previous} actual=${violation.actual}`;
+  }
 }
 
 /**
@@ -55,6 +68,10 @@ export function createPluginContext(
   const subscribing = new Set<string>();
   /** 建立过程中已被退订的 topic（回调到达时需立即回收）。 */
   const cancelled = new Set<string>();
+  /** 被拒订阅的待重试定时器（topic → timer）。 */
+  const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** 被拒订阅已消耗的重试次数（topic → 次数）。 */
+  const retryCounts = new Map<string, number>();
 
   // ── 取件泵 ────────────────────────────────────────────────────────────
   //
@@ -80,8 +97,27 @@ export function createPluginContext(
    */
   const CALL_EXEC_FAILED = 'E_CALL_EXEC_FAILED';
 
+  /**
+   * 订阅申请被拒后的重试退避阶梯（毫秒）。
+   *
+   * 「主窗批准**晚于**插件激活」是正常时序（管理员先开插件面板、之后才点批准），
+   * 而一次性 `eventsSubscribe` 失败若被永久吞掉，钩子就在该插件窗的整个生命周期里
+   * 都不触发——只有重新激活才能接上，这与「批准即生效」的承诺相反。故按阶梯重试；
+   * 累计约 63s 后放弃，退化为文档承诺的静默降级。**有上限**是刻意的：无上限轮询
+   * 既是死循环，也在宿主侧持续堆积订阅申请。
+   */
+  const SUBSCRIBE_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 32_000];
+
   let pumpTimer: ReturnType<typeof setTimeout> | null = null;
   let pumpActive = false;
+  /**
+   * A102 接收端顺序守卫（每条 `sender → receiver` 流的期望序号）。
+   *
+   * 插件收到的帧只有 `host_events_drain` 这一个入口，泵就是接收端的咽喉点；不在这
+   * 里判定，`seq`/`sender`/`receiver` 就只是宿主写、前端读的字段，重复投递与丢帧
+   * 没有任何地方能发现。
+   */
+  const ordering = new EventOrderingWatcher();
 
   const stopPump = (): void => {
     pumpActive = false;
@@ -89,6 +125,9 @@ export function createPluginContext(
       clearTimeout(pumpTimer);
       pumpTimer = null;
     }
+    // 收泵 = 这条插件会话的流暂时结束。清掉期望序号，否则重新激活后宿主重铸的
+    // seq 会被整批改判成 duplicate/gap。
+    ordering.reset();
   };
 
   /** 没有任何在途/存量宿主订阅、也没有可执行命令时收泵（不再空转 IPC）。 */
@@ -148,6 +187,14 @@ export function createPluginContext(
       if (!pumpActive) return;
       for (const frames of batches) {
         for (const frame of frames ?? []) {
+          // A102：先判顺序，再分发。异常只记日志、不丢帧——at-least-once 的幂等归
+          // 业务（尤其入站调用帧重投会二次执行命令，但那只能由命令自己判幂等）。
+          const violation = ordering.observe(frame);
+          if (violation) {
+            ctx.log.warn(
+              `事件顺序契约异常（topic \`${frame.topic}\` seq=${frame.seq}）：${describeViolation(violation)}`,
+            );
+          }
           if (frame.topic.endsWith(CALL_TOPIC_SUFFIX)) {
             // 入站调用帧：自动执行 + 回填（不进事件订阅者——它不是事件）。
             handleCallFrame(frame.payload);
@@ -172,7 +219,15 @@ export function createPluginContext(
     void runPump();
   };
 
-  /** 惰性建立宿主订阅：同一 topic 只订阅一次。 */
+  /** 清掉某 topic 的待重试状态（成功 / 退订 / 销毁都要清，否则复活已退订的订阅）。 */
+  const clearSubscriptionRetry = (topic: string): void => {
+    const timer = retryTimers.get(topic);
+    if (timer !== undefined) clearTimeout(timer);
+    retryTimers.delete(topic);
+    retryCounts.delete(topic);
+  };
+
+  /** 惰性建立宿主订阅：同一 topic 只订阅一次，被拒则按退避阶梯重试。 */
   const ensureSubscription = (topic: string): void => {
     if (eventTokens.has(topic) || subscribing.has(topic)) return;
     subscribing.add(topic);
@@ -180,6 +235,7 @@ export function createPluginContext(
       .eventsSubscribe([{ topic }])
       .then((sub) => {
         subscribing.delete(topic);
+        clearSubscriptionRetry(topic);
         if (cancelled.delete(topic)) {
           // 订阅途中所有订阅者都已退订：立即回收，避免宿主侧悬挂订阅
           void host.eventsUnsubscribe(sub.token).catch(() => undefined);
@@ -190,15 +246,45 @@ export function createPluginContext(
         startPump();
       })
       .catch(() => {
-        // 订阅失败（如未获授权）：不抛给调用方，静默降级为本地无投递
+        // 订阅失败（典型：私有 topic 尚未获主窗批准）：不抛给调用方，本轮静默降级。
         subscribing.delete(topic);
         cancelled.delete(topic);
         stopPumpIfIdle();
+        const attempts = retryCounts.get(topic) ?? 0;
+        const delay = SUBSCRIBE_RETRY_DELAYS_MS[attempts];
+        if (delay === undefined) {
+          if (attempts === SUBSCRIBE_RETRY_DELAYS_MS.length) {
+            ctx.log.warn(
+              `事件订阅在 ${SUBSCRIBE_RETRY_DELAYS_MS.length} 次重试后放弃：${topic}（该 topic 未获批准；重新订阅会再走一轮阶梯）`,
+            );
+          }
+          // 阶梯走空即**清零**：`ensureSubscription` 只有两个入口——本阶梯的定时器，
+          // 以及插件显式 `events.subscribe`。前者已在上面用 `eventListeners.has` 挡住，
+          // 所以清零**不会**变成无限轮询；反之若不清零，这个 topic 就在插件窗的整个
+          // 剩余生命周期里被永久拉黑——即使管理员后来批准了、插件重新订阅也一样，
+          // 那等于把「批准即生效」换成了「必须重启插件」。
+          retryCounts.delete(topic);
+          return;
+        }
+        retryCounts.set(topic, attempts + 1);
+        retryTimers.set(
+          topic,
+          setTimeout(() => {
+            retryTimers.delete(topic);
+            // 期间本地已无人订阅该 topic → 不得复活订阅
+            if (!eventListeners.has(topic)) {
+              retryCounts.delete(topic);
+              return;
+            }
+            ensureSubscription(topic);
+          }, delay),
+        );
       });
   };
 
   /** 释放宿主订阅。 */
   const releaseSubscription = (topic: string): void => {
+    clearSubscriptionRetry(topic);
     const token = eventTokens.get(topic);
     if (token !== undefined) {
       eventTokens.delete(topic);
@@ -361,6 +447,9 @@ export function createPluginContext(
       eventListeners.clear();
       subscribing.clear();
       cancelled.clear();
+      for (const timer of retryTimers.values()) clearTimeout(timer);
+      retryTimers.clear();
+      retryCounts.clear();
       stopPump();
       await Promise.all(
         tokens.map((token) => host.eventsUnsubscribe(token).catch(() => undefined)),

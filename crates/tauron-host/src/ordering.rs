@@ -38,8 +38,11 @@ pub struct OrderingTracker {
 impl OrderingTracker {
     /// Allocate the next host-owned sequence for one sender→receiver stream.
     ///
-    /// The sequence is committed immediately. Reliable transports may call `rollback_last`
-    /// while still serializing the same sender/receiver stream if enqueue fails before delivery.
+    /// The sequence is committed immediately. Reliable transports must therefore
+    /// **pre-validate** their queue budget before calling this (see
+    /// `EventBus::publish_with_causation`): a sequence issued for a frame that
+    /// never became visible leaves a permanent gap, and rolling it back is unsound once
+    /// another publisher has issued on the same stream.
     pub fn issue(
         &mut self,
         sender: &str,
@@ -72,23 +75,12 @@ impl OrderingTracker {
         Ok(meta)
     }
 
-    /// Roll back the most recently issued sequence when a reliable enqueue never became visible.
+    /// 接收端判定一帧的顺序（A102）：`Ok(())` = 正常，否则给出违规种类。
     ///
-    /// State revisions are not rolled back because this helper is intentionally only for
-    /// non-state reliable request paths.
-    pub fn rollback_last(&mut self, meta: &OrderedEventMeta) -> bool {
-        if meta.state_revision.is_some() {
-            return false;
-        }
-        let key = (meta.sender.clone(), meta.receiver.clone());
-        let expected_after = meta.sequence.saturating_add(1);
-        if self.next.get(&key).copied() != Some(expected_after) {
-            return false;
-        }
-        self.next.insert(key, meta.sequence);
-        true
-    }
-
+    /// 这是**验收视图**：遇到 gap 后不重同步，因此该流之后的每一帧都继续报 gap，
+    /// 异常一个都不掩掉。运行视图正相反——TS 侧 `EventOrderingWatcher`
+    /// （`packages/tauron-host/src/events.ts`，由 `toHostRpc` 取件泵与插件 SDK 泵消费）
+    /// 报告一次即把期望值抬到 `seq + 1`，否则一次丢帧会把整条流变成噪音。
     pub fn observe(&mut self, meta: &OrderedEventMeta) -> Result<(), OrderingError> {
         let key = (meta.sender.clone(), meta.receiver.clone());
         let expected = self.next.get(&key).copied().unwrap_or(1);
@@ -154,15 +146,12 @@ mod tests {
     }
 
     #[test]
-    fn issued_sequence_is_per_sender_receiver_and_can_rollback_reliable_failure() {
+    fn issued_sequence_is_per_sender_receiver_stream() {
         let mut tracker = OrderingTracker::default();
         let a1 = tracker.issue("a", "b", "e1", None, None).unwrap();
         let c1 = tracker.issue("a", "c", "e1", None, None).unwrap();
         let a2 = tracker.issue("a", "b", "e2", None, None).unwrap();
         assert_eq!((a1.sequence, c1.sequence, a2.sequence), (1, 1, 2));
-        assert!(tracker.rollback_last(&a2));
-        let retry = tracker.issue("a", "b", "e2-retry", None, None).unwrap();
-        assert_eq!(retry.sequence, 2);
     }
 
     #[test]

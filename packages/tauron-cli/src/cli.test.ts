@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runCli } from './cli.js';
 import type { CliOptions } from './types.js';
+import { CLI_VERSION } from './version.js';
 
 // 脚手架命令会**真的写盘**，所以必须把落盘根目录指到临时目录——
 // 否则 `runCli(['create', 'my-app'])` 会在仓库里建出 `my-app/`。
@@ -33,13 +34,13 @@ describe('runCli', () => {
   it('returns help for help command', async () => {
     const result = await runCli(['--help']);
     expect(result.success).toBe(true);
-    expect(result.message).toContain('tauron v1.1.0');
+    expect(result.message).toContain(`tauron v${CLI_VERSION}`);
   });
 
   it('returns version for version command', async () => {
     const result = await runCli(['--version']);
     expect(result.success).toBe(true);
-    expect(result.message).toContain('v1.1.0');
+    expect(result.message).toContain(`v${CLI_VERSION}`);
   });
 
   it('runs doctor command', async () => {

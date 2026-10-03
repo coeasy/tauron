@@ -7,6 +7,12 @@
 > §1/§2 描述的是**施工前**状态（调用投递等缺口已于轮 20 修复，见该文件 §2.4）。
 > 另：§2.2 把 `tauron-acl` / `tauron-market` 列为「迁移中/孤儿」**已过期**，
 > 两者现已在 `tauron-adapter` 依赖表内。
+>
+> ⚠️ **1.1 口径更正（2026-10-02）**：本文里所有「`plugin-install` 已进 `tauron-adapter`
+> 默认特性 / `default = ["plugin-install"]` / 默认 85 条」的表述**已被 1.1 的
+> V4 minimal-substrate 规则反转**：`crates/tauron-adapter/Cargo.toml` 现为 `default = []`，
+> 该 feature 回到 **opt-in**——默认装配 **83** 条，显式开启后 **85** 条。W6 那一行记录的
+> 「进默认」是 1.0 当时的事实，保留为历史，不再当作现状读。
 
 > **原状态**：方案已定，分轮实施中（轮 19 起）。不得据此宣称可发布。
 > **目标版本**：tauron 0.4
@@ -73,7 +79,7 @@
 | 设置 | `host_settings_*`（含 adopt/migrate） | ✅ 真通 | `SettingsStore` 四层合并 + 版本迁移 |
 | 资源配额 | `host_resource_stats` | ✅ 真通 | 4 类 per-plugin 配额已接线 |
 | **插件调用** | `host_plugin_call` / `host_call_end` / `host_cancel` | ~~❌ 只登记，不投递~~ → ✅ **已闭环**（0.4-A1） | `host_call_plugin` / `host_call_result` / `host_call_take` 三条投递命令已接线（`lib.rs:2597/2616/2649`）；消费方 `ShellController`（`shell-controller.ts:231/264`）与 `HostClient.callPlugin/takeCallResult`。原 §5-L8 的缺口已修 |
-| **插件安装** | `host_registry_install(_preview)` | ⚠️ 默认可达但需配置 | `#[cfg(feature="plugin-install")]`；该 feature **已进默认**（`crates/tauron-adapter/Cargo.toml:21`，1.0-W6），但 `plugin_install_dir` 未配置时仍明确不可用（`lib.rs:226-228`） |
+| **插件安装** | `host_registry_install(_preview)` | ⚠️ 需显式开 feature + 配置 | `#[cfg(feature="plugin-install")]`；该 feature 曾于 1.0-W6 进默认、**1.1 改回 opt-in**（`crates/tauron-adapter/Cargo.toml` 现为 `default = []`），且 `plugin_install_dir` 未配置时仍明确不可用 |
 | **进程插件通信** | `host_runtime_spawn/health` | ❌ 能起不能聊 | `tauron-proc/spawner.rs:126-127` `Stdio::null()` |
 | **扩展点 UI** | `host_contributes_register/list/reconcile` | ~~❌ 不驱动 UI~~ → 🟡 **对账已闭合**（2026-09-27） | `host_contributes_reconcile` + `E_CONTRIBUTES_DRIFT` 已在（`authz.rs:189`/`error.rs:97`/`tauri.rs:1421`）；`oc-command-select` 已由 `ShellController` 接管（`shell-controller.ts:203`）。**剩余**：命令面板填充仍由接入方喂数 |
 | 对话框 | `host_dialog_*`（4 条） | ⚠️ 诚实降级 | `UnsupportedBody`，非「假装成功」 |
@@ -157,7 +163,8 @@ tauron-acl ──────→ tauron-host
 1. **跨语言线格式强制 camelCase**：跨 IPC 的 Rust 结构体一律
    `#[serde(rename_all = "camelCase", deny_unknown_fields)]`，由 wire-gate 正则扫源码锁定。
 2. **两套错误码、零交集、只追加**：框架层 `SC-xxxx`，应用层 `E_*`；
-   `ErrorCode` 新码只能追加到枚举末尾（TS `HOST_ERROR_CODES` 按声明顺序比对）。
+   两套码表**零交集**；新码放在语义相邻处即可——V4 A69/§89（轮 10 落地）后
+   两侧按**码名集合**比对，声明顺序不属于协议。
 3. **身份从 webview label 解析，不信任入参**：self 档命令的 pluginId 只从
    `plugin-<id>` 解析（`lib.rs` 的 `require_self_plugin_scope`，`:1811`；label 铸造在 `:4932`），调用方传入一律忽略。
 4. **底座类型上触达不到注册表**：`SubstrateState` 无 registry 字段，编译期隔离。
@@ -640,7 +647,7 @@ pub struct DeliveryReceipt {
 
 | 文档 | 需同步内容 |
 |---|---|
-| [overview.md](./overview.md) | 三层结构（补充「活线依赖死线」）；接线状态表按 A8-5 归置表更新；命令面 83 条（默认 85） |
+| [overview.md](./overview.md) | 三层结构（补充「活线依赖死线」）；接线状态表按 A8-5 归置表更新；命令面 83 条（显式开 `plugin-install` 则 85） |
 | [app-layer-wire.md](./app-layer-wire.md) | 新增 install 的 feature 可达性说明、调用投递的 `DeliveryReceipt` 线形、contributes reconcile |
 | [canonical-owners.md](./canonical-owners.md) | crate 归置表按 A4/A5/A8-5 更新；wasm 从「可选组件」改为「可选组件（已接线）」 |
 | [multi-plugin-substrate-roadmap.md](./multi-plugin-substrate-roadmap.md) | §2 残差表按本次实测重写（M-1/M-2 已实现） |

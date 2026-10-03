@@ -8,6 +8,8 @@
 // - 模板与框架包版本同源发版
 // ──────────────────────────────────────────────────────────────────────────
 
+import { FRAMEWORK_VERSION } from './framework-version.js';
+
 // ──────────────────────────────────────────────────────────────────────────
 // 类型
 // ──────────────────────────────────────────────────────────────────────────
@@ -39,7 +41,7 @@ export interface PluginConfig {
    * tauron 源码检出根相对**生成插件工程根**的路径（可选）。
    *
    * 给出时 `package.json` 生成 `file:` 依赖——跨目录生成插件也能装上
-   * （tauron 的包都未发布到 npm，registry 坐标今天解析不了）。
+   * （registry 现值是 **1.0.2**，与仓库当前源码不同步，本地开发不该装它）。
    * 省略时退回 `workspace:*`：那**只在同一个 pnpm workspace 内**可解析，
    * 所以 CLI 侧总是自动探测并传入（探测失败则如实报错）。
    */
@@ -237,9 +239,6 @@ export function validatePluginConfig(config: PluginConfigInput): PluginConfig {
 // 文件生成
 // ──────────────────────────────────────────────────────────────────────────
 
-/** 框架包版本（与 @tauron/host 同源发版）。 */
-const FRAMEWORK_VERSION = '1.1.0';
-
 /**
  * 生成插件 manifest.json 内容。
  */
@@ -285,8 +284,8 @@ export function generatePluginPackageJson(config: PluginConfig): string {
    * 解析一条 `@tauron/*` 依赖的坐标。
    *
    * - 给了 `tauronPath` → `file:`（**跨目录生成也能装上**，这是 CLI 的常态路径）；
-   * - 没给 → `workspace:*`（**只在同一个 pnpm workspace 内**可解析；写成 registry
-   *   版本号是错的，因为这些包没发布）。
+   * - 没给 → `workspace:*`（**只在同一个 pnpm workspace 内**可解析；插件工程在
+   *   仓库外时必须走 `file:`，registry 现值 1.0.2 落后于当前源码，不能当默认）。
    *
    * 两种都不是「随便写一个看起来像版本号的东西」——仓库里曾经那种写法会让
    * `npm install` 直接失败，而不是「稍后补上」。

@@ -104,7 +104,9 @@ export class UpdaterStore {
 
   constructor(config: Partial<UpdaterConfig> = {}) {
     this._config = {
-      currentVersion: config.currentVersion ?? '1.1.0',
+      // 默认值不是「本 SDK 的版本」——`currentVersion` 语义是**宿主应用自己的**版本，
+      // 拿 SDK 版本兜底会让没传配置的 app 显示一个与它无关、且每次发版都会漂移的号。
+      currentVersion: config.currentVersion ?? '0.0.0',
       checkInterval: config.checkInterval ?? 3600000, // 1 hour
       autoDownload: config.autoDownload ?? false,
       autoInstall: config.autoInstall ?? false,

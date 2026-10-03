@@ -7,9 +7,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { generateClientConfig } from './client-config.js';
+import { FRAMEWORK_VERSION } from './framework-version.js';
 import { ensureDir, writeFile, pathExists, toPosixRelative } from './fs-operations.js';
-
-const FRAMEWORK_VERSION = '1.1.0';
 
 // ── 类型 ──
 

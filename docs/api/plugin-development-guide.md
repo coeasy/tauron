@@ -47,9 +47,29 @@ tauron 插件系统在**清单层**定义了四种插件类型（`PluginType` �
    做代码层身份判定（仅主窗 / 绑定自身命名空间 / 绑定自身身份 / 按身份过滤四类），
    但**不**做资源限额（内存、CPU、通知环占用都没有 per-plugin 配额，见
    `docs/architecture/app-layer-wire.md` 的限制登记）。
-2. **Process 插件的边界**：崩溃检测目前是**轮询式**（不是内核级进程组回收）、RPC 帧循环
-   尚未接线、进程退出不会连带杀掉它的子进程。所以"进程隔离"成立，但"崩溃自动清理"
-   不成立。
+2. **Process 插件的边界**。此前本文件在这里写"RPC 帧循环尚未接线、进程退出不会连带
+   杀掉它的子进程"——那两条已被代码推翻（轮 11 核实，见
+   `crates/tauron-proc/src/spawner.rs` 的 `CommandSpawner` 文档与 `Drop` 实现），
+   正确的口径是：
+   - **JSON-RPC 帧回路已接线**（0.4-A1）：stdin/stdout 走 `Stdio::piped()`，每条
+     sidecar 在 `spawn` 时单独起一个读线程排空 stdout，回帧（含 `callId`）经
+     `ProcessFrameSinkImpl` 调 `Registry::settle_call` 闭合链路。**诚实边界**：本仓
+     没有可执行的 sidecar 二进制、测试不起真进程，所以"sidecar 真收帧 / 真回帧 /
+     宿主真结算"只有契约与格式级证据，**没有运行期证据**。
+   - **进程树回收已接线**：Unix/macOS 用独立 POSIX process group
+     （`kill(-pgid, SIGKILL)`），Windows 用带 `KILL_ON_JOB_CLOSE` 的 Job Object；
+     `CommandSpawner` 被最终持有者丢弃时，仍在跟踪的每个 pid 都走同一套 tree-aware
+     `kill`。终止失败时句柄保留、正在退出的宿主没有重试方，该子进程因此**可能存活**
+     （OS 语义，不假装已解决）。
+   - **仍然成立的限制**：① 崩溃检测是**轮询式**——没有后台监控线程，宿主不调
+     `host_runtime_health` 就发现不了死亡；② 两个 provider 都自报
+     `ProcessSandboxEnforcement::Partial`（无文件系统/网络/系统调用隔离，Windows 还有
+     post-spawn attach race），因此 `productionDoctor` 的 `process-sandbox` 检查项不会
+     因它们变绿。Production 下**接上 `ProcSpawner` 即被拒启**（装配期
+     `validate_process_runtime_for_start` 报 `PROCESS_SANDBOX_HARD_REQUIRED`）；即使
+     绕过装配直接调 `host_runtime_spawn` 也一样被拒（`E_STATE_INVALID_TRANSITION`，
+     判定只作用于"需要起新进程"那条路径，已有活租约的幂等查询不受影响）。
+   一句话：**进程隔离与退出连带回收成立，OS 级资源/系统调用沙箱与事件驱动崩溃检测不成立。**
 
 ---
 
@@ -57,15 +77,16 @@ tauron 插件系统在**清单层**定义了四种插件类型（`PluginType` �
 
 ### 获取 CLI
 
-`@tauron/cli@1.1.0` 已发布到 npm，可通过 `npm install -g @tauron/cli@1.1.0` 安装；
-在 Tauron 仓库内开发时也可直接运行 bin。
+`@tauron/cli` 在 npm 上的 `latest` 是 **1.0.2**（2026-10-02 实测量：`npm view @tauron/cli version`
+→ `1.0.2`）；本仓库的 `1.1.0` 已备好但**尚未发布**，所以 `npm install -g @tauron/cli@1.1.0`
+现在会 `ETARGET`。在 Tauron 仓库内开发请直接运行 bin，无需安装：
 
 **下文一律用 `tauron` 代指 `node packages/tauron-cli/bin/tauron.js`（在仓库根执行）。**
 
 ### 验证
 
 ```bash
-tauron --version   # tauron v1.1.0
+tauron --version   # tauron v1.1.0（仓库 bin；npm 全局装到的是 1.0.2，会打印 v1.0.2）
 tauron doctor      # 环境诊断：探测 Node / pnpm / Rust / Tauri CLI
 ```
 
@@ -317,10 +338,18 @@ registerPlugin({
 ### 发起方（主窗示例）
 
 ```ts
-const info = await shell.callPlugin('com.example.calc', 'add', { a: 1, b: 2 });
-// info.state === 'pending'：已登记、已投递，等执行方回填
+import { isUnsupportedBody } from '@tauron/host';
+
+const accepted = await shell.callPlugin('com.example.calc', 'add', { a: 1, b: 2 });
+// 返回的是 `ProviderResult<PendingCallInfo>`：**先分流再取件**。
+// `Unsupported` = 这个宿主没有投递通路，它**没有** `callId`，
+// 直接 `accepted.callId` 会拿到 `undefined` 并让取件以非法入参失败。
+if (isUnsupportedBody(accepted)) {
+  throw new Error(`${accepted.reason}（建议：${accepted.fallback ?? '无'}）`);
+}
+// accepted 现在是 PendingCallInfo；state === 'pending' 表示已登记、已投递，等执行方回填
 // 稍后取件（一次性语义：settled 取走即删；pending 返回副本、条目保留）
-const done = await shell.callTakeResult(info.callId);
+const done = await shell.callTakeResult(accepted.callId);
 if (done.state === 'settled') {
   if (done.errorCode) { /* 执行方失败 */ } else { /* 用 done.result */ }
 }
@@ -329,6 +358,10 @@ if (done.state === 'settled') {
 `ShellClient.callPlugin(target, method, argsJson?)` 只能在主窗调（宿主主窗视角的
 封装）。插件侧发起用 `HostClient.callPlugin` / `takeCallResult`（self 档：只有
 发起方本人能取走结果）。
+
+两侧都返回 `ProviderResult<PendingCallInfo>`：`Unsupported` 支是**通路事实**（没有
+投递通路），与「执行方回填了失败」是两个完全不同的失败面——后者有 `callId`、有
+`errorCode`，前者什么都没有。分流用 `isUnsupportedBody()`，别用 `'callId' in x`。
 
 ### 执行方（插件）
 
@@ -414,6 +447,12 @@ await shell.settingsSet('plugin:com.example.formatter.width', 120); // 插件窗
 
 ### 诚实边界
 
+- **未获批时的重试是有界的**：SDK 的惰性订阅按 `1 / 2 / 4 / 8 / 16 / 32` 秒退避，
+  即**首次申请 + 6 次重试 = 共 7 次**（累计约 63 秒）。阶梯走空后不再自动重试，只打一条
+  `warn` 日志——所以「批准后自动生效」的窗口就是这 63 秒。此后管理员再批准也**不会**自动
+  接上：需要插件侧重新 `events.subscribe` 同一 topic（`onSettingsChanged` 那条订阅在
+  激活时建立，等价于重载插件窗）才会重走一轮阶梯。退订会清掉待重试状态并回收宿主侧订阅，
+  已退订的 topic 不会被残留定时器复活。
 - **审批是 topic 粒度的，不是键粒度**：一旦某订阅者获批 `host:settings:changed`，
   宿主就会把该 topic 的全部帧投给它（SDK 只过滤**投递给钩子**的那一份，这是应用层
   约定，不是宿主级 ACL）。需要「按键授权」时得按新特性立项，别把 SDK 过滤当安全边界。
@@ -430,6 +469,15 @@ await shell.settingsSet('plugin:com.example.formatter.width', 120); // 插件窗
   挂在**同一个提交口**（适配器的 `commit_settings_change` → `publish_committed_change`），
   所以宿主内即使有人用 Rust watcher，也**不会**和插件收到的帧分叉出两份事实；
   两条路各拿各的队列，一边溢出不会饿死另一边。
+- **迁移失败不会吃掉你上一次的设置（A101），但恢复出来的是迁移前的那一版**。
+  `host_settings_migrate` 在契约要求快照时，会把**迁移前**的用户层密封成
+  `host-settings.rollback.json`（信封 schema `tauron.host-settings-rollback/1`），并且
+  **先写镜像、再写正式文档**——顺序反了就会出现"已经迁了，却没有任何东西能回滚"。
+  这份镜像是**一次性**的：① 下次启动时若正式文档校验不过，装配会消费它并立刻删除；
+  ② 迁移落盘失败、内存 rewind 之后同样删除。所以插件作者要预期的边界是——
+  走恢复路径启动后，`host_settings_get` 读到的是迁移前的值，宿主**不会**自动重跑迁移
+  （`host_settings_migrate` 只在主窗显式调用时执行），需要管理员重新点一次迁移才回到当前
+  schema。别把"能读到值"当成"迁移已完成"。
 
 ---
 
@@ -440,9 +488,9 @@ await shell.settingsSet('plugin:com.example.formatter.width', 120); // 插件窗
 登记表（`authz::COMMANDS` / `ADMIN_COMMANDS`）的强制兑底是**门禁测试**
 （`validate_command_registry` + TS 镜像 `capabilities.ts`）。
 
-### 插件面命令（19 条，登记在 `authz::COMMANDS`）
+### 插件面命令（20 条，登记在 `authz::COMMANDS`）
 
-**Self_（17 条）**——身份取自 webview label（`plugin-<id>`），入参里的身份字段一律忽略（防冒充）：
+**Self_（18 条）**——身份取自 webview label（`plugin-<id>`），入参里的身份字段一律忽略（防冒充）：
 
 | 命令 | 说明 |
 |---|---|
@@ -452,6 +500,7 @@ await shell.settingsSet('plugin:com.example.formatter.width', 120); // 插件窗
 | `host_lifecycle_report` | 上报生命周期事件（state / reason） |
 | `host_contributes_register` | 注册 contributes（commands / menus / panels / …） |
 | `host_contributes_reconcile` | 对账本插件已注册的贡献（检出漂移并如实上报，0.4-W3） |
+| `host_capabilities` | 拉取宿主真实命令面与域可用性（能力协商入口，R1-4 fail-closed 的真相源；无身份参数，任何主体可读） |
 | `host_events_publish` | 事件发布唯一入口（越界丢弃 + 计数） |
 | `host_events_subscribe` | 事件订阅（跨插件订阅需对方 `public: true`） |
 | `host_events_unsubscribe` | 事件退订（窗口销毁时由宿主回收） |
@@ -481,7 +530,11 @@ await shell.settingsSet('plugin:com.example.formatter.width', 120); // 插件窗
 
 ### 主窗特权命令（8 条，登记在 `authz::ADMIN_COMMANDS`）
 
-**Privileged（8 条）**——仅主窗 / 宿主 UI，代码层判定与部署 ACL 双保险：
+**Privileged（8 条）**——仅主窗 / 宿主 UI：判定都落在 `require_main_window`，
+其中 4 条会改状态 / 授权的（`host_registry_admin` / `host_runtime_spawn` /
+`host_events_approve` / `host_events_revoke`）经分发唯一咽喉 `admin_gate`
+（判定 + `record_admin_audit` 留痕），另 4 条只读、直接判、刻意不入审计表。
+**判定只有代码这一层**（Tauri ACL 不按 `host_*` 命令名管辖，见下节更正）：
 
 | 命令 | 说明 |
 |---|---|
@@ -490,15 +543,22 @@ await shell.settingsSet('plugin:com.example.formatter.width', 120); // 插件窗
 | `host_runtime_health` | 按租约查询 sidecar 健康（pid / 崩溃窗口计数；暴露 PID 故同属特权） |
 | `host_resource_stats` | 查看全局及逐插件的 pending、流、订阅与通知配额占用 |
 | `host_events_approve` | 审批一条「订阅者 × 主题」的 Event 决策（主题必须已被声明，否则 `E_AUTH_DENIED`；审批表上限 4096 条，满则 `E_SUBSCRIPTION_FULL`） |
-| `host_events_revoke` | 撤销一条 Event 审批（订阅者侧的授权事实即刻失效） |
+| `host_events_revoke` | 撤销一条 Event 审批。**撤销即失效**：该 `(subscriber, topic)` 的既有订阅当场全部退订、三个通道队列里该 topic 的待取帧一并作废；返回 `true/false` 只回答「有没有真的删掉一条授权事实」（幂等重试为 `false`，但**效力照走**） |
 | `host_events_approvals` | 只读列出当前全部审批事实（宿主审批 UI / 审计对账用） |
 | `host_production_doctor` | 读取机器可读的 production readiness 自检报告（部署模式 + 逐项检查 + `productionSafe` 汇总；见下文「生产就绪自检」） |
 
-### 插件安装命令（2 条，feature-gated 且**已进默认特性**）
+### 插件安装命令（2 条，feature-gated 且为 **opt-in**）
 
 `host_registry_install_preview` / `host_registry_install` 挂在 `plugin-install` feature 下，
-而该 feature **已进 `tauron-adapter` 的默认特性**（`crates/tauron-adapter/Cargo.toml:21`，
-1.0-W6）。只想取底座的接入方用 `default-features = false` 关掉。
+而该 feature 是 **opt-in**：`crates/tauron-adapter/Cargo.toml` 的 `default = []`（V4
+minimal-substrate 规则——只依赖 `tauron-adapter` 的底座接入方不得被拉进
+market/signature/archive 依赖）。因此**默认装配只有 83 条**，接入方显式
+`features = ["plugin-install"]` 才是 85 条；示例应用
+（`examples/minimal-app/src-tauri/Cargo.toml` 的
+`default = ["plugin-install", "runtime-wasm-broker"]`）就属于显式开启那一类。
+
+> 1.0-W6 曾把该 feature 放进默认特性，1.1 的 V4 合并按 minimal-substrate 规则改回
+> opt-in。看到旧文档写「已进默认特性」时以 `Cargo.toml` 为准。
 
 | 命令 | 说明 |
 |---|---|
@@ -514,9 +574,34 @@ await shell.settingsSet('plugin:com.example.formatter.width', 120); // 插件窗
 
 其余命令（`host_window_*` / `host_settings_*` / `host_notify` / `host_recover_*` /
 `host_market_*` / `host_i18n_*` / `host_brand_info` / `host_registry_list_all` 等）
-**不在档位表内**——它们是主窗专属命令，由 Tauri
-capability 的 `windows` 字段限制（只授予 `main`），不走 `authz` 表。
-完整线格式见 `docs/architecture/app-layer-wire.md`。
+**不在档位表内**——它们是主窗 / 宿主 UI 专属面，判定落在**代码层**：需要判定的那些
+在 wire 入口调 `require_main_window`（会改状态的特权族再包一层咽喉 `admin_gate`，判定 +
+审计同点），
+`host_settings_*` / `host_notify` 等按身份绑键空间或过滤可见集合。
+
+> ⚠️ **旧口径在此更正（轮 12）**：本节曾写「由 Tauri capability 的 `windows` 字段限制
+> （只授予 `main`）」——示例工程的能力文件 `windows` 是 `["main", "plugin-*"]`、
+> `permissions` 只有 `core:default`，而 `host_*` 是 **root 注册**（裸名），Tauri ACL
+> 并不按命令名管辖它们；`origin_gate` 判的也只是 label + origin 的**形态与来源**，
+> 不是「这条命令谁能调」。**代码层判定是按命令的唯一权威**，因此这条面上漏判定
+> 就是真越权：轮 12 实测把 9 条宣称「主窗专属」、实则零判定的命令补成
+> `require_main_window`（`host_window_quit`、`host_clipboard_read` / `_write`、
+> `host_dialog_open` / `_save` / `_message` / `_confirm`、`host_recover_boot`、
+> `host_i18n_stats`）。
+>
+> 另有 **9 条**经复核**刻意不带**身份判定（`host_brand_info`、`host_i18n_t` /
+> `_t_params`、`host_window_close` / `_maximize` / `_minimize` / `_restore` /
+> `_set_position` / `_set_size`）：前 3 条只读且只返回调用方自身可见的信息（几何族的
+> 目标窗口由注入的 caller label 决定，插件只能作用在自己窗口），逐条理由写在各命令的
+> `///` 注释里，并由 `wire-gate` 按**名字**钉住——新增命令想悄悄加入这一清单即红。
+
+> **全量对照看 [`docs/api/command-surface.md`](./command-surface.md)**：85 条命令的
+> 业务形参、返回类型、feature 门、函数体里**实际执行**的 `require_*` 判定、以及
+> 前端落点（哪个 package 调它）由 `pnpm command-surface:gen` 从代码生成，
+> CI 用 `pnpm command-surface:check` 复算——「代码加了命令、文档没跟上」会被直接拦下。
+> 本节的表只列**档位表内**的命令（插件面 22 + 特权 8 + 安装 2），
+> 关键命令的线格式与错误契约在 `docs/architecture/app-layer-wire.md` 第 3 节
+> （那一节按口径只写**关键**命令，不是全量清单）。
 
 > **`host_call_begin` / `host_grant_request` 是故意移除的命令**，回归会被
 > `packages/tauron-host/src/gates.test.ts` 拦下。
@@ -551,9 +636,123 @@ const revoked = await admin.eventsRevoke('com.example.viewer', 'plugin:com.examp
   审批不会为不存在的主通制造孤儿事实；
 - 审批表有上限（`MAX_APPROVALS = 4096`），达限返回 `E_SUBSCRIPTION_FULL`
   （不确定失败，不可自动重试），先 `eventsRevoke` 失效项再审批；
+- `eventsRevoke` 的**效力**（A81，轮 11 起）不止于「删一行授权」：对「他人声明且非公共」
+  档，它同时 ① 退订该 `(subscriber, topic)` 的全部既有订阅、② 作废 pending/stream/event
+  三类通道队列里该 topic 的待取帧。公共 / 自属 topic 的订阅不归审批表管，撤销一条冗余审批
+  **不会**掐掉它们（与 `subscribe` 的授权判定同一口径）。返回的布尔值只表示是否真删了
+  一行——幂等重放（返回 `false`）仍会再作废一次队列，管理面因此**可以用重放封住并发尾巴**：
+  与撤销并发、且在撤销前就已把 token 解析成订阅者的那次 `publish`，仍可能在作废之后落一帧，
+  再调一次 `eventsRevoke` 即无残留。要在发布侧封死该窗口需把审批重检放进队列临界区，
+  已作为代价登记在 `docs/architecture/v4-industrial-gap-closure-plan.md` A81 行；
 - `productionDoctor` 是**只读**诊断：不写状态、不落盘，可在启动期安全轮询；
   报告内容由 `AdapterConfig` 的实际配置推导（fail-closed 与启动门同源，
   不会出现「自检通过但启动拒绝」）。
+- `productionSafe` **只在 `deploymentMode === 'production'` 且全部检查项通过时才为
+  `true`**——开发态/测试态即使项项全绿也如实报 `false`，别把它当「没问题」读。
+
+#### `productionDoctor().checks` 的 9 个检查项（全部 `requiredInProduction: true`）
+
+`id` 是稳定契约（wire camelCase），逐项来自
+`tauron_host::production::doctor`，宿主无法自行声明其中任何一位：
+
+| `id` | 通过条件（由配置推导） | 对应的启动门 |
+|---|---|---|
+| `caller-identity` | 声明了身份策略，**或** origin 清单非空 | `CALLER_IDENTITY_POLICY_REQUIRED` |
+| `origin-gate` | **仅** `origin_allowlist` 非空 | `ORIGIN_GATE_ARMED_REQUIRED` |
+| `recovery-durability` | 配了持久化恢复，或显式声明不支持 | `RECOVERY_DURABILITY_REQUIRED` |
+| `install-trust` | 未开 `plugin-install` 即视为通过；开了就必须配齐信任材料 | `INSTALL_TRUST_REQUIRED` |
+| `trusted-time` | 同上：开了安装才要求可信时间源 | `TRUSTED_TIME_REQUIRED` |
+| `admin-audit` | 审计 sink 的 `AdminAuditFacts::healthy()`（落盘 ∧ 链完整 ∧ 零写失败） | `ADMIN_AUDIT_REQUIRED` |
+| `durable-data-dir` | 可写的持久数据目录 | `DATA_DIR_REQUIRED` |
+| `process-sandbox` | 未接进程运行时即视为通过；接了就要 `Hard` 级沙箱 | `PROCESS_SANDBOX_HARD_REQUIRED` |
+| `no-mock-provider` | 没有启用 mock/测试 provider | `MOCK_PROVIDER_FORBIDDEN` |
+
+> 想核对某一项为什么红：`message` 是固定英文短句，`pass` 之外还要读
+> `requiredInProduction`。**不要**按检查项的个数写死逻辑（清单会随能力增长变长），
+> 按 `id` 取。
+
+#### `admin-audit` 检查项与审计事实（轮 11 / F3 新增）
+
+`productionDoctor()` 除 `checks` 外还带一个 `adminAudit: AdminAuditFacts | null`
+快照（`packages/tauron-host/src/host.ts`），它是**读取侧的独立证据**：
+`admin-audit` 检查项不是宿主自报的布尔位，而是从活的审计 sink 现算出来的。
+
+```ts
+const report = await admin.productionDoctor();
+const audit = report.adminAudit; // null = 宿主根本没配 sink（Production 会被拒启）
+if (audit && !audit.durable) {
+  // 记录仍在内存里，进程退出即丢：检查项红，productionSafe 随之为 false
+}
+if (audit && audit.writeFailures > 0) {
+  console.error(audit.lastWriteError, audit.lastCommand, audit.lastOutcome);
+}
+```
+
+语义与边界：
+
+- 被打审计的是 `AUDITED_ADMIN_COMMANDS` 这 6 条特权命令：`host_events_approve`、
+  `host_events_revoke`、`host_registry_admin`、`host_registry_install`、
+  `host_registry_install_preview`、`host_runtime_spawn`（`eventsApprovals` 是只读列出，
+  **不**落审计），**允许与拒绝都留痕**（`lastOutcome` 取 `'allowed' | 'denied'`）；
+  新增特权写操作若忘记登记，wire-gate 会与判定代码对账报红；
+- 记录是**哈希链**（每条带 `prevHash`），落盘文件为 `admin-audit.json`，环形上限
+  `MAX_ADMIN_AUDIT_RECORDS = 512`；`records` 是当前保留条数、`totalRecorded` 含被裁剪的；
+- 离线复核用 `tauron_host::admin_audit::verify_file`（运维/取证读，不经宿主），
+  宿主侧只暴露事实快照；
+- 因此 `with_admin_audit(bool)` 这类「声明我有审计」的开关**已删除**——唯一满足方式是
+  在 `AdapterConfig.admin_audit_dir` 给一个真实可写目录，缺它则 Production 启动即
+  `ADMIN_AUDIT_REQUIRED`。
+
+#### `origin-gate` 检查项（1.1 / 轮 10 新增）
+
+`productionDoctor().checks` 里有一项 `id: 'origin-gate'`，它问的**不是**
+「宿主有没有声明身份策略」，而是「命令分发处的 origin 门有没有真的装弹」——
+即 `AdapterConfig.origin_allowlist` 是否非空。两者是**两个独立事实**：
+
+| 事实 | 由什么满足 | 是否给 origin 门装弹 |
+|---|---|---|
+| `caller-identity` | `caller_identity_policy_enabled`，**或**非空 `origin_allowlist` | ❌ 显式声明不算（非 origin 传输也能声明它） |
+| `origin-gate` | 仅 `origin_allowlist` 非空 | ✅ 唯一装弹途径 |
+
+所以「声明了 caller identity 但清单为空」的 Production 宿主：`caller-identity`
+绿、`origin-gate` 红、`productionSafe: false`，且启动被
+`ORIGIN_GATE_ARMED_REQUIRED` 拒绝。这不是文档口径，是
+`AdapterConfig::production_readiness()` 里由 `!origin_allowlist.is_empty()`
+直接推导的（宿主**无法**伪造这一位）。
+
+#### Production 下 origin 门的拒绝原因（命令面行为，插件作者需要知道）
+
+`DeploymentMode::Production` 时，每一条 `host_*` 命令在进入 handler 前都要过
+`tauron_host::authz::production_caller_allowed`。它只会以下面四种原因拒绝，全部
+`E_AUTH_DENIED`、`retryable: false`、message 里点名原因：
+
+| 原因串 | 触发条件 | 宿主侧修法 |
+|---|---|---|
+| `ORIGIN_GATE_NOT_ARMED` | `origin_allowlist` 为空 | 配清单（见下） |
+| `CALLER_IDENTITY_INVALID` | webview label 形态非法（如 `plugin-` 前缀后缺 id） | 别自造 label |
+| `MAIN_WINDOW_LABEL_NOT_DECLARED` | 调用方不是插件、其 label 又不在 `main_window_labels` 里 | 声明主窗 label |
+| `ORIGIN_NOT_ALLOWED` | label 合法但 webview 真实 origin 不在清单内 | 把该 origin 写进清单 |
+
+关键差别（相对开发态）：**未声明的 label 不再自动等同主窗**。开发态/测试态保持
+原有的兼容语义（空清单 = 不启用，非插件 label = 主窗）。主窗 label 集合由
+`AdapterConfig::main_window_labels` 声明，留空时装配方展开为 Tauri 约定缺省
+`["main"]`——因此多窗宿主（`editor`/`settings` 之类的窗口想调宿主命令）**必须**
+显式声明，否则在 Production 会被 `MAIN_WINDOW_LABEL_NOT_DECLARED` 拒掉。
+
+```rust
+// src-tauri 侧装配（宿主特权，插件看不到也改不了）
+let cfg = tauron_adapter::AdapterConfig {
+    // 非空即装弹：这一位同时推导 readiness 的 origin_gate_armed。
+    origin_allowlist: vec!["tauri://localhost".into()],
+    ..tauron_adapter::AdapterConfig::production()
+};
+let cfg = cfg.with_main_window_labels(vec!["main".into(), "editor".into()]);
+tauron_adapter::init_with_adapter_config(cfg);
+```
+
+> 判定素材全部取自宿主侧（`Invoke` 由 Tauri 在分发时构造的真实 command 名、
+> 真实 webview label、真实 URL 的 origin）。**前端自报的任何 origin/label 都不参与
+> 判定**，`origin` 字段在插件侧参数里出现也不被读取。
 
 ---
 
@@ -580,20 +779,20 @@ const revoked = await admin.eventsRevoke('com.example.viewer', 'plugin:com.examp
 | `SC-3003` | `PLUGIN_EXITED` | 插件退出 |
 | `SC-9001` | `INTERNAL` | 内部错误（**可重试**） |
 
-### 应用层 `E_*`（21 个，`tauron-host`）
+### 应用层 `E_*`（24 个，`tauron-host`）
 
 变体名即**跨 IPC 线协议名**（改名即破坏兼容）。TS 侧 `HOST_ERROR_CODES`
 按**声明顺序**比对（wire-gate 门禁）。
 
 | 码 | 触发点 |
 |---|---|
-| `E_HOST_PANIC` | handler panic，经 `catch_unwind` 归一化（**可重试**） |
+| `E_HOST_PANIC` | handler panic，经 `catch_unwind` 归一化（`retryClass: never`——panic 可能已留下部分副作用，自动重放不安全） |
 | `E_UNKNOWN_PLUGIN` | 未知 `plugin_id` |
 | `E_AUTH_DENIED` | 档位不满足，或身份被伪造 |
-| `E_INVALID_MANIFEST` | 清单不合法：未知字段、非法 id、权限表外字符串、缺 `framework`、`abi` 字段缺失/非法 |
+| `E_INVALID_MANIFEST` | **入参/声明不合格**（宿主的通用"改载荷即可"码，见下方说明）：清单未知字段、非法 id、权限表外字符串、缺 `framework`、`abi` 字段缺失/非法；**同样用于**非清单入口——JS 插件缺 `entry.ui`、UI 路径非法、进程 spawn 配置不合、设置文档非对象或违反 schema |
 | `E_STATE_INVALID_TRANSITION` | 状态机无匹配规则（非法迁移） |
 | `E_CALL_NOT_FOUND` | pending call 不存在或已结束 |
-| `E_CALL_TIMEOUT` | pending call 超时（**可重试**） |
+| `E_CALL_TIMEOUT` | pending call 超时（`retryClass: manual`——人工决定是否重发，宿主不自动重放） |
 | `E_FORBIDDEN_PERMISSION` | 申请了禁止授予清单内的权限 |
 | `E_ABI_MISMATCH` | `host_runtime_spawn` 的 ABI 契约比对失败（见下节） |
 | `E_PLUGIN_DISABLED` | 插件已禁用（含崩溃预算耗尽） |
@@ -602,15 +801,35 @@ const revoked = await admin.eventsRevoke('com.example.viewer', 'plugin:com.examp
 | `E_SUBSCRIPTION_FULL` | 订阅表达到上限 |
 | `E_PLUGIN_EXISTS` | 插件已存在（重复注册） |
 | `E_INSTALL_FAILED` | 安装期失败：验签 / hash / 解包 / range |
-| `E_PLUGIN_FILTERED` | 被配置过滤器排除（**可重试**） |
+| `E_PLUGIN_FILTERED` | 被配置过滤器排除（改配置后人工重试，`retryClass: manual`） |
 | `E_PLUGIN_TYPE_NO_RUNTIME` | 该插件类型没有运行期执行器（如对 js/wasm 插件调 `host_runtime_spawn`） |
-| `E_LEASE_EXPIRED` | 运行时租约不存在或已失效 |
-| `E_STREAM_FULL` | 流句柄数达到上限（`MAX_STREAMS = 1024`）——先 `host_stream_close` 再开 |
+| `E_LEASE_EXPIRED` | 运行时租约不存在或已失效（`retryClass: after-reconnect`：先重建会话再重新 spawn） |
+| `E_STREAM_FULL` | 流句柄数达到上限（宿主 `MAX_STREAMS = 256`，单插件 `MAX_STREAMS_PER_PLUGIN = 32`）——先 `host_stream_close` 再开 |
 | `E_CALL_ALREADY_SETTLED` | 执行方对同一次跨主体调用重复回填（0.4-A1；重复回填显式拒绝，不覆盖） |
 | `E_CONTRIBUTES_DRIFT` | 贡献对账分叉：manifest 声明的扩展点与 activate 期实际注册的不一致（0.4-W3；报错并点名缺哪条） |
+| `E_STREAM_BACKPRESSURE` | 生产方用尽了接收方授予的 byte credit 窗口（`retryClass: manual`）——**被拒的那一帧不会投递，也不消耗 seq**，补给 credit 后可原帧重发 |
+| `E_CALL_CYCLE` | 同步调用图会成环、重入同一主体，或超出有界的跳数预算 |
+| `E_EVENT_CAUSATION_LIMIT` | 事件因果链超出有界的深度预算 |
 
-**可重试集合只有 3 个**：`E_HOST_PANIC` / `E_CALL_TIMEOUT` / `E_PLUGIN_FILTERED`。
-其余一律不可自动重试——把一个确定性失败标成可重试会让前端无限重试。
+**重试语义：`retryClass`，不是 `retryable`。** 四档 kebab-case 线名
+`never` / `manual` / `auto-idempotent` / `after-reconnect`，与 Rust
+`ErrorCode::retry_class()` 逐项同集合，TS 侧用 `HOST_RETRY_CLASS` /
+`retryClassOf(code)` 查。今天的真实分布只有三档有用：
+`manual`（`E_CALL_TIMEOUT` / `E_PLUGIN_FILTERED` / `E_STREAM_BACKPRESSURE`）、
+`after-reconnect`（`E_LEASE_EXPIRED`）、其余一律 `never`；
+`auto-idempotent` **一个码都没落**——它是留给"已证明幂等的操作"的位置，不等于许可。
+
+遗留兼容位 `retryable` 恒为 `false`（`retryable() == retry_class() == auto-idempotent`），
+TS 的 `RETRYABLE_HOST_ERROR_CODES` 同为空集（两侧由门禁锁定）。
+V4 刻意不把 panic / 超时标成可自动重放：`catch_unwind` 只是**遏制**，
+不是"没有部分副作用"的证明。**分流请读 `retryClass`。**
+
+**`E_INVALID_MANIFEST` 的复用约定**：适配器**不新增错误码**——
+新增一个 `E_*` 必须同时改 Rust 枚举、`Display`、TS `HOST_ERROR_CODES`
+与 canonical 注册表 `contracts/error/error-codes.json`（四处按**码名集合**比对，
+声明顺序不属于协议，V4 A69），而"入参不合格"这一族失败对调用方的动作完全相同
+（**改载荷，别重试**）。因此 spawn 配置、JS entry、设置文档等非清单入口
+也复用本码；差异放在 `message` 里（面向日志，不作分支依据）。
 
 ---
 

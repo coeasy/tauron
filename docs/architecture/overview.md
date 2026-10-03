@@ -25,7 +25,7 @@
 ├──────────────────────────────────────────────────────────────────────────┤
 │                  Tauri 命令适配层（薄包装，feature = "tauri"）              │
 │   tauron-shell: plugin_invoke / plugin_cancel / plugin_emit (3 条信封命令) │
-│   tauron-adapter: host_* 命令族（应用层，83 条 = 底座 61 + 插件运行时 22；install 2 条 feature-gated 默认开启 → 85 条）│
+│   tauron-adapter: host_*（应用层 83 条，install 2 条 opt-in → 85）     │
 ├──────────────────────────────────────────────────────────────────────────┤
 │          Rust 壳层                        TS 插件 SDK 层                   │
 │  ┌──────────────────────────┐      ┌──────────────────────────────────┐  │
@@ -76,7 +76,7 @@ tauron 由**框架层**与**应用层**组成。两层共享同一套类型与�
 | **面向** | 第三方客户端集成 | 完整客户端交付 |
 | **npm** | `@tauron/types` `core` `plugin-sdk` `dual-world` `adapter-*` `market` `shell-matrix` `cli` `contract-tests` | `@tauron/host` `framework` `ui` `app-cli` `app-plugin-sdk` `app-contract-kit` |
 | **Rust** | `tauron-shell` | `tauron-host` `tauron-adapter` |
-| **命令族** | `plugin_invoke` / `plugin_cancel` / `plugin_emit` | `host_*`（83 条；`plugin-install` 默认开启时 85 条） |
+| **命令族** | `plugin_invoke` / `plugin_cancel` / `plugin_emit` | `host_*`（83 条；`plugin-install` 为 **opt-in**，显式开启时 85 条） |
 | **入口** | `tauron_shell::commands::init()` 或零配置 `state_init()` + `tauron_generate_handler![]` | `tauron_adapter::tauri::init()` 或 `state_init()` + `tauron_generate_handler![]` |
 
 > 应用层**复用**框架层的类型与协议，不修改框架层契约。两层之间的命令名与
@@ -279,13 +279,18 @@ tauron-*       ← 全部 Rust crate
     成功必须上报一次，否则每次重启都被计为一次崩溃，连续两次进安全模式
     （方向安全：一次 `success` 即自愈）。安全模式内逐个试启用
     `host_recover_trial_enable`，试验失败 1 次即回落 `disabled-by-safemode`。
-14. **运行期订阅审批已接线（1.1 / V4 §33 R2-5）** — `host_events_approve` /
-    `host_events_revoke` / `host_events_approvals` 三条**特权**命令（仅主窗，
-    `authz::ADMIN_COMMANDS`）+ `@tauron/host` 的 `AdminClient.eventsApprove/
+14. **运行期订阅审批已接线（1.1 / V4 §33 R2-5，撤销效力在轮 11 补齐）** —
+    `host_events_approve` / `host_events_revoke` / `host_events_approvals` 三条**特权**
+    命令（仅主窗，`authz::ADMIN_COMMANDS`）+ `@tauron/host` 的 `AdminClient.eventsApprove/
     Revoke/Approvals`，落到 `EventBus` 的跨主体审批表；未获批订阅私有 topic 得
-    `E_AUTH_DENIED`（fail-closed），审批表有容量上限。**仍缺的是键粒度**：审批只到
+    `E_AUTH_DENIED`（fail-closed），审批表有容量上限。**撤销是有实效的**（A81）：
+    对「他人声明且非公共」档，一次 `revoke` 同时退订既有订阅并作废三类通道里该 topic
+    的待取帧；并发发布留下的尾巴靠幂等重放封口。**仍缺的是键粒度**：审批只到
     topic 一级，宿主不按键过滤投递（设置镜像 topic 的命名空间过滤在 SDK 侧，属
-    投递约定而非安全边界）。**安装期**授权是另一套（`@tauron/host` 的 `grants.ts`），
+    投递约定而非安全边界）。这 6 条特权写操作（含 `registry_admin` / `registry_install`
+    / `runtime_spawn`）**允许与拒绝都会落审计事实**（轮 11 / F3：链式哈希 + durable
+    `admin-audit.json`，doctor 的 `admin-audit` 项由 sink 真实状态推导）。
+    **安装期**授权是另一套（`@tauron/host` 的 `grants.ts`），
     两者不可混谈；`grants.ts` 本身是**纯策略函数库**（`requiresReapproval` 等），
     仓库内没有生产消费方——要由接入方在安装/更新路径上显式调用才会生效，
     不调用则不构成门禁。

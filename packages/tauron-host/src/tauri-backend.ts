@@ -61,8 +61,12 @@ function currentOrigin(): string | null {
  * 集只由运行期 `host_capabilities` 协商填充，本清单不再被乐观地塞进
  * `capabilities()`。未注册命令的实际失败仍会在 invoke 时以结构化错误暴露
  * （见 normalizeError）。
+ *
+ * 导出理由：它是 `FrameworkCommand` 类型的唯一来源，也是接入方可用于装配自检
+ * （「我的壳到底 invoke 得到哪些命令」）的基线；与 `OPTIONAL_FRAMEWORK_COMMANDS`
+ * 对称。**读它不能当作「命令可用」的判断**——那必须走协商结果。
  */
-const FRAMEWORK_COMMANDS = [
+export const FRAMEWORK_COMMANDS = [
   // 框架服务（插件 webview 调用的 self/admin 档）
   'host_plugin_call',
   'host_call_end',
@@ -173,16 +177,17 @@ const FRAMEWORK_COMMANDS = [
 /**
  * **可选**命令面：Rust 侧是 feature-gated 的（`plugin-install`）。
  *
- * ⚠️ **该 feature 现已进 `tauron-adapter` 默认特性**（`crates/tauron-adapter/Cargo.toml:21`，
- * 1.0-W6）——所以默认装配的宿主**会**注册这两条；只有接入方显式
- * `default-features = false` 时才不注册。它们仍归「可选」是因为**能力表不得硬编码**：
- * feature 可在编译期关掉，静态全集里写上它们就会在那种装配下变成
- * 「能力表说有、invoke 说没有」的误报（0.4-A2 修的正是这个断链）。
+ * ⚠️ `plugin-install` 是 **opt-in** 特性：`crates/tauron-adapter/Cargo.toml` 的
+ * `default = []`（V4 minimal-substrate 规则——底座接入方不得仅因依赖
+ * `tauron-adapter` 就拉进 market/signature/archive 依赖）。因此**默认装配的宿主不注册
+ * 这两条**，只有接入方显式开启 `features = ["plugin-install"]` 才注册。
  *
- * 处置：这两条**不进**静态全集，只能由运行期真相开门——宿主调
- * `host_capabilities` 拿到真实命令集后调 {@link TauriBackend.adoptCapabilities}
- * （或 `HostClient.refreshCapabilities()`）把它们并进来。
- * 能力表只能由运行时真相推导，不得硬编码（0.4 不变量 §10.1-8）。
+ * 无论开关，它们都**不进**静态全集：能力表不得硬编码编译期才知道的事实——feature
+ * 可在接入方手里关掉，静态全集里写上它们就会在那种装配下变成
+ * 「能力表说有、invoke 说没有」的误报（0.4-A2 修的正是这个断链）。
+ * 真相只允许来自运行期：宿主调 `host_capabilities` 拿到真实命令集后调
+ * {@link TauriBackend.adoptCapabilities}（或 `HostClient.refreshCapabilities()`）
+ * 把它们并进来（能力表只能由运行时真相推导，0.4 不变量 §10.1-8）。
  */
 export const OPTIONAL_FRAMEWORK_COMMANDS = [
   'host_registry_install',

@@ -23,6 +23,7 @@
  */
 
 import type { PluginConfig, PackageManifest, CliOptions, PluginType } from './types.js';
+import { CLI_VERSION } from './version.js';
 
 /**
  * tauron 宿主清单（`tauron.plugin.json`）的线形。
@@ -177,7 +178,7 @@ export function generatePackageJson(config: PluginConfig): PackageManifest {
     type: 'module',
     main: config.type === 'process' ? 'main.js' : 'src/index.js',
     devDependencies: {
-      '@tauron/plugin-sdk': '^1.1.0',
+      '@tauron/plugin-sdk': `^${CLI_VERSION}`,
     },
   };
 }
@@ -234,7 +235,7 @@ crate-type = ["cdylib"]
 
 # 诚实边界：tauron 的 **wasm 插件侧 SDK 尚未提供**。
 # \`tauron-wasm\` 是宿主侧的引擎/校验库（不是 proc-macro，也没有插件模板宏），
-# 且整个 workspace 的 crate 都未发布到 crates.io。
+# 且 crates.io 现值只到 1.0.2（\`tauron-ffi\` 连 1.0.2 都没有）。
 # 接入后在这里加依赖，并把 src/lib.rs 的入口换成 SDK 提供的形态。
 [dependencies]
 `;
@@ -367,7 +368,7 @@ ${
   }
 ## 本地依赖
 
-\`@tauron/*\` 包**尚未发布到 npm**，本地开发请把 \`devDependencies\` 改成
-\`workspace:*\` 或 \`file:\` 指向本仓库对应目录。
+\`@tauron/*\` 的 npm 现值是 **1.0.2**，落后于本仓库源码；插件开发请把
+\`devDependencies\` 用 \`workspace:*\` 或 \`file:\` 指向本仓库对应目录，别装 registry 版本。
 `;
 }

@@ -22,6 +22,7 @@ struct Ping {
 fn production_ready() -> ProductionReadiness {
     ProductionReadiness {
         caller_identity_policy_enabled: true,
+        origin_gate_armed: true,
         durable_recovery_available: true,
         recovery_explicitly_unsupported: false,
         install_feature_enabled: false,

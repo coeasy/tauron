@@ -4,9 +4,11 @@
 // 1. 声明 onSettingsChanged 的插件，激活时真的向宿主订阅设置变更镜像 topic
 //    （此前这个钩子只在类型里存在，没有任何投递路径——写了也永远不会被调用）；
 // 2. 投递只覆盖本插件命名空间的键，他人键/宿主键/畸形帧一律不触发回调；
-// 3. 未获主窗批准（订阅失败）时静默降级，激活不得因此失败。
+// 3. 未获主窗批准（订阅失败）时静默降级，激活不得因此失败；
+// 4. 被拒订阅按**有界**退避阶梯重试——批准晚于激活是正常时序，不能要求重启插件；
+//    阶梯走完后放弃，不留无限轮询。
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { HostClient, MockBackend } from '@tauron/host';
 import { createPluginContext } from './context.js';
 import { createPlugin, HOST_SETTINGS_CHANGED_TOPIC } from './createPlugin.js';
@@ -109,9 +111,7 @@ describe('onSettingsChanged 投递链', () => {
     await tick();
     ctx.dispatchEvent(HOST_SETTINGS_CHANGED_TOPIC, { key: `plugin:${PLUGIN_ID}`, value: 1 });
 
-    expect(seen).toEqual([
-      { [`plugin:${PLUGIN_ID}`]: 1 },
-    ]);
+    expect(seen).toEqual([{ [`plugin:${PLUGIN_ID}`]: 1 }]);
 
     await plugin.deactivate(ctx);
   });
@@ -183,5 +183,176 @@ describe('onSettingsChanged 投递链', () => {
     expect(plugin.isActive).toBe(true);
 
     await plugin.deactivate(ctx);
+  });
+});
+
+/** 前 `failTimes` 次 `host_events_subscribe` 被拒、之后放行的后端。 */
+class LateApprovalBackend extends MockBackend {
+  subscribeAttempts = 0;
+
+  constructor(
+    options: ConstructorParameters<typeof MockBackend>[0],
+    private readonly failTimes: number,
+  ) {
+    super(options);
+  }
+
+  override invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+    if (cmd === 'host_events_subscribe') {
+      this.subscribeAttempts += 1;
+      if (this.subscribeAttempts <= this.failTimes) {
+        this.invocations.push(args === undefined ? { cmd } : { cmd, args });
+        return Promise.reject(new Error('E_AUTH_DENIED: 私有 topic 未获主窗批准'));
+      }
+    }
+    return super.invoke(cmd, args);
+  }
+}
+
+const WATCH_CASES = [
+  { cmd: 'host_events_subscribe', result: { token: 'sub-late', selectors: [] } },
+  { cmd: 'host_events_unsubscribe', result: undefined },
+  {
+    cmd: 'host_events_drain',
+    args: { kind: 'event' },
+    result: [
+      { topic: HOST_SETTINGS_CHANGED_TOPIC, payload: { key: `plugin:${PLUGIN_ID}.w`, value: 7 } },
+    ],
+  },
+  { cmd: 'host_events_drain', args: { kind: 'request' }, result: [] },
+];
+
+describe('被拒订阅的有界退避重试（§33 R2-4 批准晚到时序）', () => {
+  it('批准晚于激活：按阶梯重试后接上投递，钩子无需重启插件即可触发', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = new LateApprovalBackend(
+        {
+          capabilities: ['host_events_subscribe', 'host_events_unsubscribe', 'host_events_drain'],
+          pluginId: PLUGIN_ID,
+          cases: WATCH_CASES,
+        },
+        2, // 前两次申请落在批准之前
+      );
+      const ctx = createPluginContext(PLUGIN_ID, new HostClient({ backend }));
+      const seen: unknown[] = [];
+      const plugin = createPlugin({
+        ...base,
+        onSettingsChanged: (s) => {
+          seen.push(s);
+        },
+      });
+
+      await plugin.activate(ctx);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(backend.subscribeAttempts).toBe(1);
+      expect(seen).toEqual([]); // 尚未起泵
+
+      await vi.advanceTimersByTimeAsync(1_000); // 阶梯 1：仍早于批准
+      expect(backend.subscribeAttempts).toBe(2);
+      await vi.advanceTimersByTimeAsync(2_000); // 阶梯 2：批准已到 → 订阅成立 → 起泵
+      expect(backend.subscribeAttempts).toBe(3);
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen[0]).toEqual({ [`plugin:${PLUGIN_ID}.w`]: 7 });
+
+      await plugin.deactivate(ctx);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('始终未获批准时在阶梯走完后放弃，不无限轮询', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = new LateApprovalBackend(
+        {
+          capabilities: ['host_events_subscribe', 'host_events_unsubscribe', 'host_events_drain'],
+          pluginId: PLUGIN_ID,
+          cases: WATCH_CASES,
+        },
+        Number.POSITIVE_INFINITY,
+      );
+      const ctx = createPluginContext(PLUGIN_ID, new HostClient({ backend }));
+      const plugin = createPlugin({ ...base, onSettingsChanged: () => {} });
+
+      await plugin.activate(ctx);
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000); // 远超整条阶梯
+
+      // 1 次首发 + 6 次退避重试，之后不再申请。
+      expect(backend.subscribeAttempts).toBe(7);
+      expect(backend.invocations.filter((i) => i.cmd === 'host_events_drain')).toEqual([]);
+      expect(plugin.isActive).toBe(true);
+
+      await plugin.deactivate(ctx);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('阶梯走空后重新订阅会再走一轮（不得把 topic 永久拉黑）', async () => {
+    vi.useFakeTimers();
+    try {
+      // 前 8 次申请全部落在批准之前：1 次首发 + 6 次阶梯重试 = 7 次用尽，
+      // 第 8 次来自「批准之后插件显式再订阅」，它必须成功。
+      const backend = new LateApprovalBackend(
+        {
+          capabilities: ['host_events_subscribe', 'host_events_unsubscribe', 'host_events_drain'],
+          pluginId: PLUGIN_ID,
+          cases: WATCH_CASES,
+        },
+        8,
+      );
+      const ctx = createPluginContext(PLUGIN_ID, new HostClient({ backend }));
+      const seen: unknown[] = [];
+      const plugin = createPlugin({
+        ...base,
+        onSettingsChanged: (s) => {
+          seen.push(s);
+        },
+      });
+
+      await plugin.activate(ctx);
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(backend.subscribeAttempts).toBe(7); // 阶梯用尽，没有无限轮询
+      expect(seen).toEqual([]); // 泵没起
+
+      ctx.events.subscribe(HOST_SETTINGS_CHANGED_TOPIC, () => {});
+      await vi.advanceTimersByTimeAsync(0); // 第 8 次：仍被拒 → 必须重新排一轮阶梯
+      expect(backend.subscribeAttempts).toBe(8);
+      await vi.advanceTimersByTimeAsync(1_000); // 第 9 次：批准已到 → 订阅成立 → 起泵
+      expect(backend.subscribeAttempts).toBe(9);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(seen.length).toBeGreaterThan(0);
+
+      await plugin.deactivate(ctx);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('退订后不再重试（定时器不得复活已退订的 topic）', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = new LateApprovalBackend(
+        {
+          capabilities: ['host_events_subscribe', 'host_events_unsubscribe', 'host_events_drain'],
+          pluginId: PLUGIN_ID,
+          cases: WATCH_CASES,
+        },
+        Number.POSITIVE_INFINITY,
+      );
+      const ctx = createPluginContext(PLUGIN_ID, new HostClient({ backend }));
+      const unsubscribe = ctx.events.subscribe(HOST_SETTINGS_CHANGED_TOPIC, () => {});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(backend.subscribeAttempts).toBe(1);
+
+      unsubscribe();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(backend.subscribeAttempts).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

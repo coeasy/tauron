@@ -59,8 +59,17 @@ describe('门禁：错误码线与 Rust ErrorCode 完全一致', () => {
     expect(rustCodes.length).toBe(HOST_ERROR_CODES.length);
   });
 
-  it('逐个线名一致（顺序也一致）', () => {
-    expect([...HOST_ERROR_CODES]).toEqual(rustCodes);
+  it('逐个线名一致（按名集合，不按声明顺序）', () => {
+    // 线上承载的是**码名**（`ErrorCode` 的 serde 表示就是变体名字符串），声明顺序
+    // 不进入任何一端的分支。按序比对会把「在中间插入一个码」判成协议变更，让人
+    // 只能把新码堆到末尾——那是把测试的实现细节当成协议约束（V4 A69 取消的正是这个耦合）。
+    // 集合相等仍然钉死「一个都不多、一个都不少」：换名/漏名/多名都会红。
+    expect(new Set(HOST_ERROR_CODES).size, 'TS 码表有重复项').toBe(HOST_ERROR_CODES.length);
+    expect(new Set(rustCodes).size, 'Rust 码表有重复项').toBe(rustCodes.length);
+    const missing = rustCodes.filter((c) => !HOST_ERROR_CODES.includes(c as never));
+    const extra = [...HOST_ERROR_CODES].filter((c) => !rustCodes.includes(c as string));
+    expect(missing, 'TS 侧缺码').toEqual([]);
+    expect(extra, 'TS 侧多码').toEqual([]);
   });
 
   it('V4 RetryClass 与 Rust retry_class() 一致，自动重试集合默认为空', () => {

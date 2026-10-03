@@ -3,7 +3,7 @@
 > Tauri 2 之上的插件化桌面客户端基础设施 —— 插件隔离、受控能力面、跨语言契约与多形态插件执行。
 
 [![CI](https://github.com/coeasy/tauron/actions/workflows/ci.yml/badge.svg)](https://github.com/coeasy/tauron/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-1729%20TS%20%C2%B7%201299%20Rust-informational)](#测试)
+[![Tests](https://img.shields.io/badge/tests-1759%20TS%20%C2%B7%201426%20Rust-informational)](#测试)
 [![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![Node](https://img.shields.io/badge/Node-22.x-brightgreen)](#)
 [![Rust](https://img.shields.io/badge/Rust-1.98-orange)](#)
@@ -21,7 +21,7 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
 | 层 | 面向 | 拿到什么 |
 |---|---|---|
 | **框架层** | 通用集成 | 信封协议 `plugin_invoke`、`PluginType` 四形态（Js / Process 有生产执行器；Rust / Wasm 诚实返回 `E_PLUGIN_TYPE_NO_RUNTIME`，代码里**不存在**「B+ 混合模式」）、双层 ACL、事件总线、插件市场（Ed25519 验签）、CLI。**诚实边界**：`@tauron/dual-world` 的进程内沙箱是 fail-closed 模拟（`SANDBOX_UNAVAILABLE`），进程内 WASM 运行时仍为路线图项 |
-| **应用层** | 完整客户端交付 | `host_*` 命令族（83 条 = 底座 61 + 插件运行时 22；`plugin-install` 另加 2 条，该 feature **已进默认特性** → 默认装配共 85 条）、生命周期状态机、三档授权、设置中心、白标、主题、菜单/托盘、允许根内的文件 I/O、更新通道、崩溃恢复、Event 审批与生产就绪自检（1.1）、UI 组件 |
+| **应用层** | 完整客户端交付 | `host_*` 命令族（83 条 = 底座 61 + 插件运行时 22；`plugin-install` 另加 2 条，该 feature 是 **opt-in**（`crates/tauron-adapter/Cargo.toml` 的 `default = []`，V4 minimal-substrate 规则）→ 显式开启后共 85 条；示例应用已开启，故其装配为 85 条）、生命周期状态机、三档授权、设置中心、白标、主题、菜单/托盘、允许根内的文件 I/O、更新通道、崩溃恢复、Event 审批与生产就绪自检（1.1）、UI 组件 |
 
 ### 它不是什么
 
@@ -31,8 +31,9 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
   用来演示链路，不是产品形态的客户端。
 - **不是 Tauri 的替代品**。它建在 Tauri 2 之上——Tauri 管窗口 / WebView / IPC，
   tauron 管其上的插件运行时与能力治理。
-- **可通过 registry 安装的 SDK**。20 个可发布 npm 包与 15 个 Rust crate 已发布；具体
-  接入方式见[安装与使用](./docs/installation.md)。
+- **可通过 registry 安装的 SDK**。20 个公开 npm 包与 15 个 Rust crate 可从公共 registry 安装
+  （**registry 上的 `latest` 目前是 `1.0.2`**；本仓库的 `1.1.0` 已通过发布内容校验，
+  但尚未执行发布）。具体接入方式见[安装与使用](./docs/installation.md)。
 - **当前版本为 1.1.0**。公开 API 遵循语义化版本；具体未接入的运行时与平台能力见下方成熟度说明。
 
 ### 成熟度：哪些是真的，哪些还是占位
@@ -90,7 +91,7 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
 | 产出 | 状态 |
 |---|---|
 | `src-tauri/`（`Cargo.toml` / `main.rs` / `build.rs` / `capabilities/default.json` / `tauri.conf.json`） | ✅ **真装配**：`state_init_with_adapter_config` + `tauron_generate_handler![]`（85 条）+ 窗口销毁回收 + capability 覆盖 `plugin-*` 窗。形态与 `examples/minimal-app` 同源 |
-| 依赖坐标 | ✅ 默认固定到 `1.1.0` registry；源码开发须显式使用 `--tauron-path` |
+| 依赖坐标 | ⚠️ 固定到**本 CLI 的版本**（`src/framework-version.ts`，仓库源码为 `1.1.0`，npm 上装到的 CLI 是 `1.0.2`）；1.1.0 尚未发布，所以从源码生成的工程暂时装不到 registry，源码开发请用 `--tauron-path` |
 | 前端 bundler / dev-server 配置 | ✅ `vite.config.ts`（`server.port` 与 `devUrl` 一致、`outDir` 与 `frontendDist` 一致、排除 `src-tauri/`）+ 根 `index.html` + `tauri.conf.json` 的 `beforeDevCommand` / `beforeBuildCommand` |
 | `src-tauri/icons/` | ⚠️ 生成**纯色占位图**（`32x32.png` / `128x128.png` / `128x128@2x.png` / `icon.png` / `icon.ico` / `icon.icns`）——**发布前须替换成品牌图标**。不给文件连 `cargo check` 都过不去：`tauri-build` 在 Windows 上要 `icons/icon.ico` 才能生成资源文件 |
 
@@ -103,8 +104,8 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
 > 解析它自己的 `workspace:*` 依赖）；② `packages/*/dist` 必须是已构建状态（`pnpm -r build`）。
 
 ```bash
-# npm / crates.io 正式发布：
-npm create tauron-app@1.1.0 -- ./my-app --framework react
+# 公共 registry（latest 现为 1.0.2；别点名 @1.1.0，它尚未发布，会 ETARGET）：
+npm create tauron-app@latest -- ./my-app --framework react
 
 # 在 Tauron 仓库内开发时，显式启用本地源码依赖：
 node packages/tauron-app-cli/dist/cli.js new ./my-app --tauron-path ..
@@ -130,7 +131,8 @@ v1 官方宿主范围为 Tauri 2；React、Vue、Svelte 与原生 TypeScript 是
 
 ### 1. 安装依赖
 
-> **SDK 已发布到公共 registry**：20 个公开 npm 包与 15 个 Rust crate 可直接安装；另有
+> **SDK 可从公共 registry 安装**：20 个公开 npm 包与 15 个 Rust crate（registry 现值
+> **`1.0.2`**；本仓库的 `1.1.0` 已备好但尚未发布，点名 `@1.1.0` 现在装不到）；另有
 > 1 个仅供仓库内部测试的私有 npm 包。下面给出最小依赖示例：
 
 ```bash
@@ -266,7 +268,7 @@ const { subscribe, invoke } = createInvokeStore('com.example.formatter');
 ### 创建插件
 
 ```bash
-# tauron = node packages/tauron-cli/bin/tauron.js（@tauron/cli 尚未发布到 npm）
+# tauron = node packages/tauron-cli/bin/tauron.js（npm 上 @tauron/cli 的 latest 是 1.0.2，落后于仓库源码）
 tauron plugin new my-plugin --type js
 ```
 
@@ -429,9 +431,11 @@ const error = checkPluginPermission(
 
 ## CLI 工具
 
-> ⚠️ `@tauron/cli` **尚未发布到 npm**（20 个可发布 npm 包都尚未发布），
-> `npx tauron` 装不到东西。下文用 `tauron` 代指
-> `node packages/tauron-cli/bin/tauron.js`（在仓库根执行）。
+> ⚠️ **registry 现状（2026-10-02 实测）**：npm 上 `@tauron/cli` 的 `latest` 是 **1.0.2**——
+> 本仓库的 `1.1.0` 已通过 `pnpm publish:npm -- --check`，但**还没有 `--publish`**，
+> 所以 `npx @tauron/cli` 拿到的是 1.0.2 的行为，与当前代码不一定一致。
+> 下文用 `tauron` 代指 `node packages/tauron-cli/bin/tauron.js`（在仓库根执行），
+> 以本仓库代码为准。
 
 ```bash
 # 环境诊断
@@ -532,14 +536,15 @@ tauron/
 
 | 侧 | 用例数 | 口径 |
 |---|---|---|
-| TypeScript | **1729**（101 个测试文件 / 20 包） | `pnpm -r test` 实跑通过 |
-| Rust | **1299** | 源码内 `#[test]` 声明数（静态计数）；同修订 `cargo test --workspace --lib --tests` 实跑 **1264**（15 个测试二进制） |
-| 跨语言契约 | **126** | `@tauron/contract-tests` 的 wire-gate（`vitest run src/wire-gate.test.ts` 实跑）；本包合计 147 条 / 2 个文件 |
+| TypeScript | **1759**（104 个测试文件 / 20 包，0 failed） | `pnpm -r test` 实跑通过（2026-10-02 本机，轮 9 收尾那次运行） |
+| Rust | **1426 passed / 0 failed**（21 个测试二进制） | `cargo test --workspace --locked --lib --tests` 实跑（2026-10-02 本机，默认特性，exit 0）；源码 `#[test]` **声明数** 1498 |
+| 跨语言契约 | **130** | `@tauron/contract-tests` 的 wire-gate（`vitest run src/wire-gate.test.ts` 实跑）；本包合计 151 条 / 2 个文件 |
 
-> **关于 Rust 一栏的口径**：Rust 侧除默认特性外还有 **feature 门控**用例
-> （`tauron-adapter` / `tauron-shell` 的 `tauri` feature），两者不是同一个数。
-> 这里给的是源码声明数，**执行结果以 CI 的 `Rust` / `Rust (tauri feature)`
-> 两个 job 为准** —— 徽章上的数字不冒充执行结果。
+> **关于 Rust 一栏的口径**：表中给的是**执行结果**（默认特性）。Rust 侧另有
+> **feature 门控**用例（`tauron-adapter` / `tauron-shell` 的 `tauri`、
+> `tauron-adapter` 的 `plugin-install`），所以要高于默认特性执行数——源码
+> `#[test]` 声明数 **1498** 就是这个差额的来源。feature 矩阵的执行结果以 CI 的
+> `Rust (tauri feature)` / `Rust (minimal substrate)` 两个 job 为准。
 
 ### 本地命令
 
@@ -599,14 +604,23 @@ cargo clippy --workspace --all-targets -- -D warnings
 |---|---|
 | [安装与使用](./docs/installation.md) | 三种「安装」辨析、各平台安装示例应用、从源码构建、接入自己项目、装完自检、已知限制与 FAQ |
 | [架构概览](./docs/architecture/overview.md) | 整体架构图、两层架构、包命名体系、模块依赖、关键设计决策、架构演进 |
-| [应用层线格式协议](./docs/architecture/app-layer-wire.md) | `host_*` 命令族的参数 / 返回 / 生命周期事件 / 能力档位规范与限制登记 |
+| [应用层线格式协议](./docs/architecture/app-layer-wire.md) | **关键** `host_*` 命令的参数 / 返回 / 生命周期事件 / 能力档位规范与限制登记 |
+| [命令面全量参考](./docs/api/command-surface.md) | 85 条 `host_*` 的业务形参 / 返回 / 档位与判定 / feature 门 / 前端落点——**生成物**，`pnpm command-surface:gen` 写、CI `command-surface:check` 复算 |
 | [canonical 归属](./docs/architecture/canonical-owners.md) | 唯一事实源与已冻结的 legacy 门面（改这张表等于改架构） |
 | [0.3 优化改进方案](./docs/architecture/multi-plugin-substrate-roadmap.md) | 多插件框架 × 任意宿主底座：成熟度记分卡、残差清单、S/M/X 改进项与轮次编排 |
+| [V4 工业级缺口收口方案](./docs/architecture/v4-industrial-gap-closure-plan.md) | 逐条对照 V4 §134/§135/§136/§141：A01–A110 的已落 / 部分 / 未落台账、F1–F5 危险缺口、Batch 0–6' 编排与推迟清单 |
 | [渐进接入指南](./docs/integration/incremental-adoption.md) | 三档装配：只取底座 / 底座 + 插件运行时 / 完整客户端 |
 | [插件开发指南](./docs/api/plugin-development-guide.md) | 创建、测试、打包、发布插件（含 CLI 各命令的真实边界） |
 | [竞品分析](./docs/competitive-analysis/competitive-analysis.md) | 竞品全景图、功能对比矩阵、头条特性兑现度标记 |
 | [示例应用](./examples/minimal-app/README.md) | 最小集成示例 |
 | [CHANGELOG](./CHANGELOG.md) | 版本变更记录与「已知债务」清单 |
+
+> **V4 进度的一句话口径**（可核查，改代码时同轮改这里，别凭印象写）：A64–A110 共 47 项
+> —— **已落 22 / 部分 21 / 未落 4**；§134 的 DoD 表逐行数得 **✅ 16 / ⚠️ 15 / ❌ 1**。
+> 逐条证据、门禁输出与「本轮未做」清单都在
+> [V4 工业级缺口收口方案](./docs/architecture/v4-industrial-gap-closure-plan.md)。
+> 对外表述维持 **「较强的 Tauri-first substrate 基础 + 完整的 Universal/Industrial 演进设计」**，
+> 不出现 industrial-grade。
 
 ---
 
@@ -614,20 +628,27 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 | 工作流 | 触发 | 做什么 |
 |---|---|---|
-| [`ci.yml`](./.github/workflows/ci.yml) | `main` push / PR | TS（build→typecheck→lint→test）、Rust 默认特性、Rust `tauri` feature、wire-gate |
+| [`ci.yml`](./.github/workflows/ci.yml) | `main` push / PR | 版本号一致性（`version:check`）→ TS（build→typecheck→lint→test）、Rust 默认特性、Rust `tauri` feature、wire-gate |
 | [`release.yml`](./.github/workflows/release.yml) | 推 `v*` tag | 版本号一致性校验 → Windows / macOS（arm64 + x64）/ Linux 安装包构建 → 公开 Release |
 
 发布流程：
 
 ```bash
-# 1. 更新工作区与所有 npm 包版本，并同步示例应用的 package.json、Cargo.toml、
-#    tauri.conf.json；release 工作流会校验全部版本一致
-# 2. 更新 CHANGELOG.md
-git tag v1.1.0 && git push origin v1.1.0
+# 1. 一条命令写齐全部版本号落点（根 package.json 是唯一事实源 → Cargo workspace、
+#    packages/* 的每个 package.json、示例应用的 package.json、它的 src-tauri
+#    Cargo.toml 与 tauri.conf.json）：
+pnpm version:sync 1.2.0
+pnpm version:check     # 同一判定已进 CI；漏改任何一处都会在这里红，而不是在 Release 里
+# 2. 更新 CHANGELOG.md 并提交。tag 号必须等于根版本号——release.yml 的 version-check
+#    会把它与上述落点逐一比对（此前这一步只有校验器，没有生产者）
+git tag v1.2.0 && git push origin v1.2.0
 ```
 
-> `cargo fmt`、`cargo clippy`、ESLint 和应用示例装配均为硬门禁。`cargo-deny`
-> 仍为 advisory，因为它使用持续更新的 RustSec 公告数据库；结果见 CI 的 deny job。
+> `cargo fmt`、`cargo clippy`、ESLint 和应用示例装配均为硬门禁。`cargo-deny` 自轮 9
+> 复核起也是**阻断式硬门禁**（`ci.yml` 的 `deny` 作业跑 `command: check --all-features`，
+> 无 `continue-on-error`）；任何例外必须在 `deny.toml` 显式登记并附审查说明。
+> 唯一还不在 CI 里的强制项是 **`main` 分支保护**——它是仓库设置，需人工开启，
+> 详见 `docs/architecture/v4-industrial-gap-closure-plan.md` 的 Batch 0-7。
 
 ---
 

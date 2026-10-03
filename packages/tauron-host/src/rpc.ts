@@ -13,7 +13,14 @@
 // ──────────────────────────────────────────────────────────────────────────
 
 import type { Unlisten } from './backend.js';
-import type { EventFrame, EventSelector, Subscription, JsonValue } from './events.js';
+import { EventOrderingWatcher } from './events.js';
+import type {
+  EventFrame,
+  EventSelector,
+  EventOrderingViolation,
+  JsonValue,
+  Subscription,
+} from './events.js';
 import type { ContributeEntryInput, HostClient } from './host.js';
 import type { StreamFrame } from './stream.js';
 
@@ -81,6 +88,13 @@ export interface HostRpcOptions {
   pumpIntervalMs?: number;
   /** 自定义节拍器（测试用）。 */
   scheduler?: PumpScheduler;
+  /**
+   * A102 接收端顺序异常出口（重复 / 丢帧 / 状态倒退）。
+   *
+   * 缺省走 `console.error`：异常必须**有出口**，否则顺序契约只在类型里存在。
+   * 注入本回调的宿主自行决定聚合方式（打点、告警、触发重同步），底座不替它丢帧。
+   */
+  onOrderingViolation?: (violation: EventOrderingViolation, frame: EventFrame) => void;
 }
 
 const defaultScheduler: PumpScheduler = {
@@ -94,6 +108,7 @@ const defaultScheduler: PumpScheduler = {
 export function toHostRpc(client: HostClient, options: HostRpcOptions = {}): HostRpc {
   const handlers = new Map<string, Set<(payload: unknown) => void>>();
   const tokens = new Map<string, string>();
+  const ordering = new EventOrderingWatcher();
   let stopPump: Unlisten | null = null;
   let ticking = false;
 
@@ -104,6 +119,20 @@ export function toHostRpc(client: HostClient, options: HostRpcOptions = {}): Hos
     try {
       const frames = await client.eventsDrain('event');
       for (const frame of frames) {
+        // A102 接收端：`seq`/`sender`/`receiver` 不再是只读字段。异常只上报、不丢帧
+        // （理由见 EventOrderingWatcher：at-least-once 的幂等归业务，宿主重启后 seq
+        // 还会重铸，按 seq 丢帧会吃掉一条正常新流）。
+        const violation = ordering.observe(frame);
+        if (violation) {
+          if (options.onOrderingViolation) {
+            options.onOrderingViolation(violation, frame);
+          } else {
+            console.error(
+              `[tauron] 事件顺序契约异常（\`${frame.topic}\` seq=${frame.seq}）：`,
+              violation,
+            );
+          }
+        }
         const set = handlers.get(frame.topic);
         if (!set) continue;
         // 逐订阅者隔离：**一个订阅者抛错不得吞掉同批其余帧**。
@@ -170,6 +199,9 @@ export function toHostRpc(client: HostClient, options: HostRpcOptions = {}): Hos
         if (handlers.size === 0 && stopPump) {
           stopPump();
           stopPump = null;
+          // 收泵即"这条适配器的流暂时结束"：清掉期望序号，否则下一轮订阅期间
+          // 宿主重铸的 seq 会被当成 duplicate/gap 误报。
+          ordering.reset();
         }
       };
     },

@@ -13,6 +13,7 @@
 //! "IPC 接线"分开验证。
 
 pub mod activation;
+pub mod admin_audit;
 pub mod admission;
 pub mod authz;
 pub mod call_delivery;
@@ -80,17 +81,20 @@ pub use wire::{
 
 // V4 universal/industrial foundation exports.
 pub use activation::{ActivationError, ActivationRecord, ContentIdentity};
+pub use admin_audit::{
+    audited as admin_audit_required, AdminAuditError, AdminAuditFacts, AdminAuditOutcome,
+    AdminAuditRecord, AdminAuditSink, ADMIN_AUDIT_FILE, ADMIN_AUDIT_SCHEMA, AUDITED_ADMIN_COMMANDS,
+    MAX_ADMIN_AUDIT_RECORDS,
+};
 pub use admission::{
-    AdmissionController, AdmissionError, CreditWindow, FairQueue, ResourceKind, ResourceLimit,
+    AdmissionController, AdmissionError, CreditWindow, ResourceKind, ResourceLimit,
 };
 pub use call_graph::{
     CallGraph, CallGraphError, CausationError, EventCausation, ReentrancyPolicy,
     DEFAULT_MAX_CALL_HOPS, DEFAULT_MAX_CAUSATION_DEPTH,
 };
 pub use call_state::{AtomicCallState, CallTerminalState};
-pub use durable::{
-    decode_durable, encode_durable, DurableEnvelope, DurableError, MigrationSnapshot,
-};
+pub use durable::{decode_durable, encode_durable, DurableEnvelope, DurableError};
 pub use execution::{
     current_domain, in_domain, require_domain, ExecutionDomain, ExecutionDomainGuard,
     ExecutionError,

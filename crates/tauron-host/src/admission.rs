@@ -1,6 +1,17 @@
 //! V4 credit-based backpressure and hierarchical admission control (A79/A80).
+//!
+//! 本模块有**两个活的**原语，各自都有生产消费点：
+//! - [`AdmissionController`]：分层（global + per-principal）资源预算，由
+//!   `Registry::call_begin` 准入、全终态路径释放（A80 的双层限额那一半）。
+//! - [`CreditWindow`]：接收方驱动的字节额度，是 `StreamRegistry` **唯一**的额度
+//!   算术来源（A79）；流侧不再存裸计数器，也不再有第二套 `saturating_add/min`
+//!   可以与之漂移。
+//!
+//! **不在本模块的东西**：按 owner 的公平调度（A80 的另一半）。曾经的 `FairQueue`
+//! 类型零消费者，已按 V4「未接线公开 API 台账」删除登记——饿死风险仍然真实存在，
+//! 但它现在记在方案里而不是记在一个没人调用的泛型上。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -148,6 +159,10 @@ impl AdmissionController {
 }
 
 /// Receiver-driven credits. A sender may not emit more units than the consumer has granted.
+///
+/// 生产者（仓内唯一）：`StreamRegistry` 的每条流句柄——`open` 装初始额度、
+/// `grant` 由接收方补额（封顶 `max`）、`push` 在占 `seq` **之前**扣额，
+/// 不足即 `E_STREAM_BACKPRESSURE` 且零副作用。因此额度语义只有一处可改。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CreditWindow {
     available: u64,
@@ -155,6 +170,7 @@ pub struct CreditWindow {
 }
 
 impl CreditWindow {
+    /// `initial` 会被夹到 `max`；`max` 至少为 1，避免零额度窗口让首帧永远无法通过。
     pub fn new(initial: u64, max: u64) -> Self {
         let max = max.max(1);
         Self { available: initial.min(max), max }
@@ -177,46 +193,6 @@ impl CreditWindow {
         }
         self.available -= credits;
         Ok(())
-    }
-}
-
-/// Small deterministic round-robin queue used by adapters to avoid one principal monopolizing
-/// dispatch. It is intentionally transport/runtime neutral.
-#[derive(Debug, Default)]
-pub struct FairQueue<T> {
-    order: VecDeque<String>,
-    queues: HashMap<String, VecDeque<T>>,
-}
-
-impl<T> FairQueue<T> {
-    pub fn push(&mut self, principal: impl Into<String>, item: T) {
-        let principal = principal.into();
-        let queue = self.queues.entry(principal.clone()).or_default();
-        let was_empty = queue.is_empty();
-        queue.push_back(item);
-        if was_empty {
-            self.order.push_back(principal);
-        }
-    }
-
-    pub fn pop(&mut self) -> Option<(String, T)> {
-        let principal = self.order.pop_front()?;
-        let queue = self.queues.get_mut(&principal)?;
-        let item = queue.pop_front()?;
-        if !queue.is_empty() {
-            self.order.push_back(principal.clone());
-        } else {
-            self.queues.remove(&principal);
-        }
-        Some((principal, item))
-    }
-
-    pub fn len(&self) -> usize {
-        self.queues.values().map(VecDeque::len).sum()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.queues.is_empty()
     }
 }
 
@@ -279,15 +255,19 @@ mod tests {
         assert_eq!(c.available(), 3);
     }
 
+    /// `CreditWindow` 是 `StreamRegistry` 的额度原语（A79）。这里锁住它的**边界**语义，
+    /// 使流侧那条生产路径与单测共用同一份算术：封顶、夹初始值、min-max=1 的存活下界。
     #[test]
-    fn fair_queue_round_robins_principals() {
-        let mut q = FairQueue::default();
-        q.push("a", 1);
-        q.push("a", 2);
-        q.push("b", 3);
-        assert_eq!(q.pop(), Some(("a".into(), 1)));
-        assert_eq!(q.pop(), Some(("b".into(), 3)));
-        assert_eq!(q.pop(), Some(("a".into(), 2)));
-        assert!(q.is_empty());
+    fn credit_window_bounds_and_ratchet_the_way_streams_depend_on() {
+        let c = CreditWindow::new(10, 4);
+        assert_eq!(c.available(), 4, "初始额度夹到 max");
+
+        let mut c = CreditWindow::new(1, 0);
+        assert_eq!(c.available(), 1, "max=0 也要留下能过一帧的下界");
+        c.grant(9);
+        assert_eq!(c.available(), 1, "封顶后 grant 不能把窗口抬过 max");
+        assert!(c.consume(2).is_err());
+        c.consume(1).unwrap();
+        assert_eq!(c.available(), 0);
     }
 }

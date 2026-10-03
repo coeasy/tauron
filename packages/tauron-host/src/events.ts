@@ -64,6 +64,77 @@ export interface EventFrame {
   maxCausationDepth?: number;
 }
 
+/**
+ * V4 A102 接收端顺序违规（{@link EventOrderingWatcher.observe} 的判定结果）。
+ *
+ * 三种判据与 Rust `tauron_host::OrderingError` 一一对应。
+ */
+export type EventOrderingViolation =
+  | { kind: 'duplicate'; sender: string; receiver: string; seq: number }
+  | { kind: 'gap'; sender: string; receiver: string; expected: number; actual: number }
+  | { kind: 'revision-regression'; previous: number; actual: number };
+
+/**
+ * 接收端顺序守卫（A102）：宿主为每条 `sender → receiver` 流铸造从 1 起的单调
+ * `seq`，本类把它在**消费侧**用起来——重复投递、丢帧、状态倒退都能当场判出来。
+ *
+ * 为什么需要它：此前 `seq`/`sender`/`receiver` 只是**字段**，取件泵把帧交给业务
+ * 时就再没人看过顺序。可靠通道是 at-least-once（重试可能重投），无接收端去重等于
+ * 「同一事件被处理两次且无从发现」。
+ *
+ * 与 Rust 侧 {@link OrderingTracker}（conformance oracle）的一处**有意分歧**：
+ * oracle 遇到 gap 后不重同步，于其后每一帧都继续报 gap——那是验收视图，异常要全部
+ * 可见。运行视图正相反：一次丢帧若永久毒化这条流，后续每帧都成噪音，真正的重复/
+ * 倒退反而被埋掉。因此这里报告一次后把期望值抬到 `seq + 1`。
+ *
+ * 没有 `sender`/`receiver` 的帧（N-1 宿主）不参与判定：判定依据都不存在。
+ *
+ * **只做可见性，不替业务丢帧**：可靠通道是 at-least-once，但「收到两次该不该再执行
+ * 一次」是业务的幂等语义，不是底座的；且宿主重启后 `seq` 会从 1 重新铸造，按 `seq`
+ * 丢帧会把一条正常的新流全部吃掉。真正的去重键是 A78 `eventId`，登记为后续项。
+ */
+export class EventOrderingWatcher {
+  private readonly expectedByStream = new Map<string, number>();
+  private readonly latestRevisionByStream = new Map<string, number>();
+
+  /** 丢弃全部已观察的流状态（宿主重连/换会话时调用，避免跨会话误判重复）。 */
+  reset(): void {
+    this.expectedByStream.clear();
+    this.latestRevisionByStream.clear();
+  }
+
+  /** 观察一帧；返回 `null` 表示顺序正常。 */
+  observe(frame: EventFrame): EventOrderingViolation | null {
+    const { sender, receiver } = frame;
+    if (sender == null || receiver == null) return null;
+    const key = `${sender}\u0000${receiver}`;
+    const expected = this.expectedByStream.get(key) ?? 1;
+
+    if (frame.seq < expected) {
+      return { kind: 'duplicate', sender, receiver, seq: frame.seq };
+    }
+    if (frame.seq > expected) {
+      // 报告一次即重同步：丢的那帧回不来，但后续帧必须能回到正常判定。
+      this.expectedByStream.set(key, frame.seq + 1);
+      this.trackRevision(key, frame.stateRevision);
+      return { kind: 'gap', sender, receiver, expected, actual: frame.seq };
+    }
+    this.expectedByStream.set(key, expected + 1);
+    return this.trackRevision(key, frame.stateRevision);
+  }
+
+  private trackRevision(key: string, revision?: number): EventOrderingViolation | null {
+    if (revision == null) return null;
+    const previous = this.latestRevisionByStream.get(key);
+    if (previous != null && revision < previous) {
+      // 不回退记录值：倒退之后的帧仍应按已知最新 revision 判定。
+      return { kind: 'revision-regression', previous, actual: revision };
+    }
+    this.latestRevisionByStream.set(key, revision);
+    return null;
+  }
+}
+
 // R5 收敛：此前的 `CallFrame`（`kind: 'response'|'progress'|'cancel'`，
 // `value`/`data`/`errorCode`）与 Rust 侧的帧类型**不是同一个词表**——前端按
 // `CallFrame` 写、宿主按 `StreamFrame` 发，两边都「有类型」却对不上。现在只有

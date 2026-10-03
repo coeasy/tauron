@@ -8,6 +8,7 @@
 // - 每个方法都用 {@link translate_at_boundary} 把未知错误收口成 {@link HostException}（R2-c：边界显式）。
 // ──────────────────────────────────────────────────────────────────────────
 import type { Backend, ChannelPort, Principal } from './backend.js';
+import type { ProviderResult } from './dialog-client.js';
 import { HOST_ERROR_CODES, translate_at_boundary } from './errors.js';
 import type {
   EventFrame,
@@ -306,14 +307,21 @@ export class HostClient {
    * 发起主体由宿主从 webview label 解析（防冒充），主窗即 `"main"`。
    *
    * 返回宿主铸造的权威簿记：`takeCallResult` 用其中的 `callId` 取件。
+   *
+   * 返回类型是 {@link ProviderResult}，**不是**裸 `PendingCallInfo`：无可用投递通路
+   * （如 Wasm 插件未装 `runtime-wasm-broker`）时 Rust 走 `Unsupported` 分支，线形是
+   * `{supported:false, reason, fallback}`、**没有 `callId`**。把它当裸簿记读，`callId`
+   * 就是 `undefined`，随后 `host_call_take` 以非法入参失败——把「没有通路」这个诚实
+   * 信号变成了 IPC 反序列化错误（轮 7 修的正是这条）。调用方必须先
+   * {@link isUnsupportedBody} 分流。
    */
   async callPlugin(
     target: string,
     method: string,
     argsJson?: JsonValue,
     parentCallId?: string,
-  ): Promise<PendingCallInfo> {
-    return this.call<PendingCallInfo>('host_call_plugin', {
+  ): Promise<ProviderResult<PendingCallInfo>> {
+    return this.call<ProviderResult<PendingCallInfo>>('host_call_plugin', {
       req: {
         target,
         method,
@@ -543,11 +551,34 @@ export interface ProductionDoctorCheck {
   message: string;
 }
 
+/** Live facts of the privileged-operation audit sink (V4 轮 11 / Batch 0-3). */
+export interface AdminAuditFacts {
+  /** False = memory-only sink: records exist but do not survive the process. */
+  durable: boolean;
+  /** Retained records (bounded ring, see `MAX_ADMIN_AUDIT_RECORDS`). */
+  records: number;
+  /** Total records written by this host, including pruned ones. */
+  totalRecorded: number;
+  pruned: number;
+  writeFailures: number;
+  lastWriteError: string | null;
+  /** Hash chain + durable checksum hold. */
+  chainIntact: boolean;
+  lastCommand: string | null;
+  lastOutcome: 'allowed' | 'denied' | null;
+}
+
 /** Result of `host_production_doctor` — mirrors `tauron_host::ProductionDoctorReport`. */
 export interface ProductionDoctorReport {
   deploymentMode: 'development' | 'test' | 'production';
   productionSafe: boolean;
   checks: ProductionDoctorCheck[];
+  /**
+   * Audit snapshot behind the `admin-audit` check, or `null` when the host configured
+   * no audit sink. The check is derived from these facts — it is no longer a flag the
+   * host declares about itself.
+   */
+  adminAudit: AdminAuditFacts | null;
 }
 
 export class AdminClient {
@@ -573,7 +604,14 @@ export class AdminClient {
       });
   }
 
-  /** Revoke a private-topic approval. Returns true when a grant actually existed. */
+  /**
+   * Revoke a private-topic approval. Returns true when a grant actually existed.
+   *
+   * 撤销**有实效**（V4 A81）：该 `(subscriber, topic)` 的既有订阅当场退订，队列里
+   * 该 topic 尚未取走的帧一并作废——不只是「之后的新订阅被拒」。公共 topic 的订阅
+   * 不以审批为依据，因此不受撤销影响。与撤销**并发**的发布可能留下一帧，重放一次
+   * `eventsRevoke`（返回值仍为 `false`）即作废。
+   */
   async eventsRevoke(subscriber: string, topic: string): Promise<boolean> {
     return this.backend
       .invoke<boolean>('host_events_revoke', { subscriber, topic })

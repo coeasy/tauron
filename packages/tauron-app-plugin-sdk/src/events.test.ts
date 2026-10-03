@@ -3,7 +3,7 @@
 // 锁定的行为：声明式 events.subscribe 必须真正向宿主申请订阅，
 // 宿主投递的事件必须送达插件（此前这条链路是断的）。
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { HostClient, MockBackend } from '@tauron/host';
 import { createPluginContext } from './context.js';
 import { createPlugin } from './createPlugin.js';
@@ -207,6 +207,65 @@ describe('createPlugin 声明式事件', () => {
     ).toBeGreaterThanOrEqual(2); // request + event 两路都取
 
     await ctx.disposeEvents(); // 收泵，不把定时器带进后续用例
+  });
+
+  it('取件泵判定 A102 丢帧并经 ctx.log.warn 暴露，同时照常分发', async () => {
+    // 断链回归：宿主在每帧上写了 seq/sender/receiver，但插件侧泵从不读它们——
+    // 「重复投递 / 丢帧」在业务视角完全静默。这里钉住两件事：异常必须进插件日志，
+    // 且**不影响分发**（at-least-once 的幂等归业务，底座不替它丢帧）。
+    const warns: unknown[][] = [];
+    const spy = vi.spyOn(console, 'warn').mockImplementation((...args) => {
+      warns.push(args);
+    });
+    const backend = new MockBackend({
+      capabilities: ['host_events_subscribe', 'host_events_unsubscribe', 'host_events_drain'],
+      pluginId: PLUGIN_ID,
+      cases: [
+        { cmd: 'host_events_subscribe', result: { token: 'sub-1', selectors: [] } },
+        { cmd: 'host_events_unsubscribe', result: undefined },
+        // 一帧正常、一帧跳号（seq 1 → 5）：接收端应判出丢帧并把期望值抬到 6。
+        {
+          cmd: 'host_events_drain',
+          args: { kind: 'request' },
+          result: [
+            {
+              topic: 'com.example.topic',
+              seq: 1,
+              payload: { v: 1 },
+              sender: 'com.example.sender',
+              receiver: PLUGIN_ID,
+            },
+            {
+              topic: 'com.example.topic',
+              seq: 5,
+              payload: { v: 5 },
+              sender: 'com.example.sender',
+              receiver: PLUGIN_ID,
+            },
+          ],
+        },
+        { cmd: 'host_events_drain', args: { kind: 'event' }, result: [] },
+      ],
+    });
+    const host = new HostClient({ backend });
+    const ctx = createPluginContext(PLUGIN_ID, host);
+    const seen: unknown[] = [];
+    ctx.events.subscribe('com.example.topic', (payload) => seen.push(payload));
+
+    await tick(); // 订阅落地 → 泵第一拍
+    await tick(); // 分发
+    await ctx.disposeEvents();
+    spy.mockRestore();
+
+    expect(seen, '顺序异常不得让泵吞掉载荷').toEqual([{ v: 1 }, { v: 5 }]);
+    const reported = warns
+      .flat()
+      .filter((p): p is string => typeof p === 'string')
+      .filter((p) => p.includes('顺序契约异常'));
+    expect(reported, '丢帧必须进插件日志').toHaveLength(1);
+    expect(reported[0]).toContain('丢帧');
+    expect(reported[0]).toContain('期望 seq=2');
+    expect(reported[0]).toContain('实收 seq=5');
   });
 
   it('声明式 contributes 会在激活时注册到宿主（best-effort，不阻断激活）', async () => {

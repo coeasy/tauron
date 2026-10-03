@@ -43,6 +43,7 @@ import {
   type PluginInstallEventDetail,
 } from '@tauron/shell-events';
 import { ShellClient } from './shell-client.js';
+import { isUnsupportedBody } from './dialog-client.js';
 import { AdminClient } from './host.js';
 import type { PendingCallInfo } from './events.js';
 
@@ -231,6 +232,19 @@ export class ShellController {
         return;
       }
       const pending = await this.client.callPlugin(entry.pluginId, commandId);
+      // `Unsupported` = 宿主没有通往该插件的投递通路（不是「执行失败」）。
+      // 不分流就直接读 `pending.callId`：那是 `undefined`，`host_call_take` 会以
+      // 非法入参失败，把诚实的「无通路」信号换成 IPC 报错（轮 7 修的正是这条）。
+      if (isUnsupportedBody(pending)) {
+        this._onError(
+          new Error(
+            `命令 \`${commandId}\` 无可用投递通路：${pending.reason}` +
+              (pending.fallback !== null ? `（建议：${pending.fallback}）` : ''),
+          ),
+          'command.select',
+        );
+        return;
+      }
       const settled = await this._awaitCallResult(pending.callId);
       if (settled === undefined) {
         const { attempts, intervalMs } = this._commandBudget;

@@ -4,6 +4,10 @@
 > 进度表见 §0.2。**不得据此宣称可发布。**
 > **目标版本**：tauron 1.0（不再保留历史兼容负担——见 §12）
 > **口径**：全部数字与结论为 **2026-09-26 本机实测**（命令附在每节）；文档与代码冲突处记文档漂移。
+> ⚠️ **1.1 反向变更（2026-10-02）**：本文的 W6 把 `plugin-install` 进 `tauron-adapter`
+> 默认特性（`default = ["plugin-install"]`），**1.1 的 V4 minimal-substrate 规则已把它
+> 改回 opt-in**（现为 `default = []`）——默认装配 **83** 条、显式开启后 **85** 条。
+> 文中「默认可达 / 默认 85（或旧的 80）条」按 1.0 当时的事实读，不代表现行默认。
 > **判据**：**「入口可达性」**，不是「函数存在」。本仓反复出现的缺陷类型是
 > 「**有类型、有接口、有测试、没有入口**」；其次是「**命令登记了但最后一跳没送出去**」。
 > **关联**：[overview.md](./overview.md)、[app-layer-wire.md](./app-layer-wire.md)、
@@ -93,12 +97,12 @@ A4–A8 与轮 23–29 **未开工**；本文先做**整体重评估**（不假�
 | 集合 | 条数 | 定义处 |
 |---|---:|---|
 | 底座 `tauron_substrate_handler!` | **61** | `crates/tauron-adapter/src/tauri.rs`（R9 五域补齐后 39→57；1.1 审批 3 条 + 生产就绪自检 1 条 → 61） |
-| 插件运行时 `tauron_plugin_handler!` | **83**（底座 61 + 运行时 22；`plugin-install` 另 2 条 gated，**已进默认特性** → 默认 **85**） | 同上 |
-| TS `FRAMEWORK_COMMANDS` / `OPTIONAL_FRAMEWORK_COMMANDS` | **85**（含 OPTIONAL 两条 install）/ **2** | `packages/tauron-host/src/tauri-backend.ts` |
-| `authz::COMMANDS`（插件面档位表） | **19**（Self_ 17 + ScopedRead 2） | `crates/tauron-host/src/authz.rs` |
-| `authz::ADMIN_COMMANDS`（主窗特权） | **4** | 同上 `:240-268` |
+| 插件运行时 `tauron_plugin_handler!` | **83**（底座 61 + 运行时 22；`plugin-install` 另 2 条 gated，**1.1 起为 opt-in** → 显式开启后 **85**） | 同上 |
+| TS `FRAMEWORK_COMMANDS` / `OPTIONAL_FRAMEWORK_COMMANDS` | **85**（静态全集，**含** install 那两条）/ **2**（opt-in 那两条：不得由静态表乐观放行，只能由运行期协商开门） | `packages/tauron-host/src/tauri-backend.ts` |
+| `authz::COMMANDS`（插件面档位表） | **20**（Self_ 18 + ScopedRead 2；含能力协商入口 `host_capabilities`） | `crates/tauron-host/src/authz.rs` 的 `pub static COMMANDS` |
+| `authz::ADMIN_COMMANDS`（主窗特权） | **8**（注册表管理 1 + sidecar 2 + 资源诊断 1 + Event 审批 3 + 生产就绪自检 1） | 同文件的 `pub static ADMIN_COMMANDS` |
 
-> 三方一致性由 `@tauron/contract-tests` 的 wire-gate 锁定（2026-09-27 复核：**126/126 绿**；本包合计 147 条）。
+> 三方一致性由 `@tauron/contract-tests` 的 wire-gate 锁定（2026-10-02 本机实跑：**130/130 绿**；本包合计 151 条 / 2 文件）。
 > **教训（已入纪律）**：不要用临时 python 正则去数命令面——窗口截断会产生假警报；
 > 一律以 wire-gate 的解析器为准。
 
@@ -189,7 +193,7 @@ tauron-market ───→ tauron-host
 1. **跨语言线格式强制 camelCase**：跨 IPC 的 Rust 结构体一律
    `#[serde(rename_all = "camelCase", deny_unknown_fields)]`，由 wire-gate 扫源码锁定。
 2. **两套错误码、零交集、只追加**：框架层 `SC-xxxx`、应用层 `E_*`；
-   新码只能追加到枚举末尾（TS `HOST_ERROR_CODES` 按声明顺序比对）。
+   新码放在语义相邻处即可（两侧按**码名集合**比对，声明顺序不属于协议，V4 A69/§89）。
 3. **身份从 webview label 解析，不信任入参**：self 档命令的 pluginId 只从
    `plugin-<id>` 解析，调用方传入一律忽略。
 4. **底座类型上触达不到注册表**：`SubstrateState` 无 registry 字段，编译期隔离。
@@ -500,6 +504,10 @@ tauron-market ───→ tauron-host
 
 **另需**：`tauron-settings` 变更通知链（P1-6）接出口——`host_settings_changed` 事件或
 `host_events_publish` 保留 topic；`tauron-i18n` 的 `to_json`/`from_json` 接持久化。
+> 现状（2026-10-02）：这一条**已按第二种形态落地**——宿主在提交口把变更镜像到私有
+> topic `host:settings:changed`（线名，不是这里的 `host_settings_changed`；命令面上
+> 没有也不会有这个名字），SDK 侧 `onSettingsChanged` 从此有真实投递路径。
+> `tauron-i18n` 的持久化仍缺。
 
 **不变量**：任何被宣称「已接线」的 crate 必须有**非测试的生产调用点**（门禁可判）。
 

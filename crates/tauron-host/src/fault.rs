@@ -72,23 +72,34 @@ impl FaultBoundary {
         self.ensure_ready()?;
         match catch_unwind(AssertUnwindSafe(f)) {
             Ok(value) => Ok(value),
-            Err(payload) => {
-                let message = panic_message(payload);
-                self.state = FaultState::Faulted;
-                self.generation = self.generation.saturating_add(1);
-                let record = FaultRecord {
-                    boundary: self.name.clone(),
-                    operation: operation.to_string(),
-                    message: message.clone(),
-                    generation: self.generation,
-                };
-                self.last_fault = Some(record);
-                Err(FaultError::Panicked {
-                    boundary: self.name.clone(),
-                    operation: operation.to_string(),
-                    message,
-                })
-            }
+            Err(payload) => Err(self.record_panic(operation, payload)),
+        }
+    }
+
+    /// 登记一次 panic：边界切 `Faulted`、推进 generation、留下记录，返回对外错误。
+    ///
+    /// 从 `run` 里拆出来只有一个理由：被守护的闭包可能包含**阻塞 I/O**，而 `run` 要求
+    /// 调用方在整段闭包期间持有边界锁（`&mut self`）。锁跨磁盘写下去，故障闸门就成了
+    /// 事实上的串行化点——读命令被排在别人的写盘后面，真正该管事务的写租约反而成了装饰。
+    /// 需要「判就绪 → 松开锁跑闭包 → 事后登记」的调用方（宿主 settings 事务）走这两段。
+    pub fn record_panic(
+        &mut self,
+        operation: &str,
+        payload: Box<dyn std::any::Any + Send>,
+    ) -> FaultError {
+        let message = panic_message(payload);
+        self.state = FaultState::Faulted;
+        self.generation = self.generation.saturating_add(1);
+        self.last_fault = Some(FaultRecord {
+            boundary: self.name.clone(),
+            operation: operation.to_string(),
+            message: message.clone(),
+            generation: self.generation,
+        });
+        FaultError::Panicked {
+            boundary: self.name.clone(),
+            operation: operation.to_string(),
+            message,
         }
     }
 

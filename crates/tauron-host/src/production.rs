@@ -21,12 +21,20 @@ pub enum DeploymentMode {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProductionReadiness {
     pub caller_identity_policy_enabled: bool,
+    /// Whether the runtime origin gate is **armed**: a non-empty allowlist is actually
+    /// enforced on every host command. `caller_identity_policy_enabled` may be satisfied
+    /// by a transport-level declaration, which does not arm the gate — hence a separate fact.
+    pub origin_gate_armed: bool,
     pub durable_recovery_available: bool,
     pub recovery_explicitly_unsupported: bool,
     pub install_feature_enabled: bool,
     pub install_trust_configured: bool,
     /// A100: trusted time is required for supply-chain expiry decisions when install is enabled.
     pub trusted_time_available: bool,
+    /// Privileged administration has a working audit sink.
+    ///
+    /// Batch 0-3 (F3): adapters must derive this from the live
+    /// [`crate::admin_audit::AdminAuditFacts::healthy`] snapshot, not from a host-set flag.
     pub audit_for_admin_operations_available: bool,
     pub writable_data_dir_available: bool,
     /// Whether this host instance actually installs the process-plugin runtime.
@@ -51,6 +59,14 @@ pub struct ProductionDoctorReport {
     pub deployment_mode: DeploymentMode,
     pub production_safe: bool,
     pub checks: Vec<ProductionDoctorCheck>,
+    /// Live audit facts of the privileged-operation audit sink, or `None` when the host
+    /// configured no sink at all.
+    ///
+    /// Batch 0-3 (F3): the `admin-audit` check used to read a host-set boolean. It is now
+    /// derived from this sink, so a report can no longer claim an audit trail that records
+    /// nothing. `doctor()` itself stays pure (mode + readiness only); the platform adapter
+    /// attaches the real snapshot before the report leaves the host.
+    pub admin_audit: Option<crate::admin_audit::AdminAuditFacts>,
 }
 
 /// One production self-test check. A failed check is release-blocking in Production.
@@ -76,6 +92,12 @@ pub fn doctor(mode: DeploymentMode, input: &ProductionReadiness) -> ProductionDo
             message: "caller identity/origin policy is fail-closed",
         },
         ProductionDoctorCheck {
+            id: "origin-gate",
+            pass: input.origin_gate_armed,
+            required_in_production: true,
+            message: "the runtime origin gate enforces a non-empty allowlist",
+        },
+        ProductionDoctorCheck {
             id: "recovery-durability",
             pass: input.durable_recovery_available || input.recovery_explicitly_unsupported,
             required_in_production: true,
@@ -97,7 +119,7 @@ pub fn doctor(mode: DeploymentMode, input: &ProductionReadiness) -> ProductionDo
             id: "admin-audit",
             pass: input.audit_for_admin_operations_available,
             required_in_production: true,
-            message: "privileged administration has an audit sink",
+            message: "privileged administration records into a durable audit sink",
         },
         ProductionDoctorCheck {
             id: "durable-data-dir",
@@ -120,7 +142,7 @@ pub fn doctor(mode: DeploymentMode, input: &ProductionReadiness) -> ProductionDo
     ];
     let production_safe =
         mode == DeploymentMode::Production && checks.iter().all(|check| check.pass);
-    ProductionDoctorReport { deployment_mode: mode, production_safe, checks }
+    ProductionDoctorReport { deployment_mode: mode, production_safe, checks, admin_audit: None }
 }
 
 /// Validate production-only invariants.
@@ -137,6 +159,12 @@ pub fn validate(mode: DeploymentMode, input: &ProductionReadiness) -> Vec<Readin
         out.push(ReadinessViolation {
             code: "CALLER_IDENTITY_POLICY_REQUIRED",
             message: "production requires a fail-closed caller identity/origin policy",
+        });
+    }
+    if !input.origin_gate_armed {
+        out.push(ReadinessViolation {
+            code: "ORIGIN_GATE_ARMED_REQUIRED",
+            message: "production requires an armed origin gate (empty allowlist = gate disabled)",
         });
     }
     if !input.durable_recovery_available && !input.recovery_explicitly_unsupported {
@@ -197,6 +225,7 @@ mod tests {
     fn ready() -> ProductionReadiness {
         ProductionReadiness {
             caller_identity_policy_enabled: true,
+            origin_gate_armed: true,
             durable_recovery_available: true,
             recovery_explicitly_unsupported: false,
             install_feature_enabled: true,
@@ -225,6 +254,25 @@ mod tests {
         assert!(codes.contains(&"RECOVERY_DURABILITY_REQUIRED"));
         assert!(codes.contains(&"ADMIN_AUDIT_REQUIRED"));
         assert!(codes.contains(&"DATA_DIR_REQUIRED"));
+    }
+
+    /// V4 轮 10（F2）：一条**已声明**的身份策略不得替 runtime origin 门装弹。
+    ///
+    /// 旧行为是 `caller_identity_policy_enabled` 单真即通过，于是「配了 flag、
+    /// 允许清单为空」的宿主能在 origin 门实际放行一切的情况下自称 production-safe。
+    #[test]
+    fn declared_identity_policy_does_not_arm_the_origin_gate() {
+        let mut input = ready();
+        input.origin_gate_armed = false;
+        let violations = validate(DeploymentMode::Production, &input);
+        assert!(
+            violations.iter().any(|v| v.code == "ORIGIN_GATE_ARMED_REQUIRED"),
+            "empty allowlist must not read as an enforced origin policy"
+        );
+        assert!(!is_production_safe(DeploymentMode::Production, &input));
+        let report = doctor(DeploymentMode::Production, &input);
+        assert!(!report.production_safe);
+        assert!(report.checks.iter().any(|c| c.id == "origin-gate" && !c.pass));
     }
 
     #[test]

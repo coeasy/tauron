@@ -536,19 +536,23 @@ RJSF 兼容 Schema + uiSchema
 
 ## 四、测试体系
 
-| 层级 | 测试数量（2026-09-27 实测） | 工具 |
+| 层级 | 测试数量（2026-10-02 实测） | 工具 |
 |------|---------|------|
-| Rust 单元测试 | **1264 tests**（`cargo test --workspace --lib --tests` 聚合，15 个 suite 全部 0 failed；源码 `#[test]` **声明数** 1299 是另一个口径，见 §四脚注） | `cargo test --workspace` |
-| TypeScript 单元测试 | **1729 tests**（101 个测试文件，2026-09-27 更新；轮 11 时 1571） | `vitest`（`pnpm -r test`） |
-| 契约测试 | TS↔Rust 跨语言，wire-gate **126 条门禁**（本包合计 147 条） | `@tauron/contract-tests` + `@tauron/contract-kit` |
+| Rust 单元测试 | **1426 tests / 0 failed**（`cargo test --workspace --locked --lib --tests` 聚合，21 个测试二进制，另有 12 条 feature 门控用例 filtered out；源码 `#[test]` **声明数** 1498 是另一个口径，见 §四脚注） | `cargo test --workspace` |
+| TypeScript 单元测试 | **1759 tests / 0 failed**（104 个测试文件 / 20 包，2026-10-02 更新；轮 11 时 1571） | `vitest`（`pnpm -r test`） |
+| 契约测试 | TS↔Rust 跨语言，wire-gate **130 条门禁**（本包合计 151 条 / 2 文件） | `@tauron/contract-tests` + `@tauron/contract-kit` |
 | 属性测试 | — | `proptest` |
 | 性能基准 | — | `criterion` |
 
 > 上表数字是 `cargo test --workspace --locked --lib --tests` / `pnpm -r test` 的**实测
-> 聚合值**（口径：所有 suite 的 `passed` 之和，failed 必须为 0；实测 15 个 suite /
-> **1264 passed / 0 failed**）。**另有一个不同的口径**：源码里 `#[test]` 的**声明数**
-> 是 **1299**——它包含 feature 门控（`tauri`）下才编译的用例，因此大于执行数；
-> README 的「测试」表给的是声明数，两处不要混读。
+> 聚合值**（口径：所有 suite 的 `passed` 之和，failed 必须为 0；实测 21 个测试二进制 /
+> **1426 passed / 0 failed**）。**另有一个不同的口径**：源码里 `#[test]` 的**声明数**
+> 是 **1498**——它包含 feature 门控（`tauri` / `plugin-install`）下才编译的用例，因此大于
+> 默认特性的执行数（默认特性下另有 12 条以 `filtered out` 出现）；那些门控用例本机也单独
+> 实跑通过（`cargo test -p tauron-adapter --features tauri` **285**、
+> `--features plugin-install` **269**、`cargo test -p tauron-shell --features tauri` **72**，
+> 均 rc=0）。README 的「测试」表现在同样给
+> **执行结果**（并附声明数），两处口径一致，不要与历史文档里的旧快照混读。
 
 ---
 
@@ -561,6 +565,14 @@ RJSF 兼容 Schema + uiSchema
 > 的"包发布 ❌"自相矛盾，属原文缺陷）。可行的接入方式是 `workspace:*` / `file:` /
 > path 依赖。完整的接入步骤、三档装配选择与最小可运行示例见
 > [安装与使用](../installation.md) §3。
+>
+> ⚠️ **2026-10-02 再复核：上面那句"均未发布"本身也过期了。** 实测 registry 现值为
+> **1.0.2**（npm 20 个公开包逐个 `npm view <包> version`；crates.io 15 个 `tauron-*`
+> 逐个 `cargo add <crate> --dry-run`，唯 `tauron-ffi` 无任何版本）。所以
+> `pnpm add @tauron/host @tauron/ui` 现在**装得到**，只是装到的是 1.0.2；仓库版本
+> 1.1.0 仍未发布（`@1.1.0` 会 `ETARGET`），且 1.0.2 的 `tauron-adapter` 默认还带着
+> `plugin-install`（命令面 85 条），与 1.1.0 的 opt-in 83 条**行为不同**。
+> 需要当前源码行为时用 `workspace:*` / `file:` / path 依赖。
 
 ```bash
 # 前端：同一 pnpm workspace 内（跨仓库用 file: 指向本仓库的 packages/<包名>）
@@ -608,7 +620,7 @@ tauri::Builder::default().plugin(tauron_adapter::tauri::state_init())
 10. 🟡 **RFC 8785 规范化签名验证** — 商城插件签名验证（`crates/tauron-market/src/lib.rs:53` 的 `canonical_json` + 64 个测试〔默认特性；`--all-features` 下 74〕；适配层 `host_market_*` 是桩，见第 11 条）。签名算法为 **Ed25519**（非对称：私钥签发、公钥验证）
 11. 🟡 **安全解压四重防护** — 路径清洗、条目≤2000、解压≤200MB、压缩比≤100×（`crates/tauron-market` 的 `validate_zip_constants` 有正反测试；**只做校验、不做解压**——crate 自述"zip 解包由适配层提供"，`crates/tauron-market/src/lib.rs:11`，而适配层没有解压实现）
 12. 🟡 **链式 hash 审计日志** — 商城操作不可篡改（`crates/tauron-market` 的 `AuditLog::verify_chain` 有篡改检测测试；未接线）
-13. ✅ **generate_handler!() 宏** — 一次性注册全部 Tauri 命令，零样板。⚠️ 原文写的 **17 条已过时**：实测为 **83 条**（`tauron_plugin_handler!` = 底座 61 + 插件运行时 22；`plugin-install` feature 另注册 2 条且**已进默认特性，启用后共 85 条**），底座-only 宿主用 `tauron_substrate_handler!` 只注册 **61 条**（`crates/tauron-adapter/src/tauri.rs` 的两个宏定义，计数逐条数过；分域清单见 `docs/integration/incremental-adoption.md` §0.1/§0.2）
+13. ✅ **generate_handler!() 宏** — 一次性注册全部 Tauri 命令，零样板。⚠️ 原文写的 **17 条已过时**：实测为 **83 条**（`tauron_plugin_handler!` = 底座 61 + 插件运行时 22；`plugin-install` feature 另注册 2 条，该 feature 为 **opt-in**（`default = []`），显式开启后共 85 条），底座-only 宿主用 `tauron_substrate_handler!` 只注册 **61 条**（`crates/tauron-adapter/src/tauri.rs` 的两个宏定义，计数逐条数过；分域清单见 `docs/integration/incremental-adoption.md` §0.1/§0.2）
 14. 🟡 **Shell 矩阵 4 形态** — local / local-server / remote-url / sub-webview 覆盖主流场景（`packages/tauron-shell-matrix/src/manager.ts:71-93` 四条分支均为 `Simulate ...` 注释下的模拟返回，自带测试但未接真实 webview/本地服务）
 15. ✅ **双层 ACL** — 外层 Tauri 静态（capability/permission，由接入方在 `capabilities/` 声明）+ 内层框架动态（三档授权 + origin 允许清单，`origin_gate` 是唯一分发咽喉点，`crates/tauron-adapter/src/tauri.rs:1944`）
 16. ✅ **per-plugin 崩溃重启限制** — 进程插件 3 次 / 5 分钟，防止雪崩（`tauron-proc::CrashTracker`，在 `cmd_runtime_spawn` 的预算门里真被调用，`crates/tauron-adapter/src/lib.rs`）。⚠️ **无进程组 / 作业对象、无 kill 树**（孙进程不随父进程一起死），空闲超时 kill 未实现（`crates/tauron-proc/src/spawner.rs:93`）
@@ -628,7 +640,7 @@ tauri::Builder::default().plugin(tauron_adapter::tauri::state_init())
 | 3 | **tauron-shell vs tauron-host 重复** | 🟡 中 | 两个 Rust crate 都实现注册表/事件总线/ACL，但面向不同框架 |
 | 4 | **部分模块实现深度不一** | 🟡 中 | proc/wasm 的运行时逻辑依赖 stub |
 | 5 | **Tauri 适配层硬编码** | 🟡 中 | `tauri.rs` 中 `host_events_publish` 通过 `strip_prefix("plugin-")` 解析 publisher，缺乏防御性 |
-| 6 | **未发布到公共注册表** | 🟡 中 | npm/crates.io 均未发布，第三方无法直接 `cargo add` / `pnpm add` |
+| 6 | **公共注册表只到旧版** | 🟡 中 | 2026-10-02 实测：npm 20 个公开包与 crates.io 15 个 crate 的现值都是 **1.0.2**（`tauron-ffi` 一个版本都没发），仓库 **1.1.0 尚未发布**。第三方能 `cargo add` / `pnpm add`，但拿不到当前源码行为（1.0.2 的 `tauron-adapter` 默认带 `plugin-install`，1.1.0 改成 opt-in） |
 | 7 | **示例应用不足** | 🟢 低 | 仅 minimal-app，缺少展示完整能力的 demo |
 
 ---
@@ -694,3 +706,10 @@ tauri::Builder::default().plugin(tauron_adapter::tauri::state_init())
 > **教训**：R1–R8 底座重构把 `tauri.rs` 整体重排，**行号指针是最先腐烂的证据形式**。
 > 后续修订优先写符号名（`fn resolve_principal` / `origin_gate` / 宏名），行号只作辅助；
 > 凡"仍是 X"的论断必须回源码确认——本轮抓到的两处都已被更早的轮次修掉，文档却留在旧状态。
+
+> **2026-10-02 口径提示**：上表是**那一轮**的对照，数字不随后续改动刷新。
+> 现行命令面口径（以 `crates/tauron-adapter/Cargo.toml` 与 wire-gate 为准）：
+> 底座 `tauron_substrate_handler!` **61** 条，`tauron_plugin_handler!` **83** 条；
+> `plugin-install` 的 2 条在 1.0-W6 曾进默认特性，**1.1 已改回 opt-in**（`default = []`），
+> 所以默认装配 **83**、显式开启后 **85**。档位表现为 `authz::COMMANDS` **20**（Self_ 18 +
+> ScopedRead 2）+ `authz::ADMIN_COMMANDS` **8**，应用层错误码 **24** 个变体。

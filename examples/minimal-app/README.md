@@ -1,8 +1,10 @@
 # Minimal App Example — tauron 应用层贯通示例
 
 可运行的集成示例：宿主主窗 + **iframe 沙箱插件**（握手/调用全协议）+
-**`host_*` 命令族 83 条**（底座 61 + 插件运行时 22；`plugin-install` 另 2 条
-**已进默认特性** → 本示例实际注册 **80** 条）+ `@tauron/ui` Web Components。
+**`host_*` 命令族 83 条**（底座 61 + 插件运行时 22；`plugin-install` 另 2 条是 **opt-in**
+——`tauron-adapter` 的 `default = []`，本示例 `src-tauri/Cargo.toml` 的
+`default = ["plugin-install", "runtime-wasm-broker"]` 显式开启，故实际注册 **85** 条）
++ `@tauron/ui` Web Components。
 
 ## 安装包获取与运行
 

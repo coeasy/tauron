@@ -25,16 +25,19 @@
 | Rust 测试 | **1221 / 0 failed**（15 crate） | 轮 12 收口 |
 | TS 测试 | **1571 / 0 failed**（97 文件，21 包） | 轮 12 收口 |
 | 跨语言门禁 wire-gate | **125 / 125**（当轮计数口径，见下方口径注） | `packages/tauron-contract-tests/src/wire-gate.test.ts` |
-| 命令面（本方案新增 `host_capabilities` 后） | **83 = 底座 61 + 插件运行时 22**（0.4-A1 三命令、0.4-W3 对账命令，以及 R9 五域 menu/tray/fs/http/updater 与品牌/主题接通；1.1 再进 Event 审批 3 条 + 生产就绪自检 1 条；`plugin-install` feature 另注册 2 条且默认开启 → 85 条） | `tauron_substrate_handler!` / `tauron_plugin_handler!` |
+| 命令面（本方案新增 `host_capabilities` 后） | **83 = 底座 61 + 插件运行时 22**（0.4-A1 三命令、0.4-W3 对账命令，以及 R9 五域 menu/tray/fs/http/updater 与品牌/主题接通；1.1 再进 Event 审批 3 条 + 生产就绪自检 1 条；`plugin-install` feature 另注册 2 条，该 feature 为 **opt-in**（`tauron-adapter` 的 `default = []`），显式开启后共 **85** 条） | `tauron_substrate_handler!` / `tauron_plugin_handler!` |
 | 能力表 | 16（13 插件面 + 3 特权） | `authz::COMMANDS` / `capabilities.ts` |
 | 底座独立装配 | ✅ 有编译证据 + 功能证据 | `substrate-only` feature + `substrate_only_host_is_functionally_complete` |
 
 > **数字口径**：上表是**轮 12 收口时**的快照，作为本方案的比较基准，不随后续改动刷新。
-> 当前实测（2026-09-27，发布收口三轮审计之后）：TS **1729**（`pnpm -r test` 实跑，101 文件）；
-> Rust 执行结果 **1264 passed / 0 failed**（`cargo test --workspace --locked --lib --tests`，
-> 15 suite），源码 `#[test]` 声明数 **1299**——**声明数不是执行结果**，feature 门控
-> （`tauron-adapter` / `tauron-shell` 的 `tauri` feature）另计，真实执行结果以 CI 为准；
-> wire-gate **126**（`vitest run src/wire-gate.test.ts` 实跑；本包合计 147 条 / 2 文件；
+> 当前实测（2026-10-02，轮 7–9 三轮审计之后，本机全门禁实跑）：TS **1759 / 0 failed**
+> （`pnpm -r test`，104 文件 / 20 包）；Rust 执行结果 **1426 passed / 0 failed**
+> （`cargo test --workspace --locked --lib --tests`，21 个测试二进制，另有 12 条
+> feature 门控用例在本配置下 filtered out），源码 `#[test]`
+> 声明数 **1498**——**声明数不是执行结果**，feature 门控
+> （`tauron-adapter` / `tauron-shell` 的 `tauri`、`tauron-adapter` 的 `plugin-install`）另计，
+> 二者本机均已单独实跑通过；
+> wire-gate **130**（`vitest run src/wire-gate.test.ts` 实跑；本包合计 151 条 / 2 文件；
 > 基线表的 125 是更早的计数口径，那个口径下同一文件曾按包含 `contract.test.ts` 的整包计）。
 > 本节只陈述口径，不再回头改基线表的数字。
 
@@ -119,7 +122,7 @@
 >
 > | 条目 | 本节原判 | 2026-09-26 实测 |
 > |---|---|---|
-> | M-1 无 install 入口 | 🔴 | **已实现**：`host_registry_install` / `_preview` 存在（`tauri.rs` 的 `#[cfg(feature = "plugin-install")]` 块，注册点 `:2506-2508`），且该 feature **已进 `tauron-adapter` 默认特性**（`Cargo.toml:21`，1.0-W6）→ 默认构建**可达**；`plugin_install_dir` 未配置时仍如实不可用（`lib.rs:226-228`）。TS 侧能力表曾无条件列出（误报为已注册），已由 0.4-A2 修 |
+> | M-1 无 install 入口 | 🔴 | **已实现**：`host_registry_install` / `_preview` 存在（`tauri.rs` 的 `#[cfg(feature = "plugin-install")]` 块），该 feature 在 1.0-W6 曾进 `tauron-adapter` 默认特性，**1.1 又改回 opt-in**（`Cargo.toml` 现为 `default = []`）→ **默认构建不可达，需接入方显式 `features = ["plugin-install"]`**；`plugin_install_dir` 未配置时仍如实不可用。TS 侧能力表曾无条件列出（误报为已注册），已由 0.4-A2 修 |
 > | M-2 无任何 per-plugin 配额 | 🔴 | **已接线 4 类**：pending 100/插件（`registry.rs:33`）、stream 32/插件（`stream.rs:113`）、订阅 256/插件（`eventbus.rs:52`）、通知 64/插件（`tauron-notify/src/lib.rs:161`） |
 > | S-6 无能力协商 | 🟠 | **已实现且已推导**：`host_capabilities` 在，`families` / `unsupported` 已改为**由各域 sink 运行期可用性推导**、两列互斥（不再是硬编码清单），配 `host_capabilities_derives_domains_from_injected_sinks` 单测 |
 > | S-3 桩命令谎报 | 🔴 | **已修**：dialog / clipboard / brand / market 全部返回有类型的 `UnsupportedBody` / `simulated`，无裸成功 |
@@ -152,7 +155,7 @@
 
 | # | 残差 | 证据 | 档 |
 |---|---|---|---|
-| M-1 | ~~**无 install 入口**~~ → **已实现且已进默认特性**（2026-09-27 复核）：`host_registry_install` / `_preview` 已存在并注册，挂 `#[cfg(feature = "plugin-install")]`，而该 feature **已进 `default`**（`Cargo.toml:21`，1.0-W6）；`plugin_install_dir` 未配置时仍如实不可用；TS 侧能力表原无条件列出（误报已注册），已由 0.4-A2 改为运行期 `host_capabilities` 开门 | `tauri.rs` 符号 `host_registry_install`（注册点 `:2506-2508`）、`crates/tauron-adapter/Cargo.toml:21`；修正在 `capability-closure-plan.md` A2 | 🟠 |
+| M-1 | ~~**无 install 入口**~~ → **已实现**（2026-09-27 复核）：`host_registry_install` / `_preview` 已存在并注册，挂 `#[cfg(feature = "plugin-install")]`；该 feature 曾于 1.0-W6 进 `default`，**1.1 按 V4 minimal-substrate 规则改回 opt-in**（`crates/tauron-adapter/Cargo.toml` 现为 `default = []`），故默认构建不含这两条，需接入方显式开启；`plugin_install_dir` 未配置时仍如实不可用；TS 侧能力表原无条件列出（误报已注册），已由 0.4-A2 改为运行期 `host_capabilities` 开门 | `tauri.rs` 符号 `host_registry_install`、`crates/tauron-adapter/Cargo.toml` 的 `[features] default = []`；修正在 `capability-closure-plan.md` A2 | 🟠 |
 | M-2 | ~~**无任何 per-plugin 配额**~~ → **已接线 4 类**（2026-09-26 改判）：pending 100/插件、stream 32/插件 + 256 全局、订阅 256/插件 + 4096 全局、通知 64/插件 + 512 全局。**剩余缺口**：通知环仍是全局单实例（逐插件只是裁剪）、无内存/CPU 配额 | `registry.rs:33`、`stream.rs:113/122`、`eventbus.rs:49/52`、`tauron-notify/src/lib.rs:129/161` | 🟡 |
 | M-3 | **Js 型插件无执行器**：`entry.js` 零消费点；真实路径是「宿主开窗 + 插件自举」，但文档没这么写 | `manifest.rs:344-350` | 🔴 |
 | M-4 | **Rust 型插件完全无落点**：`PluginType::Rust` 仅出现在 manifest 校验与 1 个测试；插件开发指南的形态表**缺 Rust 整行** | `manifest.rs:335/392/732`、`registry.rs:1874`；`docs/api/plugin-development-guide.md:24-29` | 🔴 |
@@ -236,6 +239,9 @@ pub trait MenuProvider: Send + Sync {
 
 - 每个域一组命令（`host_menu_set` / `host_menu_on_select` …），**命令属于底座集合**，
   未注册 provider 时返回 `Unsupported`（见 S3 的统一形状），而不是恒成功。
+  > 本节是**提案名**：`host_menu_on_select` 从未注册，现行菜单面只有
+  > `host_menu_set` / `host_menu_popup` / `host_menu_reset` 三条；「选中项回传宿主」
+  > 这条回调链**仍是缺口**（`MenuSink` 没有 on-select 口），别按本节的命令名去找实现。
 - Tauri 实现放在 feature-gated 的 binding 层（允许新增 `tauri-plugin-*` 依赖，见 §4 约束变更）。
 - 优先级排序：**fs > http > updater > menu > tray**。
   fs/http 是插件刚需（几乎所有插件都要读写与联网），且 Tauri 有官方插件；
@@ -401,6 +407,13 @@ UI 无安装入口。也就是说今天的插件只能"生而有之"（宿主预
    权限**扩张**才需重审（acl 的 diff 语义已实现，直接复用）。
 4. **安装命令**：`host_registry_install`（privileged，仅主窗）+ `host_registry_install_progress`
    （走 S1 的流式通道回传阶段进度）。
+   > **现状（2026-10-02 复核）**：本条**部分落地**。已在命令面的是
+   > `host_registry_install` / `host_registry_install_preview`，且 preview→install 已由
+   > **一次性 `InstallReviewToken`**（nonce + 过期 + 内容指纹比对）绑死，
+   > 替换包内容后重装会被拒（`reviewed_install_rejects_package_replaced_after_preview`）。
+   > **`host_registry_install_progress` 不存在**——安装期进度今天没有推送通道，
+   > 只有命令返回值（进度语义要落仍需先有 W11 的 push 链路）。
+   > 别按这个名字去找命令，会找不到。
 5. **原子性**：落盘用 tmp + rename；任一步失败则整体回滚，注册表不留条目。
 
 **不变量**：

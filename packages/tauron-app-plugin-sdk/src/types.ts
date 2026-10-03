@@ -35,13 +35,6 @@ export type CommandHandler<TArgs = unknown, TResult = unknown> = PluginCommandHa
  */
 export type DeclaredCommandHandler = CommandHandler<never, unknown>;
 
-/** 已注册的命令。 */
-export interface RegisteredCommand {
-  id: string;
-  handler: CommandHandler;
-  registeredAt: number;
-}
-
 /**
  * 命令注册结果。
  *

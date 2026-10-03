@@ -28,7 +28,7 @@ export interface Capability {
 /**
  * 框架服务命令面（计划 §2.1，D1/D2/D15/D16 修订后定稿）。
  *
- * - 19 条插件命令：17 条 `self` + 2 条 `scoped-read`
+ * - 20 条插件命令：18 条 `self` + 2 条 `scoped-read`
  * - 主窗特权命令覆盖注册表/运行时/资源诊断/Event Approval Broker 审批
  *   （approve/revoke/approvals）与生产就绪自检（A109）——SDK 只提供命令面，
  *   审批与诊断 UI 由宿主管理面自行实现
@@ -37,9 +37,15 @@ export interface Capability {
  *
  * **覆盖范围（有意如此，不是遗漏）**：本表覆盖「插件侧可触达的命令面 + 管理命令」。
  * 主窗专属命令（窗口 / i18n / notify / settings / recovery / market / dialog /
- * clipboard / brand / contributes_list 等）由 Tauri ACL 按窗口 label 管辖，不在此表内。
- * 判据是**谁可能越权**：插件 webview 能摸到的命令必须有档位（否则授权层对它没有定义），
- * 主窗命令不存在"下放"路径。该范围由 `wire-gate` 的「授权面」门禁钉住：
+ * clipboard / brand / contributes_list 等）不在此表内。判据是**谁可能越权**：插件
+ * webview 能摸到的命令必须有档位（否则授权层对它没有定义）。
+ *
+ * ⚠️ **不在本表 ≠ 由 Tauri ACL 管辖**（旧口径在此更正）：`host_*` 走应用层 root
+ * 注册，能力文件不按命令名授权，`windows` 还同时覆盖 `main` 与 `plugin-*`，所以
+ * ACL 这条路径管不到它们。这些命令的可达性由适配器里的**代码层判定**
+ * （`require_main_window` / `admin_gate` / 按身份过滤 / 根目录限定）或**调用方自身
+ * 作用域**决定；逐命令实见 `docs/api/command-surface.md`（生成物，CI 复算）。
+ * 该范围由 `wire-gate` 的「授权面」门禁钉住：
  * `HostClient` 触达的每条命令都必须在本表内且档位为 self/scoped-read。
  *
  * **档位与代码层判定的关系（轮 11 起）**：本表是**契约与门禁**，真正的执行判定在
@@ -134,6 +140,16 @@ export const CAPABILITIES: readonly Capability[] = [
     consumer: 'plugin',
     description:
       '对账 manifest 声明的贡献与 activate 期实际注册（分叉报 E_CONTRIBUTES_DRIFT；0.4-W3）',
+  },
+  {
+    // 能力协商入口**自身**也必须在表内（轮 7 补登记，与 Rust `authz::COMMANDS` 同源）。
+    // 漏它的后果很具体：`isAvailable()` / `capabilityMatrix()` 以本表为白名单，
+    // 于是一条协商成功的命令在矩阵里恒为 `false`——fail-closed 门禁无法为自己的
+    // 入口作证，读矩阵的人会把「宿主已实现」误读成「宿主没实现」。
+    command: 'host_capabilities',
+    tier: 'self',
+    consumer: 'plugin',
+    description: '拉取宿主真实命令面与域可用性（能力协商的真相源，R1-4 fail-closed 入口）',
   },
   {
     command: 'host_events_drain',

@@ -4,8 +4,9 @@ CLI 工具 —— `create`、`plugin new|dev|test|pack|sign|publish`、`doctor`�
 
 ## 安装
 
-> ⚠️ **尚未发布到 npm**（本包当前 `private: true`），`npm install -g @tauron/cli`
-> 装不到任何东西。在仓库内直接跑 bin：
+> ⚠️ **npm 上的 `latest` 是 1.0.2**（2026-10-02 实测 `npm view @tauron/cli version` → `1.0.2`），
+> 本仓库的 `1.1.0` 尚未发布，点名 `@1.1.0` 会 `ETARGET`。`npx @tauron/cli` 拿到的是 1.0.2
+> 的行为，与当前代码不一定一致。在仓库内开发请直接跑 bin：
 
 ```bash
 node packages/tauron-cli/bin/tauron.js --help

@@ -33,25 +33,32 @@ tauron-app new ./my-app --framework react --shell tauri
 tauron-app new ./my-app --tauron-path ../tauron --dry-run   # 只报告产物、不落盘
 ```
 
-正式发布后也可直接运行：
+npm 上也能直接运行（`latest` 现为 **1.0.2**）：
 
 ```bash
-npm create tauron-app@1.1.0 -- ./my-app --framework react
+# ⚠️ 别点名 @1.1.0：仓库版本 1.1.0 尚未发布，现在装它会 ETARGET。
+npm create tauron-app@latest -- ./my-app --framework react
 ```
 
 生成的工程包含 `src-tauri/{Cargo.toml,src/main.rs,build.rs,capabilities/default.json,tauri.conf.json}`
 与前端入口、`package.json`、`tsconfig.json`、`vite.config.ts`、根 `index.html`。
 `src-tauri` 是 `examples/minimal-app` 同形态的**真装配**（`state_init_with_adapter_config` +
-`tauron_generate_handler![]`，默认 85 条命令；`--features substrate-only` 走 61 条底座），
+`tauron_generate_handler![]`；生成的工程自己写 `default = ["plugin-install"]`，故注册 **85** 条
+——`tauron-adapter` 本体默认只有 **83** 条，那 2 条安装命令是 opt-in；
+`--features substrate-only` 走 61 条底座），
 capability 覆盖 `main` 与 `plugin-*` 窗。
 
 「一键」到 `npm run tauri dev` 的链路已闭合：`tauri.conf.json` 带 `beforeDevCommand` /
 `beforeBuildCommand`（拉起 vite），`vite.config.ts` 的 `server.port` 与 `devUrl` 一致、
 `outDir` 与 `frontendDist` 一致，`index.html` 位于工程根（vite 的 root 约定）。
 
-依赖坐标：默认使用精确的 `1.1.0` registry 版本；贡献 Tauron 源码时，显式使用
-`--tauron-path <相对路径|绝对路径>` 生成 `path` / `file:` 本地依赖。发布前，registry
-安装暂不可用；发布状态见[安装与使用](../../docs/installation.md)。
+依赖坐标：默认固定到**本 CLI 的 `FRAMEWORK_VERSION`**（仓库当前源码为精确 `1.1.0`，
+npm 上装到的 1.0.2 CLI 固定 `1.0.2`）；这一位版本由 `src/framework-version.ts` 单点
+提供，发版时必须与 `package.json` 一起改（`framework-version.test.ts` 会在漏改时把
+`pnpm -r test` 弄红）。贡献 Tauron 源码时，显式使用
+`--tauron-path <相对路径|绝对路径>` 生成 `path` / `file:` 本地依赖。⚠️ 仓库的 1.1.0
+**尚未发布**，所以从源码构建的本 CLI 生成的工程暂时无法从 registry 装依赖；发布状态见
+[安装与使用](../../docs/installation.md)。
 
 > **需自行替换的部分**：`src-tauri/icons/` 是**纯色占位图**（6 个文件，覆盖 Windows / macOS /
 > Linux 打包所需）——**发布前必须换成品牌图标**。不给这组文件连 `cargo check` 都过不去：

@@ -39,6 +39,8 @@ import { HostClient, normalizeError, capabilityMatrix, CAPABILITIES } from '@tau
 
 // 真实后端（唯一 import 点）
 import { TauriBackend, pluginIdFromLabel } from '@tauron/host/tauri';
+// 命令面基线（门禁/装配自检用；**不是**运行期能力表，可用性请读协商结果）
+import { FRAMEWORK_COMMANDS, OPTIONAL_FRAMEWORK_COMMANDS } from '@tauron/host/tauri';
 
 // 契约测试专用
 import { MockBackend } from '@tauron/host/testing';
@@ -60,7 +62,7 @@ backend.adoptCapabilities(caps.commands); // 拒空 / 拒缺 host_capabilities
 | 门禁 | 内容 |
 |---|---|
 | §8-1 | 整个 `src/` 只有 `tauri-backend.ts` 导入 `@tauri-apps/api` |
-| 错误码 | TS `HOST_ERROR_CODES` 与 Rust `error::ErrorCode` 枚举**逐项同序一致** |
+| 错误码 | TS `HOST_ERROR_CODES` 与 Rust `error::ErrorCode` 枚举**按码名集合全等**（顺序不属于协议，V4 A69/§89；改名或漏码即红） |
 | 可重试 | TS `RETRYABLE_HOST_ERROR_CODES` 与 Rust `ErrorCode::retryable()` 的 `matches!` 集合一致 |
 | 命令面 | TS `CAPABILITIES` 与 Rust `authz::COMMANDS` / `ADMIN_COMMANDS` 逐项一致 |
 | 废弃命令 | `host_grant_request`（D16）、`host_call_begin`（D2）两侧都不存在 |
@@ -69,15 +71,16 @@ backend.adoptCapabilities(caps.commands); // 拒空 / 拒缺 host_capabilities
 
 ## 命令面（计划 §2.1 定稿）
 
-**27 条已登记命令**：`crates/tauron-host/src/authz.rs` 的 `COMMANDS` **19 条**
-（17 `self` + 2 `scoped-read`）+ `ADMIN_COMMANDS` **8 条特权**（仅主窗）；
+**28 条已登记命令**：`crates/tauron-host/src/authz.rs` 的 `COMMANDS` **20 条**
+（18 `self` + 2 `scoped-read`）+ `ADMIN_COMMANDS` **8 条特权**（仅主窗）；
 另有 **2 条 feature-gated**（`host_registry_install_preview` / `host_registry_install`，
-挂 `plugin-install`——**该特性现已进 `tauron-adapter` 的默认特性**，
-见 `crates/tauron-adapter/Cargo.toml:21`；只想取底座用 `default-features = false`）。
+挂 `plugin-install`——该特性是 **opt-in**（`crates/tauron-adapter/Cargo.toml` 的
+`default = []`，V4 minimal-substrate 规则），接入方须显式
+`features = ["plugin-install"]` 才注册）。
 
-> 「27 条」是**需登记档位**的命令；Tauri 实际注册的命令面是另一个口径：**83 条**
-> （`tauron_plugin_handler!` = 底座 61 + 插件运行时 22），默认特性下 85 条。
-> 两侧一致性由 `src/gates.test.ts` 逐名比对，不靠本文维护。
+> 「28 条」是**需登记档位**的命令；Tauri 实际注册的命令面是另一个口径：**83 条**
+> （`tauron_plugin_handler!` = 底座 61 + 插件运行时 22），显式开启 `plugin-install`
+> 后 85 条。两侧一致性由 `src/gates.test.ts` 逐名比对，不靠本文维护。
 
 | 命令 | 档位 | 消费方 |
 |---|---|---|
@@ -98,6 +101,7 @@ backend.adoptCapabilities(caps.commands); // 拒空 / 拒缺 host_capabilities
 | `host_call_plugin` | self | 宿主主窗 / plugin-sdk（插件→插件） |
 | `host_call_result` | self | plugin-sdk（执行方回填） |
 | `host_call_take` | self | 宿主主窗 / plugin-sdk（发起方取件） |
+| `host_capabilities` | self | 任何主体（R1-4 协商入口：宿主自述命令面，只读，故不要求身份） |
 | `host_registry_list` | scoped-read | plugin-sdk / `<oc-plugin-manager>` |
 | `host_contributes_list` | scoped-read | `ShellClient.contributesList` / 应用设置中心 |
 | `host_registry_admin` | privileged | 宿主 UI 主窗（`<oc-plugin-manager>`） |
@@ -118,8 +122,8 @@ backend.adoptCapabilities(caps.commands); // 拒空 / 拒缺 host_capabilities
 以下客户端面向**主窗**，通过 `host_window_*` / `host_dialog_*` / `host_clipboard_*` /
 `host_market_*` / `host_deep_link_*` / `host_capabilities` 等主窗命令族工作（完整命令面见
 `crates/tauron-adapter/src/tauri.rs` 的 `tauron_substrate_handler!` / `tauron_plugin_handler!`
-宏：底座 **61** + 插件运行时 **22** = **83** 条；`plugin-install` 另 **2** 条**已进默认特性**，
-默认装配共 **85** 条）：
+宏：底座 **61** + 插件运行时 **22** = **83** 条；`plugin-install` 另 **2** 条为
+**opt-in**（`default = []`），接入方显式开启后共 **85** 条）：
 
 - `ShellClient` / `ShellController` — 标题栏动作、主题、更新事件路由（已接线）
 - `AutoUpdateClient` — 检查/下载/安装/重启状态机 + 定时自动检查

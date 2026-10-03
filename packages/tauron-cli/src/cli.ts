@@ -18,6 +18,7 @@ import {
   loadHostConformanceAdapter,
   runHostConformance,
 } from './conformance.js';
+import { CLI_VERSION } from './version.js';
 import { createApp, IMPLEMENTED_TEMPLATES } from './scaffold.js';
 import { pluginNew } from './plugin.js';
 import {
@@ -100,7 +101,7 @@ export async function runCli(
     case 'version':
     case '--version':
     case '-v':
-      return { success: true, message: 'tauron v1.1.0' };
+      return { success: true, message: `tauron v${CLI_VERSION}` };
     default:
       return {
         success: false,
@@ -307,7 +308,7 @@ function pluginNewCommand(args: string[], options: CliOptions): CliResult {
  * 获取帮助文本
  */
 function getHelpText(): string {
-  return `tauron v1.1.0 — tauron CLI
+  return `tauron v${CLI_VERSION} — tauron CLI
 
 Usage:
   tauron <command> [options]

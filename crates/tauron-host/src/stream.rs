@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::admission::CreditWindow;
 use crate::error::{ErrorCode, HostError, HostResult};
 
 /// 帧种类（闭集）。未知取值一律拒绝，不做「默认 data」之类的兜底。
@@ -128,6 +129,17 @@ pub const MAX_STREAM_CREDIT_BYTES: usize = 16 * 1024 * 1024;
 /// Accounting overhead so empty data frames still consume finite credit.
 pub const STREAM_FRAME_OVERHEAD_BYTES: usize = 32;
 
+/// 每条流一个 [`CreditWindow`]（A79 的**唯一**额度算术）。
+///
+/// 轮 10 之前这里是一段手写的 saturating-add/min/clamp 组合：补额时
+/// `add().min(MAX)`，写帧时先 `if frame > 余额` 再 `余额 -= frame`。它与
+/// [`crate::admission::CreditWindow`] 语义**完全重复**却各写一遍，而重复的那份
+/// 没有消费点——于是「credit 背压」在文档里是一个原语、在代码里是两套可以各自
+/// 漂移的算术。现在额度只由 `CreditWindow` 裁决，句柄表里不再存裸计数器。
+fn new_credit_window() -> CreditWindow {
+    CreditWindow::new(DEFAULT_STREAM_CREDIT_BYTES as u64, MAX_STREAM_CREDIT_BYTES as u64)
+}
+
 /// 一次调用的帧载体登记项。
 struct CallBinding {
     subscriber: String,
@@ -139,7 +151,7 @@ struct StreamHandle {
     subscriber: String,
     seq: u64,
     closed: bool,
-    credit_bytes: usize,
+    credit: CreditWindow,
     sink: Arc<dyn StreamSink>,
 }
 
@@ -213,7 +225,7 @@ impl StreamRegistry {
                 subscriber: subscriber.to_string(),
                 seq: 0,
                 closed: false,
-                credit_bytes: DEFAULT_STREAM_CREDIT_BYTES,
+                credit: new_credit_window(),
                 sink,
             },
         );
@@ -231,9 +243,8 @@ impl StreamRegistry {
                 format!("流 `{stream_id}` 属于插件 `{}`", handle.subscriber),
             ));
         }
-        handle.credit_bytes =
-            handle.credit_bytes.saturating_add(bytes).min(MAX_STREAM_CREDIT_BYTES);
-        Ok(handle.credit_bytes)
+        handle.credit.grant(bytes as u64);
+        Ok(handle.credit.available() as usize)
     }
 
     /// 只读探一眼某条流的剩余额度。
@@ -241,7 +252,7 @@ impl StreamRegistry {
     /// **嵌入方诊断口**：写方在 [`Self::grant`] 的返回值里就已经拿到新额度，
     /// 命令面没有对应的读取命令（不为此扩线上契约）。
     pub fn credit_remaining(&self, stream_id: &str) -> Option<usize> {
-        self.handles.get(stream_id).map(|h| h.credit_bytes)
+        self.handles.get(stream_id).map(|h| h.credit.available() as usize)
     }
 
     /// 写一帧 `data`（`seq` 由宿主铸）。
@@ -309,17 +320,18 @@ impl StreamRegistry {
                     format!("流 `{stream_id}` 已终结（终帧后句柄失效）"),
                 ));
             }
-            if frame_bytes > handle.credit_bytes {
-                return Err(HostError::new(
-                    ErrorCode::E_STREAM_BACKPRESSURE,
-                    format!(
-                        "流 `{stream_id}` credit 不足：需要 {frame_bytes} bytes，剩余 {} bytes",
-                        handle.credit_bytes
-                    ),
-                ));
-            }
+            // 额度只由 `CreditWindow` 裁决：拒绝零副作用（seq 未占位、额度未扣），
+            // 失败消息里的两个数字就是原语自己的剩余额度与请求量。
+            let remaining = handle.credit.available() as usize;
             if kind == StreamKind::Data {
-                handle.credit_bytes -= frame_bytes;
+                handle.credit.consume(frame_bytes as u64).map_err(|_| {
+                    HostError::new(
+                        ErrorCode::E_STREAM_BACKPRESSURE,
+                        format!(
+                            "流 `{stream_id}` credit 不足：需要 {frame_bytes} bytes，剩余 {remaining} bytes"
+                        ),
+                    )
+                })?;
             }
             // seq 先占位再派发：载体失败不回滚（见模块文档）。
             handle.seq += 1;
@@ -527,6 +539,38 @@ mod tests {
         // 只读探针与 grant 的返回值必须报同一份事实（嵌入方诊断口的前提）。
         assert_eq!(reg.credit_remaining(&id), Some(MAX_STREAM_CREDIT_BYTES));
         assert_eq!(reg.credit_remaining("不存在的流"), None);
+    }
+
+    /// 轮 10 / F4 的生产消费点断言：`admission::CreditWindow` 不只是一个能被单测
+    /// 自证的类型——**这条流上的额度就是它**。边界必须按原语的算术落在恰好的位置上：
+    /// 扣到 0 之后哪怕多 1 byte 也要拒绝，且拒绝不改 seq、不发帧。
+    #[test]
+    fn stream_credit_is_arbitrated_by_the_shared_window_at_its_exact_boundary() {
+        let sink = Arc::new(RecordingSink::default());
+        let (mut reg, id) = registry_with_sink(sink.clone());
+        let initial = reg.credit_remaining(&id).unwrap();
+        assert_eq!(initial, DEFAULT_STREAM_CREDIT_BYTES);
+
+        // 恰好把额度用光：raw + 32 bytes 帧开销 = initial。
+        let exact = vec![7u8; initial - STREAM_FRAME_OVERHEAD_BYTES];
+        let f = reg.write(&id, "p1", None, Some(exact)).expect("恰好用光额度的帧必须放行");
+        assert_eq!(f.seq, 1);
+        assert_eq!(reg.credit_remaining(&id), Some(0), "扣额由 CreditWindow 完成");
+
+        // 多 1 byte 即拒绝，且零副作用（seq 未占位、sink 没多帧）。
+        // 1 byte payload + 32 bytes 帧开销 = 33，剩余额度是 0。
+        let over = vec![7u8; 1];
+        let err = reg.write(&id, "p1", None, Some(over)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_STREAM_BACKPRESSURE);
+        assert!(err.message.contains("需要 33 bytes"), "err={}", err.message);
+        assert!(err.message.contains("剩余 0 bytes"), "err={}", err.message);
+        assert_eq!(sink.frames().len(), 1, "被拒的帧不得派发");
+        assert_eq!(reg.credit_remaining(&id), Some(0));
+
+        // 接收方补额后立刻恢复；额度封顶仍由原语管。
+        assert_eq!(reg.grant(&id, "p1", 100).unwrap(), 100);
+        assert_eq!(reg.write(&id, "p1", None, None).unwrap().seq, 2);
+        assert_eq!(reg.credit_remaining(&id), Some(100 - STREAM_FRAME_OVERHEAD_BYTES));
     }
 
     #[test]

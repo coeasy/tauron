@@ -49,6 +49,23 @@ jobs:
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
+      # 发布链的生产者自检：六处版本号必须全等于根 package.json（release.yml 的
+      # version-check 读同一组落点）。放在最前面是为了让「版本漂移」这种失败
+      # 在十分钟的构建之前就说清楚。
+      - name: 版本号一致性（version-sync --check）
+        run: pnpm version:check
+
+      # 文档里的 `file.rs:1234` / `symbol:1234` 是**可执行断言**：代码一改数字就会漂，
+      # 漂掉的引用比不写引用更糟。这条把三份核心 V4 文档的引用逐个回查仓库当前内容。
+      - name: 文档行号引用核对（docs:check）
+        run: pnpm docs:check
+
+      # 命令面全量参考是**生成物**：85 条命令的形参/返回/档位/前端落点由代码单向产出。
+      # 这条判定的是「代码有的命令，文档必须一条不漏」——轮 12 之前没人钉，于是
+      # 插件指南称 `app-layer-wire.md` 为「完整线格式」而它只覆盖 49/85 条，无人报警。
+      - name: 命令面接口参考同步（command-surface:check）
+        run: pnpm command-surface:check
+
       - name: 构建（第 1 步，不可省）
         run: pnpm -r build
 
@@ -268,6 +285,12 @@ jobs:
       # V4 A84/A94/A100: security-sensitive install behavior must be executed, not merely compiled.
       - name: 测试 tauron-adapter（plugin-install feature）
         run: cargo test -p tauron-adapter --features plugin-install --locked
+
+      # A84 的 asset 协议读侧（tauron-plugin:// URI scheme）只在 **两个** feature 同时开启
+      # 时才存在：`tauri` 让 tauri.rs 编译，`plugin-install` 让那 4 条摘要复核测试编译。
+      # 上面两步各自只开一个，这条链就会退化成"编译过、没跑过"——所以必须单独跑一次。
+      - name: 测试 tauron-adapter（tauri + plugin-install feature）
+        run: cargo test -p tauron-adapter --features tauri,plugin-install --locked
 
       # 全 feature 组合的编译检查。放在这个 job 里是因为 `--all-features`
       # 会打开 tauri，需要上面那批系统库。
