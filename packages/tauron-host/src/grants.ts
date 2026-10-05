@@ -5,8 +5,10 @@
 // - 授予集落盘带版本并**签名防篡改**（HMAC-SHA256，`signature` 为 hex）；
 // - 权限或 scope 变多必须重新审批（{@link GrantDiff.requiresReapproval}）；
 // - 撤销语义如实（ADR-05）：收缩不需要重新审批；
-// - 高危档逐条展开成人话并默认不勾（{@link ApprovalRow.defaultChecked}）；
-// - 审批 UI 文案与代码共享同一常量来源（`humanText` 取自权限词表）。
+// - 高危档逐条展开成人话并默认不勾（`defaultChecked` 由宿主判定，见 ApprovalRow 注释）；
+// - 审批 UI 的**文案与判定都不在本文件重述**：行由 Rust `tauron_acl::build_approval_rows`
+//   单源生成，本文件只是它的线上协议镜像（轮 56 收口：此前这里有一份字段名与线上不一致、
+//   且无人构造的平行类型，已改为逐字段镜像）。
 // ──────────────────────────────────────────────────────────────────────────
 
 import type { JsonValue } from './events.js';
@@ -72,15 +74,23 @@ export interface GrantDiff {
   requiresReapproval: boolean;
 }
 
-/** 审批 UI 的一行。 */
+/**
+ * 审批 UI 的一行——**宿主 `tauron_acl::build_approval_rows` 输出的线上协议镜像**（轮 56）。
+ *
+ * 字段名与 Rust 的 camelCase 序列化逐字一致，消费方是壳层安装流
+ * （`shell-controller.ts` 的 `_installPlugin`）：它按 `defaultChecked` 决定问法是
+ * 「是否授予」还是「逐字输入 `confirmationHint`」，本文件不参与判定、也不得重述规则。
+ */
 export interface ApprovalRow {
   permission: string;
   risk: Risk;
-  /** 人话描述，**来自权限词表**（与代码同一来源）。 */
-  humanText: string;
-  scope?: string;
-  /** `risk === 'high'` 一律默认不勾。 */
+  /** 人话描述：宿主权限词表的 `description`，不是本地另拟的文案。 */
+  description: string;
+  /** 默认勾态由宿主按 §4.5 判定（高危档为 `false`）；壳层照办，不自行按 risk 重算。 */
   defaultChecked: boolean;
+  scope?: string;
+  /** 高危行的确认词，**唯一来源是宿主**；缺失即视为宿主不合规，不代为拟定。 */
+  confirmationHint?: string;
 }
 
 /** 物化出的 Tauri capability 形状（`add_capability` 的入参）。 */

@@ -52,6 +52,7 @@ import {
 } from './auto-update-client.js';
 import { AdminClient } from './host.js';
 import type { PendingCallInfo } from './events.js';
+import type { ApprovalRow } from './grants.js';
 
 export interface ShellControllerOptions {
   backend: Backend;
@@ -499,10 +500,20 @@ export class ShellController {
       const preview = await this.admin.registryInstallPreview(packagePath);
       const approved: string[] = [];
       for (const permission of preview.permissions) {
-        const allow = window.confirm(
-          `${preview.pluginName} (${preview.version})\n\n${permission.permission}\n${permission.risk}: ${permission.description}\n\n是否授予此权限？`,
-        );
-        if (!allow) return;
+        // §4.5 的判定已经在宿主做完（Rust `tauron_acl::build_approval_rows` 单源，轮 55）：
+        // `defaultChecked` 就是「这一行该不该默认授予」。壳层此前对每一行都问同一句
+        // 「是否授予」，等于把宿主的高危判定原样丢掉——现在按判定决定问法，
+        // 并把宿主给的事实（scope、确认词）显示出来，不在本地重算 risk。
+        const detail =
+          `${preview.pluginName} (${preview.version})\n\n` +
+          `${permission.permission}\n${permission.risk}: ${permission.description}` +
+          (permission.scope ? `\nscope: ${permission.scope}` : '');
+        if (permission.defaultChecked) {
+          if (!window.confirm(`${detail}\n\n是否授予此权限？`)) return;
+          approved.push(permission.permission);
+          continue;
+        }
+        if (!this._confirmHighRiskRow(detail, permission)) return;
         approved.push(permission.permission);
       }
       const installed = await this.admin.registryInstall(
@@ -522,6 +533,40 @@ export class ShellController {
     } catch (error) {
       this._onError(error, 'plugin.install');
     }
+  }
+
+  /**
+   * 轮 56：宿主判定为「默认不勾」的行必须逐字输入确认词才授予。
+   *
+   * 三条出口，都不授予时**整次安装中止**（不是跳过这一行继续装——批准集缺一项
+   * 交给宿主会得到「未覆盖 manifest」的拒绝，那才是假成功的路径）：
+   * - `confirmationHint` 缺失：旧宿主或被改坏的宿主。文案唯一来源是宿主，
+   *   壳层不代为拟定，经 `onError` 具名上报。
+   * - 用户取消（`prompt` 返回 `null`）：与点「否」同义，静默中止。
+   * - 输入与确认词不一致：只提示，不上报——用户改主意不是宿主故障。
+   */
+  private _confirmHighRiskRow(detail: string, permission: ApprovalRow): boolean {
+    const hint = permission.confirmationHint;
+    if (!hint) {
+      this._onError(
+        new Error(
+          `宿主未对高危权限 ${permission.permission} 给出确认词（confirmationHint 缺失），` +
+            '壳层不代为拟定文案；请升级宿主后重新预览',
+        ),
+        'plugin.install',
+      );
+      return false;
+    }
+    const answer = window.prompt(
+      `${detail}\n\n此权限为高危档，默认不授予。逐字输入下方确认词以继续：\n${hint}`,
+      '',
+    );
+    if (answer === null) return false;
+    if (answer !== hint) {
+      window.alert('确认词与宿主给出的文案不一致，未授予该权限，安装已中止。');
+      return false;
+    }
+    return true;
   }
 
   /**

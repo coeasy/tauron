@@ -4946,16 +4946,83 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     const acl = read('crates/tauron-acl/src/approval.rs');
     expect(acl, 'acl 的 build_approval_rows 注释仍宣称无人调用').toContain('已接线（轮 55）');
 
-    const hostTs = read('packages/tauron-host/src/host.ts');
-    expect(
-      [...hostTs.matchAll(/confirmationHint\?: string;/g)].length,
-      'host.ts 的预览行类型没把确认词带出来（应 2 处：返回声明 + invoke 泛型）',
-    ).toBe(2);
+    // （轮 56 更正：TS 侧行形状收敛成 `grants.ts` 的 `ApprovalRow` 单处声明，host.ts 只引用。
+    // 因此「host.ts 把三个字段带出来」这根针检查的对象已经不在了，改由轮 56 段
+    // 直接钉「引用单源类型 + 不再内联字段列表」。台账/勾选规则/确认词三根针仍属本轮。）
 
     const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
     expect(plan, '缺口方案缺轮 55 小节').toMatch(/^### 轮 55：/m);
     const changelog = read('CHANGELOG.md');
     expect(changelog, 'CHANGELOG 缺轮 55 条目').toMatch(/轮 55/);
+  });
+
+  it('轮 56：壳层安装流真的消费宿主的审批判定（defaultChecked/scope/confirmationHint）', () => {
+    // 轮 55 把判定收到宿主单源，但线上事实到壳层就被丢掉：`_installPlugin` 对每一行都问
+    // 同一句「是否授予」，`defaultChecked`/`scope`/`confirmationHint` 三个字段零读者——
+    // 「后端判了、前端没接」正是本仓库要的断链。门禁钉：①循环按 `defaultChecked` 分叉；
+    // ②高危行走宿主确认词，且**比对是逐字相等**（不是包含、不是本地另拟文案）；
+    // ③`scope` 进显示文本；④TS 行类型只在 `grants.ts` 声明一次，host.ts 只引用；
+    // ⑤确认词字面量在 TS 侧零出现（唯一来源是 Rust `tauron-acl`）。
+    const shell = read('packages/tauron-host/src/shell-controller.ts');
+    for (const needle of [
+      'if (permission.defaultChecked) {',
+      'if (!this._confirmHighRiskRow(detail, permission)) return;',
+      'const hint = permission.confirmationHint;',
+      'if (answer !== hint) {',
+      "(permission.scope ? `\\nscope: ${permission.scope}` : '')",
+    ]) {
+      expect(shell, `shell-controller.ts 缺 ${needle}（宿主判定又被丢回了）`).toContain(needle);
+    }
+    // 反向钉：确认词文案的唯一来源是宿主，壳层不得内联一份。
+    expect(
+      shell,
+      '壳层内联了确认词文案（§4.5 规定其唯一来源是 acl 的常量，前端只能引用宿主给的字段）',
+    ).not.toContain('我理解该权限的能力边界并显式批准');
+    // 反向钉：壳层不自行按 risk 重算默认勾态。
+    expect(shell, '壳层又出现本地 risk→勾选判定（该结论由宿主的 defaultChecked 给出）').not.toMatch(
+      /risk\s*===\s*'high'/,
+    );
+
+    const grants = read('packages/tauron-host/src/grants.ts');
+    for (const needle of [
+      'confirmationHint?: string;',
+      'defaultChecked: boolean;',
+      'scope?: string;',
+    ]) {
+      expect(grants, `grants.ts 的 ApprovalRow 少了 ${needle}`).toContain(needle);
+    }
+    // 反向钉：`humanText` 是轮 56 删掉的那个平行字段名（线上真名是 `description`）。
+    expect(grants, 'grants.ts 还留着与线上不同名的 humanText 字段').not.toContain('humanText');
+
+    // 单源声明计数：行形状在 TS 侧只许有一处字段列表（grants.ts），host.ts 只引用类型。
+    const hostTs = read('packages/tauron-host/src/host.ts');
+    expect(
+      [...hostTs.matchAll(/permissions: ApprovalRow\[\];/g)].length,
+      'host.ts 的预览行形状没收敛到单源类型（应 2 处引用：返回声明 + invoke 泛型）',
+    ).toBe(2);
+    expect(
+      hostTs,
+      'host.ts 又内联了一遍确认词字段（字段列表只能在 grants.ts 存在一份）',
+    ).not.toContain('confirmationHint?: string;');
+    expect(
+      [...grants.matchAll(/confirmationHint\?: string;/g)].length,
+      'grants.ts 的确认词字段声明数量变了（应 1 处：ApprovalRow）',
+    ).toBe(1);
+
+    const acl = read('crates/tauron-acl/src/approval.rs');
+    expect(acl, 'acl 的确认词常量不见了（壳层就没有可比对的真源）').toContain(
+      '我理解该权限的能力边界并显式批准',
+    );
+
+    const shellTest = read('packages/tauron-host/src/shell-controller.test.ts');
+    expect(shellTest, '缺轮 56 的行为测试（不一致即中止）').toContain(
+      '轮 56：宿主判为高危的行必须逐字输入确认词',
+    );
+
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案缺轮 56 小节').toMatch(/^### 轮 56：/m);
+    const changelog = read('CHANGELOG.md');
+    expect(changelog, 'CHANGELOG 缺轮 56 条目').toMatch(/轮 56/);
   });
 
   it('V7 §7：风险表的复核结论必须与代码同形（宣称链不得悄悄升级）', () => {

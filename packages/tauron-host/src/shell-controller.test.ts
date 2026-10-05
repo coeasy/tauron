@@ -9,6 +9,7 @@ import { AdminClient } from './host.js';
 import { ShellClient } from './shell-client.js';
 import type { ContributeEntry, NotificationsListResult } from './shell-client.js';
 import type { AdminReviewToken, PendingCallInfo, RegistryAdminOutcome } from './events.js';
+import type { ApprovalRow } from './grants.js';
 
 /**
  * 控制器用到的命令面（与 `ShellClient` 的调用点一一对应）。
@@ -660,6 +661,122 @@ describe('ShellController', () => {
     expect(
       backend.invocations.some((invocation) => invocation.cmd === 'host_registry_install'),
     ).toBe(false);
+  });
+
+  // 轮 55 把审批行的判定收到宿主单源（`tauron_acl::build_approval_rows`），并把
+  // `defaultChecked` / `scope` / `confirmationHint` 送上线；本轮要求壳层**真的读它们**——
+  // 否则宿主的高危判定在最后一米被丢掉，前端链路仍是断的。
+  const MIXED_ROWS: ApprovalRow[] = [
+    { permission: 'host:notify', risk: 'low', description: '发送通知', defaultChecked: true },
+    {
+      permission: 'fs:allow-remove',
+      risk: 'high',
+      description: '删除应用数据目录内的文件',
+      defaultChecked: false,
+      scope: '$APPDATA/sub/**',
+      confirmationHint: '我理解该权限的能力边界并显式批准',
+    },
+  ];
+
+  it('轮 56：宿主判为高危的行必须逐字输入确认词，输入不符即中止且不提交缺项批准集', async () => {
+    vi.spyOn(AdminClient.prototype, 'registryInstallPreview').mockResolvedValue({
+      pluginId: 'com.install',
+      pluginName: 'Install Me',
+      version: '1.0.0',
+      permissions: MIXED_ROWS,
+      reviewToken: REVIEW_TOKEN,
+    });
+    const install = vi.spyOn(AdminClient.prototype, 'registryInstall');
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const prompt = vi.spyOn(window, 'prompt').mockReturnValue('我理解该权限的能力边界');
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    controller.start([container]);
+    container.dispatchEvent(
+      new CustomEvent('oc-plugin-install', { detail: { packagePath: '/tmp/install.tpkg' } }),
+    );
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(confirm, '默认勾的行仍是一问一答').toHaveBeenCalledOnce();
+    expect(prompt, '默认不勾的行必须问宿主给的确认词').toHaveBeenCalledOnce();
+    const asked = String(prompt.mock.calls[0]?.[0]);
+    expect(asked, '宿主给的 scope 必须显示出来').toContain('$APPDATA/sub/**');
+    expect(asked, '确认词逐字来自宿主').toContain('我理解该权限的能力边界并显式批准');
+    expect(install, '不得把缺一项的批准集交给宿主冒充成功').not.toHaveBeenCalled();
+    expect(alert, '不一致要看得见，不能静默返回').toHaveBeenCalledOnce();
+  });
+
+  it('轮 56：逐字输入确认后批准集完整交给宿主（两条都不丢）', async () => {
+    vi.spyOn(AdminClient.prototype, 'registryInstallPreview').mockResolvedValue({
+      pluginId: 'com.install',
+      pluginName: 'Install Me',
+      version: '1.0.0',
+      permissions: MIXED_ROWS,
+      reviewToken: REVIEW_TOKEN,
+    });
+    const install = vi.spyOn(AdminClient.prototype, 'registryInstall').mockResolvedValue({
+      pluginId: 'com.install',
+      version: '1.0.0',
+      installPath: '/plugins/com.install',
+      approvedPermissions: ['host:notify', 'fs:allow-remove'],
+    });
+    vi.spyOn(AdminClient.prototype, 'registryAdmin').mockResolvedValue(executedOutcome());
+    vi.spyOn(ShellClient.prototype, 'windowCreate').mockResolvedValue({
+      created: true,
+      label: 'plugin-com.install',
+      pluginId: 'com.install',
+      reason: null,
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const prompt = vi.spyOn(window, 'prompt').mockReturnValue('我理解该权限的能力边界并显式批准');
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    controller.start([container]);
+    container.dispatchEvent(
+      new CustomEvent('oc-plugin-install', { detail: { packagePath: '/tmp/install.tpkg' } }),
+    );
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(prompt).toHaveBeenCalledOnce();
+    expect(install).toHaveBeenCalledWith(
+      '/tmp/install.tpkg',
+      ['host:notify', 'fs:allow-remove'],
+      REVIEW_TOKEN,
+    );
+  });
+
+  it('轮 56：宿主没给确认词时具名拒绝，壳层不代为拟定文案', async () => {
+    vi.spyOn(AdminClient.prototype, 'registryInstallPreview').mockResolvedValue({
+      pluginId: 'com.install',
+      pluginName: 'Install Me',
+      version: '1.0.0',
+      permissions: [
+        {
+          permission: 'fs:allow-remove',
+          risk: 'high',
+          description: '删除应用数据目录内的文件',
+          defaultChecked: false,
+        },
+      ],
+      reviewToken: REVIEW_TOKEN,
+    });
+    const install = vi.spyOn(AdminClient.prototype, 'registryInstall');
+    const prompt = vi.spyOn(window, 'prompt').mockReturnValue('我随便写的');
+    const seen: Array<{ err: unknown; context: string }> = [];
+    const c = new ShellController({
+      backend,
+      onError: (err, context) => seen.push({ err, context }),
+    });
+    c.start([container]);
+    container.dispatchEvent(
+      new CustomEvent('oc-plugin-install', { detail: { packagePath: '/tmp/install.tpkg' } }),
+    );
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(prompt, '没有宿主文案就不该问一个本地编出来的确认词').not.toHaveBeenCalled();
+    expect(install).not.toHaveBeenCalled();
+    const hit = seen.find((s) => s.context === 'plugin.install');
+    expect(hit, '契约缺口必须经 onError 具名上报').toBeDefined();
+    expect(String((hit!.err as Error).message)).toContain('confirmationHint');
+    c.stop();
   });
 
   it('宿主未启用 plugin-install 特性时明确拒绝安装（不发注定 command not found 的 invoke）', async () => {

@@ -3196,9 +3196,92 @@ W5 acl 注释改回未接线、W6 TS 线形只补一处（`invoke` 泛型漏）�
 **诚实边界**：①`packages/tauron-host/src/grants.ts` 的 `ApprovalRow`（字段名 `humanText`）是 SDK 侧的
 **并行类型**，与线形字段 `description` 不同名——本轮只补全了 `host.ts` 里预览返回的行类型，
 没有改那个公开类型名/字段（破坏性），它属于台账「已接线/未接线之外的并行实现」那一族；
+（**轮 56 已落地**：该类型经查证既无构造者也无读者，于是直接改成宿主输出的逐字段镜像
+（`description` + `confirmationHint?`），`host.ts` 的两处内联字段列表收敛为引用它——
+并行实现因此消失，而不是被改名。）
 ②壳层安装对话框是否已经把 `confirmationHint` 渲染出来不在本轮验证范围（宿主响应已带出，
-UI 消费是下一环）；③高危确认词的**校验**（用户必须逐字输入才放行）在宿主侧仍不存在——
+UI 消费是下一环）；（**轮 56 已落地**：`_installPlugin` 现在按 `defaultChecked` 分叉，
+高危行逐字比对宿主给的确认词，`scope` 进显示文本。）
+③高危确认词的**校验**（用户必须逐字输入才放行）在宿主侧仍不存在——
 `approvedPermissions` 只收权限名，这是 A83 审批链的既有边界，不是本轮新开的洞，也**不**因本轮接线而可宣称闭合。
+
+### 轮 56：宿主管住了高危档，壳层却一个字都没读——审批行在最后一米被降级成「是/否」
+
+**断链**：轮 55 把审批行的生成收口到 `tauron_acl::build_approval_rows` 单源，并把
+`defaultChecked` / `scope` / `confirmationHint` 三个事实送上线。但线上事实到壳层就断了：
+`packages/tauron-host/src/shell-controller.ts` 的 `_installPlugin` 循环（原 501-507 行）对
+**每一行**都问同一句 `是否授予此权限？`，只读 `permission` / `risk` / `description` 三个字段，
+`defaultChecked`、`scope`、`confirmationHint` 在整个 `packages/` 里**零读者**（`grep -rn` 只命中
+类型声明与本轮门禁的文本针）。后果不是「少显示一点信息」而是判定被换掉：宿主说「这一行默认
+不勾、且要逐字确认」，壳层把它降级成与低风险行完全同级的一次是/否点击——§4.5 的高危门槛在
+真实安装流里等于不存在。同一段代码里还躺着第二份行形状：`packages/tauron-host/src/grants.ts`
+的 `ApprovalRow`（字段名 `humanText`，与线上 `description` 不同名、无确认词、无构造者），
+文件头注释却宣称「高危档逐条展开成人话并默认不勾（`ApprovalRow.defaultChecked`）」
+「审批 UI 文案与代码共享同一常量来源」——两条都是假的：那个字段从没被赋值过，
+唯一的安装 UI 也不读它。
+
+**修法**（4 步，全在 TS 侧，不动命令面 85 条）：
+
+1. `grants.ts` 的 `ApprovalRow` 改为宿主输出的**逐字段线上镜像**：`humanText` → `description`，
+   补 `confirmationHint?`，字段顺序与 camelCase 序列化一致；文件头两条假宣称改写为事实
+   （文案与判定都不在本文件重述，本文件只是镜像）。
+2. `host.ts` 的 `registryInstallPreview` 两处行形状（返回声明 + `invoke` 泛型）删掉内联字段
+   列表，改引用 `ApprovalRow[]`——行形状在 TS 侧从此只有一处声明。
+3. `shell-controller.ts` 的循环按宿主的 `defaultChecked` **分叉问法**：默认真勾的行仍是一问一答；
+   默认不勾的行走新私有法 `_confirmHighRiskRow`，把 `scope` 显示出来、要求用户
+   **逐字输入**宿主给的 `confirmationHint`（`answer !== hint` 即中止）。三条出口都不授予：
+   缺确认词（经 `onError` 具名上报，壳层不代为拟定文案）、用户取消（静默，同点「否」）、
+   输入不一致（`alert` 明示，不当成宿主故障）。任一失败都是**整次安装中止**，
+   不把缺项的批准集交给宿主——那会换来一句「未覆盖 manifest」的拒绝，是假成功的路径。
+4. 门禁 `轮 56` 段：五根正向针（分叉、委托、读 `confirmationHint`、逐字比较、`scope` 进文本）+
+   三根反向针（壳层不得内联确认词文案、不得本地重算 `risk === 'high'`、`grants.ts` 不得留
+   `humanText`）+ 单源计数针（`host.ts` 引用 `ApprovalRow[]` 恰 2 处且不再内联字段列表、
+   `grants.ts` 的确认词字段恰 1 处）+ 真源针（acl 的确认词常量仍在）；轮 55 段那根
+   「数字段出现次数」的 TS 针检查的对象已被本轮收敛掉，就地注明「改由轮 56 段钉」并删除。
+
+**新增行为测试**（`shell-controller.test.ts`，3 条，真跑 DOM 事件链 + 桩 `window`）：混合两行
+（低风险 `defaultChecked:true` / 高危 `defaultChecked:false` + `scope` + 确认词）——
+①输入不一致时 `confirm` 一次、`prompt` 一次、`install` 零调用、`alert` 一次，且 `prompt` 文本
+含 `$APPDATA/sub/**` 与确认词原文；②逐字输入正确后批准集**完整**交给宿主
+（`['host:notify','fs:allow-remove']`）；③宿主没给确认词时 `prompt` 压根不问、
+`install` 不调用、`onError` 的 `plugin.install` 上下文里带 `confirmationHint` 字样。
+
+**读数**（2026-10-05 同一轮内取，日志在 `C:/tmp/r56-*.log`）：`tauron-host` 包 22 文件 **447 passed**
+（本轮新增 3 条行为测试都在其中）；契约测试 2 文件 **216 passed**（轮 55 是 215，+1 是本轮门禁段）；
+`pnpm verify` 全链退出码 0（跨包用例累计 1943）；`gates:check` / `format:check` / `docs:check`
+（7 文档 275 条行号引用）/ `command-surface:check`（85 条命令面，本轮零改动）全部退出码 0；
+孤儿公共 API 台账 **11 条**未接线宣称 + 5 条已接线反例，自动发现 626 ≤ 基线 635。
+本轮**没有任何 Rust 文件改动**（`git status` 只有 7 个 TS/MD 路径），因此轮 55 的 cargo 腿读数
+（acl 43 / adaptpi 338 / adaptta 373 / workspace 1598）仍是当前树的事实。
+
+**变异证明**：`C:/tmp/r56-mut2.mjs` **12/12 逐段变红**、每次恢复后与备份逐字节一致
+（`restore:OK` ×12），终检无残留（`if (true)`/`if (false)`/`localHigh`/内联字段列表/`humanText`/
+「轮 五十六」/`#### 轮 56` 全部 0 命中，脚本锁已删）。四条语义变异跑 `shell-controller.test.ts`
+真事件链（C1 分叉拉平、C2 确认词比较放过、C3 丢掉 scope、C4 拆掉缺文案的 fail-closed），
+八条布线变异跑本轮门禁段（C5 提示文案内联确认词、C6 本地 `risk === 'high'` 重算、
+C7/C8 正向针、C9 `humanText` 复活、C10 `host.ts` 退回内联字段列表、C11/C12 文档编号与标题锚定）。
+首版 `r56-mut.mjs` 10/12：C5 的变异顺带破坏了正向针，门禁在到达反向钉之前就红了（期望串写错对象）；
+C10 更值得记住——那根针当时还挂在**轮 55 的用例**里，而本轮脚本用 `-t "轮 56：…"` 只跑轮 56 用例，
+于是「针存在但没人执行」= 假绿。修法是把检查搬进它所保护的那一轮，并在轮 55 段就地注明移交给轮 56。
+
+**诚实边界**：①这仍是**壳层默认安装入口**的判定接线——`window.prompt` 是 Web 标准对话框，
+宿主换实现（或无头形态）时没有这个出口，届时必须走 `host_registry_install_reviewed` 的
+令牌链而不是本地弹框；②宿主侧**依然不校验**用户输入了什么——逐字比对发生在壳层，
+绕过壳层直接 invoke `host_registry_install` 的攻击面不由本轮关闭（A83 的令牌链才是那一层的
+防线，但它当前只在管理域 uninstall/purge 与安装评审里存在）；③`packages/types/src/acl.ts`
+里那份手维护的 `PermissionMeta` 词表镜像仍然没有读者，本轮没有顺手删它——删公共类型要先确认
+对外 npm 包的导出面影响，留给下一轮单独判定。
+
+**文档面同步**：`packages/tauron-host/README.md` 的 ShellController 一节补上安装审批问法的事实
+（分叉规则、三条中止出口、`onError` 上下文、行形状单源声明，以及「逐字比对在壳层、直接
+`invoke` 的路径归 A83 令牌链」这条边界）——此前该节写了标题栏/更新/通知三条已接线腿，
+安装腿的 UX 契约一句没写，接入方只能读源码。轮 55 小节的两条诚实边界（① `grants.ts` 并行类型、
+②壳层是否消费 `confirmationHint`）按惯例就地标注「轮 56 已落地」，不改写历史句。
+
+**遗留（本轮之后仍未闭合，如实登记）**：①壳层安装走的是 Web 标准弹框（`confirm` / `prompt`），
+无头形态或换宿主实现时没有这个出口，届时应改走 `host_registry_install_reviewed` 的评审令牌链；
+②`<oc-plugin-manager>` 一类真 UI 组件是否渲染同一套判定不在本轮范围（本轮只覆盖
+`ShellController` 这条有真实消费者的路径）；③宿主侧不校验用户输入（A83，见上面第②条边界）。
 
 ## 9. 明确推迟 / 不做（附理由）
 

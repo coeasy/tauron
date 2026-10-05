@@ -150,6 +150,15 @@ backend.adoptCapabilities(caps.commands); // 拒空 / 拒缺 host_capabilities
   各拼一句就是第三面镜像）；`state` 与 `stateSimulated` 成对读——账本现有写入方都是
   `simulated` 桩，只看 `state` 就会把"点了一下模拟安装"说成"已安装"。命令缺席 / 报错 /
   答空三种情况都**不改**检查结论，有更新时**不**多打这条诊断命令。
+  插件安装的审批问法自**轮 56** 起照办宿主的判定：`host_registry_install_preview` 每行带回
+  `defaultChecked` / `scope` / `confirmationHint`（由 Rust `tauron_acl::build_approval_rows` 单源
+  生成，轮 55），`_installPlugin` 按 `defaultChecked` **分叉**——默认真勾的行是一问一答，
+  默认不勾的高危行显示 `scope` 并要求**逐字输入**宿主给的确认词。输入不一致 / 用户取消 /
+  宿主没给确认词，三种情况都**整次安装中止**（绝不把缺项的批准集交给宿主换一句"已安装"）；
+  缺确认词那条走 `onError`（context `'plugin.install'`），因为那是宿主契约缺口而不是用户选择。
+  行形状在 TS 侧只有 `grants.ts` 的 `ApprovalRow` 一处声明，`host.ts` 引用它——曾经那份字段名
+  与线上不同（`humanText` vs `description`）的平行类型已改成逐字段镜像。逐字比对发生在**壳层**：
+  绕过壳层直接 `invoke` 安装命令的路径归 A83 的评审令牌链管，不在这一环。
   通知中心自**轮 36** 起接上。宿主 `TauriDispatchSink::send` 每次都向
   `tauron://notification` `emit` 一条**信号**（`{ id, pluginId, kind, ts }`，**不带正文**——
   `emit` 是广播给所有 webview 的，正文进广播就是跨插件内容泄露，轮 11 因此把它降成信号），

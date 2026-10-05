@@ -29,6 +29,7 @@ import type {
   StreamWriteInput,
 } from './stream.js';
 import type { PluginReportableEvent } from './lifecycle.js';
+import type { ApprovalRow } from './grants.js';
 
 /** 插件 → 自己 C/D 后端的调用请求。 */
 export interface PluginCallRequest {
@@ -678,14 +679,8 @@ export class AdminClient {
     pluginId: string;
     pluginName: string;
     version: string;
-    permissions: Array<{
-      permission: string;
-      risk: string;
-      description: string;
-      defaultChecked: boolean;
-      scope?: string;
-      confirmationHint?: string;
-    }>;
+    /** 审批行由宿主单源生成，形状即 `ApprovalRow`（轮 56 起不再在本文件重列字段）。 */
+    permissions: ApprovalRow[];
     reviewToken: InstallReviewToken;
   }> {
     return this.backend
@@ -693,14 +688,7 @@ export class AdminClient {
         pluginId: string;
         pluginName: string;
         version: string;
-        permissions: Array<{
-          permission: string;
-          risk: string;
-          description: string;
-          defaultChecked: boolean;
-          scope?: string;
-          confirmationHint?: string;
-        }>;
+        permissions: ApprovalRow[];
         reviewToken: InstallReviewToken;
       }>('host_registry_install_preview', { packagePath })
       .catch((err: unknown) => {
