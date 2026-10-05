@@ -86,16 +86,10 @@ export {
 } from './config.js';
 
 // ---- ACL（§3）----
-export {
-  type PluginPermissionGrant,
-  PERMISSION_GRANULARITY,
-  type PermissionRisk,
-  type PermissionMeta,
-  hasPermission,
-  hasAllPermissions,
-  missingPermissions,
-  isValidPermission,
-} from './acl.js';
+// 轮 58：这里只留**有读者**的导出。风险档位的单一声明在
+// `@tauron/host` 的 `RISKS`/`Risk`（与 Rust `Risk` 的序列化名由门禁对齐），
+// 本包不再另立一份同义类型。
+export { type PluginPermissionGrant, PERMISSION_GRANULARITY, missingPermissions } from './acl.js';
 
 // ---- Manifest（§4.1）----
 export {

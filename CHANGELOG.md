@@ -30,6 +30,20 @@
   `chunks_exact_to_as_chunks`），已改为语义等价的 `as_chunks_mut::<8>().0`——「HEAD 上发布门禁是红的」
   本身就是断链，不因为不是本轮引入就留着。
 
+- **内层权限词表不再挂着零读者的 TS 镜像（轮 58）**：`packages/types/src/acl.ts` 的
+  `PermissionMeta` / `PermissionRisk` / `hasPermission` / `hasAllPermissions` / `isValidPermission`
+  在接线面零读者，而它的注释与 `docs/architecture/app-layer-wire.md` §6 却宣称「审批 UI 文案与
+  `isValidPermission` 都用它」——文案自轮 55 起由 Rust `tauron_acl::build_approval_rows` 单源生成
+  并经线上传前端，这张表从没被 UI 读过（「一边没人用一边说它能用」正是孤儿台账判据里不合法的那类）。
+  本轮选择**删**而不是为接线而接线：内层词表在 Rust 侧没有对应表，单独在 TS 侧加校验会造成
+  「同一标识，嵌入式世界拒、宿主收」的双标。保留 `PluginPermissionGrant`、`missingPermissions`
+  （`@tauron/core` 真消费）与 `PERMISSION_GRANULARITY`（对外声明的词表本身合法），并把注释与 §6
+  改口成「仓库内没有它的执行者」。风险档位在 TS 侧只剩 `@tauron/host` 的 `RISKS`/`Risk` 一处声明
+  （与 Rust `Risk` 的序列化名早有跨语言测试对齐）。删除由 `packages/types` 的导出面运行时断言 +
+  `pnpm -r typecheck` 共同证明，门禁新增轮 58 用例钉住「零读者工具不得回来」。边界：词表**执行者
+  缺位**是设计问题，另开一轮判定；`@tauron/types` 尚未发布，故本次删除不构成对外破坏，发布后同类
+  动作要走版本判定。
+
 - **壳层安装流开始真的消费宿主的审批判定（轮 56）**：轮 55 之后 `defaultChecked` / `scope` /
   `confirmationHint` 三个字段在 `packages/` 里**零读者**——壳层安装对每一行都问同一句
   「是否授予」，把宿主的高危判定降级成一次普通是/否点击。现在 `_installPlugin` 按宿主的

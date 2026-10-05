@@ -693,9 +693,12 @@ capability/ACL 强制（生产客户端应采用——把 8 条特权命令只�
 ## 6. 权限词表分层（勿混淆）
 
 - **内层（框架 ACL，动态授予）**：§3.3 风格（`store:read`、`http:fetch`…），
-  TS `@tauron/types` `PERMISSION_GRANULARITY` 为描述词表；框架层
-  `check_plugin_permission`（Rust）/ `getMissingPermissions`（TS）是
-  **嵌入式扩展点**，默认分发主链不调用。
+  TS `@tauron/types` `PERMISSION_GRANULARITY` 是这一层的**声明词表**。轮 58 把话说实：
+  仓库内**没有它的执行者**——Rust `check_plugin_permission` 按字符串精确比对、不查表，
+  审批人话文案自轮 55 起来自 Rust `tauron_acl::build_approval_rows` 的线上行，也不读这张表；
+  曾与它并列的 `isValidPermission` / `hasPermission` / `hasAllPermissions` 零读者，已删。
+  框架层 `check_plugin_permission`（Rust）/ `getMissingPermissions`（TS，经 `missingPermissions`）
+  是**嵌入式扩展点**，默认分发主链不调用。
 - **外层（应用层 manifest，静态声明）**：只能取自随框架发版的
   `schema/permissions.index.json`（Tauri 标识符，如 `store:allow-get`），
   表外即安装失败（`manifest.validate` 强制）。该 index 目前是**手工维护**的

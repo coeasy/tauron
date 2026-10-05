@@ -3272,7 +3272,11 @@ C10 更值得记住——那根针当时还挂在**轮 55 的用例**里，而�
 绕过壳层直接 invoke `host_registry_install` 的攻击面不由本轮关闭（A83 的令牌链才是那一层的
 防线，但它当前只在管理域 uninstall/purge 与安装评审里存在）；③`packages/types/src/acl.ts`
 里那份手维护的 `PermissionMeta` 词表镜像仍然没有读者，本轮没有顺手删它——删公共类型要先确认
-对外 npm 包的导出面影响，留给下一轮单独判定。
+对外 npm 包的导出面影响，留给下一轮单独判定。（**轮 58 已落地**：导出面按 `pnpm -r typecheck`
+实测无消费者，`PermissionMeta` / `PermissionRisk` / `hasPermission` / `hasAllPermissions` /
+`isValidPermission` 五个零读者导出已删。该句本身也需要更正一处：当时说的「词表镜像」在源码里
+并不是 `PERMISSION_META` 常量，而是 `{description, risk}` 的形状类型加风险档位 union——
+宣传与事实的偏差正是这类镜像的常规死法。）
 
 **文档面同步**：`packages/tauron-host/README.md` 的 ShellController 一节补上安装审批问法的事实
 （分叉规则、三条中止出口、`onError` 上下文、行形状单源声明，以及「逐字比对在壳层、直接
@@ -3376,6 +3380,82 @@ workspace `rust-version = 1.98` 也远高于该 API 的稳定线。改后 worksp
 （3 tiers / 10 bundles / **85 commands**）；`docs:check` 绿（7 文档 / **276 条**行号引用）；
 `command-surface:check` 绿（85 条，底座 61 / 运行时 22 / 安装 2，孤儿命令 0，无代码层判定 9）；
 `format:check`、`eslint --max-warnings 0`、`version:check`（26 处 1.1.0）全绿。
+
+### 轮 58：内层权限词表在 TS 里有一份没人执行的声明，还假装自己有人在读
+
+**断链**：`packages/types/src/acl.ts` 是内层（框架 ACL）词表在仓库里的**唯一**home，而它带着
+五个零读者的导出：`PermissionMeta`（`{description, risk}` 形状）、`PermissionRisk`
+（`'low' | 'elevated' | 'high'`）、`hasPermission`、`hasAllPermissions`、`isValidPermission`。
+按接线面口径（`crates/*/src`、`packages/*/src`、examples、apps，剔除测试与 re-export 行）逐个查，
+读者只有它们自己的单测与 `src/index.ts` 的转出。更糟的是**注释在替它们宣传读者**：
+`PERMISSION_GRANULARITY` 的 docstring 与 `docs/architecture/app-layer-wire.md` §6 都写着
+「审批 UI 文案与 `isValidPermission` 都用它」——审批文案自轮 55 起由 Rust
+`tauron_acl::build_approval_rows` 单源生成并经线上传给前端（轮 56 让壳层真的消费它），
+这张表**从没被 UI 读过**；`isValidPermission` 也从未被任何命令路径、安装链或宿主校验调用。
+这正是台账判据里不合法的那一类：「一边没人用一边说它能用」。
+
+**修法（删，而不是为接线而接线）**：判定依据是「接线谁」——内层词表在 Rust 侧没有对应表
+（`check_plugin_permission` 按字符串精确比对，不校验标识是否在表内），若为了让 TS 表有读者而
+在 TS 侧加校验，会出现「同一个内层标识，嵌入式世界拒、宿主收」的**双标**，比零读者更糟。
+所以本轮：
+1. 删 `PermissionMeta` / `PermissionRisk` / `hasPermission` / `hasAllPermissions` /
+   `isValidPermission`；保留 `PluginPermissionGrant`（`@tauron/core` 与契约测试都在用）、
+   `missingPermissions`（`@tauron/core` 的 `getMissingPermissions` 是真读者）与
+   `PERMISSION_GRANULARITY`（对外声明的内层词表本身合法）。
+2. 风险档位在 TS 侧只剩**一处**声明：`@tauron/host` 的 `RISKS` / `Risk`——它与 Rust `Risk`
+   的序列化名早已有 `packages/tauron-host/src/gates.test.ts:172` 跨语言对齐，本轮把重复的那一份
+   删掉而不是再建第三份。
+3. `acl.ts` 的 docstring 改口：这张表「在仓库内没有执行者」，审批文案来自线上行；
+   `app-layer-wire.md` §6 同一处同步改口并点名五个已删导出。
+4. 门禁把「不许再长出第二份风险档位声明 / 不许把零读者工具加回来」钉住（轮 58 用例）。
+
+**新增行为测试**：`packages/types/src/acl.test.ts` 的「导出面（轮 58）」用例运行时 `import`
+包的入口，断言 `missingPermissions` 仍是函数、`PERMISSION_GRANULARITY` 仍在，而三个被删的工具
+在运行时导出面上为 `undefined`——删公共 API 的“删干净”不能只靠源码文本针。
+消费者级证据：`pnpm -r typecheck` 全绿（所有包重新类型检查），即删除没有打断任何真实 import。
+
+**诚实边界**：①本轮**没有**给内层词表找回执行者，事实就是「声明存在、无人执行」，这一点现在写在
+`acl.ts` 与 §6 里而不是藏在注释里；真正的收口要么把词表移到 Rust 与 `check_plugin_permission`
+并列、要么生成到 TS，属独立一轮（见遗留）。②`@tauron/types` 尚未发布到 npm（发布链被 token
+卡住），所以这次删除对**外部**使用者不构成破坏；一旦发布，同类删除要走 minor/major 判定。
+③`PluginPermissionGrant` / `missingPermissions` 留下不是因为它们有门禁，而是因为
+`@tauron/core` 真的 import 它们。
+
+**遗留（本轮之后仍未闭合，如实登记）**：①内层词表的**执行者缺位**是设计问题不是布线问题：
+要么在 Rust `tauron-shell::acl` 侧建立同一份词表并让 `check_plugin_permission` 校验，要么把
+TS 表定为纯对外文档面——两条路都会动两套世界的一致性口径，另开一轮判定；②`packages/types`
+里其它「SDK 面」导出本轮未审（只审了 ACL 一族）；③轮 57 点名的 `adopt_legacy` / `migrate`
+整份文档写路径不做按键语义校验仍开着。
+
+**变异证明（本轮实跑，13 例全红）**：删除类改动最容易做成「文本针自己证明自己」，所以每条针都
+配一个反向改动——
+- 五个零读者工具被加回 `acl.ts`（M1）、`missingPermissions` 被顺手删掉（M3，把真有读者的那件
+  也删了）、`@tauron/core` 不再消费它（M4）、TS 侧长出第二份风险档位字面量（M5）、`grants.ts`
+  的 `RISKS` 单源声明被搬走（M6）、`acl.ts` 注释把读者写回 UI/校验函数（M7）、§6 文档重新把词表
+  宣传成有执行者（M8）、运行时导出面断言抽掉缺席检查（M9，删除只剩文本针）、方案小节降级（M10）、
+  轮 56 遗留句没被就地改口（M11）：逐条改即红。
+- B1 走的是**另一条证据链**：把 `isValidPermission` 重新定义并重新转出后，红的是
+  `packages/types` 的运行时用例（`…又导出了一份没人用的 isValidPermission`），不是文本针——
+  证明「删干净」的判据挂在模块真实导出面上。
+- 三处脚本缺陷如实登记：首轮 10/13 红，M2/B1 **PRECHECK-FAIL**（prettier 把 `index.ts` 的
+  导出块收成单行，脚本还按多行形状找针——**格式化会改死针的字面形状**，针必须从当前文件重取），
+  M12 **NOT-RED**（同文件两条针各自从**原文**改写，后一条把前一条覆盖掉了——多针改动必须
+  在上一轮结果上继续替换，而不是并行替换）。按当前文件形状重写、并把同文件操作改成叠加后，
+  `M2fix / M12fix / B1fix` 三条重跑全红、`restore:OK`。**门禁绿不等于门禁有牙**，这轮的牙是
+  重跑那 3 例证明的。
+
+**读数（轮 58 收口时同批采集，`C:/tmp/r58-node.log`、`C:/tmp/r58-mut.log`、
+`C:/tmp/r58-mut2.log`、`C:/tmp/r58-typecheck.log`）**：本轮**零 Rust 改动**（`git diff` 里
+`.rs` 计数为 0），Rust 侧读数是轮 57 收口时采集的 workspace **1602 passed / 0 failed**，本轮
+未重跑也不声称重跑；`pnpm -r typecheck` **rc=0**（删除没打断任何真实 import）；
+`packages/types` **71 passed**（6 files，含新增的导出面用例）、契约测试 **218 passed**
+（2 files，比轮 57 多 1 例＝轮 58 用例）、`packages/tauron-host` **447 passed**（22 files）；
+孤儿台账 **10 条未接线宣称 + 5 条已接线反例**复核通过、自动发现 **621 ≤ 基线 635**（比轮 57 的
+624 再降 3，正是被删的三个工具）；域归属门禁绿（7 文件 / 19 域 / `lib.rs` 顶层条目 **292
+已封顶**）且自检 6 个变异形状按规则判定；Tier↔Bundle 门禁绿（3 tiers / 10 bundles /
+**85 commands**）；`docs:check` 绿（7 文档 / **277 条**行号引用）；`command-surface:check` 绿
+（85 条，底座 61 / 运行时 22 / 安装 2，孤儿命令 0，无代码层判定 9）；`format:check`、
+`eslint --max-warnings 0`、`version:check`（26 处 1.1.0）全绿。
 
 ## 9. 明确推迟 / 不做（附理由）
 

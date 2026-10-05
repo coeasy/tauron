@@ -5126,6 +5126,62 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(changelog, 'CHANGELOG 缺轮 57 条目').toMatch(/轮 57/);
   });
 
+  it('轮 58：内层权限词表不留零读者镜像（风险档位 TS 只有一处声明）', () => {
+    // 轮 58 立的规矩：`@tauron/types` 的 ACL 面只留**真有读者**的导出；零读者的形状类型/工具
+    // 一律删。理由不是「没人用就删」，而是它的注释与 `app-layer-wire.md` §6 在**替它宣传读者**
+    // （「审批 UI 文案与 isValidPermission 都用它」）——文案自轮 55 起来自 Rust 单源的线上行。
+    const acl = read('packages/types/src/acl.ts');
+    const typesIndex = read('packages/types/src/index.ts');
+    const grants = read('packages/tauron-host/src/grants.ts');
+    const core = read('packages/tauron-core/src/acl.ts');
+    const typesTest = read('packages/types/src/acl.test.ts');
+    for (const gone of [
+      'PermissionMeta',
+      'PermissionRisk',
+      'hasPermission',
+      'hasAllPermissions',
+      'isValidPermission',
+    ]) {
+      expect(acl, `ACL 面又长回零读者的 ${gone}（轮 58 已删，要回来先带读者）`).not.toContain(gone);
+      expect(typesIndex, `${gone} 又被转出（轮 58 收口的公共导出面被破）`).not.toContain(gone);
+    }
+    // 保留面：有读者的三件必须还在，缺任何一件就是「把能力也删了」。
+    for (const needle of [
+      'export interface PluginPermissionGrant {',
+      'export const PERMISSION_GRANULARITY',
+      'export function missingPermissions(',
+    ]) {
+      expect(acl, `轮 58 之后 ACL 面少了真有读者的 ${needle}`).toContain(needle);
+    }
+    expect(
+      core,
+      '@tauron/core 不再真的消费 missingPermissions（那才是这些工具留在包里的唯一理由）',
+    ).toContain('return missingPermissions(grant, requiredPerms);');
+    // 单源：TS 侧风险档位只许有 `@tauron/host` 的一份声明。
+    expect(grants, 'grants.ts 的风险档位单源声明被搬走').toContain(
+      "export const RISKS = ['low', 'elevated', 'high'] as const;",
+    );
+    const riskLiterals = [...`${acl}${typesIndex}${grants}`.matchAll(/'elevated'/g)];
+    expect(
+      riskLiterals.length,
+      `TS 侧风险档位字面量有 ${riskLiterals.length} 处（只许 1 处）`,
+    ).toBe(1);
+    // 注释与文档改口：词表「无人执行」是事实，不许再假装有人读。
+    expect(acl, '内层词表的注释又宣称自己被 UI/校验函数读').toContain('在仓库内没有任何执行者');
+    const wire = read('docs/architecture/app-layer-wire.md');
+    expect(wire, '§6 又把内层词表宣传成有执行者的描述词表').toContain('仓库内**没有它的执行者**');
+    expect(wire, '§6 没登记轮 58 删掉的零读者工具').toContain('已删');
+    // 删除要由运行时断言证明，不能只靠文本针。
+    expect(typesTest, '轮 58 的导出面行为测试被删').toContain("(await import('./index.js'))");
+    expect(typesTest, '轮 58 的导出面行为测试不再断言被删工具缺席').toContain(
+      '又导出了一份没人用的',
+    );
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案缺轮 58 小节').toMatch(/^### 轮 58：/m);
+    expect(plan, '轮 56 的遗留句没被轮 58 就地改口').toMatch(/轮 58 已落地/);
+    expect(read('CHANGELOG.md'), 'CHANGELOG 缺轮 58 条目').toMatch(/轮 58/);
+  });
+
   it('V7 §7：风险表的复核结论必须与代码同形（宣称链不得悄悄升级）', () => {
     // 轮 28 立的规矩：审计风险表一旦被逐行复核，"结论"就成了对外宣称。这条门禁挡两种漂移：
     // ①代码没动、文档把「部分／仍成立」改成「已闭合」（假宣称）；②文档没动、代码悄悄多了

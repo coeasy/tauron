@@ -21,12 +21,15 @@ export interface PluginPermissionGrant {
 /**
  * 权限粒度清单（设计文档 §3.3）。
  *
- * 这是**内层（框架 ACL）**的描述词表：`PluginPermissionGrant` 的 permissions、
- * 审批 UI 文案与 `isValidPermission` 都用它。注意与应用层 manifest 权限区分——
- * 插件 manifest 的 `permissions` 只能取自随框架发版的
- * `schema/permissions.index.json`（Tauri 标识符，如 `store:allow-get`），
- * 表外即安装失败（Rust `manifest.validate` 强制）。两套词表分层且互不通用。
- * 该 index 目前是**手工维护**的（仓库内无生成器），仅有门禁做校验。
+ * 这是**内层（框架 ACL）**的词表：`PluginPermissionGrant` 的 `permissions` 用它命名。
+ * 轮 58 把话说实：这份词表**在仓库内没有任何执行者**——Rust 侧 `check_plugin_permission`
+ * 按字符串精确比对，不校验标识是否在此表内；审批 UI 的人话文案自轮 55 起由 Rust
+ * `tauron_acl::build_approval_rows` 单源生成并经线上传给前端，**不读这张表**。
+ * 因此它的当前身份是「SDK 对外声明的内层词表」，不是「已被执行的能力」。
+ * 另注意与应用层 manifest 权限区分——插件 manifest 的 `permissions` 只能取自随框架发版的
+ * `schema/permissions.index.json`（Tauri 标识符，如 `store:allow-get`），表外即安装失败
+ * （Rust `manifest.validate` 强制）。两套词表分层且互不通用；该 index 目前是**手工维护**的
+ * （仓库内无生成器），仅有门禁做校验。
  */
 export const PERMISSION_GRANULARITY: Readonly<Record<string, string>> = {
   // 存储
@@ -59,45 +62,13 @@ export const PERMISSION_GRANULARITY: Readonly<Record<string, string>> = {
   'wasm:timeout': 'WASM 执行超时（ms）',
 };
 
-/** 权限风险等级 */
-export type PermissionRisk = 'low' | 'elevated' | 'high';
-
-/** 权限元数据 */
-export interface PermissionMeta {
-  description: string;
-  risk: PermissionRisk;
-}
-
 /**
- * 检查插件是否拥有指定权限
- */
-export function hasPermission(grant: PluginPermissionGrant, permission: string): boolean {
-  return grant.permissions.includes(permission);
-}
-
-/**
- * 检查插件是否拥有所需的所有权限
- */
-export function hasAllPermissions(
-  grant: PluginPermissionGrant,
-  requiredPermissions: string[],
-): boolean {
-  return requiredPermissions.every((perm) => grant.permissions.includes(perm));
-}
-
-/**
- * 获取缺失的权限列表
+ * 获取缺失的权限列表。内层词表里唯一有真实读者的工具——
+ * `packages/tauron-core/src/acl.ts` 的 `getMissingPermissions` 走它。
  */
 export function missingPermissions(
   grant: PluginPermissionGrant,
   requiredPermissions: string[],
 ): string[] {
   return requiredPermissions.filter((perm) => !grant.permissions.includes(perm));
-}
-
-/**
- * 验证权限标识是否有效
- */
-export function isValidPermission(permission: string): boolean {
-  return permission in PERMISSION_GRANULARITY;
 }
