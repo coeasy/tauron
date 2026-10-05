@@ -3001,11 +3001,13 @@ npm 缺 20、crates.io 缺 9、未能核实 8」，其中 crates 列表面含 `t
 「共 **36** 项在 1.1.0 上未通过核验：npm 缺 20 个、crates.io 缺 9 个、未能核实 7 个」——
 与本台账先前登记的 36 项口径（npm 20 + crates 16）重新对齐。
 `pnpm gates:check` rc=0、`pnpm docs:check` rc=0、`pnpm format:check` rc=0（脚本改动经 prettier 重写后复验）。
+**复跑消除了唯一的含糊读数**：首跑有 7 个 crate 因网络超时判「未能核实」，重跑后是
+「共 36 项在 1.1.0 上未通过核验：npm 缺 20 个、crates.io 缺 16 个」，且 0 项 `: published`、
+0 项未能核实——registry 上 1.1.0 一个都没有，是**确证**而不是「大概没发」。
 同一轮把发布载荷也实测了一遍：`node scripts/publish-npm.mjs`（--check 模式）= 可发布包 20 个、通过 20、失败 0；
 `node scripts/publish-crates.mjs`（--check 模式）= crate 共 16 个、产物校验失败 0。
 
-**诚实边界**：恒红死锁已解，但**1.1.0 仍未发布**（rc=1 是真的缺，不是门禁坏）——
-真发布要 `NPM_TOKEN` / `CARGO_REGISTRY_TOKEN`，两个脚本在没有令牌时都硬拒绝，本机 `npm whoami` 为 `ENEEDAUTH`，
+**诚实边界**：恒红死锁已解，但**1.1.0 仍未发布**（rc=1 是真的缺，不是门禁坏）——真发布要 `NPM_TOKEN` / `CARGO_REGISTRY_TOKEN`，两个脚本在没有令牌时都硬拒绝，本机 `npm whoami` 为 `ENEEDAUTH`，
 所以这一步只能由带令牌的 `publish-sdk.yml`（publish=true）完成；上面 37→36 的差值也只证明「门禁不再钉死」，
 不证明「Release 已建出」。另有一条未做的核对：`docs/installation.md` 里「15 个 crate」的旧读数段（§发布相关，
 写于 `tauron-ffi`/sidecar 之前）与本轮的 16 未逐句对齐，留作下一轮的文档对账项。
