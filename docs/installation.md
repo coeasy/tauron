@@ -290,7 +290,7 @@ pnpm --filter minimal-app build
   / `files` 白名单）；第 20 个 `@tauron/contract-tests` **刻意保留 `private`**
   （它是仓库内的契约测试 harness，`dist/` 里只有 `*.test.js`、没有 `index.js`，
   用例还依赖 monorepo 目录布局，发布出去对第三方无意义）。
-- **crates**：15 个 crate 的内部互引用都已同时给出 `version`；发布检查会从每个 `.crate`
+- **crates**：**16** 个可发布 crate 的内部互引用都已同时给出 `version`；发布检查会从每个 `.crate`
   tarball 实际构建，并断言产物 manifest 里 `path` 已被 cargo 剥离，只剩 `version`。
 
 发布编排脚本、发布状态与验收见 §3.7。
@@ -398,7 +398,11 @@ pnpm add @tauron/types @tauron/core @tauron/host   # npm / yarn 同理
 
 ### 3.5 方式 3：crate 集成
 
-15 个 crate 均已通过 `cargo package` 检查：产物 manifest 里内部依赖已只剩 `version`
+**可发布 crate 是 16 个，不是 `crates/` 目录数**：`crates/tauron-test-sidecar/` 的清单写
+`publish = false`（它是真进程 sidecar 测试夹具，发布出去对第三方无意义），所以它**不进**发布清单、
+也不会出现在 crates.io——registry 核验会显式剔除它并打印剔除项。
+
+16 个 crate 均已通过 `cargo package` 检查：产物 manifest 里内部依赖已只剩 `version`
 （`path` 由 cargo 剥离）。本次发布工作流按依赖顺序上传，完成后再由 Windows 干净消费者工程实际安装构建。
 
 - ✅ **本机已验证**：`cargo package -p <crate> --allow-dirty --offline` 对全部 15 个 crate
