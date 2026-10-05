@@ -85,14 +85,6 @@
       "docRef": "docs/integration/incremental-adoption.md"
     },
     {
-      "symbol": "remove_resource_bundle",
-      "declaredIn": "crates/tauron-i18n/src/lib.rs",
-      "lang": "rust",
-      "probe": "\\bremove_resource_bundle\\b",
-      "disposition": "未接线：语言包卸载没有命令面入口，插件撤下时其 i18n bundle 常驻内存。属于「装得下、退不掉」的泄漏类孤儿。",
-      "docRef": "docs/integration/incremental-adoption.md"
-    },
-    {
       "symbol": "is_downgrade / is_monotonic",
       "declaredIn": "crates/tauron-market/src/lib.rs",
       "lang": "rust",

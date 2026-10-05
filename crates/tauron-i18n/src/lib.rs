@@ -222,10 +222,14 @@ impl I18nEngine {
     pub fn cleanup_plugin(&mut self, plugin_id: &str) -> usize {
         let prefix = format!("plugin:{plugin_id}.");
         let mut removed = 0;
+        let mut touched: Vec<String> = Vec::new();
         // 从所有资源包中删除该前缀的 key。
         for bundle in self.bundles.values_mut() {
             let keys_to_remove: Vec<String> =
                 bundle.texts.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
+            if !keys_to_remove.is_empty() {
+                touched.push(bundle.locale.clone());
+            }
             for key in keys_to_remove {
                 bundle.remove(&key);
                 removed += 1;
@@ -237,6 +241,14 @@ impl I18nEngine {
         for key in default_keys {
             self.default_bundle.remove(&key);
             removed += 1;
+        }
+        // 一个语言包可能全靠某个插件的文案撑着：剥完 key 就只剩空壳，留着既是退不掉的内存占用，
+        // 又会让语言列表继续广告一个没有任何文案的语言。只回收**本次被清空**的包——
+        // 卸载别的插件不该顺手删掉本来就空着的包。
+        for locale in touched {
+            if self.bundles.get(&locale).is_some_and(|bundle| bundle.texts.is_empty()) {
+                self.remove_resource_bundle(&locale);
+            }
         }
         // 从缺失计数中删除。
         for counts in self.missing_counts.values_mut() {
@@ -578,6 +590,31 @@ mod tests {
     #[test]
     fn plugin_key_prefix() {
         assert_eq!(I18nEngine::plugin_key("p.audio", "settings"), "plugin:p.audio.oc.settings");
+    }
+
+    #[test]
+    fn locale_bundle_whose_only_texts_came_from_the_plugin_is_dropped() {
+        let mut e = default_engine();
+        let mut bundle = ResourceBundle::new("de");
+        bundle.insert("plugin:p.audio.oc.settings", "Audio-Einstellungen");
+        e.add_resource_bundle(bundle);
+        assert!(e.get_bundle("de").is_some());
+        assert_eq!(e.cleanup_plugin("p.audio"), 1);
+        // 卸载必须真的把空壳语言包退回内存：get_bundle 现在读到 None，而不是一个空包。
+        assert!(e.get_bundle("de").is_none(), "插件文案清空后语言包仍留在内存里");
+    }
+
+    #[test]
+    fn cleanup_keeps_a_locale_that_still_has_non_plugin_texts() {
+        let mut e = default_engine();
+        let mut bundle = ResourceBundle::new("fr");
+        bundle.insert("plugin:p.audio.oc.settings", "Réglages audio");
+        bundle.insert("oc.app.title", "Application");
+        e.add_resource_bundle(bundle);
+        e.cleanup_plugin("p.audio");
+        let fr = e.get_bundle("fr").expect("仍有核心文案的语言不应被回收");
+        assert_eq!(fr.texts.len(), 1);
+        assert!(fr.get("oc.app.title").is_some());
     }
 
     #[test]
