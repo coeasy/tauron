@@ -87,8 +87,8 @@ F1/F2/F3/F4 四项属**同一类病**：判定或类型存在、缺一个 fail-c
 |---|---|---|
 | Tauri 2 是正式支持边界 | **仍成立** | 唯一的 Adapter 是 `tauron-adapter`；Local Host 只有 example（F5） |
 | origin empty allowlist = gate disabled | **仍成立** | `tauri.rs:2990`（F2） |
-| recovery durability 可关闭 | **已闭合**（改为 fail-closed） | `reconcile_settings_boundary:7252` 无持久化即 `Quarantined`（行为测试 `settings_fault_without_durable_state_is_quarantined_not_faked_ready:14999`）；`recovery.rs:305/345` 走 `DurableEnvelope::seal` |
-| RecoveryAction 幂等生产链未接 | **已闭合**（A92） | 生产命令 `cmd_recover_trial_enable:8550`，幂等键取持久化 incident 序列（`should_execute:8582`），`should_execute=false` 走零副作用分支（`should_execute:8582`）；同 incident 去重测试 `recovery_trial_enable_action_is_deduplicated_in_same_incident:12704` |
+| recovery durability 可关闭 | **已闭合**（改为 fail-closed） | `reconcile_settings_boundary:7252` 无持久化即 `Quarantined`（行为测试 `settings_fault_without_durable_state_is_quarantined_not_faked_ready:15167`）；`recovery.rs:305/345` 走 `DurableEnvelope::seal` |
+| RecoveryAction 幂等生产链未接 | **已闭合**（A92） | 生产命令 `cmd_recover_trial_enable:8575`，幂等键取持久化 incident 序列（`should_execute:8607`），`should_execute=false` 走零副作用分支（`should_execute:8607`）；同 incident 去重测试 `recovery_trial_enable_action_is_deduplicated_in_same_incident:12729` |
 | whole-package memory read | **已闭合**（轮 44） | 验签流式 64 KiB（`package_signature.rs:163-230`）、解包逐 entry `std::io::copy`、**激活摘要也改流式**（`ContentIdentity::from_reader`，安装腿此前把每个文件整读进内存，本轮门禁抓出的真实缺口）；`verify_tpkg`/`verify_tpkg_file` 整包入口已删除；内存门禁迁到**真实安装流**（`install_stream_probe` 走 preview→reviewed 提交链；`performance-budgets.json` 的 `installStream`：载荷下限 64 MiB、堆峰值 16 MiB（计数分配器，跨平台）+ VmHWM 32 MiB）。网络下载消费者仍缺，但那是市场下载腿（simulated，A44 线）的事，不影响本条的「无整包读」结论 |
 | ErrorCode 顺序耦合 TS gate | **半闭合** | canonical 注册表已按**名集合**比对（`wire-gate.test.ts:252-263` + `contracts/error/error-codes.json`），但 `packages/tauron-host/src/gates.test.ts:63` 与 `packages/tauron-app-contract-kit/src/contracts.test.ts:44` 仍逐序 `toEqual`，`crates/tauron-host/src/error.rs:74,166` 注释仍在教「追加末尾」 |
 | E_HOST_PANIC = retryable | **已闭合**（A70） | `error.rs:127 => RetryClass::Never`，`retryable()` 由 class 派生（`:141-143`），wire-gate 锁定 panic=never |
@@ -115,10 +115,10 @@ F1/F2/F3/F4 四项属**同一类病**：判定或类型存在、缺一个 fail-c
 | A66 zero-surface/headless ReadinessSet | **已落**（轮 46） | `tauron-host/src/readiness.rs`：`ReadinessFact` + `ReadinessSet` 六组必备事实、`headless()` 空 Surface 不阻塞、`evaluate()` 未就绪事实具名进 `blockers`、`health()` 桥 A103 `HealthReport`；真跑 conformance 三条（`v4_host_conformance.rs`：零 Surface 就绪 / 声明未挂载 Surface 具名拦下 / kernel 未就绪不豁免）；`wire-gate` 轮 46 段钉形状与测试名 | — |
 | A69 generated Error Registry | **部分** | 见 §2 半闭合行 | 取消三处顺序耦合；补 codegen（Rust 24 个 `E_*` / TS 数组 / JSON 三份手工同步）；框架侧 14 个 `SC-####`（`tauron-shell/src/error.rs`）与宿主码的关系成文 |
 | A70 RetryClass | **部分** | 判定已改（`error.rs:110-134`）、两侧断言齐（`wire-gate.test.ts:273-299`） | §90 的 RetryPolicy/OperationClass/RetryBudget **无类型无实现**；`RetryClass::AutoIdempotent` 当前无码映射 → `retryable()` 恒 false（诚实但字段零信息）；TS 侧无自动重放路径 |
-| A91 FaultBoundary / subsystem quarantine | **部分** | `fault.rs:71` panic 后 `NotReady` 确定性拒新工作；生产面四条边界——settings（`run_settings_boundary:7231`；四个写租约消费点 `reconcile_settings_boundary:7252` / `cmd_settings_set:6915` / `cmd_settings_adopt_legacy:7627` / `cmd_settings_migrate:7626`），重建自 durable（`load_settings_doc:6791`）、无持久化即 Quarantined（`settings_fault_without_durable_state_is_quarantined_not_faked_ready:14999`）；**轮 47 扩到** events/approval/registry 三条（`run_events_boundary:7348` / `run_review_boundary:7364` / `run_registry_boundary:7379`；三段式共用 `run_subsystem_boundary:7327` + 修复前置判定 `begin_subsystem_reconcile:7398`）：7 条事件命令走闸门，修复=**会话态清零且保留 topic 声明**（`EventBus::reset_session_state:518`；测试 `session_reset_clears_subscriptions_but_keeps_topic_declarations:1223` / `events_fault_boundary_rejects_bus_work_and_recover_boot_resets_session_state:15014`）；4 个令牌消费点走闸门，修复=重新 preview 清空旧令牌（`reconcile_review_boundary:7441`；测试 `approval_fault_boundary_blocks_tokens_and_preview_reconcile_clears_them:15066`）；5 条注册表命令走闸门，无会话内重建=**如实 Quarantined 待重启**（`reconcile_registry_boundary:7458`；测试 `registry_fault_boundary_quarantines_until_reassembly_not_faked_ready:15131`）；四条边界的故障读数并入 `host_resource_stats` 的 faults（settings/events/approval/registry）；**轮 11 拆分**：闸门只保留「就绪判定 + 事后登记」（`ensure_ready:63` + `record_panic:85`），边界锁**不再跨磁盘 I/O**，单写者边界交回 `settings_write_lock`（A87），并有行为证明 `concurrent_settings_writes_never_lose_a_key_or_share_a_generation` | 其余子系统（registry 的调用/流/运行时读取面、http/fs/process、总线内部调用点）未包边界——一个 panic 仍是全宿主风险；`FaultBoundary::run` 拆分后只剩 fault.rs 单测消费者，按「未接线公开 API 台账」登记为 embedder 面（轮 11 小节） |
-| A92 RecoveryExecutor 生产接线 | **已落** | `cmd_recover_trial_enable:8550` + dedup 分支（`should_execute:8582`）；测试 `recovery_trial_enable_action_is_deduplicated_in_same_incident:12704`、`cmd_recover_report_drives_phase_and_reconciles_registry:12606` | — |
-| A93 DurableEnvelope/checksum/generation/quarantine | **已落** | `durable.rs:37-76`；读写口 `load_settings_doc:6791` / `persist_settings_doc:6916`（密封 ↔ `decode_durable`）、`recovery.rs:305/345/394`；损坏隔离到 `.corrupt`；测试 `settings_durable_envelope_detects_tamper_and_quarantines_file:15511` | — |
-| A109 production security self-test / doctor | **已落** | Rust + 命令面 + TS + 示例三层通（§0 末段）；档位 `authz.rs:340` Privileged；测试 `production_doctor_is_main_window_only_and_mirrors_readiness:16359`；**轮 11**：`admin-audit` 检查项由真实 sink 的 `AdminAuditFacts::healthy()` 推导，并把读数快照（条数/裁剪/写失败/链完整）一并上线（`production_doctor_report:6704`，测试 `doctor_derives_the_admin_audit_check_from_the_live_sink:10961`） | 空清单 fail-open（F2）与开关位（F3）均已在轮 10/11 闭合；剩余边界=分支保护未开（0-7，需用户操作） |
+| A91 FaultBoundary / subsystem quarantine | **部分** | `fault.rs:71` panic 后 `NotReady` 确定性拒新工作；生产面四条边界——settings（`run_settings_boundary:7231`；四个写租约消费点 `reconcile_settings_boundary:7252` / `cmd_settings_set:6915` / `cmd_settings_adopt_legacy:7633` / `cmd_settings_migrate:7632`），重建自 durable（`load_settings_doc:6791`）、无持久化即 Quarantined（`settings_fault_without_durable_state_is_quarantined_not_faked_ready:15167`）；**轮 47 扩到** events/approval/registry 三条（`run_events_boundary:7348` / `run_review_boundary:7364` / `run_registry_boundary:7379`；三段式共用 `run_subsystem_boundary:7327` + 修复前置判定 `begin_subsystem_reconcile:7398`）：7 条事件命令走闸门，修复=**会话态清零且保留 topic 声明**（`EventBus::reset_session_state:518`；测试 `session_reset_clears_subscriptions_but_keeps_topic_declarations:1223` / `events_fault_boundary_rejects_bus_work_and_recover_boot_resets_session_state:15182`）；4 个令牌消费点走闸门，修复=重新 preview 清空旧令牌（`reconcile_review_boundary:7441`；测试 `approval_fault_boundary_blocks_tokens_and_preview_reconcile_clears_them:15234`）；5 条注册表命令走闸门，无会话内重建=**如实 Quarantined 待重启**（`reconcile_registry_boundary:7458`；测试 `registry_fault_boundary_quarantines_until_reassembly_not_faked_ready:15299`）；四条边界的故障读数并入 `host_resource_stats` 的 faults（settings/events/approval/registry）；**轮 11 拆分**：闸门只保留「就绪判定 + 事后登记」（`ensure_ready:63` + `record_panic:85`），边界锁**不再跨磁盘 I/O**，单写者边界交回 `settings_write_lock`（A87），并有行为证明 `concurrent_settings_writes_never_lose_a_key_or_share_a_generation` | 其余子系统（registry 的调用/流/运行时读取面、http/fs/process、总线内部调用点）未包边界——一个 panic 仍是全宿主风险；`FaultBoundary::run` 拆分后只剩 fault.rs 单测消费者，按「未接线公开 API 台账」登记为 embedder 面（轮 11 小节） |
+| A92 RecoveryExecutor 生产接线 | **已落** | `cmd_recover_trial_enable:8575` + dedup 分支（`should_execute:8607`）；测试 `recovery_trial_enable_action_is_deduplicated_in_same_incident:12729`、`cmd_recover_report_drives_phase_and_reconciles_registry:12631` | — |
+| A93 DurableEnvelope/checksum/generation/quarantine | **已落** | `durable.rs:37-76`；读写口 `load_settings_doc:6791` / `persist_settings_doc:6916`（密封 ↔ `decode_durable`）、`recovery.rs:305/345/394`；损坏隔离到 `.corrupt`；测试 `settings_durable_envelope_detects_tamper_and_quarantines_file:15679` | — |
+| A109 production security self-test / doctor | **已落** | Rust + 命令面 + TS + 示例三层通（§0 末段）；档位 `authz.rs:340` Privileged；测试 `production_doctor_is_main_window_only_and_mirrors_readiness:16527`；**轮 11**：`admin-audit` 检查项由真实 sink 的 `AdminAuditFacts::healthy()` 推导，并把读数快照（条数/裁剪/写失败/链完整）一并上线（`production_doctor_report:6704`，测试 `doctor_derives_the_admin_audit_check_from_the_live_sink:10986`） | 空清单 fail-open（F2）与开关位（F3）均已在轮 10/11 闭合；剩余边界=分支保护未开（0-7，需用户操作） |
 
 ### Batch 2 — 固化 Universal Contract：A67 A68 A71 A72 A73 A74 A75
 
@@ -126,7 +126,7 @@ F1/F2/F3/F4 四项属**同一类病**：判定或类型存在、缺一个 fail-c
 |---|---|---|---|
 | A67 Wire framing + mandatory json-v1 | **部分** | `wire.rs:110` 解析前查上限；`remote_host_reference.rs:140-149` 先验后分配；消费点全是**校验/回环**（`tauron-ffi/src/lib.rs:267`、`remote_host.rs:535`），唯一副作用式消费是 8 MiB pending args 预算（`registry.rs:40`） | 真实命令面走 Tauri 裸 `invoke`（`tauri-backend.ts:270`），**不穿 envelope、不协商 codec**（`adoptCapabilities:249` 只协商命令集）；无固定二进制头/frame kind/flags/sequence |
 | A68 schema extension / unknown-field policy | **部分** | Wire 侧 extensions 收口（`wire.rs:58/62/66`，测试 `:157-163`）；Manifest `manifest.rs:673` | `WireExtensions` 全仓仅 wire.rs 自用；Manifest 无 `manifestVersion`/extensions 通道；Capability「required 未知→incompatible」零实现 |
-| A71 TargetSpec + ArtifactVariantResolver | **已落** | `target.rs:41` 模型完整、`current_target_spec:197` 被 `adapter/lib.rs:1315` 消费；**轮 49**：`resolve_best:88` 泛型化并新增 `ArtifactVariantResolver`（`target.rs:109`），经 `UpdateArtifactVariant` + `with_variants` 接进 `DistributeUpgradeInstaller` 的 download/install（变体过滤，无兼容硬拒；host 测试 `artifact_variant_resolver_returns_none_when_no_variant_is_runnable:162`，adapter 测试 `variant_list_without_compatible_target_is_rejected_before_any_download:20489`）；孤儿台账条目已删除 | 无（五维模型不变；变体来源仍由装配方提供） |
+| A71 TargetSpec + ArtifactVariantResolver | **已落** | `target.rs:41` 模型完整、`current_target_spec:197` 被 `adapter/lib.rs:1315` 消费；**轮 49**：`resolve_best:88` 泛型化并新增 `ArtifactVariantResolver`（`target.rs:109`），经 `UpdateArtifactVariant` + `with_variants` 接进 `DistributeUpgradeInstaller` 的 download/install（变体过滤，无兼容硬拒；host 测试 `artifact_variant_resolver_returns_none_when_no_variant_is_runnable:162`，adapter 测试 `variant_list_without_compatible_target_is_rejected_before_any_download:20657`）；孤儿台账条目已删除 | 无（五维模型不变；变体来源仍由装配方提供） |
 | A72 C ABI / FFI ownership contract | **已落** | `tauron-ffi` + `conformance/c/ffi_ownership_asan.c`，CI 真跑 ASan + `detect_leaks=1:halt_on_error=1`（`ci.yml:238-243`） | 只有 ASan；无 TSan/Miri |
 | A73 ExecutionDomain / thread-affinity | **已落** | `execution.rs:89` 门禁测试 | 仅单测级证据，无真跨线程调度断言 |
 | A74 ProviderLifecycle + CapabilityEpoch | **部分** | `provider.rs` 自测齐 | **适配器零消费**：Provider 热替换的 generation 保护未接主链（对照 §141「provider hot swap generation 不混线」） |
@@ -150,14 +150,14 @@ F1/F2/F3/F4 四项属**同一类病**：判定或类型存在、缺一个 fail-c
 
 | A码 | 判定 | 证据 | 缺口 |
 |---|---|---|---|
-| A83 InstallReviewToken | **已落**（install 域 + 管理域 uninstall/purge；轮 43） | install 域：`InstallReviewToken:996` 类型、`mint_install_review:1072` 铸、consumption 处 nonce 一次性 `remove` 再比对 + `review_matches_verified:1095` 绑 package/manifest/permission 三摘要；TOCTOU 靠 `VerifiedPluginPackage`（`:990`，`:994 archive` 句柄）；测试 `reviewed_install_rejects_package_replaced_after_preview:11466` / `reviewed_install_accepts_the_exact_previewed_package_once:11512`。管理域（轮 43）：`AdminReviewToken:1127`（camelCase + `deny_unknown_fields`，绑 plugin_id+op+预览版本）、`ADMIN_REVIEW_TTL_SECS:1138`/`MAX_ADMIN_REVIEWS:1139` 有界、`mint_admin_review:1245`、`validate_admin_review:1281`（凡呈现即严格校验）、`admin_review_required:1235`（feature+Production 才强制）；旧面无令牌入口 `cmd_registry_admin_as:5414` 在该档拒破坏性操作、新面 `cmd_registry_admin_reviewed_as:5412` 预览只铸令牌（零副作用）→ 提交令牌重核事实；wire `RegistryAdminResponse:1149`（`kind` 判别；executed 分支老字段仍在顶层，老读者不破）+ `wire_registry_admin:606`（`HostAdminOp` `preview`/`reviewToken` 双 `#[serde(default)]`，旧载荷仍合法）；TS 判别联合 `RegistryAdminOutcome` + `_destructiveAdminOp:291`（预览→确认→带令牌提交；无 DOM 默认钩子失败关闭）+ shell `_uninstallPlugin` 同链；测试 `admin_review_preview_binds_facts_and_commits_once:13165` / `admin_review_rejects_op_mismatch_and_stays_consumed:13216` / `admin_review_version_drift_forces_a_fresh_preview:13250` / `admin_review_protocol_rejects_non_destructive_mixing:13279` / `production_destructive_admin_op_requires_the_review_path:13407`（+ wire-gate 轮 43 段） | update 域＝install+uninstall 两条腿均已覆盖、无独立通道（`E_PLUGIN_EXISTS` 拒覆盖，正路即两腿组合）；install 域语义仍借 `E_INSTALL_FAILED`（仅过期判定改判 `E_AUTH_DENIED`）；审批令牌 nonce 未进 admin 审计事实（过渡留痕按既有 admin_gate 形状） |
-| A84 immutable installed content + activation integrity | **已落**（范围内） | HMAC 保护的全目录摘要清单（`activation.rs` 写口 `collect_plugin_activation_records:557` ← `cmd_registry_install_as:4895`，symlink 直接拒 `symlink_metadata:581`）；激活校验 HMAC+generation+当前文件集重算（`load_sealed_activation:704` → `symlink_metadata:715` ← `with_plugin_asset_protocol:1755`）；篡改/注入测试 `installed_plugin_ui_rejects_content_and_activation_metadata_tampering:11726` / `installed_plugin_ui_rejects_injected_files_after_activation:11792`；**轮 11**：逐资产服务 `read_installed_plugin_asset`（`tauri.rs:1738`）在 `canonicalize`+`starts_with` 之后、把字节交给响应之前过 `PluginAssetTrust::verify_asset`（`verify_asset:828`→`record.verify_bytes`）——无密封记录（安装后注入的文件）与摘要不符同样拒服务，并区分 404（没有这条内容）/403（有这条路径、内容与封的不一致）；`ActivationRecord::verify_bytes`/`ActivationError::IntegrityMismatch` 由此拿到生产消费者 | 摘要复核只覆盖 `plugin-install` 特性的服务路径；probation/commit、以及「摘要不符 ⇒ 事件通道实时撤服务」未建模（撤的是当次请求） |
+| A83 InstallReviewToken | **已落**（install 域 + 管理域 uninstall/purge；轮 43） | install 域：`InstallReviewToken:996` 类型、`mint_install_review:1072` 铸、consumption 处 nonce 一次性 `remove` 再比对 + `review_matches_verified:1095` 绑 package/manifest/permission 三摘要；TOCTOU 靠 `VerifiedPluginPackage`（`:990`，`:994 archive` 句柄）；测试 `reviewed_install_rejects_package_replaced_after_preview:11491` / `reviewed_install_accepts_the_exact_previewed_package_once:11537`。管理域（轮 43）：`AdminReviewToken:1127`（camelCase + `deny_unknown_fields`，绑 plugin_id+op+预览版本）、`ADMIN_REVIEW_TTL_SECS:1138`/`MAX_ADMIN_REVIEWS:1139` 有界、`mint_admin_review:1245`、`validate_admin_review:1281`（凡呈现即严格校验）、`admin_review_required:1235`（feature+Production 才强制）；旧面无令牌入口 `cmd_registry_admin_as:5414` 在该档拒破坏性操作、新面 `cmd_registry_admin_reviewed_as:5412` 预览只铸令牌（零副作用）→ 提交令牌重核事实；wire `RegistryAdminResponse:1149`（`kind` 判别；executed 分支老字段仍在顶层，老读者不破）+ `wire_registry_admin:606`（`HostAdminOp` `preview`/`reviewToken` 双 `#[serde(default)]`，旧载荷仍合法）；TS 判别联合 `RegistryAdminOutcome` + `_destructiveAdminOp:291`（预览→确认→带令牌提交；无 DOM 默认钩子失败关闭）+ shell `_uninstallPlugin` 同链；测试 `admin_review_preview_binds_facts_and_commits_once:13190` / `admin_review_rejects_op_mismatch_and_stays_consumed:13241` / `admin_review_version_drift_forces_a_fresh_preview:13275` / `admin_review_protocol_rejects_non_destructive_mixing:13304` / `production_destructive_admin_op_requires_the_review_path:13432`（+ wire-gate 轮 43 段） | update 域＝install+uninstall 两条腿均已覆盖、无独立通道（`E_PLUGIN_EXISTS` 拒覆盖，正路即两腿组合）；install 域语义仍借 `E_INSTALL_FAILED`（仅过期判定改判 `E_AUTH_DENIED`）；审批令牌 nonce 未进 admin 审计事实（过渡留痕按既有 admin_gate 形状） |
+| A84 immutable installed content + activation integrity | **已落**（范围内） | HMAC 保护的全目录摘要清单（`activation.rs` 写口 `collect_plugin_activation_records:557` ← `cmd_registry_install_as:4895`，symlink 直接拒 `symlink_metadata:581`）；激活校验 HMAC+generation+当前文件集重算（`load_sealed_activation:704` → `symlink_metadata:715` ← `with_plugin_asset_protocol:1755`）；篡改/注入测试 `installed_plugin_ui_rejects_content_and_activation_metadata_tampering:11751` / `installed_plugin_ui_rejects_injected_files_after_activation:11817`；**轮 11**：逐资产服务 `read_installed_plugin_asset`（`tauri.rs:1738`）在 `canonicalize`+`starts_with` 之后、把字节交给响应之前过 `PluginAssetTrust::verify_asset`（`verify_asset:828`→`record.verify_bytes`）——无密封记录（安装后注入的文件）与摘要不符同样拒服务，并区分 404（没有这条内容）/403（有这条路径、内容与封的不一致）；`ActivationRecord::verify_bytes`/`ActivationError::IntegrityMismatch` 由此拿到生产消费者 | 摘要复核只覆盖 `plugin-install` 特性的服务路径；probation/commit、以及「摘要不符 ⇒ 事件通道实时撤服务」未建模（撤的是当次请求） |
 | A85 PortablePathValidator | **已落（轮 42）** | 五维逐条（`crates/tauron-host/src/portable_path.rs`）：Windows 保留名表 `WINDOWS_RESERVED_STEMS`（主名命中即拒，`NUL.txt` 也算）、NFC 归一（`ComposingNormalizerBorrowed::new_nfc()`，非 NFC → `NotNfc`）、尾点/空格（`TrailingDotOrSpace`）、便携长度上界（`MAX_SEGMENT_BYTES` 255 / 整条 1023 → `TooLong`）；集合级 `validate_portable_entry_set`（ASCII 折叠冲突 → `CaseCollision`）。zip 侧（`crates/tauron-market/src/lib.rs`，`signing` 生产面）委派**同一份**判定：`sanitize_entry_path` 逐条 + `validate_zip_constants` 集合级；测试 host 五条 + market 两条 | 折叠只做 ASCII（Unicode 全表折叠需额外数据表，边界成文）；长度上界是相对路径承诺，Windows MAX_PATH 的宿主侧治理仍属 A95 |
 | A87 StorageNamespace + SingleWriterLease | **已落** | 真跨进程 `File::try_lock`（`storage.rs:132`）、OS 自动回收、陈旧 owner 覆盖（`:213-217`）、epoch 递增；装配期 panic（`adapter/lib.rs` 的 `let storage_writer_lease = …` 段：`PersistentWriterLease::acquire` 的 `unwrap_or_else` 里那句 `durable-state single-writer lease rejected startup`）；conformance 真起子进程证 Busy/acquire（`v4_host_conformance.rs:155`） | namespace 硬编码（同一段的 `tauron_host::StorageNamespace { tenant, application, principal }` 三个字面量），未与 `tauron-brand/src/lib.rs:77 data_dir` 归属打通 |
 | A88 generational plugin/provider/runtime activation | **部分** | runtime 一条已接（见 A90）；**轮 25 封口 V7 §9 leak gate**：代际台账不再「只进不出」——`RuntimeTable::remove_plugin` 释放租约后连带 `GenerationRegistry::forget` 摘除跟踪（有活跃租约时 `forget` 拒绝，绝不摘掉还在被校验的资源），在管数上界＝在飞插件数而非「曾起过运行期的插件数」，读数 `GenerationStats` 随 `host_resource_stats` 跨 IPC 可查；churn 证明分三层（台账 / 租约表 / 注册表真实安装-起租约-卸载路径） | `ProviderLifecycle`/`CapabilityEpoch` 适配器零消费；插件激活不校验代际 |
 | A89 PackLease / CacheLease | **已落**（库层） | `generation.rs` 的 `pack_gc_requires_all_four_guards_to_be_clear` / `live_cross_host_lease_blocks_gc_until_release_or_expiry` / `heartbeat_extends_only_a_live_lease_and_cannot_resurrect_expired_owner` / `gc_retirement_is_atomic_with_the_authority_metadata` 四条 GC 租约测试；跨宿主回收已建模 | 上游缺 Pack Manager（1.3 项），租约只服务引用与状态——登记为「已落但有天花板」 |
 | A94 streaming package verify/extract | **已落**（轮 44） | 验签流式 64 KiB（`package_signature.rs:163-230`，`verify_tpkg_reader` / `verify_tpkg_reader_with_time` 单源）、解包逐 entry `std::io::copy`、验签/解包共用同一句柄（`registry_install_preview_inner:4941` → `registry_install_inner:4909`）；轮 44：**删除** `verify_tpkg(&[u8])` / `verify_tpkg_file` 整包入口（零调用者），激活摘要改 `ContentIdentity::from_reader` 流式（固定 64 KiB 缓冲）；`performance-budgets.json` 的 `process.maxPeakRssKb` 换成 `installStream`（载荷下限 67108864 B、堆峰值 16384 KiB、VmHWM 32768 KiB），由 `install_stream_probe`（96 MiB 载荷走真实 preview→reviewed 提交链）产出、`check-performance-size.mjs` 断言；`wire-gate` 轮 44 段反向钉住 | 网络下载消费者仍缺（市场下载腿 simulated，见 §9 推迟表与 A44 线）；重放/限速类对抗不在本条 |
-| A101 migration reversible/snapshot contract | **已落**（宿主设置域） | 事务回滚 + **磁盘回滚镜像**：`cmd_settings_migrate:7626` 先 `snapshot_all()` 再迁；合同 `requires_snapshot` 时先把迁移前用户层落进 `host-settings.rollback.json`（`stage_settings_rollback_image:6959`，自带 `DurableEnvelope`，schema `tauron.host-settings-rollback/1`），**之后**才写正式文档；装配读不回正式文档时按已校验的镜像恢复并**一次性作废**（`load_settings_rollback_image:4005`），救不回来才走 `report_settings_load_failure`（生产档 panic 前缀逐字未改）；落盘失败 ⇒ rewind 内存 + 作废镜像（`persist_settings_doc:6916`）；健康启动即回执掉镜像（`clear_settings_rollback_image:3995`）。行为测试 `concurrent_settings_writes_never_lose_a_key_or_share_a_generation`、重启级 E2E `a101_rollback_image_restores_pre_migration_state_after_a_restart:15379`（轮 16 R3 改判后为**四轮**：坏文档→按镜像恢复并作废→再迁移→健康启动**回执掉镜像**→二次损坏时因无镜像而如实降级，绝不消费陈旧镜像）；死结构 `durable.rs MigrationSnapshot` 已删除并登记 | 镜像只在迁移合同要求时产出；recovery/registry 等其它持久命名空间没有同类回滚合同；probation/commit（跨进程两阶段）仍未建模 |
+| A101 migration reversible/snapshot contract | **已落**（宿主设置域） | 事务回滚 + **磁盘回滚镜像**：`cmd_settings_migrate:7632` 先 `snapshot_all()` 再迁；合同 `requires_snapshot` 时先把迁移前用户层落进 `host-settings.rollback.json`（`stage_settings_rollback_image:6959`，自带 `DurableEnvelope`，schema `tauron.host-settings-rollback/1`），**之后**才写正式文档；装配读不回正式文档时按已校验的镜像恢复并**一次性作废**（`load_settings_rollback_image:4005`），救不回来才走 `report_settings_load_failure`（生产档 panic 前缀逐字未改）；落盘失败 ⇒ rewind 内存 + 作废镜像（`persist_settings_doc:6916`）；健康启动即回执掉镜像（`clear_settings_rollback_image:3995`）。行为测试 `concurrent_settings_writes_never_lose_a_key_or_share_a_generation`、重启级 E2E `a101_rollback_image_restores_pre_migration_state_after_a_restart:15547`（轮 16 R3 改判后为**四轮**：坏文档→按镜像恢复并作废→再迁移→健康启动**回执掉镜像**→二次损坏时因无镜像而如实降级，绝不消费陈旧镜像）；死结构 `durable.rs MigrationSnapshot` 已删除并登记 | 镜像只在迁移合同要求时产出；recovery/registry 等其它持久命名空间没有同类回滚合同；probation/commit（跨进程两阶段）仍未建模 |
 
 ### Batch 5 — 扩跨宿主与安全隔离：A86 A95 A96 A97 A100 A106 A107 A108
 
@@ -165,9 +165,9 @@ F1/F2/F3/F4 四项属**同一类病**：判定或类型存在、缺一个 fail-c
 |---|---|---|---|
 | A86 LocalHostBroker + peer auth + single-instance lease | **部分**（非生产接线） | 一次性 challenge/绑定 subject（`local_host.rs:214-217`）、`reclaim_stale:143`；**真 OS 凭据在 reference**：Linux `SO_PEERCRED`（`local_host_reference.rs:132-160`）、macOS `getpeereid:207`、Windows 管道 DACL+模拟 SID `:519/:614/:633` | `LocalHostBroker::new` 只在 tests/chaos/conformance/example；适配器与命令面零消费；CI 只跑 `cargo run --example`；Windows 管道腿不在矩阵，且 Windows `serve_one`（`local_host_reference.rs:741`）的 `ConnectNamedPipe`/`ReadFile` 传空 OVERLAPPED = **同步等待、无读超时**（Unix 侧 `:256` 有 `REFERENCE_EXCHANGE_TIMEOUT` 20s 交换上界）——调用方必须在专用线程上跑并用 `recv_timeout` 收它的结局 |
 | A95 ScopedFsProvider no-follow / handle-based | **部分** | Unix 真句柄式：`scoped_fs.rs:130-215` openat + `O_NOFOLLOW` 逐级、`statat SYMLINK_NOFOLLOW:281`，测试 `:364/:378/:415` | **Windows 无 handle-based**：`*_hard` 全返回 `HardEnforcementUnavailable`（`:320-348`），`platform_enforcement=Partial`（`:83`）；`StdFsSink` 退化为按 `display_path` 重检（`impl FsSink for StdFsSink:2263-2283`），插件资产读口（`:710-728`）同样 |
-| A96 HttpProvider redirect/DNS/private-network | **已落**（轮 48） | URL 解析取代前缀匹配（`network_policy.rs:53-91`，label 边界 `:75-83`）、逐跳 `authorize_redirect:228` 且跨源不转凭据（`:228-244`）、私网/字面 IP 拒（`:194-226`、`is_public_ip:315`）、默认 `deny_all`；**轮 48 接生产**：`cmd_http_request:9372` 重写为宿主侧单跳循环——sink 契约=只发单跳 + 必须回报 `resolved_addrs`（`HttpResponseSpec:2483`）、非法地址失败关闭；逐跳链 `resolve_redirect_location:260`（RFC 3986，`Url::join`）→ `authorize_redirect`（hop 上界 + 跨源剥离 `authorization`/`cookie`/`proxy-authorization` `:9298`）→ 按 provider 回报地址 `authorize_resolution` 复检；`NetworkEnforcement::RedirectAndDns` 成能力闸（其它档拒发 `:9243-9250`）；注入 builder `AdapterConfig::with_http_sink:432`；五条行为测试（`http_redirect_flow_follows_hops_with_rfc_3986_resolution:19331` / `http_redirect_cross_origin_strips_credentials_and_denied_target_never_sent:19356` / `http_redirect_loop_is_bounded_by_policy_max_redirects:19386` / `http_provider_resolution_is_rechecked_against_private_network_policy:19402` / `http_provider_without_redirect_enforcement_is_rejected_before_any_request:19420`）+ TS 线形可选 `resolvedAddrs`（`shell-client.ts:490`） | 真实 provider 仍缺：缺省 `UnavailableHttpSink` 如实 Unsupported，`RedirectAndDns` 实现者=注入方责任；`max_redirects` 上界与凭据剥离目前只有 `ScriptedHttpSink` 测试证明（无第三方实现） |
+| A96 HttpProvider redirect/DNS/private-network | **已落**（轮 48） | URL 解析取代前缀匹配（`network_policy.rs:53-91`，label 边界 `:75-83`）、逐跳 `authorize_redirect:228` 且跨源不转凭据（`:228-244`）、私网/字面 IP 拒（`:194-226`、`is_public_ip:315`）、默认 `deny_all`；**轮 48 接生产**：`cmd_http_request:9397` 重写为宿主侧单跳循环——sink 契约=只发单跳 + 必须回报 `resolved_addrs`（`HttpResponseSpec:2483`）、非法地址失败关闭；逐跳链 `resolve_redirect_location:260`（RFC 3986，`Url::join`）→ `authorize_redirect`（hop 上界 + 跨源剥离 `authorization`/`cookie`/`proxy-authorization` `:9298`）→ 按 provider 回报地址 `authorize_resolution` 复检；`NetworkEnforcement::RedirectAndDns` 成能力闸（其它档拒发 `:9243-9250`）；注入 builder `AdapterConfig::with_http_sink:432`；五条行为测试（`http_redirect_flow_follows_hops_with_rfc_3986_resolution:19499` / `http_redirect_cross_origin_strips_credentials_and_denied_target_never_sent:19524` / `http_redirect_loop_is_bounded_by_policy_max_redirects:19554` / `http_provider_resolution_is_rechecked_against_private_network_policy:19570` / `http_provider_without_redirect_enforcement_is_rejected_before_any_request:19588`）+ TS 线形可选 `resolvedAddrs`（`shell-client.ts:490`） | 真实 provider 仍缺：缺省 `UnavailableHttpSink` 如实 Unsupported，`RedirectAndDns` 实现者=注入方责任；`max_redirects` 上界与凭据剥离目前只有 `ScriptedHttpSink` 测试证明（无第三方实现） |
 | A97 ProcessSandboxProvider + enforcement descriptor | **已落**（诚实分级=不隔离） | `UnixProcessGroupSandboxProvider` / `WindowsJobObjectSandboxProvider`（`tauron-proc/src/spawner.rs`）均自标 `Partial` 并写明 fs/net/syscall 未隔离；生产 hard-sandbox 语义 = **拒启 + 拒 spawn 双门**（`AdapterConfig::validate_process_runtime_for_start` → `PROCESS_SANDBOX_HARD_REQUIRED`；`cmd_runtime_spawn` 在非 Hard descriptor 下 `E_STATE_INVALID_TRANSITION`；doctor `process-sandbox` 项由 `production_doctor_report` 从 descriptor 推导）；provider 行为各有独立测试 | 仓内无 Hard provider（唯一 `Hard` 是测试替身）→ 代价是「生产形态下进程插件不可用」，这是对外必须写清的能力边界。**未验证清单（轮 11 补登记；轮 22 部分收口；`CommandSpawner` 文档注释指向本行）**：~~① 真 sidecar「收帧 → 回帧 → `settle_call`」端到端~~ **已落**——`crates/tauron-test-sidecar/tests/sidecar_e2e.rs`（真二进制、真起进程）连同生产投递/结算面一起跑；~~③ `kill` 正路（真杀活进程）~~ **随之有运行期证据**（禁用与静默不回帧两条用例）。仍未封口：② `impl Drop for CommandSpawner` 的连带 tree-aware 回收没有注入式失败测试（只有 E2E 收尾的 `tracked()` 归零断言 + 源码形门禁），以及 Windows post-spawn attach race 未测 |
-| A100 TimeTrustState + TrustedTimeProvider SPI | **部分**（轮 43 收紧） | `require_unexpired` 失败关闭（`time_trust.rs:53`）→ `package_signature.rs:358`（provider 不可信即拒）与 `package_signature.rs:376`（过期即拒）；**轮 43：install 与管理两域令牌 TTL 全部改走 `review_now:1187` / `review_unexpired:1213`**——provider 在则走 `trusted_time`（Trusted 放行、非 Trusted 失败关闭），None+Production 在铸发与消费两处都直接拒；provider 缺席仅开发/测试档回落墙钟（`unix_time_seconds:5215`，现只余 ACL 授权行的发放时间戳，不再参与 TTL 判定）；生产档启动即要求 provider 存在且 Trusted（`TRUSTED_TIME_REQUIRED`，`AdapterConfig::validate_for_start`）；门禁 `suspicious_clock_does_not_bypass_expiry:98`、`trusted_clock_enforces_expiry:108`、`production.rs:154`；测试 `install_review_ttl_follows_the_trusted_provider:13586` / `admin_review_ttl_follows_the_trusted_provider:13547` / `demoted_clock_after_startup_fails_closed_for_admin_review:13496` / `production_without_trusted_time_is_rejected_at_startup:13470` / `production_with_suspicious_clock_is_rejected_at_startup:13482` / `production_preview_fails_closed_without_trusted_time_in_substrate_builds:13466` | 生产 provider 装配仍缺（生产档启动直接拒启 → provider 注入须随生产装配一起落地，见 Batch 5'「A100 生产 provider 装配」）；`suspicious_if_skew_exceeds` 零消费者 |
+| A100 TimeTrustState + TrustedTimeProvider SPI | **部分**（轮 43 收紧） | `require_unexpired` 失败关闭（`time_trust.rs:53`）→ `package_signature.rs:358`（provider 不可信即拒）与 `package_signature.rs:376`（过期即拒）；**轮 43：install 与管理两域令牌 TTL 全部改走 `review_now:1187` / `review_unexpired:1213`**——provider 在则走 `trusted_time`（Trusted 放行、非 Trusted 失败关闭），None+Production 在铸发与消费两处都直接拒；provider 缺席仅开发/测试档回落墙钟（`unix_time_seconds:5215`，现只余 ACL 授权行的发放时间戳，不再参与 TTL 判定）；生产档启动即要求 provider 存在且 Trusted（`TRUSTED_TIME_REQUIRED`，`AdapterConfig::validate_for_start`）；门禁 `suspicious_clock_does_not_bypass_expiry:98`、`trusted_clock_enforces_expiry:108`、`production.rs:154`；测试 `install_review_ttl_follows_the_trusted_provider:13611` / `admin_review_ttl_follows_the_trusted_provider:13572` / `demoted_clock_after_startup_fails_closed_for_admin_review:13521` / `production_without_trusted_time_is_rejected_at_startup:13495` / `production_with_suspicious_clock_is_rejected_at_startup:13507` / `production_preview_fails_closed_without_trusted_time_in_substrate_builds:13491` | 生产 provider 装配仍缺（生产档启动直接拒启 → provider 注入须随生产装配一起落地，见 Batch 5'「A100 生产 provider 装配」）；`suspicious_if_skew_exceeds` 零消费者 |
 | A106 非 Tauri Local Host 参考应用 | **部分** | `examples/local_host_reference.rs` + `src/local_host_reference.rs:275`；CI 真跑 UDS E2E（`ci.yml:160/210`） | 是 `--example`，**不是可分发应用**；无第三方按文档跑通的证据 |
 | A107 FFI/C#/Swift/Kotlin golden conformance fixtures | **未落**（只有静态比对） | `tauron-ffi/src/lib.rs:454-473` 用 `abi-v1.json` 断言 abiVersion 与三个 `TauronStatus` 码值一致，再对 `conformance/{c,csharp,swift,kotlin}` 源码做 `requiredSymbols` 字符串包含断言 | **从未编译/执行任何 C#/Swift/Kotlin**；只有 C 经 ASan 真跑 → §141「C/Native FFI ownership 明确」在 Rust↔C 成立，其余语言是「fixture 文本对得上」而非「 ABI 实测对得上」 |
 | A108 local/remote chaos + peer-auth suite | **已落**（框架浅） | `v4_local_host_chaos.rs:13/31/59/81`（challenge flood/重放/takeover 围栏）、`v4_remote_host_chaos.rs:57/109/146/180`（nonce/速率/配额/at-most-once）；CI 四 OS + ubuntu（`ci.yml:172/230/233`） | 无真进程崩溃/网络注入框架（当前是模拟注入） |
@@ -2764,12 +2764,12 @@ ownership lib.rs **290 已封顶** + 自检 6 形、tier-bundle 3/10/85。
    （3xx 原样返回 + `location` 头），**必须**在响应里回报本跳实际解析地址
    （`HttpResponseSpec.resolved_addrs:2481`）；redirect 跟随与解析复检全部归宿主。
    `NetworkEnforcement::RedirectAndDns` 升为**能力闸**：声明其它档的 provider 在
-   `cmd_http_request:9372-9379` 直接拒发（`E_AUTH_DENIED`）——这不是"降级跑"，是
+   `cmd_http_request:9397-9404` 直接拒发（`E_AUTH_DENIED`）——这不是"降级跑"，是
    策略不可执行时拒绝执行。
-2. **宿主逐跳循环**：`cmd_http_request:9372` 重写——每跳响应先按 provider 回报地址
-   `authorize_resolution:9337` 复检（不可解析地址失败关闭、私网/字面 IP 拒）；
+2. **宿主逐跳循环**：`cmd_http_request:9397` 重写——每跳响应先按 provider 回报地址
+   `authorize_resolution:9362` 复检（不可解析地址失败关闭、私网/字面 IP 拒）；
    3xx 且带 `location` 时 `resolve_redirect_location:260`（`tauron-host` 新公开 fn，
-   `Url::join` 做 RFC 3986 相对解析）→ `authorize_redirect:9337`（`max_redirects`
+   `Url::join` 做 RFC 3986 相对解析）→ `authorize_redirect:9362`（`max_redirects`
    hop 上界；跨源 `forward_credentials=false` 时剥离 `authorization`/`cookie`/
    `proxy-authorization` `:9298-9303`）→ 下一跳；3xx 无 `location` 按最终响应交还
    调用方（没有可授权的下一跳，不臆造）。
@@ -2777,11 +2777,11 @@ ownership lib.rs **290 已封顶** + 自检 6 形、tier-bundle 3/10/85。
    的实现即可启用"的悬空承诺；TS 侧 `HttpResponseSpec.resolvedAddrs?`
    （`shell-client.ts:490`）随线形可选回传。五条行为测试（四条走 `ScriptedHttpSink` +
    一条 `UrlOnlySink` 拒发）：
-   `http_redirect_flow_follows_hops_with_rfc_3986_resolution:19331` /
-   `http_redirect_cross_origin_strips_credentials_and_denied_target_never_sent:19356` /
-   `http_redirect_loop_is_bounded_by_policy_max_redirects:19386` /
-   `http_provider_resolution_is_rechecked_against_private_network_policy:19402` /
-   `http_provider_without_redirect_enforcement_is_rejected_before_any_request:19420`。
+   `http_redirect_flow_follows_hops_with_rfc_3986_resolution:19499` /
+   `http_redirect_cross_origin_strips_credentials_and_denied_target_never_sent:19524` /
+   `http_redirect_loop_is_bounded_by_policy_max_redirects:19554` /
+   `http_provider_resolution_is_rechecked_against_private_network_policy:19570` /
+   `http_provider_without_redirect_enforcement_is_rejected_before_any_request:19588`。
 
 **同轮自查与读数（照抄同轮日志）**：`cargo fmt --all` 退出码 0；adapter HTTP 六条
 测试全绿（`6 passed; 0 failed; 302 filtered out`）；domain-ownership 记账后 lib.rs
@@ -3340,7 +3340,9 @@ command-surface:check` 与 `contracts/public-surface-ledger.json` 按这一口�
 `FaultBoundary::run`、配置样张三件套、`is_monotonic` 与 TS 侧的 `validateClientConfig` 族 /
 三个 `create*Client` 工厂 / `UpdaterStore`·`PluginRegistry`·`ConfigManager` 平行类型仍在台账；
 ②`cmd_settings_adopt_legacy` / `cmd_settings_migrate` 这两条**整份文档**写路径仍不做按键语义
-校验（本轮只在 `host_settings_set` 上加了先判后写），它们的坏值由装配期降级兜住；
+校验（本轮只在 `host_settings_set` 上加了先判后写），它们的坏值由装配期降级兜住（**轮 59 已落地**：
+两条路径都改走同一个判定——接手前 `validate_notify_capacity_document`、迁移落盘前
+`notify_capacity_from_settings`，降级分支因此只剩「用户手改磁盘文件」这一条来路）；
 ③`host_resource_stats` 的 `notifications.limit` 与设置键读数是两处出口，本轮没有再收成一处
 （两者都取 `NotifyStore::capacity()`，同源不同面，属可接受的读侧冗余）。
 
@@ -3456,6 +3458,98 @@ TS 表定为纯对外文档面——两条路都会动两套世界的一致性�
 **85 commands**）；`docs:check` 绿（7 文档 / **277 条**行号引用）；`command-surface:check` 绿
 （85 条，底座 61 / 运行时 22 / 安装 2，孤儿命令 0，无代码层判定 9）；`format:check`、
 `eslint --max-warnings 0`、`version:check`（26 处 1.1.0）全绿。
+
+### 轮 59：设置键的语义只守一扇门，另外两条整份写路径把同一个键当自由值
+
+**断链**：轮 57 给 `notifications.capacity` 立了「判定只在 `parse_notify_capacity` 一处 +
+`host_settings_set` 先判后写」，但设置文档有**三条**落盘路径，另外两条——`cmd_settings_adopt_legacy`
+（接手旧版整份文档）与 `cmd_settings_migrate`（schema 迁移）——把同一个键当自由值直写 Store。
+坏值不是假想：v1 文档的键是**裸键**，`migrate_host_settings_v1_to_v2` 把它逐键改名成转义键，
+而转义键才是装配期 `get_key` 读得到的形态——也就是说**迁移这一步正是坏容量从「读不到」变成
+「可读事实」的时刻**，落下盘后下一次启动只能走降级分支。轮 57 的注释甚至把这条链写成坏值的
+「真实来路」（`cmd_settings_set` 的文档注释与那条降级用例的注释都是这么说的），等于用文档给
+双标背书。这与轮 54/55/56 是同一类病灶：同一条规则有两套实现，且其中一套被宣称成合法的。
+
+**修法（把三条路径收到同一个判定上，而不是再加一套校验器）**：
+1. 域文件 `notify_capacity.rs` 新增 `validate_notify_capacity_document(doc)`——文档里出现这个键
+   就必须按 `parse_notify_capacity` 解释；裸键与 `settings_path` 转义键**两种拼法都查**（同一个键
+   的两种形态，不是两条规则）。
+2. `host_settings_adopt_legacy` 在**碰 Store 之前**调用它：非法文档既不写用户层，也不把数据版本
+   重标成 v1（否则等于给迁移伪造一个起点）。校验挂在这个函数而不是只挂在 `cmd_*` 上，Rust 嵌入方
+   走同一条门。
+3. `cmd_settings_migrate` 在**写回滚镜像与落盘之前**用 `notify_capacity_from_settings` 复核迁移
+   结果，非法即 `rollback_migration` 整体退回——与既有两条失败分支同样全有或全无，磁盘、数据版本、
+   durable 代数、环形缓冲四样都不动。
+4. 生效点从「两处」收成「每条把设置文档成功落盘的路径各一次」：`apply_notify_capacity` 现在恰在
+   `cmd_settings_set` / `cmd_settings_adopt_legacy` / `cmd_settings_migrate` 三处、且都在 durable
+   commit **之后**调用。迁移或接手带进来的合法容量因此不必等重启就能反映到
+   `host_notifications_list` 的 `capacity`。
+
+**新增行为测试**（cargo 实跑，非文本针）：`adopting_a_legacy_document_with_a_bad_capacity_is_rejected_before_any_mutation`
+（四种非法形态 × 两种键拼法逐一硬拒，并断言数据版本、磁盘 durable 代数、缓冲容量都不动）；
+`adopting_and_migrating_a_valid_capacity_applies_it_without_a_restart`（裸键接手→不生效，迁移后
+→生效并驱逐最旧；转义键接手→落盘即生效）；`migrate_refuses_to_persist_a_capacity_it_cannot_interpret`
+（绕过命令层播一份坏 v1 文档 → 迁移硬拒、版本不推前、回滚镜像不生成、代数不前进，且这个键没被
+冻住：随后一次合法写入立即生效）。轮 57 的「坏值不拒启」用例改由**绕过命令层直接写盘**播坏值，
+对应用户手改文件——命令路径已经进不来了。
+
+**诚实边界**：①v1 裸键文档在迁移之前**不是可读事实**，所以接手一步不生效、迁移成功后才生效——
+这是键编码契约，本轮没有把它「顺手」改成两处生效；②降级分支保留，但范围如实缩到「用户手改磁盘
+文件」这一条来路；③只有 `notifications.capacity` 这一个键带语义，`validate_notify_capacity_document`
+是**专门针对它的文档级入口**，不是通用键 schema 注册表——没有为假想的第二个键先造框架；④迁移被拒
+时用户层的其它键也已经随 `rollback_migration` 退回，这是全有或全无的代价，与 A101 的既有姿态一致。
+
+**遗留（本轮之后仍未闭合，如实登记）**：①内层权限词表的**执行者缺位**（轮 58 遗留①）仍开着，
+要动 Rust/TS 两套世界的口径；②`packages/types` 其它「SDK 面」导出未审（轮 58 遗留②）；③装配缺省
+`upgrade_installer = NoUpgradeInstaller`（`lib.rs:4150`），仓库内只有测试 fixture 换成真
+`DistributeUpgradeInstaller` ⇒ 出厂路径的 `host_market_download/install` 仍是 `simulated: true`，
+轮 54 的降级门禁在真实宿主里永不触发——属 Batch 5' 装配缺口，V7 §7 Upgrade 行维持**部分**；
+**顺带闭环（对外口径的旧存量数字）**：`docs/architecture/overview.md` 的孤儿台账段仍写「12 条
+未接线宣称」，并把 `resolve_best` 当例子列着——`resolve_best` 自轮 49 接线后条目已删，本轮实测
+是 10 条。这个数字**不在** `docs:check` 的行号引用核对范围内（它只核对 `symbol:行号` 型引用），
+所以没人报错就等于没人看过；就地改成 10 条并把例子换成台账里真实在存的
+`to_capability`/`is_monotonic`/`PluginRegistry` 等。登记这条是为了说清：**门禁覆盖不到的 prose
+数字必须靠同轮实测读数复核，不能靠记忆**。
+
+**变异证明（本轮实跑，15 例全部转红；日志 `C:/tmp/r59-mut.log`、`C:/tmp/r59-c2-full.log`）**：
+11 例文本/结构针（W1–W11：删接手校验调用、把 `for` 收成单拼法、把 `parse` 换成空转、删迁移落盘前
+复核、删迁移落盘后生效、改口模块注释、回退 `cmd_settings_set` 注释、抹掉「轮 59 已落地」标注（该针
+后被收紧，见下）、把
+本轮小节降级成四级标题、抽掉 CHANGELOG 的轮 59 编号、改掉本轮迁移测试名）与 4 例 cargo 行为
+（C1 接手校验被删 → 非法整份文档真写进 Store；C2 校验器只查裸键 → 转义键坏值逃过先判；C3 落盘前
+复核被删 → 坏容量被迁成 v2 落盘；C4 落盘后生效被删 → 容量要等重启）。首轮打印
+`MUTATION(r59): 14/15 RED`，**C2 的 NOT-RED 是脚本缺陷而不是门禁空洞**：变异确实让
+`adopting_a_legacy_document_with_a_bad_capacity_is_rejected_before_any_mutation` 失败（
+`test result: FAILED. 0 passed; 1 failed`），但先失败的断言是 `lib.rs:14926`「非法文档不得被重标成
+v1（那会让迁移以为自己有起点）」，而脚本的 `expect` 抄的是循环里 `expect_err` 的文案——转义键坏值
+在 C2 下**通过**了先判，`expect_err` 因此不炸，直到版本断言才露馅（这恰好是本轮要证的那件事的现场
+证据：没有先判，文档就真会被改写）。把 `expect` 换成先失败的那句后单跑 C2 = `1/1 RED`，故本轮
+15/15 有效。**登记这条脚本缺陷的口径与轮 58 同**：`expect` 必须写**最先失败**的那条断言的文案。
+按修正后的脚本复跑全量时又露出第二类缺陷：W8（抹掉轮 57 遗留句的落地标注）转为 **NOT-RED**——原因
+是本轮的证明材料自己写了「抹掉『轮 59 已落地』标注」，`toMatch(/轮 59 已落地/)` 被证明文本自己喂饱
+（**写探针的人成了喂探针的人**）。把针收紧到被标注的那句本体 `/降级兜住（\*\*轮 59 已落地\*\*/`
+（改写前实测全文唯一命中 1 处）后 W8 复红。**口径**：描述某条针的元文本不得原样复用该针的锚串；
+针必须锚到「被宣称的那个位置」的形状，而不是锚到一个词。修完这两处脚本缺陷后按同一脚本全量复跑：
+`MUTATION(r59): 15/15 RED`，15 例逐条 `restore:OK`（`C:/tmp/r59-mut-final2.log`）。
+
+**读数（轮 59 收口时同批采集，全部来自本轮日志）**：`cargo test -p tauron-adapter --lib`
+**318 passed / 0 failed**（`C:/tmp/r59-close-rs.log`）；契约测试 wire-gate 单文件 **198 passed**、
+`tauron-contract-tests` 整包 **219 passed / 2 files**（`C:/tmp/r59-close-ct.log`、
+`C:/tmp/r59-close-ctfull.log`）；`gates:check` 全绿——孤儿台账 **10 条未接线 + 5 条已接线反例、
+自动发现 621 ≤ 基线 635**，域归属 **lib.rs 顶层条目 292 已封顶**（19 个域、93 组顶层 fn / 389 个
+函数、41 个 impl 类型 / 187 个方法）且 self-test 6 个变异形状各按规则判定，Tier↔Bundle↔命令表
+**3 tiers / 10 bundles / 85 commands**；`command-surface:check` **85 commands（底座 61 / 运行时 22 /
+安装 2），孤儿命令 0**；`version:check` **26 处版本号全部 1.1.0**；`cargo fmt --all --check` 与
+`pnpm format:check` 均无输出（rc=0）。
+
+**顺带闭环（Rust 行长变化会把文档锚点全部推走）**：本轮往 `lib.rs` 测试模块插了 3 个测试，行号型
+引用整体下移，`docs:check` 一次报红 **51 条漂移**。`--fix` 按「唯一最近解」重锚了其中 32 条，剩下
+19 条（轮 47/48/49 的测试名锚点）漂移约 +168 行、超出 `REANCHOR_WINDOW = 150`，脚本按规则一律留红
+而不是猜数字——这 19 条按当前真实行号逐个手工重锚（`fn` 定义行取自 `grep -n`），改完后
+`docs:check` 全绿，收口读数为 **7 个文档 / 279 条引用**。域归属台账也同轮改预算并写理由：
+`notify_capacity.rs` 文件预算 4→5（新增 `validate_notify_capacity_document`）、键 `fn validate`
+高点 4→5 且 owner 从 `lib.rs` 扩成两个文件——**多一个落点不等于第二套范围**，新函数只是把两种键
+拼法逐个交给同一个 `parse_notify_capacity`，范围与错误文案仍只有一个来源；`lib.rs` 预算分毫未动。
 
 ## 9. 明确推迟 / 不做（附理由）
 

@@ -193,9 +193,9 @@ tauron-*       ← 全部 Rust crate
 > | **已接线** | `tauron-distribute` | updater provider：`host_updater_check` / `host_updater_status` 真跑 `check_for_update`（灰度 + 签名 + 崩溃门禁），`InstallationIdentity` 落盘持久化；未注入 `EndpointClient` 时 fail-closed；轮 54 起升级执行器**默认拒绝降级**（`ensure_not_downgrade` 复用 market 的 `cmp_version`/`is_downgrade` 单一算术源，门禁落在 `validate` 的零文件副作用段） |
 > | **未接线** | `tauron-shell` | 框架层整层：它的 3 条 `plugin_*` 命令在仓库内**没有任何宿主注册**——示例 `main.rs` 只把 `tauron_shell::tauron_generate_handler![]` 写在**注释**里；且 `PluginDispatcher` 的**生产实现为零**（唯一 `impl` 是测试用的 `EchoDispatcher`），未装载分发器时 `plugin_invoke` 恒回 `SC-9001`。CI 会带 `tauri` feature 编译并自测该 crate，但那是库内自测，**不构成宿主装配证据** |
 >
-> **公共 API 的孤儿面另有台账**：12 条「文档宣称未接线」的公共 API（`to_capability`、
-> `resolve_best`、配置样张三件套、notify/i18n 的若干入口、TS 的三个 `create*Client`
-> 工厂等）与 5 条「已接线」反例逐条登记在 `contracts/orphan-public-api.json`，由 CI 步骤
+> **公共 API 的孤儿面另有台账**：10 条「文档宣称未接线」的公共 API（`to_capability`、
+> `is_monotonic`、配置样张三件套、notify/i18n 的若干入口、TS 的三个 `create*Client`
+> 工厂与 `PluginRegistry`/`ConfigManager` 平行类型等）与 5 条「已接线」反例逐条登记在 `contracts/orphan-public-api.json`，由 CI 步骤
 > `Orphan-Public-API（V7 轮 22）` 机器复核——未接线宣称必须在产品接线面查不到消费者，
 > 反例必须查得到，并以棘轮禁止新增孤儿。详见
 > [渐进接入指南 §5](../integration/incremental-adoption.md)。

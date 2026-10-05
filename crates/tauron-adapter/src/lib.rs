@@ -43,7 +43,7 @@ mod notify_capacity;
 
 pub(crate) use notify_capacity::{
     apply_notify_capacity, notify_capacity_from_settings, parse_notify_capacity,
-    NOTIFICATIONS_CAPACITY_DEFAULT, NOTIFICATIONS_CAPACITY_KEY,
+    validate_notify_capacity_document, NOTIFICATIONS_CAPACITY_DEFAULT, NOTIFICATIONS_CAPACITY_KEY,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -7477,6 +7477,11 @@ fn reconcile_registry_boundary(state: &SubstrateState) -> HostResult<bool> {
 ///
 /// `doc` 必须是对象（键 = 设置键，值 = 设置值）；否则返回 `E_INVALID_MANIFEST`，
 /// 不静默退化成空文档。
+///
+/// **轮 59 起的按键语义校验**：文档里出现 [`NOTIFICATIONS_CAPACITY_KEY`] 时，值必须先过
+/// [`validate_notify_capacity_document`]（判定仍是 `parse_notify_capacity` 那一处），非法
+/// 文档在**碰 Store 之前**就被拒——内存与磁盘都保持原样。轮 57 只在 `host_settings_set`
+/// 上加了先判后写，这条整份接手路径因此是坏值的门。
 pub fn host_settings_adopt_legacy(
     state: &SubstrateState,
     doc: serde_json::Value,
@@ -7487,6 +7492,7 @@ pub fn host_settings_adopt_legacy(
             "旧版宿主设置文档必须是对象（键 = 设置键）".to_string(),
         ));
     }
+    validate_notify_capacity_document(&doc)?;
     let mut store = state.settings.lock();
     store.set_layer(HOST_SETTINGS_NAMESPACE, tauron_settings::LayerKind::User, doc);
     store.set_data_version(HOST_SETTINGS_NAMESPACE, HOST_SETTINGS_SCHEMA_V1);
@@ -7560,7 +7566,7 @@ pub fn cmd_settings_get(state: &SubstrateState, key: &str) -> HostResult<serde_j
 /// `unread`/分组记账，放大=只抬上限）；`host_notifications_list` 的 `capacity` 字段
 /// 报的就是**生效后的真值**。宿主启动时会再读一次磁盘（见装配处的
 /// `notify_capacity_from_settings`），重启不会回到内建默认；磁盘上若有越界写入的坏值
-/// （例如旧文档经 `host_settings_adopt_legacy` + `host_settings_migrate` 带进来的）
+/// （轮 59 起两条整份写路径都按同一判定先判后写，剩下的真实来路是**用户手改文件**）
 /// **不拒绝启动**：留痕并沿用内建默认。
 pub fn cmd_settings_set(
     state: &SubstrateState,
@@ -7633,6 +7639,10 @@ pub fn cmd_settings_adopt_legacy(state: &SubstrateState, doc: serde_json::Value)
             state.settings.lock().restore(&before);
             return Err(error);
         }
+        // 轮 59：与 `cmd_settings_set` 同一姿态——**落盘成功了才生效**。整份接手一条
+        // 裸键文档时这个读口拿不到容量（键的转义由迁移负责），此时它是空操作；
+        // 文档已经用转义键时，容量立刻按磁盘事实生效，不等重启。
+        apply_notify_capacity(state)?;
         Ok(())
     })
 }
@@ -7658,6 +7668,10 @@ pub fn cmd_settings_adopt_legacy_as(
 /// 且**幂等**（重复调用始终是 0）。全有或全无：链路缺失 / 迁移结果过不了新
 /// schema 校验时用户层一个字节都不改，返回 `E_INVALID_MANIFEST`。
 ///
+/// 轮 59 起「过不了校验」还包括**带语义的键**：迁移把 v1 裸键转成装配期读得到的转义键，
+/// 这一步正是坏容量变成「可读事实」的时刻，所以落盘前按 [`parse_notify_capacity`] 同一
+/// 判定解释一次，解释不了就回滚整个迁移；成功落盘后容量立即生效（不等重启）。
+///
 /// 与 [`cmd_settings_adopt_legacy`] 一样受 [`guard`] 保护——迁移要走 schema
 /// 编译与用户数据改写，一旦 panic 必须是 `E_HOST_PANIC` 而不是把 panic  unwind
 /// 穿过 IPC 边界。
@@ -7671,6 +7685,14 @@ pub fn cmd_settings_migrate(state: &SubstrateState) -> HostResult<usize> {
         let receipt = host_settings_migrate_transaction(state)?;
         let steps = receipt.steps();
         if receipt.changed() {
+            // 轮 59：**迁移是坏值变成「可读事实」的那一步**——裸键 `notifications.capacity`
+            // 转成转义键之后，装配期才读得到它。所以在写镜像与落盘之前先按同一个判定解释一次，
+            // 非法就整体回滚（与下面两条失败分支同样全有或全无，磁盘一个字节都不改）。
+            let capacity = notify_capacity_from_settings(&state.settings.lock());
+            if let Err(error) = capacity {
+                state.settings.lock().rollback_migration(receipt);
+                return Err(error);
+            }
             // 合同要求快照 → 先把迁移前的用户层落到磁盘，再动正式文档。**顺序不能反**：
             // 先写新文档再写镜像，中间掉电的结果是「已经迁了，且没有任何东西能回滚」。
             if receipt.contract().requires_snapshot {
@@ -7686,6 +7708,9 @@ pub fn cmd_settings_migrate(state: &SubstrateState) -> HostResult<usize> {
                 }
                 return Err(error);
             }
+            // 轮 59：迁移把裸键转成可读的转义键，落盘成功后容量按磁盘事实生效——
+            // 与 `cmd_settings_set` 同一姿态（生效只发生在 durable commit 之后）。
+            apply_notify_capacity(state)?;
         }
         Ok(steps)
     })
@@ -14841,15 +14866,16 @@ mod tests {
             cmd_notifications_list(&CommandState::new(), None).unwrap()["capacity"].clone();
         let t = tempfile::tempdir().unwrap();
         {
-            // 坏值的真实来路：越界写入。`host_settings_set` 现在先判后写，但**整份接手**
-            // 那条链不经过它——旧文档里的裸键被 v1→v2 迁移转义后照样落盘。
+            // 坏值的真实来路：**越界写入**。轮 59 起三条命令路径（按键写、整份接手、
+            // schema 迁移）都按同一个判定先判后写，所以这里绕过命令层直接落一份坏文档，
+            // 对应「用户手改磁盘文件」这一剩余形态。
             let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
-            cmd_settings_adopt_legacy(
-                &state,
-                serde_json::json!({ (NOTIFICATIONS_CAPACITY_KEY): "plenty" }),
-            )
-            .unwrap();
-            assert_eq!(cmd_settings_migrate(&state).unwrap(), 1);
+            state.settings.lock().set_layer(
+                HOST_SETTINGS_NAMESPACE,
+                tauron_settings::LayerKind::User,
+                serde_json::json!({ (settings_path(NOTIFICATIONS_CAPACITY_KEY)): "plenty" }),
+            );
+            persist_settings_doc(&state).unwrap();
         }
         let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
         assert_eq!(
@@ -14863,6 +14889,148 @@ mod tests {
             serde_json::json!("plenty")
         );
         // 坏值不冻结这个键：一次合法写入立即生效。
+        cmd_settings_set(&state, NOTIFICATIONS_CAPACITY_KEY, serde_json::json!(2)).unwrap();
+        assert_eq!(cmd_notifications_list(&state, None).unwrap()["capacity"], 2);
+    }
+
+    /// 轮 59：**整份接手**同样先判后写。非法容量在碰 Store 之前就被拒——内存、数据版本、
+    /// 磁盘、环形缓冲四样都不动（轮 57 只守住了 `host_settings_set` 那一扇门）。
+    #[test]
+    fn adopting_a_legacy_document_with_a_bad_capacity_is_rejected_before_any_mutation() {
+        let t = tempfile::tempdir().unwrap();
+        let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+        cmd_settings_set(&state, NOTIFICATIONS_CAPACITY_KEY, serde_json::json!(3)).unwrap();
+        cmd_notify(&state, "com.a", "T1", "B").unwrap();
+        let version_before = host_settings_data_version(&state);
+        let generation_before = *state.settings_generation.lock();
+
+        // 裸键（v1 形态）与转义键（v2 形态）是同一个键的两种拼法，两种都要拦。
+        for (spelling, bad) in [
+            (NOTIFICATIONS_CAPACITY_KEY.to_string(), serde_json::json!(0)),
+            (NOTIFICATIONS_CAPACITY_KEY.to_string(), serde_json::json!("plenty")),
+            (NOTIFICATIONS_CAPACITY_KEY.to_string(), serde_json::json!(null)),
+            (settings_path(NOTIFICATIONS_CAPACITY_KEY), serde_json::json!(8192)),
+        ] {
+            let err =
+                cmd_settings_adopt_legacy(&state, serde_json::json!({ (spelling.as_str()): bad }))
+                    .expect_err(&format!("{spelling}={bad} 不是合法容量"));
+            assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST, "{spelling} → {err:?}");
+            assert!(
+                err.message.contains(NOTIFICATIONS_CAPACITY_KEY),
+                "报错要点明是哪个键被拒：{} → {}",
+                spelling,
+                err.message
+            );
+        }
+
+        assert_eq!(
+            host_settings_data_version(&state),
+            version_before,
+            "非法文档不得被重标成 v1（那会让迁移以为自己有起点）"
+        );
+        assert_eq!(
+            cmd_settings_get(&state, NOTIFICATIONS_CAPACITY_KEY).unwrap(),
+            serde_json::json!(3)
+        );
+        assert_eq!(cmd_notifications_list(&state, None).unwrap()["capacity"], 3);
+
+        // 磁盘上的事实同样没动：重启读回来是合法值 3，走的是正常分支而不是降级分支。
+        drop(state);
+        let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+        assert_eq!(cmd_notifications_list(&state, None).unwrap()["capacity"], 3);
+        assert_eq!(
+            *state.settings_generation.lock(),
+            generation_before,
+            "被拒的接手不得推进 durable 代数"
+        );
+    }
+
+    /// 轮 59：合法容量经整份路径落盘后**立即生效**，不再等重启。
+    /// 裸键形态要经迁移转成转义键才读得到（这是键编码契约，不是遗漏）；
+    /// 已经用转义键的文档接手即生效。
+    #[test]
+    fn adopting_and_migrating_a_valid_capacity_applies_it_without_a_restart() {
+        let t = tempfile::tempdir().unwrap();
+        let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+        let built_in = cmd_notifications_list(&state, None).unwrap()["capacity"].clone();
+        for n in 1..=3 {
+            cmd_notify(&state, "com.a", &format!("T{n}"), "B").unwrap();
+        }
+
+        cmd_settings_adopt_legacy(&state, serde_json::json!({ (NOTIFICATIONS_CAPACITY_KEY): 2 }))
+            .unwrap();
+        assert_eq!(
+            cmd_notifications_list(&state, None).unwrap()["capacity"],
+            built_in,
+            "v1 裸键在转义之前不是可读事实，所以这一步不该生效"
+        );
+
+        assert!(cmd_settings_migrate(&state).unwrap() >= 1, "v1 → v2 必须真的迁一步");
+        let after = cmd_notifications_list(&state, None).unwrap();
+        assert_eq!(after["capacity"], 2, "迁移成功落盘后容量立即生效");
+        assert_eq!(after["total"], 2, "收缩按环形语义驱逐最旧条目");
+
+        cmd_settings_adopt_legacy(
+            &state,
+            serde_json::json!({ (settings_path(NOTIFICATIONS_CAPACITY_KEY)): 4 }),
+        )
+        .unwrap();
+        assert_eq!(
+            cmd_notifications_list(&state, None).unwrap()["capacity"],
+            4,
+            "转义键形态的接手在落盘后立即生效，不等迁移也不等重启"
+        );
+    }
+
+    /// 轮 59：迁移是坏值变成「可读事实」的那一步，因此它必须在落盘**之前**拒，
+    /// 并把这次迁移一起 rewind（磁盘仍是那份 v1 坏文档，版本没被推前）。
+    #[test]
+    fn migrate_refuses_to_persist_a_capacity_it_cannot_interpret() {
+        let t = tempfile::tempdir().unwrap();
+        let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+        let built_in = cmd_notifications_list(&state, None).unwrap()["capacity"].clone();
+        {
+            // 绕过命令层的越界写入：命令面现在进不来坏容量，磁盘上的坏 v1 文档
+            // 只能来自手改文件——本用例专门盯这条来路。
+            let mut store = state.settings.lock();
+            store.set_layer(
+                HOST_SETTINGS_NAMESPACE,
+                tauron_settings::LayerKind::User,
+                serde_json::json!({ (NOTIFICATIONS_CAPACITY_KEY): "plenty" }),
+            );
+            store.set_data_version(HOST_SETTINGS_NAMESPACE, HOST_SETTINGS_SCHEMA_V1);
+        }
+        persist_settings_doc(&state).unwrap();
+        let generation_before = *state.settings_generation.lock();
+
+        let err = cmd_settings_migrate(&state).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST);
+        assert!(
+            err.message.contains(NOTIFICATIONS_CAPACITY_KEY),
+            "拒绝理由要点明被拒的键：{}",
+            err.message
+        );
+        assert_eq!(
+            host_settings_data_version(&state).as_deref(),
+            Some(HOST_SETTINGS_SCHEMA_V1),
+            "迁移被拒 → 数据版本不得推前"
+        );
+        assert!(
+            !t.path().join(HOST_SETTINGS_ROLLBACK_FILE).exists(),
+            "校验发生在写镜像之前，回滚镜像不该存在"
+        );
+        assert_eq!(
+            *state.settings_generation.lock(),
+            generation_before,
+            "坏容量文档不得被迁成 v2 落盘"
+        );
+        assert_eq!(
+            cmd_notifications_list(&state, None).unwrap()["capacity"],
+            built_in,
+            "迁移被拒时环形缓冲保持原样"
+        );
+
+        // 修好它不需要重装：一次合法写入立即生效（键没被这次失败冻住）。
         cmd_settings_set(&state, NOTIFICATIONS_CAPACITY_KEY, serde_json::json!(2)).unwrap();
         assert_eq!(cmd_notifications_list(&state, None).unwrap()["capacity"], 2);
     }

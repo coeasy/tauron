@@ -10,8 +10,13 @@
 //!
 //! - **判定**：[`parse_notify_capacity`]（值 → 容量）是唯一解释这个键的地方，宿主别处
 //!   都不许再出现一份范围检查或字面量；
+//! - **校验入口**：按键写走 [`parse_notify_capacity`]（`cmd_settings_set` 先判后写），
+//!   整份文档写走 [`validate_notify_capacity_document`]（`host_settings_adopt_legacy`），
+//!   迁移后的事实走 [`notify_capacity_from_settings`]（`cmd_settings_migrate` 落盘前）——
+//!   三个入口共用同一个判定，没有第二套范围；
 //! - **生效**：[`apply_notify_capacity`] 是 `NotifyStore::trim_to` 在本仓库唯一的消费者
-//!   （另一个调用点在装配期，那时 `NotifyStore` 还没进 `SubstrateState`）；
+//!   （另一个调用点在装配期，那时 `NotifyStore` 还没进 `SubstrateState`）；每条把设置文档
+//!   成功落盘的命令路径在落盘后各调一次（set / adopt_legacy / migrate）；
 //! - **默认**：[`NOTIFICATIONS_CAPACITY_DEFAULT`] 同时是「键缺席」和「磁盘上是坏值」时
 //!   用的那一个数，装配处只从这里取值。
 
@@ -56,6 +61,24 @@ pub(crate) fn parse_notify_capacity(value: &serde_json::Value) -> HostResult<usi
         return Err(invalid_notify_capacity("超过上界"));
     }
     Ok(capacity)
+}
+
+/// 整份文档写入路径的按键校验：文档里出现了这个键，就必须按**同一个判定**解释。
+///
+/// 为什么需要它（轮 59）：`host_settings_set` 自轮 57 起先判后写，但两条**整份文档**写路径
+/// （接手旧版文档、schema 迁移）绕过了它——同一个键两套标准，坏值能经旧文档进磁盘。
+///
+/// 查两种拼法而不是只查一种：v1 文档的键是**裸键**（`notifications.capacity`），v2 层的键是
+/// [`crate::settings_path`] 转义出来的**转义键**，`migrate_host_settings_v1_to_v2` 做的正是
+/// 逐键改名。两种形态都是同一个键，判定仍然只有 [`parse_notify_capacity`] 一处。
+pub(crate) fn validate_notify_capacity_document(doc: &serde_json::Value) -> HostResult<()> {
+    for spelling in [NOTIFICATIONS_CAPACITY_KEY, settings_path(NOTIFICATIONS_CAPACITY_KEY).as_str()]
+    {
+        if let Some(value) = doc.get(spelling) {
+            parse_notify_capacity(value)?;
+        }
+    }
+    Ok(())
 }
 
 /// 从设置存储读容量事实。键缺席（或显式 `null`）＝**不表态**，返回 `None`，

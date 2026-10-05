@@ -2807,11 +2807,12 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(migrate, 'requires_snapshot 没有消费点（合同仍是形容词）').toMatch(
       /receipt\.contract\(\)\.requires_snapshot/,
     );
-    // 两条失败路径都必须 rewind 内存；落盘失败那条还得作废镜像。
+    // 三条失败路径都必须 rewind 内存；落盘失败那条还得作废镜像。
+    // （轮 59 加了第三条出口：容量键解释不了时在任何写动作之前退回。）
     expect(
       (migrate.match(/rollback_migration\(receipt\)/g) ?? []).length,
-      '迁移失败路径的 rewind 出口漂移（镜像失败 / 落盘失败）',
-    ).toBe(2);
+      '迁移失败路径的 rewind 出口漂移（容量校验失败 / 镜像失败 / 落盘失败）',
+    ).toBe(3);
     expect(migrate, '落盘失败后仍留着镜像 = 在磁盘上伪造一次没发生过的迁移').toMatch(
       /clear_settings_rollback_image\(&path\)/,
     );
@@ -5075,12 +5076,12 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     ).toBe(1);
     expect(
       [...`${adapter}${capacity}`.matchAll(/parse_notify_capacity\(/g)].length,
-      '判定的定义+调用点数量变了（应 3：定义 + 读盘判定 + 写前判定）',
-    ).toBe(3);
+      '判定的定义+调用点数量变了（轮 59 后应 4：定义 + 读盘判定 + 写前判定 + 整份文档校验）',
+    ).toBe(4);
     expect(
       [...`${adapter}${capacity}`.matchAll(/notify_capacity_from_settings\(/g)].length,
-      '读盘事实的定义+调用点数量变了（应 3：定义 + 生效内 + 装配期）',
-    ).toBe(3);
+      '读盘事实的定义+调用点数量变了（轮 59 后应 4：定义 + 生效内 + 装配期 + 迁移落盘前）',
+    ).toBe(4);
     // 反向钉：内建默认只能是常量。
     expect(
       adapter,
@@ -5180,6 +5181,68 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(plan, '缺口方案缺轮 58 小节').toMatch(/^### 轮 58：/m);
     expect(plan, '轮 56 的遗留句没被轮 58 就地改口').toMatch(/轮 58 已落地/);
     expect(read('CHANGELOG.md'), 'CHANGELOG 缺轮 58 条目').toMatch(/轮 58/);
+  });
+
+  it('轮 59：整份文档写路径也按同一判定解释容量键（不再有「按键写才校验」的双标）', () => {
+    // 轮 57 只给 `host_settings_set` 加了先判后写，`cmd_settings_adopt_legacy` /
+    // `cmd_settings_migrate` 两条整份文档路径仍不校验——同一个键两套标准，坏值经旧文档
+    // 就能进磁盘（当时的注释还把它写成坏值的「真实来路」）。轮 59 把三条路径收到同一判定上。
+    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    const capacity = read('crates/tauron-adapter/src/notify_capacity.rs');
+
+    for (const needle of [
+      'pub(crate) fn validate_notify_capacity_document(doc: &serde_json::Value) -> HostResult<()> {',
+      'for spelling in [NOTIFICATIONS_CAPACITY_KEY, settings_path(NOTIFICATIONS_CAPACITY_KEY).as_str()]',
+      'parse_notify_capacity(value)?;',
+      '整份文档写走 [`validate_notify_capacity_document`]',
+    ]) {
+      expect(capacity, `notify_capacity.rs 缺 ${needle}（整份文档校验被搬空）`).toContain(needle);
+    }
+    for (const needle of [
+      'validate_notify_capacity_document(&doc)?;',
+      'let capacity = notify_capacity_from_settings(&state.settings.lock());',
+      'if let Err(error) = capacity {',
+      '轮 59 起三条命令路径',
+      '剩下的真实来路是**用户手改文件**',
+    ]) {
+      expect(adapter, `lib.rs 缺 ${needle}（轮 59 的接线或改口被掏空）`).toContain(needle);
+    }
+
+    // 计数钉：校验器一份实现 + 一处调用；生效点恰三处（set / adopt_legacy / migrate）。
+    expect(
+      [...`${adapter}${capacity}`.matchAll(/validate_notify_capacity_document\(/g)].length,
+      '整份文档校验的定义+调用点数量变了（应 2：定义 + adopt_legacy 落盘前）',
+    ).toBe(2);
+    expect(
+      [...`${adapter}${capacity}`.matchAll(/apply_notify_capacity\(state\)\?;/g)].length,
+      '容量的运行期生效点数量变了（应 3：按键写 + 整份接手 + 迁移，别处不得再多一份也不得少一份）',
+    ).toBe(3);
+
+    // 反向钉：轮 57 那句「坏值的真实来路是整份接手链」必须已经改口，不许悄悄回退成
+    // 宣称旧文档还能把坏容量带上盘（那会让先判后写重新变成注释里的假话）。
+    expect(
+      adapter,
+      'cmd_settings_set 的文档又把整份接手/迁移说成坏值来路（轮 59 起这两条门都先判后写）',
+    ).not.toContain(
+      '（例如旧文档经 `host_settings_adopt_legacy` + `host_settings_migrate` 带进来的）',
+    );
+    expect(
+      adapter,
+      '轮 57 的降级用例又改用 adopt_legacy + migrate 播坏值（那正是轮 59 关掉的门）',
+    ).not.toContain('那条链不经过它——旧文档里的裸键被 v1→v2 迁移转义后照样落盘');
+
+    for (const name of [
+      'fn adopting_a_legacy_document_with_a_bad_capacity_is_rejected_before_any_mutation(',
+      'fn adopting_and_migrating_a_valid_capacity_applies_it_without_a_restart(',
+      'fn migrate_refuses_to_persist_a_capacity_it_cannot_interpret(',
+    ]) {
+      expect(adapter, `缺轮 59 的行为测试 ${name}`).toContain(name);
+    }
+
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案缺轮 59 小节').toMatch(/^### 轮 59：/m);
+    expect(plan, '轮 57 的遗留句没被轮 59 就地改口').toMatch(/降级兜住（\*\*轮 59 已落地\*\*/);
+    expect(read('CHANGELOG.md'), 'CHANGELOG 缺轮 59 条目').toMatch(/轮 59/);
   });
 
   it('V7 §7：风险表的复核结论必须与代码同形（宣称链不得悄悄升级）', () => {

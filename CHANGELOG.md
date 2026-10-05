@@ -15,6 +15,24 @@
 
 ### Changed
 
+- **设置键的语义不再只守一扇门（轮 59）**：轮 57 给 `host_settings_set` 加了「先判后写」，
+  但两条**整份文档**写路径绕着它——`host_settings_adopt_legacy`（接手旧版文档）与
+  `host_settings_migrate`（schema 迁移）把同一个 `notifications.capacity` 当自由值直写 Store。
+  这不是假想的坏值：迁移正是把 v1 裸键转成「装配期读得到的转义键」那一步，非法容量经这两条门
+  落下盘后，下一次启动只能走降级分支。轮 57 的注释甚至把这条链写成坏值的「真实来路」，等于
+  用文档给双标背书。现在三条路径共用**同一个判定**：接手前查 `validate_notify_capacity_document`
+  （裸键与转义键两种拼法都查，判定仍是 `parse_notify_capacity`），迁移在写回滚镜像与落盘**之前**
+  用 `notify_capacity_from_settings` 复核迁移结果，非法就 `rollback_migration` 整体退回（磁盘、
+  数据版本、durable 代数、环形缓冲四样都不动）。生效点同步收口：每条把设置文档成功落盘的路径
+  落盘后各调一次 `apply_notify_capacity`（set / adopt_legacy / migrate 共三处），迁移或接手带进来的
+  合法容量不再要等重启才反映到 `host_notifications_list` 的 `capacity`。降级分支保留但如实缩范围——
+  轮 57 那条「坏值不拒启」用例改由**绕过命令层直接写盘**（对应用户手改文件）播坏值。边界：
+  v1 裸键文档在迁移之前不是可读事实，所以接手一步不生效、迁移成功后才生效（键编码契约，不是遗漏）；
+  其它带语义的键（如每插件上限）仍无可配入口，也没有第二份键语义注册表。顺带闭环两处对外口径：
+  `docs/architecture/overview.md` 的孤儿段仍写「12 条」并举 `resolve_best`（轮 49 已接线删条目）为例，
+  按本轮实测改成 10 条与真实存量条目；本轮插的 3 个测试把 `lib.rs` 之后的行推下去，`docs:check` 一次
+  报红 51 条行号型引用，`--fix` 重锚 32 条、余下 19 条超出 ±150 重锚半径按当前真实行号手工重锚。
+
 - **通知环形缓冲的容量第一次有了用户侧入口（轮 57）**：`NotifyStore::trim_to` 自落地以来是台账里
   的孤儿——库内 API + 单测，宿主侧没有任何入口能让缓冲收缩，而 `host_notifications_list` 早已把
   `capacity` 当线字段报给前端（读数有出口、事实无入口）。命令面冻结在 85 条，因此新增的是主窗专属
@@ -25,7 +43,8 @@
   留痕并沿用内建默认，姿态与 A101 的降级分支一致。调小是破坏性动作：按环形语义驱逐最旧并同步
   `unread`/分组记账，不额外存档、不弹二次确认。边界：每插件上限（64）与分发日志上限（200）仍不可配；
   设置面没有「撤销键」入口，所以 `null` 也判非法；`adopt_legacy`/`migrate` 这条整份文档写路径仍不做
-  按键语义校验。顺带闭环一处工具链漂移：`pnpm lint:rust`（workspace clippy 硬门禁）在本轮跑红于
+  按键语义校验（**轮 59 已闭合**：两条路径改走同一个判定，见上一条）。顺带闭环一处工具链漂移：
+  `pnpm lint:rust`（workspace clippy 硬门禁）在本轮跑红于
   一个既有 example（`install_stream_probe.rs` 的 `chunks_exact_mut(8)` 触发新 lint
   `chunks_exact_to_as_chunks`），已改为语义等价的 `as_chunks_mut::<8>().0`——「HEAD 上发布门禁是红的」
   本身就是断链，不因为不是本轮引入就留着。
