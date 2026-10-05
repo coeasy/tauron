@@ -55,6 +55,13 @@ backend.adoptCapabilities(caps.commands); // 拒空 / 拒缺 host_capabilities
 // 之后 shell.supports(...) 与 isAvailable(backend, ...) 才报得出真实可用性
 ```
 
+两个探测入口口径不同：`supports()` 只答**注册与否**（构建 / 协商事实，feature-gated 命令
+在默认构建下为 `false`）；`isAvailable()` 与 `capabilityMatrix()` 还按**调用方主体**过滤
+——`host_capabilities` 返回的是构建级命令集、不带调用方参数，宿主不会替插件 webview 少报，
+所以 SDK 自己按 `Backend.principal()` 过滤：插件主体（含畸形 label）下 10 条主窗特权命令
+（`host_registry_admin` / `host_runtime_spawn` / `host_production_doctor` 等）一律报
+`false`，主窗主体可见全部。真正的执行判定在宿主代码层（`require_main_window`）。
+
 ## 跨语言契约门禁
 
 `src/gates.test.ts` 读取真实 Rust 源码并断言两侧同构：
@@ -128,9 +135,103 @@ backend.adoptCapabilities(caps.commands); // 拒空 / 拒缺 host_capabilities
 以下三项在**本仓里有真实消费者**（`examples/minimal-app/src/main.ts` 逐条 `new`），
 因此可以直接当"接上就能用"的参考实现读：
 
-- `ShellClient` / `ShellController` — 标题栏动作、主题、更新事件路由（已接线）
-- `AutoUpdateClient` — 检查/下载/安装/重启状态机 + 定时自动检查
+- `ShellClient` / `ShellController` — 标题栏动作、主题、更新事件路由（已接线）。
+  更新对话框（`<oc-updater-dialog>`）的「检查更新」自轮 31 起走真通道
+  `host_updater_check`，判定与 `AutoUpdateClient.checkUpdate()` 共用同一个
+  `toUpdateInfo`；结论经 `onUpdaterCheck` 交回接入方写 UI，`currentVersion` 是
+  构造参数（缺它则**零调用**并报错，不回落宿主桩）。对话框主按钮派发什么事件**不在
+  这里决定**：状态词表与「状态 → 主按钮动作」映射都在 `@tauron/shell-events`
+  （`UPDATER_STATUSES` / `UPDATER_PRIMARY_ACTION`，轮 32），只有 `ready` 点亮
+  「立即重启」→ `oc-restart`。
+  答"没有更新"时自轮 33 起还会补一句**通道事实**：`host_updater_status` 是灰度批次、
+  崩溃门禁、宿主进程内账本的唯一出口，此前在 TS 侧零消费者，于是"你不在灰度批次"
+  "被崩溃门禁停发""宿主没装端点"在 UI 上都是同一句"没有更新"。补读数的口径与
+  `AutoUpdateClient.checkUpdate()` 共用同一个 `enrichUpdaterInfoWithChannel`（两条入口
+  各拼一句就是第三面镜像）；`state` 与 `stateSimulated` 成对读——账本现有写入方都是
+  `simulated` 桩，只看 `state` 就会把"点了一下模拟安装"说成"已安装"。命令缺席 / 报错 /
+  答空三种情况都**不改**检查结论，有更新时**不**多打这条诊断命令。
+  通知中心自**轮 36** 起接上。宿主 `TauriDispatchSink::send` 每次都向
+  `tauron://notification` `emit` 一条**信号**（`{ id, pluginId, kind, ts }`，**不带正文**——
+  `emit` 是广播给所有 webview 的，正文进广播就是跨插件内容泄露，轮 11 因此把它降成信号），
+  而正文的唯一出口是 `host_notifications_list`（按调用方身份过滤）。此前**全仓没有任何代码
+  监听那个 topic**，`notificationsList()` 也只有自己的单测在调：发出端一路 `Ok`、读端零消费者，
+  通知到不了用户而且**不报错**。现在 `start()` 订阅 `NOTIFICATION_TOPIC`（该线值常量由
+  `@tauron/host` 导出，是 Rust 侧 `pub const` 的镜像，两者一致性由 `wire-gate` 逐字比对，
+  不靠注释），收到信号后拉一次快照交回给你：
+
+  ```typescript
+  const controller = new ShellController({
+    backend,
+    notificationLimit: 20, // host_notifications_list 的 limit，缺省 20
+    onNotification: (snapshot) => {
+      badge.textContent = String(snapshot.unread); // 未读是全量真值，不受 limit 影响
+      for (const item of snapshot.items) {
+        if (!item.read) toast.push({ title: item.title, message: item.message, level: item.kind });
+      }
+    },
+  });
+  controller.start(); // DOM 事件 + 宿主信号订阅
+  controller.stop(); // 退订；在途拉取的晚到回帧由代际令牌丢弃，不再上屏
+  ```
+
+  三条口径：**不传 `onNotification` 就完全不订阅**（没人展示还挂监听 = 每条通知白打一次命令）；
+  **突发合并**（在途只允许一个拉取，期间到达的信号合并为收尾补拉一次，5 条信号 = 2 次命令）；
+  **失败必有出口**（订阅失败 `notification.subscribe`、拉取失败 `notification.pull`、
+  你的回调抛错 `notification.render`，全部走 `onError`，不静默吞）。
+  标记已读仍走 `ShellClient.notificationsRead(id?)`——控制器**不代你做这个决定**：
+  自动清未读会把"用户还没看见"变成"用户看过了"，那是产品语义，不是接线细节。
+- `AutoUpdateClient` — 检查/下载/安装/重启状态机 + 定时自动检查。检查腿（轮 29）
+  读 `host_updater_check` 且要求 `currentVersion`；下载/安装两条仍是有意的
+  `simulated` 桩，客户端有守卫拒绝把桩结果推进为"已下载/已安装"。
+  `UpdateStatus` 自轮 32 起是契约 `UpdaterStatus` 的**类型别名**，不再自己列一遍字面量：
+  此前它安装成功的终态叫 `ready`，而对话框的重启分支等的是 `done`（没人产出），
+  于是「立即重启」在真装配里点不出来。同理，`ready` 今天只能由**真实**下载+安装到达
+  ——走宿主桩到不了那个状态，这是设计而非缺陷。
+  **命名坑（轮 33 记录，未改）**：本包里 `UpdaterStatus` 这个名字指**两样东西**——
+  `@tauron/shell-events` 的状态词表（`idle`/`ready`/…，`UpdateStatus` 是它的别名）与
+  `shell-client.ts` 的 `host_updater_status` 线读数（通道状况）。后者是 1.0 起 `index.ts`
+  的公开导出，改名属破坏性变更，要走单独批准，所以本包内部先用导入别名
+  （`UpdaterStatus as UpdaterChannelStatus`）把两件事分开。读代码时别把两者当一个。
 - `DialogClient` — 文件对话框 / 消息框 / 剪贴板
+- 菜单与托盘（R9，**轮 37 接上点击腿**）— `ShellClient` 的六条主窗命令
+  （`menuSet` / `menuPopup` / `menuReset` / `trayCreate` / `traySetMenu` / `trayRemove`）
+  建的是**原生**菜单；缺省装配（非 Tauri 宿主）时宿主如实返回 `UnsupportedBody`，
+  不假装弹出。点击的回传走 **Tauri 事件通道**（`AppHandle::emit`），**不是**
+  `host_events_*` 总线——此前四处叙述都写着「经 `host_events_drain` 取件」，照它接线
+  的人会在一条永远不会有菜单帧的队列上等一次点击（那条总线是订阅 + 取件的拉模型，
+  与点击回传没有接线关系）。
+
+  ```typescript
+  import { MENU_CLICK_TOPIC } from '@tauron/host';
+  import type { MenuClickFrame } from '@tauron/host';
+
+  // 先挂接收方，再建菜单：宿主没有登记路由时就不发帧，早订阅收不到假事件。
+  await backend.listen(MENU_CLICK_TOPIC, async (payload) => {
+    const click = payload as MenuClickFrame; // { id, source: 'menu' | 'tray', native: true }
+    if (click.id === 'menu-minimize') await shell.windowMinimize();
+  });
+
+  await shell.menuSet({
+    items: [{ id: 'menu-minimize', label: '最小化', event: MENU_CLICK_TOPIC }],
+  });
+  await shell.trayCreate({
+    tooltip: 'my app',
+    menu: { items: [{ id: 'menu-minimize', label: '最小化', event: MENU_CLICK_TOPIC }] },
+  });
+  ```
+
+  三条口径：**`event` 缺省的菜单项只记录不发布**（点了没有帧，宿主不替你猜 topic）；
+  **应用菜单与托盘是两条 lane**——`menuReset()` 只失效应用菜单那条路由，托盘右键菜单
+  仍可回传，`trayRemove()` 反之（宿主侧 `MenuRouteTable` 按 lane 整体替换，旧 id 随之
+  失效，不会残留一条把点击发往无人监听 topic 的路由）；**降级装配零帧**
+  （`native_supported()` 为 `false` 的 sink 不登记路由，`listen` 挂上也等不到事件）。
+- 事件 topic 词表（**轮 38 全量收口**）— `host-topics.ts` 是宿主 `emit` 的全部五条 topic
+  在 TS 侧的唯一镜像（`NOTIFICATION_TOPIC` / `MENU_CLICK_TOPIC` / `DEEP_LINK_TOPIC` /
+  `DIALOG_DEGRADED_TOPIC` / `DEEP_LINK_NATIVE_TOPIC`，均从本包入口导出）。线值在 TS 侧
+  **恰好只出现一次**且就在该文件里，`wire-gate` 与 Rust 的 `pub const` 逐字比对——
+  要用线值就从这个模块导入，别手打字符串。两条诊断帧（`DIALOG_DEGRADED_TOPIC` /
+  `DEEP_LINK_NATIVE_TOPIC`）**仓库内零监听方**：它们只是给接入方核对用的镜像，权威结论
+  在命令返回值里，挂监听等结论等于等一条不会到的事件。
 
 `DeepLinkClient`（`host_deep_link_*`）与 `WindowState`（`host_window_*`）也在同一
 命令族上工作，但**本仓示例不调用它们**——它们和下一节的库级 API 一样是

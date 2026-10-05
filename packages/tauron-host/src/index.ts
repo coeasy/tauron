@@ -95,9 +95,13 @@ export type {
   HealthReport,
   ResourceStats,
   ReapStats,
+  TerminalReapRecord,
+  GenerationStats,
   MenuItemSpec,
   MenuSpec,
   MenuOutcome,
+  MenuClickFrame,
+  MenuClickSource,
   TraySpec,
   TrayOutcome,
   FsEntry,
@@ -116,6 +120,17 @@ export type {
 
 export { ShellController } from './shell-controller.js';
 export type { ShellControllerOptions } from './shell-controller.js';
+// 宿主 → 前端的事件主题线值（轮 36）：Rust `pub const` 的镜像，一致性由门禁比对，
+// 不靠注释。接入方要订阅投递信号时需要它，仓库内不应再出现第二份字面量。
+export { NOTIFICATION_TOPIC } from './host-topics.js';
+// 菜单/托盘点击的约定 topic（轮 37）：同上，唯一事实源是 Rust 的 `pub const`，
+// 仓库内不得出现第二份字面量（`wire-gate` 逐字比对两侧）。它**不是**宿主补的
+// 默认值——`MenuItemSpec.event` 没填就是不发帧。
+export { MENU_CLICK_TOPIC } from './host-topics.js';
+// 其余三条宿主会 `emit` 的 topic（轮 38）：深链接投递有仓库内监听方，
+// 两条诊断帧（对话框降级、深链接注册）仓库内零监听方——但线值同样只许一份镜像，
+// 接入方不必手打字符串。五条一起由 `wire-gate` 的「轮 38」词表门禁逐条比对。
+export { DEEP_LINK_TOPIC, DIALOG_DEGRADED_TOPIC, DEEP_LINK_NATIVE_TOPIC } from './host-topics.js';
 // 未接线事件的显式登记表（1.0-W3）：接入方自检「哪些事件需要自己接」。
 export { UNWIRED_EVENTS, UNWIRED_EVENT_NAMES } from './unwired-events.js';
 export type { UnwiredEvent } from './unwired-events.js';
@@ -142,9 +157,16 @@ export type { UnwiredEvent } from './unwired-events.js';
 export { WindowState, createWindowState } from './window-state.js';
 export type { WindowStateConfig, WindowStateData } from './window-state.js';
 
-export { LazyPluginLoader, createLazyPluginLoader } from './lazy-plugin-loader.js';
+export {
+  LazyPluginLoader,
+  createLazyPluginLoader,
+  LazyPluginLoadError,
+} from './lazy-plugin-loader.js';
 export type {
   LazyPluginDescriptor,
+  LazyPluginLoadOptions,
+  LazyPluginLoadErrorCode,
+  LazyPluginLoaderStats,
   PluginLoadStatus,
   PluginCacheEntry,
 } from './lazy-plugin-loader.js';
@@ -205,6 +227,7 @@ export type {
 
 export { TOPIC_MAX_LENGTH, EventOrderingWatcher } from './events.js';
 export type {
+  AdminReviewToken,
   EventFrame,
   EventOrderingViolation,
   EventSelector,
@@ -214,6 +237,7 @@ export type {
   PublishResult,
   RegistryAdminOp,
   RegistryAdminOpKind,
+  RegistryAdminOutcome,
   Subscription,
   TopicDescriptor,
 } from './events.js';
@@ -249,9 +273,13 @@ export {
   fullLoadConfig,
   minimalConfig,
   templateConfig,
+  CLIENT_CONFIG_LANDING,
+  clientConfigUnwiredKeys,
+  clientConfigUnwiredSummary,
 } from './client-config.js';
 export type {
   ClientConfig,
+  ClientConfigLanding,
   PluginFilter,
   RegistryConfigOverride,
   LogLevel,

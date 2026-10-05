@@ -1,11 +1,14 @@
 // 进程执行器的**可注入启动面**（P0-2：让 `PluginType::Process` 有真实执行器入口）。
 //
-// 为什么必须是 trait：真启动要 fork/exec 一个外部二进制，而单元测试里真起 sidecar
-// 会让 CI 变 flaky（进程泄漏、时序竞态、平台差异、CI 上没有 sidecar 二进制）。
-// 把「启动 / 探测存活 / 终止」收在这一个 trait 后面，生产实现用
-// `std::process::Command`，测试用 fake——于是执行器语义（租约登记、崩溃计数、
-// 事件投递、租约回收时的终止）可以完全离线、确定性地验证，而生产实现只需保证
-// 同一份契约。
+// 为什么必须是 trait：执行器语义（租约登记、崩溃计数、事件投递、租约回收时的
+// 终止）要能在没有外部二进制的前提下被确定性验证——fake 启动面负责这一层，
+// 生产实现用 `std::process::Command` 兑现同一份契约。
+//
+// 轮 22（V7-P1-05）补上的是另一半：仓内现在有**可执行的 sidecar 夹具**
+// （`crates/tauron-test-sidecar`，`publish = false`，永不上架），
+// `crates/tauron-test-sidecar/tests/sidecar_e2e.rs` 真起操作系统进程、真走 stdio
+// 帧回路，把下面「未验证」清单里原本靠 fake 的条目逐条换成运行期证据。
+// 也就是说：**trait 是为了分层验证而存在，不再是因为「测不了真进程」**。
 //
 // 本模块不依赖 `tauri`，也不认识任何宿主类型（`SpawnConfig` 是唯一输入，
 // `SpawnedProc` 是唯一输出）。
@@ -13,6 +16,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -430,6 +434,15 @@ pub trait ProcessFrameSink: Send + Sync {
 
     /// stdout 关闭（进程退出 / 管道 EOF）时调用一次，便于上层清理；缺省空实现。
     fn on_eof(&self, _pid: u32) {}
+
+    /// 读到一条**超过 `MAX_FRAME_BYTES` 且没有换行**的帧（协议违规）时调用一次，
+    /// 紧接着才断开该进程的读线程；缺省空实现。
+    ///
+    /// 存在的理由：断链之前这条路径与「进程干净地退出（EOF）」在宿主侧**完全不可
+    /// 区分**——两者都只是读线程结束并触发 `on_eof`，上层因此无法把「sidecar 吐了
+    /// 一条超长帧」报告成它自己的类型化结局。钩子是**追加**的、默认空实现，
+    /// 不改变任何既有行为：帧仍被丢弃、读线程仍断开、`on_eof` 仍照常触发。
+    fn on_frame_oversized(&self, _pid: u32, _observed_bytes: usize) {}
 }
 
 /// 一次 `close` 的结果：既交还 sink，也报告「本读线程是否还代表当前代次」。
@@ -571,33 +584,42 @@ impl SinkTable {
 ///
 /// **1.0-W7 加固（本轮）**
 /// - `SinkTable` 单锁：登记与关闭原子化，消除迟到登记的泄漏竞态（P0-7①）。
-/// - 写帧**不再持全局锁**：`stdin_writers` 是两级锁（外层只用于取 `Arc`，
-///   内层才是 per-pid 的阻塞写）——一个不读 stdin 的 sidecar 只阻塞**它自己**
-///   的帧投递，不再拖住所有进程（P0-7②）。
+/// - 写帧**不阻塞调用线程**（轮 2 改造）：`write_frame` 只做 `try_send`，管道写
+///   交给该 pid 专属的写线程；队列满（`WouldBlock`）、帧超长（`InvalidInput`）、
+///   无句柄（`NotFound`）、管道断（`BrokenPipe`）四种情形**全部如实失败**，
+///   没有一条会假装成功。此前这里是「两级锁 + 同步 `write_all`」——锁只挡住了
+///   「一个坏 sidecar 拖累别的 pid」，对不读 stdin 的 sidecar 本身，命令线程会
+///   永久停在管道写上（P0-7② 只算修了一半）。
+/// - 终止后的回收**有上界**（轮 2）：`kill` / `Drop` 不再用阻塞的 `Child::wait()`，
+///   改用 [`reap_bounded`]（[`KILL_REAP_TIMEOUT_MS`]）；取不到退出状态就把句柄放回
+///   跟踪表并报 `Err`，让上层留痕重试。
 /// - 单帧**长度上限** `MAX_FRAME_BYTES`：用 `Read::take` 限制，超长行（无换行）
 ///   不会无限增长把宿主 OOM（P0-7③）。
 /// - EOF 时**主动 `try_wait` 回收**已退出的子进程（不 wait 会留僵尸），
 ///   仅在「进程仍存活但关了 stdout」这种病态情形下保留句柄（P2-4）。
 /// - EOF 时调用 sink 的 `on_eof`（此前该钩子在生产路径上零调用，P2-3）。
 ///
-/// **未验证部分（诚实标注）**
-/// - **真实 sidecar 端到端**：本仓**没有**可执行的 sidecar 二进制，测试也明确
-///   **不起真进程**（CI flaky / 平台差异）。因此"sidecar 真的收到帧、真的回帧、
-///   宿主真的据此结算"这一整条链路**没有运行期证据**——验证的是帧格式、
-///   `write_frame`/`register_frame_sink` 的契约、以及读线程排空逻辑（用 mock
-///   spawner + 内存管道单测）。带真 sidecar 的 E2E 需另起集成测试环境。
-/// - 不能保证跨平台「已退出」判定时机一致（`try_wait` 在子进程退出后返回
+/// **验证面（轮 22 起有运行期证据）**
+/// - **真实 sidecar 端到端**：`crates/tauron-test-sidecar/tests/sidecar_e2e.rs`
+///   用 `env!("CARGO_BIN_EXE_tauron_test_sidecar")` 拿到真二进制、真起进程，
+///   经**生产**投递/结算面（`tauron-adapter` 的 `ProcessFrameSinkImpl` →
+///   `Registry::settle_call`）证明「sidecar 真收到帧、真回帧、宿主真结算」。
+///   同一条链路还覆盖了真崩溃计数、超长帧的类型化结局、旧代际回帧被守卫丢弃、
+///   EOF 回收不留孤儿、pending 上限、乱序回帧与静默 sidecar。
+/// - 仍然**不保证**跨平台「已退出」判定时机一致（`try_wait` 在子进程退出后返回
 ///   `Some(status)`）；僵尸进程的回收依赖本类型仍持有 `Child`。
 /// - **本类型被丢弃时会回收**：`Drop` 把仍在跟踪的每个 pid 都驱动到**同一套**
 ///   tree-aware `kill`（`terminate_tree` + `wait`）。读线程只持有内部表的 `Arc`、
 ///   不持有第二个 `CommandSpawner`，因此 Drop 只由最终持有者触发一次。
-///   两条边界如实标注：① 这条路径**没有真进程测试**（本仓测试不起真进程），
-///   `terminate_tree` 的各 provider 行为有独立测试，"退出时逐个 kill 遗留 pid"
-///   本身只有代码与结构门禁，登记在缺口计划 A97/A75 的未验证清单里；② 终止失败
+///   两条边界如实标注：① 端到端用例的收尾**显式断言 `tracked()` 归零**，并在断言
+///   失败时依赖 Drop 兜底 tree-kill，但「Drop 自己逐个 kill 遗留 pid」这条路径
+///   仍只有代码与结构门禁 + E2E 的兜底纪律，没有专门的注入式失败测试；② 终止失败
 ///   （`terminate_tree` 报错）时 `kill` 会保留跟踪句柄，而正在退出的宿主没有重试方，
 ///   该子进程因此可能存活——这是 OS 语义，不假装已经解决。
-/// - `kill` 的**正路**（真的杀掉一个活进程）在测试里未验证：验证它必须真的起一个
-///   进程，本仓测试明确不起真进程。无需进程的路径（未知 pid / 已退出）有测试。
+/// - `kill` 的**正路**（真的杀掉一个活进程 → `Terminated`）由
+///   `real_sidecar_round_trip_settles_and_disable_kills_the_process` 与
+///   `silent_sidecar_receives_but_never_answers_and_is_killed_cleanly` 真进程验证；
+///   无需进程的路径（未知 pid / 已退出）另有单测。
 /// - Unix/macOS 默认 provider 用独立 POSIX process group，Windows 默认 provider 用
 ///   KILL_ON_JOB_CLOSE Job Object；三桌面平台都已有真实 process-tree containment。
 ///   但 filesystem/network/syscall 隔离仍未内建，Windows 还有 post-spawn attach
@@ -608,12 +630,19 @@ pub struct CommandSpawner {
     /// 因此这里不再持有（不影响 `try_wait`/`kill`）。封 `Arc` 以便读线程在
     /// stdout EOF 时**主动回收**已退出的子进程（1.0-W7）。
     children: Arc<Mutex<HashMap<u32, Child>>>,
-    /// pid → sidecar stdin 写句柄（宿主写 JSON-RPC 行帧用）。
+    /// pid → sidecar stdin 写队列的发送端（宿主写 JSON-RPC 行帧用）。
     ///
-    /// **两级锁**（1.0-W7）：外层锁只在「取该 pid 的 `Arc`」时短暂持有，
-    /// 阻塞的 `write_all`/`flush` 只持**内层** per-pid 锁——因此一个不读 stdin
-    /// 的 sidecar 不会拖住其他进程的帧投递。
-    stdin_writers: Arc<Mutex<HashMap<u32, Arc<Mutex<ChildStdin>>>>>,
+    /// **轮 2 改造：写侧从「调用线程同步写管道」改为「有界队列 + 专属写线程」**。
+    /// 旧写法的阻塞点在 OS 管道上：sidecar 不读 stdin 时管道缓冲写满，
+    /// `write_all` 就**永久停在调用线程上**——生产路径的调用线程就是 Tauri 命令
+    /// 线程（`tauron-adapter/src/process_delivery.rs` 的 `CallDelivery::deliver`
+    /// 内联调用）。此前的两级锁只解决「一个坏 sidecar 拖累别的 pid」，
+    /// 对这个 pid 自己的投递线程既无超时也无上限。
+    ///
+    /// 现在的形态：`write_frame` 只做 `try_send`（不阻塞、可失败），真正面向管道
+    /// 的阻塞写发生在该 pid 专属的写线程里。条目被摘除（EOF 回收 / 未登记）时
+    /// 发送端 drop → 写线程收尾退出，同时 sidecar 的 stdin 拿到 EOF。
+    stdin_writers: Arc<Mutex<HashMap<u32, Arc<mpsc::SyncSender<Vec<u8>>>>>>,
     /// 帧接收器 + 关闭标记（同一把锁，见 [`SinkTable`]）。
     sinks: Arc<Mutex<SinkTable>>,
     /// V4 A97 sandbox provider invoked before every OS spawn.
@@ -634,6 +663,74 @@ impl Default for CommandSpawner {
 /// 单帧字节上限（1.0-W7）。超过即判定为协议违规并断开读线程——
 /// 防 sidecar 用一条没有换行的超长行把宿主内存吃光。
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+/// 写侧队列深度（轮 2）。`write_frame` 只做 `try_send`：队列满即**如实报错**，
+/// 绝不阻塞调用线程，也绝不丢帧（返回 `Err` 的帧调用方知道没投递出去）。
+///
+/// 与 [`MAX_FRAME_BYTES`]（入队时校验）合起来给出每个 pid 的写侧内存上界
+/// = `WRITE_QUEUE_FRAMES × MAX_FRAME_BYTES` = 32 MiB（最坏情况）。
+pub const WRITE_QUEUE_FRAMES: usize = 32;
+
+/// 某 pid 的 stdin 写线程：独占管道写句柄，按队列顺序逐帧写。
+///
+/// 为什么单独一个线程：管道写满只能靠**对端读**来解，宿主这边没有任何
+/// 非阻塞又能等的写法。把阻塞圈在这个线程里，代价是「这一路帧落后」，
+/// 换来的是命令线程永不被一个不读 stdin 的 sidecar 钉死。
+///
+/// 退出条件只有两条，且都**有界**：
+/// - 写管道出错（进程已退/stdin 已断）→ 立即收尾，后续入队会拿到 `Disconnected`；
+/// - 发送端全部 drop（EOF 回收摘条目 / spawner 被丢弃）→ 队列自然耗尽后退出，
+///   此时 `ChildStdin` 随本结构 drop，sidecar 读到 stdin EOF（体面的收尾信号）。
+struct StdinWriter {
+    stdin: ChildStdin,
+    rx: mpsc::Receiver<Vec<u8>>,
+}
+
+impl StdinWriter {
+    fn run(self) {
+        let StdinWriter { mut stdin, rx } = self;
+        for frame in rx.iter() {
+            if write_frame_to(&mut stdin, &frame).is_err() {
+                return; // 管道断了：留在表里的写句柄已无意义，如实结束线程
+            }
+        }
+    }
+}
+
+/// 一帧 = 内容 + 换行 + flush（sidecar 按行分帧，见 `tauron-test-sidecar`）。
+fn write_frame_to(stdin: &mut ChildStdin, frame: &[u8]) -> std::io::Result<()> {
+    stdin.write_all(frame)?;
+    stdin.write_all(b"\n")?;
+    stdin.flush()
+}
+
+/// 已发出终止后等退出状态的上界（轮 2）。
+///
+/// 取值依据：SIGKILL / Job Object 的生效在毫秒级，2s 已是三个数量级的余量；
+/// 再大就是把「收尾可能卡住」换成「收尾一定很慢」。
+const KILL_REAP_TIMEOUT_MS: u64 = 2_000;
+
+/// **有界**地取子进程退出状态，替代阻塞的 `Child::wait()`。
+///
+/// `Some(状态)` = 已确认退出并回收（Unix 不留僵尸）；`None` = 上界内取不到，
+/// 或 `try_wait` 本身报错——两者都**不是**「进程还活着」的证明，调用方必须
+/// 保留句柄并如实报告，而不是当成已回收。
+fn reap_bounded(child: &mut Child) -> Option<std::process::ExitStatus> {
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(KILL_REAP_TIMEOUT_MS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(_) => return None,
+        }
+    }
+}
 
 /// 去掉行帧首尾的 ASCII 空白（含 `\n` / `\r`），返回子切片。
 fn trim_ascii(bytes: &[u8]) -> &[u8] {
@@ -710,7 +807,9 @@ impl ProcSpawner for CommandSpawner {
         // in any Tauron runtime table. A failed Job/cgroup/container attach is fail-closed.
         if let Err(error) = self.sandbox_provider.attach_spawned(&child) {
             let _ = child.kill();
-            let _ = child.wait();
+            // 有界回收：这里的 `Child` 从未进表，没人能重试，因此**不允许**
+            // 阻塞在 `wait()` 上（轮 2：收尾路径一律有上界）。
+            let _ = reap_bounded(&mut child);
             return Err(error);
         }
 
@@ -722,7 +821,7 @@ impl ProcSpawner for CommandSpawner {
             (Some(stdin), Some(stdout)) => (stdin, stdout),
             (stdin, stdout) => {
                 let _ = child.kill();
-                let _ = child.wait();
+                let _ = reap_bounded(&mut child);
                 let _ = (stdin, stdout); // 管道句柄随作用域关闭
                 return Err(ProcError::SpawnFailed(
                     "sidecar stdin/stdout 管道未就绪（已回收子进程）".into(),
@@ -748,7 +847,13 @@ impl ProcSpawner for CommandSpawner {
             stale.on_eof(pid);
         }
 
-        self.stdin_writers.lock().insert(pid, Arc::new(Mutex::new(stdin)));
+        // 写侧：有界队列 + 该 pid 专属写线程（见 `StdinWriter`）。发送端进表，
+        // 接收端与管道句柄交给线程。先把发送端插入表里再起线程——否则一个立刻
+        // 退出并触发 EOF 回收的 sidecar 可能抢在插入之前把条目摘掉，留下一条
+        // 永远没人摘的僵尸管道句柄。
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE_FRAMES);
+        self.stdin_writers.lock().insert(pid, Arc::new(tx));
+        std::thread::spawn(move || StdinWriter { stdin, rx }.run());
 
         // 读线程：持续排空 sidecar 的 stdout，逐行交给该 pid 注册的 sink。
         // 读到 EOF（进程退出 / 关闭 stdout）即退出线程、清理登记、并**主动回收**
@@ -774,8 +879,16 @@ impl ProcSpawner for CommandSpawner {
                 match read {
                     // EOF：进程退出（或主动关了 stdout）。
                     Ok(0) => break,
-                    // 超长帧（无换行）：协议违规，断开该进程的读线程。
-                    Ok(_) if buf.len() > MAX_FRAME_BYTES => break,
+                    // 超长帧（无换行）：协议违规。先报告类型化结局，再断开该进程的读线程。
+                    Ok(_) if buf.len() > MAX_FRAME_BYTES => {
+                        // **先取后用**：与下面 `on_frame` 同一套锁纪律——不得在持着
+                        // `sinks` 临时 guard 时回调 sink。
+                        let sink = sinks.lock().get(pid, gen);
+                        if let Some(s) = sink {
+                            s.on_frame_oversized(pid, buf.len());
+                        }
+                        break;
+                    }
                     Ok(_) => {
                         let trimmed = trim_ascii(&buf);
                         if trimmed.is_empty() {
@@ -870,12 +983,13 @@ impl ProcSpawner for CommandSpawner {
         !matches!(self.status(pid), ProcessStatus::Exited)
     }
 
-    /// 终止并**回收**（`wait`）子进程。
+    /// 终止并**有界地**回收子进程（[`reap_bounded`]，上界
+    /// [`KILL_REAP_TIMEOUT_MS`]；轮 2 之前用的是阻塞的 `Child::wait()`）。
     ///
-    /// 两条无需真进程即可验证的路径：未跟踪 pid → `AlreadyGone`；`kill` 失败但
-    /// `try_wait` 确认已退出 → `AlreadyGone`。**正路（`Terminated`，即真的杀掉一个
-    /// 活进程）未验证**：验证它必须真的起一个进程，而本仓测试明确不起真进程
-    /// （见模块头注释）。这是诚实标注的未验证部分，不是遗漏。
+    /// 三条路径都有证据：未跟踪 pid → `AlreadyGone`（单测）；`kill` 失败但
+    /// `try_wait` 确认已退出 → `AlreadyGone`（单测）；**正路 `Terminated`**（真的
+    /// 杀掉一个活进程）由 `crates/tauron-test-sidecar/tests/sidecar_e2e.rs` 的真
+    /// sidecar 用例验证（轮 22 / V7-P1-05），不再只是代码推导。
     fn kill(&self, pid: u32) -> ProcResult<KillOutcome> {
         let Some(mut child) = self.children.lock().remove(&pid) else {
             return Ok(KillOutcome::AlreadyGone);
@@ -883,8 +997,19 @@ impl ProcSpawner for CommandSpawner {
 
         match self.sandbox_provider.terminate_tree(pid) {
             Ok(true) => {
-                let _ = child.wait();
-                return Ok(KillOutcome::Terminated);
+                // **有界**回收（轮 2）：`Child::wait()` 在进程不可杀（Unix D 状态、
+                // Windows 作业已脱离）时永不返回，而这里既跑在调用线程上，也会被
+                // `Drop` 逐个 pid 调用——一处卡住就把整个运行时收尾冻结。取不到退出
+                // 状态时**放回句柄并如实报错**：上层据此留痕并可重试，不假装已回收。
+                return match reap_bounded(&mut child) {
+                    Some(_) => Ok(KillOutcome::Terminated),
+                    None => {
+                        self.children.lock().insert(pid, child);
+                        Err(ProcError::ProcessTerminated(format!(
+                            "已向 pid {pid} 的进程树发出终止，但 {KILL_REAP_TIMEOUT_MS}ms 内未取到退出状态（句柄已保留，可重试）"
+                        )))
+                    }
+                };
             }
             Ok(false) => {}
             Err(error) => {
@@ -896,10 +1021,15 @@ impl ProcSpawner for CommandSpawner {
         }
 
         match child.kill() {
-            Ok(()) => {
-                let _ = child.wait();
-                Ok(KillOutcome::Terminated)
-            }
+            Ok(()) => match reap_bounded(&mut child) {
+                Some(_) => Ok(KillOutcome::Terminated),
+                None => {
+                    self.children.lock().insert(pid, child);
+                    Err(ProcError::ProcessTerminated(format!(
+                        "已终止 pid {pid}，但 {KILL_REAP_TIMEOUT_MS}ms 内未取到退出状态（句柄已保留，可重试）"
+                    )))
+                }
+            },
             Err(e) => match child.try_wait() {
                 Ok(Some(_)) => Ok(KillOutcome::AlreadyGone),
                 _ => {
@@ -912,27 +1042,47 @@ impl ProcSpawner for CommandSpawner {
         }
     }
 
-    /// 写入一帧到 sidecar stdin（JSON-RPC 行帧，自带 `\n` 结尾）。
+    /// 写入一帧到 sidecar stdin（JSON-RPC 行帧，`\n` 由写线程补）。
     ///
-    /// 该 pid 必须此前由本启动器 `spawn` 过且尚未退出（stdin 句柄仍在登记表）；
+    /// 该 pid 必须此前由本启动器 `spawn` 过且尚未被摘除（写队列发送端仍在表里）；
     /// 否则返回 `NotFound`（调用方据此知道"投递落空"，而不是静默丢失）。
     ///
-    /// **两级锁（1.0-W7）**：外层锁只用于取该 pid 的 `Arc`，取到即释放；
-    /// 阻塞的 `write_all` / `flush` 只持**内层** per-pid 锁。因此一个不读 stdin
-    /// 的 sidecar 只会阻塞它自己的帧投递，不会拖住其他进程。
+    /// **本函数不阻塞**（轮 2）：真正的管道写在那个 pid 专属的写线程上做，这里只
+    /// `try_send`。三种结局都是**如实失败**，没有一条会假装成功：
+    /// - `NotFound`：表里没有这个 pid（未起 / 已被 EOF 回收 / 已 kill 摘除）；
+    /// - `InvalidInput`：帧长超过 [`MAX_FRAME_BYTES`]——与读侧同一道上界，
+    ///   否则 32 帧队列就成了无界的宿主内存口子；
+    /// - `WouldBlock`：队列已满（对端不读 stdin）。调用方（`ProcessCallDelivery`）
+    ///   把它当作投递失败上抛，宿主侧因此看得见背压而不是无限堆帧；
+    /// - `BrokenPipe`：写线程已因管道断裂退出。
     fn write_frame(&self, pid: u32, frame: &[u8]) -> std::io::Result<()> {
-        // 注意：临时 guard 在本语句结束即释放（未绑定到变量），阻塞写不持外层锁。
-        let stdin = self.stdin_writers.lock().get(&pid).cloned();
-        let Some(stdin) = stdin else {
+        // 临时 guard 在本语句结束即释放：外层锁只用于取发送端，入队与写管道都在锁外。
+        let tx = self.stdin_writers.lock().get(&pid).cloned();
+        let Some(tx) = tx else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("pid {pid} 没有可用的 stdin 管道（进程可能尚未启动或已退出）"),
             ));
         };
-        let mut guard = stdin.lock();
-        guard.write_all(frame)?;
-        guard.write_all(b"\n")?;
-        guard.flush()
+        if frame.len() > MAX_FRAME_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("单帧 {} 字节超过上限 {MAX_FRAME_BYTES}，未投递", frame.len()),
+            ));
+        }
+        match tx.try_send(frame.to_vec()) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(_)) => Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!(
+                    "pid {pid} 的写队列已满（{WRITE_QUEUE_FRAMES} 帧未消化，sidecar 未读 stdin）"
+                ),
+            )),
+            Err(mpsc::TrySendError::Disconnected(_)) => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                format!("pid {pid} 的 stdin 管道已断（写线程因写入失败退出）"),
+            )),
+        }
     }
 
     /// 注册一个 stdout 帧接收器（sidecar 回帧经此路由回宿主）。返回 `true` 表示已登记。
@@ -1284,7 +1434,11 @@ mod tests {
     /// **锁形门禁（1.0-R1 P0）**：`children.lock()` 的临时 guard 在 edition 2021
     /// 下会一直活到 `if let` 块尾，块内再锁同一把 `parking_lot::Mutex` 就是
     /// **永久自死锁**（不可重入、无死锁检测）。真实触发条件是"病态 sidecar 关了
-    /// stdout 还在跑"，本仓测试不起真进程，抓不到运行期——只能在源码形上钉死。
+    /// stdout 还在跑"：轮 22 起该路径有真进程 E2E
+    /// （`crates/tauron-test-sidecar/tests/sidecar_e2e.rs` 的
+    /// `stdout_eof_mid_conversation_reaps_without_hang_or_orphan`），但这条源码形
+    /// 门禁仍然保留——自死锁命中时 E2E 表现为挂到硬超时而不是稳定断言，形锁才是
+    /// 确定、秒级的证据。
     #[test]
     fn eof_reap_must_not_hold_children_lock_inside_if_let() {
         let src = include_str!("spawner.rs");
@@ -1316,7 +1470,7 @@ mod tests {
     }
 
     /// 写帧到未登记的 pid：必须如实报 `NotFound`（"投递落空"），不得静默成功。
-    /// 同时验证两级锁下写路径不需要真进程即可覆盖失败分支。
+    /// 同时验证写路径（有界队列 + 专属写线程）不需要真进程即可覆盖失败分支。
     #[test]
     fn write_frame_to_unknown_pid_reports_not_found() {
         let spawner = CommandSpawner::new();

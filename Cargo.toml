@@ -37,6 +37,9 @@ arc-swap = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 # ── URL 解析（V4 A96 网络策略；禁止字符串前缀判权）──────────────
 url = "2.5.8"
+# ── Unicode NFC 归一（V4 A85 便携路径；url→idna 已把 icu 归一实现带进依赖图）──
+# 只开 `compiled_data`：缺省特性还要拉 utf16_iter（未在图内），而 `normalize` 用不到。
+icu_normalizer = { version = "2.3.0", default-features = false, features = ["compiled_data"] }
 # ── capability-style filesystem handles（V4 A95）────────────────
 rustix = { version = "1.1.5", features = ["fs"] }
 # ── OS peer credentials for Local Host reference paths ────────────

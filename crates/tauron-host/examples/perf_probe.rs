@@ -1,25 +1,14 @@
 //! Release-stable performance/size probe for V4 evidence.
 //!
 //! This is a bounded smoke baseline rather than a benchmark leaderboard. Release CI needs a
-//! deterministic regression ceiling for the canonical Wire hot path and peak process RSS.
+//! deterministic regression ceiling for the canonical Wire hot path. Peak-RSS evidence
+//! moved to the real install stream (`tauron-adapter --example install_stream_probe`, 轮 44):
+//! reading VmHWM here only measured the wire bench, not the memory-heavy path.
 
 use std::hint::black_box;
 use std::time::Instant;
 
 use tauron_host::{decode_wire_json, encode_wire_json, WireFrame, DEFAULT_MAX_WIRE_BYTES};
-
-fn peak_rss_kb() -> Option<u64> {
-    #[cfg(target_os = "linux")]
-    {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
-        let line = status.lines().find(|line| line.starts_with("VmHWM:"))?;
-        line.split_whitespace().nth(1)?.parse().ok()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
-}
 
 fn main() {
     const ITERATIONS: u64 = 100_000;
@@ -49,7 +38,6 @@ fn main() {
             "schemaVersion": 1,
             "wireRoundTripIterations": ITERATIONS,
             "wireRoundTripElapsedMs": elapsed_ms,
-            "peakRssKb": peak_rss_kb(),
             "finalFrameBytes": bytes.len()
         })
     );

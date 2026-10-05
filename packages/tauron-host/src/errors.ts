@@ -5,6 +5,8 @@
 // 这里**不**定义任何 Tauri 依赖；所有错误对象都可被 JSON 序列化。
 // ──────────────────────────────────────────────────────────────────────────
 
+import { APP_LAYER_ERROR_CODE_PATTERN, isAppLayerErrorCode, isCodeLike } from '@tauron/types';
+
 /** 线上错误码全集（与 Rust `ErrorCode` 的**码名集合**全等；声明顺序不属于协议，V4 A69）。 */
 export const HOST_ERROR_CODES = [
   'E_HOST_PANIC',
@@ -126,24 +128,17 @@ export function isHostErrorCode(v: string): v is HostErrorCode {
   return (HOST_ERROR_CODES as readonly string[]).includes(v);
 }
 
-/** 应用层错误码形态（`@tauron/types` 的 `PluginErrorCode`，形如 `SC-1001`）。 */
-export const APP_LAYER_ERROR_CODE_PATTERN = /^SC-\d{4}$/;
-
-/** 是否应用层错误码（`SC-####`）。两套词表**并存**，本函数只做形态识别。 */
-export function isAppLayerErrorCode(v: string): boolean {
-  return APP_LAYER_ERROR_CODE_PATTERN.test(v);
-}
-
 /**
- * 是否是「像错误码」的串（宿主 `E_*` 或应用层 `SC-####`）。
+ * 框架层错误码形态（`@tauron/types` 的 `PluginErrorCode`，形如 `SC-1001`）。
  *
- * 存在的理由：边界归一若只认自己那套词表，另一套的码会被**整条丢弃**，
- * 跨层回溯就失去了唯一线索。识别形态 ≠ 接受语义：非宿主码仍是
- * `E_UNKNOWN`（判定用），只是原始码被保留（诊断用）。
+ * 轮 35 起**定义权在 `@tauron/types`**：宿主侧（本文件）与插件桥
+ * （`@tauron/plugin-sdk`）共用一份判据。这里保留同名导出是为了不破 1.0 以来的
+ * 公开面，本体只是再导出——第二份 `/^SC-\d{4}$/` 字面量由线门禁禁止。
+ *
+ * 名字里的 `APP_LAYER_` 与"框架层"这对反义是 1.0 遗留：按
+ * `docs/architecture/overview.md`，`SC-####` 属框架层、`E_*` 才是应用层宿主底座。
  */
-export function isCodeLike(v: string): boolean {
-  return v.startsWith('E_') || isAppLayerErrorCode(v);
-}
+export { APP_LAYER_ERROR_CODE_PATTERN, isAppLayerErrorCode, isCodeLike };
 
 /**
  * 尝试把字符串解析为宿主错误对象（`to_tauri_err` 的 JSON 序列化形态）。
@@ -159,8 +154,8 @@ function tryParseHostError(value: string | null | undefined): HostErrorShape | n
   if (!t.startsWith('{')) return null;
   try {
     const rec = JSON.parse(t) as Record<string, unknown>;
-    // R2-c：接受**任何**码形态（宿主 `E_*` 或应用层 `SC-####`）——只认 `E_`
-    // 会把跨层的应用层码整条丢掉，那正是「边界隐式」的典型症状。
+    // R2-c：接受**任何**码形态（宿主 `E_*` 或框架层 `SC-####`）——只认 `E_`
+    // 会把跨层的框架层码整条丢掉，那正是「边界隐式」的典型症状。
     if (typeof rec?.code === 'string' && isCodeLike(rec.code)) {
       const rawCode = rec.code;
       const code = isHostErrorCode(rawCode) ? rawCode : 'E_UNKNOWN';
@@ -186,7 +181,7 @@ function tryParseHostError(value: string | null | undefined): HostErrorShape | n
  * 用于宿主尚未结构化、或 Tauri 把错误压成纯字符串的场景。
  *
  * 返回原始码串：未识别的码也要保留（见 {@link HostErrorShape.rawCode}）。
- * R2-c：同时认应用层形态 `SC-####`——跨层错误常常只有消息里带码。
+ * R2-c：同时认框架层形态 `SC-####`——跨层错误常常只有消息里带码。
  */
 function extractCode(msg: string): {
   code: HostErrorCode | 'E_UNKNOWN';
@@ -241,7 +236,7 @@ export function normalizeError(err: unknown): HostErrorShape {
     const rec = err as Record<string, unknown>;
 
     // 1) 标准宿主错误：Rust 侧 `#[serde]` 序列化出来的 `{ code, message, retryable }`。
-    //    R2-c：也接住应用层码（`SC-####`）——它不属于宿主词表，但**必须留下原始码**，
+    //    R2-c：也接住框架层码（`SC-####`）——它不属于宿主词表，但**必须留下原始码**，
     //    否则跨层翻译时无法回溯是哪套词表的哪一条。
     if (typeof rec.code === 'string' && isCodeLike(rec.code)) {
       const rawCode = rec.code;
@@ -327,8 +322,9 @@ export class HostException extends Error {
 // R2-c：错误词表边界显式化（B3）
 //
 // 仓库里有**两套**错误词表，它们各自服务不同的层，**不合并**：
-// - 宿主词表 `HOST_ERROR_CODES`（`E_*`，Rust `ErrorCode`）：宿主命令的失败。
-// - 应用层词表 `PluginErrorCode`（`SC-####`，见 `@tauron/types`）：插件实现的失败。
+// - 宿主词表 `HOST_ERROR_CODES`（`E_*`，Rust `ErrorCode`）：**应用层**宿主命令的失败。
+// - 框架层词表 `PluginErrorCode`（`SC-####`，见 `@tauron/types`，`tauron-shell` 同源）：
+//   插件沙箱/框架协议的失败。层归属口径见 `docs/architecture/overview.md`。
 //
 // 问题不是"有两套"，而是"穿越边界时哪套胜出"从未定义：错误从插件
 // webview 穿到宿主、或从宿主穿回插件时，可能被**静默换码**，调用方按
@@ -343,7 +339,7 @@ export type HostBoundary =
   /** 宿主 → 插件 webview：宿主码原样保留，不做二次翻译。 */
   | 'host→plugin-webview'
   /**
-   * 插件内部：错误**不**越界，应用层词表（`SC-####`）必须原样保留。
+   * 插件内部：错误**不**越界，框架层词表（`SC-####`）必须原样保留。
    *
    * 这条存在的意义：插件作者按 `SC-*` 分支是合法的，边界翻译不得把它
    * 偷偷换成 `E_UNKNOWN` 之外的任何宿主码。
@@ -361,9 +357,13 @@ export type HostBoundary =
  *   而插件侧 SDK 不应依赖 `@tauron/host`（那会把整个宿主客户端打进插件包）。
  * - `plugin-internal`：同上，且它的正确用法是取
  *   {@link BoundaryTranslation.rawCode} 而**不**采用宿主词表——插件内部的错误必须
- *   留在 `SC-####` 词表里。已知的**已定位缺口**（尚未修，见
- *   `packages/tauron-plugin-sdk/src/bridge.ts` 的 `invokeHandler` 失败分支）：
- *   插件 handler 抛出的 `SC-####` 会被硬写成通用 `SC-9001`，码被丢掉。
+ *   留在 `SC-####` 词表里。曾经在这里记着的**已定位缺口**（`packages/tauron-plugin-sdk/src/bridge.ts`
+ *   将 handler 抛出的码硬换成通用 `SC-9001`）已由**轮 35 收口**：桥的失败分支现在先取
+ *   错误自带的码、再退到消息里的码形态、最后才落 `SC-9001`，插件侧 `PluginContext.invoke`
+ *   的拒绝也带上了 `code`。它仍然**不**出现在本清单的"已接线"里，理由是依赖方向没变：
+ *   桥的保码发生在 `@tauron/plugin-sdk` 本地（形态判据来自 `@tauron/types`），
+ *   不是对 {@link translate_at_boundary} 的调用——两套词表的**归一语义**（`translated` /
+ *   `foreignVocabulary` 标记）仍只在宿主侧存在。
  *
  * 门禁要求：每个 `HostBoundary` 值必须"有生产使用点"或"在此清单里"——两处都没有
  * 才会红。接线之后要把值从这里删掉（清单变小是有意义的信号）。
@@ -387,9 +387,9 @@ export interface BoundaryTranslation {
    * E_UNKNOWN」与「本端不认识那个码」——两者混在一个 `code` 里会让定位失真。
    */
   translated: boolean;
-  /** 原始码是否属于**另一套**词表（应用层 `SC-####`）。 */
+  /** 原始码是否属于**另一套**词表（框架层 `SC-####`）。 */
   foreignVocabulary: boolean;
-  /** 边界前的原始码（可能是宿主码、应用层码或未知串；消息里没有码则 `null`）。 */
+  /** 边界前的原始码（可能是宿主码、框架层码或未知串；消息里没有码则 `null`）。 */
   rawCode: string | null;
 }
 
@@ -400,7 +400,7 @@ export interface BoundaryTranslation {
  * - 返回值**永远**是宿主词表的 {@link HostException}：边界之后没有"可能是
  *   Error、可能是字符串、可能是 `{message}`"的第四种形态。
  * - `rawCode` 永远保留原始码，`translated` 标记它是否被改写——**不丢信息**。
- * - 应用层码（`SC-####`）在 `plugin-internal` 边界**原样保留**（只标记
+ * - 框架层码（`SC-####`）在 `plugin-internal` 边界**原样保留**（只标记
  *   `foreignVocabulary`），不并入宿主词表。
  */
 export function translate_at_boundary(err: unknown, boundary: HostBoundary): BoundaryTranslation {

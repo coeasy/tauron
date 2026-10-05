@@ -28,6 +28,7 @@ pub mod fault;
 pub mod generation;
 pub mod health;
 pub mod lifecycle;
+pub(crate) mod liveness;
 pub mod local_host;
 pub mod local_host_reference;
 pub mod manifest;
@@ -37,6 +38,7 @@ pub mod policy;
 pub mod portable_path;
 pub mod production;
 pub mod provider;
+pub mod readiness;
 pub mod registry;
 pub mod remote_host;
 pub mod remote_host_reference;
@@ -73,7 +75,10 @@ pub use remote_host_reference::{
     RemoteTlsReferenceError, RemoteTlsRequest, RemoteTlsServerObservation,
     REMOTE_TLS_MAX_MESSAGE_BYTES,
 };
-pub use runtime::{LeaseReaper, ReapOutcome, ReapStats, RuntimeHandle, RuntimeLease, RuntimeTable};
+pub use runtime::{
+    LeaseReaper, ReapOutcome, ReapStats, RuntimeHandle, RuntimeLease, RuntimeTable,
+    TerminalReapRecord, MAX_PENDING_REAPS, MAX_REAP_RETRY_ATTEMPTS, MAX_TERMINAL_REAPS,
+};
 pub use wire::{
     decode_json as decode_wire_json, encode_json as encode_wire_json, WireError, WireExtensions,
     WireFrame, WireHeader, DEFAULT_MAX_WIRE_BYTES, JSON_V1_CODEC, WIRE_VERSION_V1,
@@ -101,8 +106,8 @@ pub use execution::{
 };
 pub use fault::{FaultBoundary, FaultError, FaultRecord, FaultState};
 pub use generation::{
-    Generation, GenerationError, GenerationHandle, GenerationRegistry, PackCacheKey, PackGcState,
-    PackLease, PackLeaseRegistry,
+    Generation, GenerationError, GenerationHandle, GenerationRegistry, GenerationStats,
+    PackCacheKey, PackGcState, PackLease, PackLeaseRegistry,
 };
 pub use health::{Degradation, HealthReport, Liveness, Readiness};
 pub use local_host::{
@@ -113,8 +118,8 @@ pub use local_host_reference::{
     reference_wire_roundtrip, LocalHostReferenceError, REFERENCE_CONTROL_MAX_BYTES,
 };
 pub use network_policy::{
-    is_public_ip, AuthorizedUrl, DomainRule, NetworkEnforcement, NetworkPolicy, NetworkPolicyError,
-    PrivateNetworkPolicy, RedirectAuthorization,
+    is_public_ip, resolve_redirect_location, AuthorizedUrl, DomainRule, NetworkEnforcement,
+    NetworkPolicy, NetworkPolicyError, PrivateNetworkPolicy, RedirectAuthorization,
 };
 pub use ordering::{OrderedEventMeta, OrderingError, OrderingTracker};
 pub use policy::{DecisionError, DecisionToken, PolicyAuthority};
@@ -125,6 +130,7 @@ pub use production::{
     ReadinessViolation,
 };
 pub use provider::{CapabilityEpoch, ProviderLifecycle, ProviderLifecycleError, ProviderState};
+pub use readiness::{ApplicationReadiness, ReadinessFact, ReadinessSet};
 pub use scoped_fs::{
     list_hard as scoped_fs_list_hard, mkdir_hard as scoped_fs_mkdir_hard,
     platform_enforcement as scoped_fs_enforcement, read_hard as scoped_fs_read_hard,
@@ -136,8 +142,8 @@ pub use storage::{
     PersistentWriterLease, SingleWriterLease, StorageNamespace, WriterLeaseError, WriterLeaseTable,
 };
 pub use target::{
-    current_target_spec, resolve_best as resolve_best_target, TargetAbi, TargetArch, TargetOs,
-    TargetSpec,
+    current_target_spec, resolve_best as resolve_best_target, ArtifactVariantResolver, TargetAbi,
+    TargetArch, TargetOs, TargetSpec,
 };
 pub use time_trust::{
     require_unexpired, suspicious_if_skew_exceeds, SystemTimeProvider, TimeTrustError,

@@ -258,7 +258,7 @@ describe('translate_at_boundary（R2-c）', () => {
     expect(r.rawCode).toBe('E_AUTH_DENIED');
   });
 
-  it('webview→host 边界：应用层码被收窄，但原始码与"发生过翻译"都留痕', () => {
+  it('webview→host 边界：框架层码被收窄，但原始码与"发生过翻译"都留痕', () => {
     const r = translate_at_boundary({ code: 'SC-1001', message: 'denied' }, 'plugin-webview→host');
     // 边界之后只有宿主词表可用 → 判定依据是 E_UNKNOWN…
     expect(r.error.code).toBe('E_UNKNOWN');
@@ -268,7 +268,7 @@ describe('translate_at_boundary（R2-c）', () => {
     expect(r.foreignVocabulary).toBe(true);
   });
 
-  it('plugin-internal 边界：应用层码保留，不构成"被翻译"', () => {
+  it('plugin-internal 边界：框架层码保留，不构成"被翻译"', () => {
     const r = translate_at_boundary(new Error('SC-2001: 超时'), 'plugin-internal');
     expect(r.rawCode).toBe('SC-2001');
     expect(r.foreignVocabulary).toBe(true);

@@ -134,11 +134,18 @@ pub struct InstallRequest {
 }
 
 /// 安装响应。
+///
+/// `success` 只表示**这条请求被 API 客户端接受**，不表示磁盘上真装了东西：
+/// 本客户端是模拟商城（`install` 不下载、不解压、不写文件），因此 `simulated`
+/// 恒为 `true`。调用方不得把 `success: true` 当作落地凭据（V7 §9
+/// `success_requires_effect` 门禁就是钉这一点的）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallResponse {
     /// 是否成功。
     pub success: bool,
+    /// 本次结果是否为模拟（`true` = 没有任何文件落地）。
+    pub simulated: bool,
     /// 插件 ID。
     pub plugin_id: String,
     /// 安装版本。
@@ -188,11 +195,16 @@ pub struct UninstallRequest {
 }
 
 /// 卸载响应。
+///
+/// 与 [`InstallResponse`] 同一口径：`success` 是「请求被模拟客户端接受」，
+/// 没有文件被删除（`simulated` 恒 `true`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UninstallResponse {
     /// 是否成功。
     pub success: bool,
+    /// 本次结果是否为模拟（`true` = 没有任何文件被删除）。
+    pub simulated: bool,
     /// 插件 ID。
     pub plugin_id: String,
     /// 错误信息。
@@ -392,6 +404,8 @@ impl MarketplaceApi {
 
         Ok(InstallResponse {
             success: true,
+            // 本客户端不下载、不解压、不写文件：如实标注。
+            simulated: true,
             plugin_id: request.plugin_id.clone(),
             version,
             install_path: format!("/plugins/{}", request.plugin_id),
@@ -412,7 +426,12 @@ impl MarketplaceApi {
             None,
         );
 
-        Ok(UninstallResponse { success: true, plugin_id: request.plugin_id.clone(), error: None })
+        Ok(UninstallResponse {
+            success: true,
+            simulated: true,
+            plugin_id: request.plugin_id.clone(),
+            error: None,
+        })
     }
 
     /// 吊销插件。
@@ -573,6 +592,8 @@ mod tests {
         assert!(result.is_ok());
         let response = result.unwrap();
         assert!(response.success);
+        // `success` 不是落地凭据：本客户端一个字节都没写（V7 §9 success_requires_effect）。
+        assert!(response.simulated, "模拟安装必须自带 simulated 标记");
         assert_eq!(response.plugin_id, "com.example.plugin-a");
     }
 
@@ -617,6 +638,8 @@ mod tests {
         assert!(result.is_ok());
         let response = result.unwrap();
         assert!(response.success);
+        // 与 `test_install` 同一条口径：卸载同样是模拟，`success` 不代表文件被删。
+        assert!(response.simulated, "模拟卸载必须自带 simulated 标记");
     }
 
     // ── 吊销测试 ──

@@ -7,6 +7,9 @@ import {
   errorCategory,
   errorMessage,
   isValidErrorCode,
+  isAppLayerErrorCode,
+  isCodeLike,
+  extractCodeLike,
 } from './errors.js';
 
 describe('errors', () => {
@@ -122,6 +125,40 @@ describe('errors', () => {
       expect(isValidErrorCode('SC-9999')).toBe(false);
       expect(isValidErrorCode('INVALID')).toBe(false);
       expect(isValidErrorCode('')).toBe(false);
+    });
+  });
+
+  // 轮 35：两套词表（宿主 `E_*` / 框架层 `SC-####`）穿越 iframe 桥时的"保码"
+  // 判据只有这一份，两侧共用；这里把**形态**与**成员资格**的边界钉住——
+  // 本层只认形态，合法集仍归各层自己的清单。
+  describe('码形态判据（isCodeLike / extractCodeLike）', () => {
+    it('识别两套词表的形态', () => {
+      expect(isCodeLike('E_LEASE_EXPIRED')).toBe(true);
+      expect(isCodeLike('SC-2001')).toBe(true);
+      expect(isAppLayerErrorCode('SC-2001')).toBe(true);
+    });
+
+    it('不把普通文本或错形态当成码', () => {
+      for (const v of ['', 'INTERNAL', 'SC-12', 'SC-12345', 'e_lower', 'SC_2001', '500']) {
+        expect(isCodeLike(v), `${v} 不是码形态`).toBe(false);
+      }
+      // 形态判据故意宽：不在应用层词表内的 SC 码仍是"码形态"，成员资格由
+      // isValidErrorCode 负责（两者不可互相替代）。
+      expect(isCodeLike('SC-9999')).toBe(true);
+      expect(isValidErrorCode('SC-9999')).toBe(false);
+    });
+
+    it('从消息文本里抽码，两处都没有返回 null', () => {
+      expect(extractCodeLike('调用失败：E_PLUGIN_DISABLED')).toBe('E_PLUGIN_DISABLED');
+      expect(extractCodeLike('boom (SC-2004)')).toBe('SC-2004');
+      expect(extractCodeLike('彻底没有码')).toBeNull();
+      expect(extractCodeLike('E_')).toBeNull();
+    });
+
+    it('全枚举值都过形态判据（词表与判据不可漂移）', () => {
+      for (const code of Object.values(PluginErrorCode)) {
+        expect(isAppLayerErrorCode(code), `${code} 应匹配 SC-#### 形态`).toBe(true);
+      }
     });
   });
 });

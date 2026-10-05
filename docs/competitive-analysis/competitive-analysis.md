@@ -61,7 +61,7 @@
 | **核心价值主张** | 为 Tauri 2 桌面应用提供完整的插件化基础设施：沙箱隔离、权限管控、插件市场、白标品牌化、多形态插件加载 |
 | **目标用户** | ① 基于 Tauri 2 开发桌面应用的团队/个人 ② 需要可扩展插件系统的客户端产品 ③ 需要白标/OEM 多品牌的企业 |
 | **核心功能** | 四种插件形态（`PluginType`：Rust/JS/WASM/Process；**代码里不存在 B+ 变体**）🟡、进程内沙箱（dual-world，fail-closed 模拟）🟡、双层 ACL ✅、插件信封协议 ✅、事件总线 ✅、CLI 工具链 🟡、插件市场 🟡、品牌化 ✅（构建期 CI 矩阵 + 运行期 `host_brand_info` 真走 `tauron-brand` 校验；env 未配置时如实降级 `UnsupportedBody`） |
-| **技术架构** | Rust 核心（16 crates 平台无关，含 `tauron-ffi`）+ TypeScript 层（21 个包目录 = 20 公开 + 私有 `@tauron/contract-tests`）+ Tauri 2 适配器 + Lit/React/Vue/Svelte UI（registry 已发布数是另一口径：15 crate / 20 包 @1.0.2，见 §5.1 复核横幅） |
+| **技术架构** | Rust 核心（17 crates：16 个平台无关核心含 `tauron-ffi`，另有 `tauron-test-sidecar` 是 CI 真 sidecar 夹具、`publish = false` 永不上架）+ TypeScript 层（21 个包目录 = 20 公开 + 私有 `@tauron/contract-tests`）+ Tauri 2 适配器 + Lit/React/Vue/Svelte UI（registry 已发布数是另一口径：15 crate / 20 包 @1.0.2，见 §5.1 复核横幅） |
 | **差异化优势** | ① 平台无关核心（不依赖 tauri crate）✅ ② 三档授权模型 ✅ ③ 四种插件形态（仅 Js / Process 有生产执行器）🟡 ④ 商城-签名-分发链路（Ed25519 验签 + 灰度登记，UI 入口未接线）🟡 ⑤ 进程内沙箱（QuickJS-WASM 引擎未接入，当前为 fail-closed 模拟）🟡 —— 标记含义见 §〇，逐条依据见第六章 |
 
 ---
@@ -88,14 +88,14 @@
 | 功能维度 | **Tauron** | Tauri 2 原生 | Taurify | VSCode Ext | DSH Desktop | Extism | ZeroClaw | **Tauron 兑现度**（2026-09-24） |
 |----------|:----------:|:------------:|:-------:|:----------:|:-----------:|:------:|:--------:|:---:|
 | 插件生命周期管理 | ✅ 10 态状态机 | ⚠️ 基础 initialize | ✅ | ✅ 完整 | ✅ Cordis | ❌ | ✅ | ✅ 已接线（`crates/tauron-host/src/lifecycle.rs`；`host_lifecycle_report` / `host_registry_admin` 实调） |
-| 多形态插件加载 | ✅ 4 形态 | ❌ 仅 Rust | ⚠️ | ⚠️ 仅 JS | ⚠️ 仅 JS | ✅ WASM | ✅ WASM | 🟡 参考实现——Js 命令面已接线且经事件总线 request 通道**真投递**；Process「真起进程 / 真探测 / 真终止」且 **stdin/stdout piped 帧回路已接线**（`crates/tauron-proc/src/spawner.rs:358-359` + 读线程 `:410`；**无真 sidecar 端到端证据**，心跳监控未实现）；wasm **无运行时**，只回诚实失败码 `E_PLUGIN_TYPE_NO_RUNTIME`（`crates/tauron-adapter/src/lib.rs` 的 `cmd_runtime_spawn`）；`PluginType` 无 B+ 变体 |
-| 安全沙箱 | ✅ 双世界+WASM | ⚠️ ACL-only | ⚠️ | ✅ 进程隔离 | ❌ | ✅ 沙箱 | ✅ 内核级 | 🟡 参考实现（`packages/tauron-dual-world/src/sandbox.ts:136` **fail closed**：返回 `ok:false` + `code:'SANDBOX_UNAVAILABLE'`，**不伪报执行成功**——轮 11 审计修正了此前"随机延迟后返回 `executed:true`"的假成功；wasm 无运行时） |
+| 多形态插件加载 | ✅ 4 形态 | ❌ 仅 Rust | ⚠️ | ⚠️ 仅 JS | ⚠️ 仅 JS | ✅ WASM | ✅ WASM | 🟡 参考实现——Js 命令面已接线且经事件总线 request 通道**真投递**；Process「真起进程 / 真探测 / 真终止」且 **stdin/stdout piped 帧回路已接线**（`crates/tauron-proc/src/spawner.rs:358-359` + 读线程 `:410`；**真 sidecar 端到端已验证**——轮 22 的 `crates/tauron-test-sidecar/tests/sidecar_e2e.rs` 真起进程跑完整帧回路，心跳监控仍未实现）；wasm **执行层已有真 wasmi 运行时**（轮 22 的 `crates/tauron-wasm/src/provider.rs`），但适配层投递仍未消费它，命令面对 wasm 仍回诚实失败码 `E_PLUGIN_TYPE_NO_RUNTIME`（`crates/tauron-adapter/src/lib.rs` 的 `cmd_runtime_spawn`）；`PluginType` 无 B+ 变体 |
+| 安全沙箱 | ✅ 双世界+WASM | ⚠️ ACL-only | ⚠️ | ✅ 进程隔离 | ❌ | ✅ 沙箱 | ✅ 内核级 | 🟡 参考实现（`packages/tauron-dual-world/src/sandbox.ts:136` **fail closed**：返回 `ok:false` + `code:'SANDBOX_UNAVAILABLE'`，**不伪报执行成功**——轮 11 审计修正了此前"随机延迟后返回 `executed:true`"的假成功；wasm 执行层轮 22 起有真 wasmi 运行时（`crates/tauron-wasm/src/provider.rs`），但双世界沙箱与 wasm 投递都还没接进宿主） |
 | 双层 ACL 权限 | ✅ 静态+动态 | ✅ capabilities | ✅ | ✅ contributes | ❌ | ✅ Manifest | ✅ deny-default | ✅ 已接线（动态三档授权 `tauron_host::authz::resolve_principal`，`crates/tauron-host/src/authz.rs:409`；origin 门是唯一分发咽喉点 `origin_gate`，`crates/tauron-adapter/src/tauri.rs:1944`）；授予/审批链 `tauron-acl` 🟡 已在依赖表内，仅 `plugin-install` feature 下被调 |
-| 插件市场/商城 | ✅ 完整链路 | ❌ | ✅ | ✅ Marketplace | ✅ dshmarket | ❌ | ❌ | 🟡 参考实现（`host_market_check` 恒 `{available:false}`、`host_market_download/install` 恒 `{simulated:true}`，`crates/tauron-adapter/src/lib.rs` 的 `cmd_market_check` / `cmd_market_download` / `cmd_market_install`；`tauron-market` 现已在 `tauron-adapter` 依赖表内（`plugin-install` feature 下用于安装验签）。**`tauron-distribute` 已接线**——它卡在商城取包链，不在分发/灰度机制本身，见下一行） |
+| 插件市场/商城 | ✅ 完整链路 | ❌ | ✅ | ✅ Marketplace | ✅ dshmarket | ❌ | ❌ | 🟡 参考实现（`host_market_check` 恒 `{available:false}`、`host_market_download/install` 恒 `{simulated:true}`，`crates/tauron-adapter/src/lib.rs` 的 `cmd_market_check` / `cmd_market_download` / `cmd_market_install`；**但"有没有更新"这个问题自轮 29 起不再由这条桩回答**——SDK 的检查腿与壳层对话框的检查腿（轮 31 接上）都读 `host_updater_check`；`tauron-market` 现已在 `tauron-adapter` 依赖表内（`plugin-install` feature 下用于安装验签）。**`tauron-distribute` 已接线**——它卡在商城取包链，不在分发/灰度机制本身，见下一行） |
 | 白标品牌化 | ✅ CI 矩阵 | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ 已接线（**构建期**：`packages/tauron-app-cli/src/brand.ts` 的 `generateCiMatrix` / `generateBrandFiles` 有测试；**运行期**（轮 13 复核改判）：`host_brand_info` 已装配 env provider——配置了 `TAURON_BRAND_CONFIG(_JSON)` 就走 `tauron-brand` 校验链返回 `BrandInfo`，未配置如实返回 `UnsupportedBody{supported:false, reason:"brand provider is not configured"}`，不是空对象桩——`crates/tauron-adapter/src/lib.rs` 的 `cmd_brand_info`） |
 | 灰度发布 | ✅ 4 阶段 | ❌ | ✅ OTA | ❌ | ✅ Beta 通道 | ❌ | ❌ | ✅ 已接线（轮 13 复核改判：`tauron-distribute` 在 `tauron-adapter` **默认**依赖表内，updater provider 真跑 `check_for_update`——灰度 4 阶段 + 每批最小停留 + 崩溃门禁 + `InstallationIdentity::load_or_create` 落盘分桶；命令面 `host_updater_check` / `host_updater_status` 仅主窗。边界：`EndpointClient` 须由装配方注入（缺省 fail-closed），批次推进 `advance_grayscale` 是留给集成方的控制面，仓内无调用方） |
 | 事件总线 | ✅ 三通道 | ⚠️ 基础 | ✅ | ✅ | ✅ Cordis | ❌ | ❌ | ✅ 已接线（`host_events_publish/subscribe/unsubscribe/drain`，`kind` = event/request/state） |
-| 多 UI 框架适配 | ✅ R/V/S/Lit | ❌ | ⚠️ | ❌ Webview | ⚠️ React | ❌ | ❌ | 🟡 分包判定（轮 17 与台账 `contracts/module-maturity.json` 对齐）：`@tauron/adapter-react` / `adapter-vue` / `adapter-svelte` 三包是 **`reference-only`** —— 各自有测试，但**本仓内零生产消费者**（`full-architecture-refactor-plan.md` §「❌ 仅本包测试可达」同一口径），面向外部集成方；`@tauron/ui-primitives` 才是 `repo-consumed`（`@tauron/ui` 依赖它）。这一判定由 `wire-gate` 的 `consumerStatus` 同源门禁把守，改台账不改文档即红 |
+| 多 UI 框架适配 | ✅ R/V/S/Lit | ❌ | ⚠️ | ❌ Webview | ⚠️ React | ❌ | ❌ | 🟡 分包判定（轮 17 与台账 `contracts/module-maturity.json` 对齐）：`@tauron/adapter-react` / `adapter-vue` / `adapter-svelte` 三包是 **`reference-only`** —— 各自有测试，但**本仓内零生产消费者**（原 1.0 方案的「❌ 仅本包测试可达」口径，同一判定现由 `contracts/module-maturity.json` 台账登记），面向外部集成方；`@tauron/ui-primitives` 才是 `repo-consumed`（`@tauron/ui` 依赖它）。这一判定由 `wire-gate` 的 `consumerStatus` 同源门禁把守，改台账不改文档即红 |
 | CLI 工具链 | ✅ 完整 | ⚠️ basic | ✅ | ✅ yo 生成器 | ❌ | ✅ PDK | ❌ | 🟡 部分接线：`@tauron/app-cli` 多数命令有实现与测试（`pluginSign` 已接 `@tauron/market` 的 Ed25519，2026-09-24）；`@tauron/cli` 的 `plugin sign` **已于轮 11 修正**——不再用 `hash * 31` 假摘要冒充 `ed25519`，现在算**真实 SHA-256 内容摘要**、线形如实标 `algorithm: 'sha256-digest'` + `simulated: true`，并把 `.sig` 真的写出来（`packages/tauron-cli/src/plugin-lifecycle.ts:157` 的 `pluginSign`；非对称签名不在本包内实现）。`plugin publish` 只生成端点不落网络 |
 | 跨语言契约测试 | ✅ TS↔Rust | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ 已接线（`@tauron/contract-tests` 的 `contract.test.ts` + `wire-gate.test.ts` 解析两侧源码逐调用点比对） |
 | i18n 国际化 | ✅ 插件命名空间 | ❌ | ⚠️ | ✅ | ❌ | ❌ | ❌ | ✅ 已接线（`host_i18n_*` 6 条命令实调 `tauron_i18n`；`plugin:<id>.oc.<key>` 前缀在 `cmd_i18n_load` 落地） |
@@ -196,10 +196,13 @@
 > - 「Rust Native Plugin」「B+ 混合模式」在代码里**没有对应实现**——`PluginType`
 >   只有 `Rust` / `Js` / `Process` / `Wasm` 四变体，且 Rust / Wasm 返回
 >   `E_PLUGIN_TYPE_NO_RUNTIME`；
-> - `tauron-wasm` 是 1629 行、50 测试的**未接线 crate，且无任何 wasm 引擎依赖**
->   （无 `wasmtime`/`extism`/`wasmi`/`quickjs`），「Extism / QuickJS-WASM」是设想；
-> - 进程插件（`tauron-proc`）的 piped 帧回路已接线（0.4-A1/W7），但**无真 sidecar
->   端到端证据**，心跳监控未实现。
+> - `tauron-wasm`（轮 22 更正）：**执行层已有真引擎**——`Cargo.toml` 里是
+>   `wasmi = "2.0.0"`，`src/provider.rs` 真编译模块、真实例化、真调导出，`execute`
+>   在模块未加载或代际不符时硬失败；**适配层的 wasm 投递仍未消费它**（回执恒
+>   `delivered:false`），所以「Extism / QuickJS-WASM」仍是设想；
+> - 进程插件（`tauron-proc`）的 piped 帧回路已接线（0.4-A1/W7），且**轮 22 起有真
+>   sidecar 端到端证据**（`crates/tauron-test-sidecar/tests/sidecar_e2e.rs`），
+>   心跳监控仍未实现。
 
 ### 3.2 Rust Crate 架构详解
 

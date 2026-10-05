@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 use tauron_host::{
     decode_wire_json, encode_wire_json, peer_proof, production_doctor, Degradation, DeploymentMode,
     HealthReport, Liveness, LocalHostBroker, OrderedEventMeta, OrderingError, OrderingTracker,
-    PeerCredentialEvidence, PersistentWriterLease, ProductionReadiness, Readiness,
-    StorageNamespace, WireFrame, WriterLeaseError, DEFAULT_MAX_WIRE_BYTES,
+    PeerCredentialEvidence, PersistentWriterLease, ProductionReadiness, Readiness, ReadinessFact,
+    ReadinessSet, ServiceGraph, ServiceNode, StorageNamespace, WireFrame, WriterLeaseError,
+    DEFAULT_MAX_WIRE_BYTES,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,4 +186,55 @@ fn conform_storage_single_writer_uses_cross_process_file_lock() {
         second.lease().epoch > first_epoch,
         "persistent fencing epoch must advance across process ownership changes"
     );
+}
+
+#[test]
+fn conform_zero_surface_host_reaches_ready_without_any_surface() {
+    // boot：真装配——底座三节点服务图（contract → policy → runtime 链）可排序且无环。
+    let mut graph = ServiceGraph::default();
+    graph.insert(ServiceNode { id: "contract".into(), requires: vec![] }).unwrap();
+    graph.insert(ServiceNode { id: "policy".into(), requires: vec!["contract".into()] }).unwrap();
+    graph.insert(ServiceNode { id: "runtime".into(), requires: vec!["policy".into()] }).unwrap();
+    assert_eq!(graph.startup_order().unwrap(), vec!["contract", "policy", "runtime"]);
+
+    // ready：零 Surface（headless / service 形态）——required_surfaces 是空集，空集不得阻塞就绪。
+    let set =
+        ReadinessSet::headless(ReadinessFact::ready("kernel"), ReadinessFact::ready("contract"));
+    assert!(set.required_surfaces.is_empty());
+    let evaluated = set.evaluate();
+    assert!(evaluated.ready, "零 Surface 形态必须达到 ApplicationReady：{:?}", evaluated.blockers);
+    assert!(evaluated.blockers.is_empty());
+    let health = set.health();
+    assert_eq!(health.readiness, Readiness::Ready);
+    assert!(health.can_accept_work(), "零 IPC 面启动完成后必须可接收工作");
+}
+
+#[test]
+fn conform_declared_surface_blocks_readiness_with_named_reason() {
+    let mut set =
+        ReadinessSet::headless(ReadinessFact::ready("kernel"), ReadinessFact::ready("contract"));
+    set.required_surfaces.push(ReadinessFact::blocked("main-window", "window-not-mounted"));
+    set.required_surfaces.push(ReadinessFact::ready("tray"));
+
+    let evaluated = set.evaluate();
+    assert!(!evaluated.ready, "声明的 Surface 未就绪时不得静默跳过");
+    assert_eq!(evaluated.blockers, vec!["main-window: window-not-mounted".to_string()]);
+
+    let health = set.health();
+    assert_eq!(health.readiness, Readiness::NotReady);
+    assert_eq!(health.liveness, Liveness::Alive, "Surface 缺位是就绪问题，不是存活问题");
+    assert_eq!(health.diagnostics, vec!["main-window: window-not-mounted".to_string()]);
+    assert!(!health.can_accept_work());
+}
+
+#[test]
+fn conform_unready_kernel_blocks_even_without_surfaces() {
+    let set = ReadinessSet::headless(
+        ReadinessFact::blocked("kernel", "substrate-graph-invalid"),
+        ReadinessFact::ready("contract"),
+    );
+    let evaluated = set.evaluate();
+    assert!(!evaluated.ready, "零 Surface 不等于跳过 kernel 检查");
+    assert_eq!(evaluated.blockers, vec!["kernel: substrate-graph-invalid".to_string()]);
+    assert_eq!(set.health().readiness, Readiness::NotReady);
 }

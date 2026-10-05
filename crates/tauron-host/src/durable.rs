@@ -72,6 +72,17 @@ pub fn encode_durable<T: Serialize>(value: &DurableEnvelope<T>) -> Result<Vec<u8
     serde_json::to_vec(value).map_err(|e| DurableError::InvalidJson(e.to_string()))
 }
 
+/// 原子写（临时文件 `<名字>.tmp` + `sync_all` + rename），与恢复/审计/设置域同一套做法。
+pub fn write_durable(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!("{name}.tmp"));
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path)
+}
+
 pub fn decode_durable<T: Serialize + DeserializeOwned>(
     bytes: &[u8],
 ) -> Result<DurableEnvelope<T>, DurableError> {

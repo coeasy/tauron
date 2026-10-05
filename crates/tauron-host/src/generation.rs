@@ -45,17 +45,67 @@ pub enum GenerationError {
     ExpiredPackLease(String),
 }
 
+/// 代际台账的有界读数（V7 §9 leak gate：随 `host_resource_stats` 跨 IPC 可见）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationStats {
+    /// 在管资源数（`active` 键集合大小）：上界是**当前挂着租约的资源数**。
+    pub tracked_resources: usize,
+    /// 活跃代际租约数（`leases` 键集合大小）：与运行时租约表一比一成对。
+    pub live_leases: usize,
+    /// 号源高点（累计铸造过的代际数）。
+    ///
+    /// **只增不减**是刻意的：它不占内存（一个 `u64`），却是"代际号跨卸载/重装永不
+    /// 复用"的唯一读数。跨 IPC 到 JS 是 `number`，2^53 之内精确。
+    pub generations_issued: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct GenerationRegistry {
+    /// 每个**在管**资源的当前代际。资源不再持有任何租约时由 [`Self::forget`] 摘除，
+    /// 因此键集合上界 = 在管资源数，与"曾起过运行期的资源数"无关（V7 §9 leak gate，
+    /// 读数走 [`Self::stats`]）。
+    ///
+    /// 摘除不会让重新激活的同名资源降回旧号：号源是下面的全局单调计数器，不是
+    /// 每资源各自的序号，所以"防句柄复用"不再依赖"高点记得多久"。
     active: HashMap<String, Generation>,
+    /// 全局代际号源（只增）。耗尽需要 2^64 次激活，用 `saturating_add` 而不是回绕：
+    /// 真到那一步，防句柄复用的判据由 `leases` 的 token 匹配兜住（旧 token 随
+    /// [`Self::release`] 消失），不会静默放过旧句柄。
+    high_water: u64,
+    /// 每条 token 都由 `RuntimeTable::register`/`remove_plugin` 成对铸造与释放，
+    /// 没有第三条插入路径，因此悬挂量等于在飞租约数。
     leases: HashMap<String, (String, Generation)>,
 }
 
 impl GenerationRegistry {
     pub fn activate(&mut self, resource: &str) -> Generation {
-        let next = self.active.get(resource).copied().map_or(Generation::INITIAL, Generation::next);
+        self.high_water = self.high_water.saturating_add(1);
+        let next = Generation(self.high_water);
         self.active.insert(resource.to_string(), next);
         next
+    }
+
+    /// 台账读数。
+    pub fn stats(&self) -> GenerationStats {
+        GenerationStats {
+            tracked_resources: self.active.len(),
+            live_leases: self.leases.len(),
+            generations_issued: self.high_water,
+        }
+    }
+
+    /// 摘除资源的代际跟踪；**仍有活跃租约时拒绝**（返回 `false`，不强行摘）。
+    ///
+    /// 这是 `active` 唯一的缩水口，也是"abandoned generation 必须有界"的落点：
+    /// 调用方（`RuntimeTable::remove_plugin`）先 `release` 自己的租约再 forget。
+    /// 有租约却强行摘除会让 `validate` 丢掉"代际必须更高"这道判据（只剩 token
+    /// 判据兜住），所以这里宁可留着条目、让读数如实反映悬挂租约。
+    pub fn forget(&mut self, resource: &str) -> bool {
+        if self.leases.values().any(|(r, _)| r == resource) {
+            return false;
+        }
+        self.active.remove(resource).is_some()
     }
 
     pub fn current(&self, resource: &str) -> Option<Generation> {
@@ -435,6 +485,50 @@ mod tests {
 
     fn cache_key() -> PackCacheKey {
         PackCacheKey::new("wasm-engine", "1.2.3", Generation(7))
+    }
+
+    /// V7 §9 leak gate：代际跟踪必须随租约一起缩水，且读数按**在管资源**计。
+    #[test]
+    fn tracked_resources_stay_bounded_under_churn_of_distinct_ids() {
+        const CHURN: usize = 10_000;
+        let mut r = GenerationRegistry::default();
+        for i in 0..CHURN {
+            let id = format!("plugin:churn-{i}");
+            r.activate(&id);
+            let handle = r.lease(&id).unwrap();
+            assert!(
+                !r.forget(&id),
+                "仍有活跃租约时必须拒绝摘除（否则 validate 只剩 token 一道判据）"
+            );
+            assert!(r.release(&handle.token));
+            assert!(r.forget(&id), "租约释放后跟踪必须能摘掉");
+        }
+        let stats = r.stats();
+        assert_eq!(stats.tracked_resources, 0, "在管资源数不得随 id churn 增长");
+        assert_eq!(stats.live_leases, 0, "租约必须成对收干");
+        assert_eq!(stats.generations_issued, CHURN as u64, "号源只增： churn 过多少代就发过多少号");
+    }
+
+    /// 摘除跟踪**不等于**放过旧句柄：号不复用，且资源不在管时一律拒绝。
+    #[test]
+    fn abandoned_generation_handle_stays_rejected_after_forget_and_reactivation() {
+        let mut r = GenerationRegistry::default();
+        r.activate("plugin:p");
+        let stale = r.lease("plugin:p").unwrap();
+        assert!(r.release(&stale.token));
+        assert!(r.forget("plugin:p"));
+        assert_eq!(r.stats().tracked_resources, 0);
+        assert!(
+            matches!(r.validate(&stale), Err(GenerationError::NotActive(_))),
+            "不在管的资源不得让旧句柄通过"
+        );
+
+        // 重新激活拿到的必须是**全局新号**（若按每资源序号会退回 1 并复用）。
+        assert_eq!(r.activate("plugin:p"), Generation(2));
+        assert!(matches!(r.validate(&stale), Err(GenerationError::StaleHandle { .. })));
+        let fresh = r.lease("plugin:p").unwrap();
+        assert_eq!(fresh.generation, Generation(2));
+        assert!(r.validate(&fresh).is_ok());
     }
 
     #[test]

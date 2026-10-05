@@ -98,12 +98,33 @@ const crates = meta.packages
     version: p.version,
     manifest: p.manifest_path,
     dir: dirname(p.manifest_path),
+    // `cargo metadata` 里 `publish = false` 落成**空数组**而不是 `false`
+    // （本轮实测：`tauron-test-sidecar => []`，其余默认成员为 `null`）。
+    // 只判 `=== false` 会让夹具静默留在发布集合里——门禁因此两种形状都认。
+    publish: p.publish,
     internal: p.dependencies
       .filter((d) => d.path)
       .map((d) => d.name)
       .sort(),
   }))
   .sort((a, b) => a.name.localeCompare(b.name));
+
+// 发布集合必须切开 `publish = false` 的成员：把它们留在集合里，`--check` 会给它们
+// 打包（看起来无害），`--publish` 则会在拓扑序中途被 cargo 拒绝——而那时**前面的
+// crate 已经发出去、收不回来**。排除必须点名，不能静默少一个。
+const isUnpublishable = (c) =>
+  c.publish === false || (Array.isArray(c.publish) && c.publish.length === 0);
+const excluded = crates.filter(isUnpublishable);
+const publishable = crates.filter((c) => !isUnpublishable(c));
+for (const c of publishable) {
+  const poisoned = c.internal.filter((dep) => excluded.some((e) => e.name === dep));
+  if (poisoned.length) {
+    fail(
+      `可发布 crate ${c.name} 依赖了 publish = false 的 ${poisoned.join(', ')}：` +
+        '发布时 crates.io 无法解析该依赖，必须改成 dev-dependencies 或去掉夹具依赖',
+    );
+  }
+}
 
 const byName = new Map(crates.map((c) => [c.name, c]));
 if (byName.size !== crates.length) fail('存在重名 crate，异常');
@@ -122,13 +143,18 @@ function visit(name) {
   seen.add(name);
   order.push(c);
 }
-for (const c of crates) visit(c.name);
+for (const c of publishable) visit(c.name);
 
 log(`\n── 发布顺序（共 ${order.length} 个 crate，被依赖者先发）──`);
 order.forEach((c, i) => {
   const deps = c.internal.length ? `  ← 依赖: ${c.internal.join(', ')}` : '  ← 无内部依赖（叶子）';
   log(`  ${String(i + 1).padStart(2)}. ${c.name}@${c.version}${deps}`);
 });
+if (excluded.length) {
+  log(`  （已排除 ${excluded.length} 个 publish = false 的 workspace 成员，不上架：`);
+  for (const c of excluded) log(`    - ${c.name}@${c.version}`);
+  log('  ）');
+}
 
 // patch 参数：把每个 crate 都 patch 回本地，供无网络解析
 const patchArgs = crates.flatMap((c) => [

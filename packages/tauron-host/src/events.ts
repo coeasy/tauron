@@ -203,7 +203,64 @@ export interface PluginDescriptor {
 /** 注册表管理操作（计划 D15 定稿枚举）。 */
 export type RegistryAdminOpKind = 'disable' | 'enable' | 'uninstall' | 'purge';
 
+/**
+ * A83（轮 43）：uninstall/purge 的审批令牌（Rust `AdminReviewToken` 镜像）。
+ *
+ * 由 `host_registry_admin` 的预览路径（`preview: true`）铸发，把「用户审阅过的
+ * 破坏性操作事实」绑到 commit：一次性（nonce）、有界（TTL）、commit 时重核
+ * 插件 id / 操作 / 版本——预览后插件换版本，令牌作废，必须重新预览。
+ */
+export interface AdminReviewToken {
+  pluginId: string;
+  /** 被审阅的破坏性操作。 */
+  op: RegistryAdminOpKind;
+  /** 预览时插件的安装版本。 */
+  version: string;
+  issuedAt: number;
+  expiresAt: number;
+  nonce: string;
+}
+
 export interface RegistryAdminOp {
   op: RegistryAdminOpKind;
   id: string;
+  /**
+   * A83（轮 43）：`true` = 只预览——宿主铸发一次性令牌并返回将被破坏的事实，
+   * **不改任何状态**。仅 uninstall/purge 有效，与 `reviewToken` 互斥。
+   */
+  preview?: boolean;
+  /** A83（轮 43）：预览返回的一次性令牌，commit 时原样带回。 */
+  reviewToken?: AdminReviewToken;
 }
+
+/**
+ * `host_registry_admin` 的线返回（轮 43 判别形）。
+ *
+ * Rust 侧 `RegistryAdminResponse` 用 internally-tagged 平铺：`executed` 分支保留
+ * 既有 `TransitionOutcome` 的**全部顶层字段**，只多 `kind` 判别字段——老读法
+ * （直接取 `.from` / `.to`）不受影响。`review` 分支不执行任何操作，携带预览事实
+ * 与一次性令牌；确认后须原样提交令牌。
+ */
+export type RegistryAdminOutcome =
+  | {
+      kind: 'executed';
+      /** 生命周期事件（SCREAMING_SNAKE_CASE 线名）。 */
+      event: string;
+      from: string;
+      to: string;
+      /** 实际迁移深度（含链式）。 */
+      depth: number;
+      /** 是否未匹配到任何规则。 */
+      illegal: boolean;
+      /** 按序执行的动作。 */
+      actions: string[];
+    }
+  | {
+      kind: 'review';
+      op: RegistryAdminOpKind;
+      pluginId: string;
+      version: string;
+      /** 预览时刻的生命周期状态（SCREAMING_SNAKE_CASE）。 */
+      state: string;
+      reviewToken: AdminReviewToken;
+    };

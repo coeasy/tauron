@@ -121,11 +121,31 @@ AppImage → 直接删文件。
 | **格式化（沙箱插件）** | 文本被规整（多余空白被压缩） | 宿主 → iframe 插件握手（token 经 URL hash 注入）→ postMessage 调用 → 返回 |
 | **最小化窗口** | 窗口真的最小化 | 前端 → `host_window_minimize` → Tauri `window.minimize()` |
 | **读剪贴板** | 弹出剪贴板当前内容 | 前端 → `host_clipboard_read`（进程内真实读取） |
-| **检查更新** | 返回一个**带 `simulated: true` 标记**的响应 | 前端 → `host_market_check` |
+| **检查更新** | 宿主没注入更新端点时如实答"更新通道答不了"；注入了才报"有/没有新版本" | 前端 `AutoUpdateClient.checkUpdate()` → `host_updater_check`（**真通道**；示例的 `currentVersion` 取自本示例 `package.json`） |
 
-> **最后一条是刻意设计的诚实边界**：更新检查目前返回的是**模拟响应**，
-> 字段里带 `simulated: true`。这不是 bug，也不是「已实现」——本项目刻意区分
+> **示例里仍然有刻意保留的诚实边界**：下载与安装两条是**桩**，返回带 `simulated: true`，
+> 前端见到它**不得**推进状态机。这不是 bug，也不是「已实现」——本项目刻意区分
 > 「真实实现」与「接口占位」，不伪造成功。看到 `simulated: true` 说明行为正确。
+>
+> ⚠️ **"检查有没有更新"与"把更新装上"是两件事**（轮 29 定口径，轮 31 补齐壳层）：
+> `host_updater_check` / `host_updater_status` 在宿主注入 `EndpointClient` 后**真跑**
+> 清单校验 + 灰度 + 签名判定；SDK 的 `AutoUpdateClient.checkUpdate()`（轮 29）与
+> `<oc-updater-dialog>` 的「检查更新」经 `ShellController`（轮 31）**共用同一份判定**
+> （`toUpdateInfo`）。`host_market_check` 仍是宿主本地桩，且**按设计**不读调用方下发的
+> 更新源参数——拿它的 `available` 当更新结论就是这两轮修掉的断链。下载/安装两条仍是桩，
+> 所以"能如实报有更新"与"能把更新装上"今天仍是两件事。
+>
+> 报"没有更新"时会带一句**依据**（轮 33）：`available: false` 至少对应四种情况——已是
+> 最新、不在灰度批次、被崩溃门禁停发、端点未装配，后三种只在 `host_updater_status` 里，
+> 两条入口现在都会把它并进 `info.reason`（`灰度 30%｜崩溃门禁未停发｜…`）后打印出来。
+> 其中宿主账本会写成 `宿主账本 installed:2.0.0（模拟推进，未真的装上）`——线字段
+> `stateSimulated` 与 `state` 成对读，桩推进的账本不会被读成"真的装上了"。
+>
+> 检查之后按钮上写着什么，也不是组件自己决定（轮 32）：状态取值来自
+> `@tauron/shell-events` 的 `UPDATER_STATUSES`，主按钮动作由 `UPDATER_PRIMARY_ACTION`
+> 推导——`error`（含"更新通道答不了"）与 `idle` 都是「检查更新」，`available` 才是
+> 「开始更新」，而「立即重启」**只在** `ready` 出现。今天宿主桩走不到 `ready`，
+> 所以页面上看不到重启按钮属于预期，不是又一处断链。
 
 如果四条都能点出反应，说明 **Rust 命令层 ↔ Tauri IPC ↔ 前端适配层** 这条主链是通的。
 
@@ -510,6 +530,7 @@ Release 并附上安装包；想自己出包看 §2。
 | 这是什么、成熟度如何 | [README](../README.md) |
 | 三档装配怎么选、怎么接 | [渐进接入指南](./integration/incremental-adoption.md) |
 | 写插件 | [插件开发指南](./api/plugin-development-guide.md) |
+| 宿主配置文件（`ClientConfig`） | [客户端配置参考](./api/client-config.md) |
 | 架构与关键设计决策 | [架构概览](./architecture/overview.md) |
 | `host_*` 线格式协议 | [应用层线格式协议](./architecture/app-layer-wire.md) |
 | 版本变更与已知债务 | [CHANGELOG](../CHANGELOG.md) |

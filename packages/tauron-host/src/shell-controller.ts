@@ -34,7 +34,7 @@
 // ```
 // ──────────────────────────────────────────────────────────────────────────
 
-import type { Backend } from './backend.js';
+import type { Backend, Unlisten } from './backend.js';
 import {
   SHELL_EVENTS,
   type CommandSelectEventDetail,
@@ -42,8 +42,14 @@ import {
   type PluginUninstallEventDetail,
   type PluginInstallEventDetail,
 } from '@tauron/shell-events';
-import { ShellClient } from './shell-client.js';
+import { ShellClient, type NotificationsListResult } from './shell-client.js';
+import { NOTIFICATION_TOPIC } from './host-topics.js';
 import { isUnsupportedBody } from './dialog-client.js';
+import {
+  enrichUpdaterInfoWithChannel,
+  toUpdateInfo,
+  type UpdateInfo,
+} from './auto-update-client.js';
 import { AdminClient } from './host.js';
 import type { PendingCallInfo } from './events.js';
 
@@ -79,6 +85,38 @@ export interface ShellControllerOptions {
    * 接入方在这里重取一次列表即可。不传则什么都不做（保持最小契约）。
    */
   onRegistryChange?: () => void | Promise<void>;
+  /**
+   * 本次检查所依据的**当前版本号**（更新对话框「检查更新」的入参）。
+   *
+   * 为什么必须由接入方给：宿主不把版本当结果给——`host_updater_check` 把它当**必填
+   * 入参**要，`host_brand_info` 的 `BrandInfo` 里也**没有** version 字段（那是白标
+   * 身份，不含版本）。缺它时控制器**不**回落桩命令兜底，见 [`_checkForUpdate`]。
+   */
+  currentVersion?: string;
+  /**
+   * 更新检查结果出口（对话框的 `status` / `version` / `message` 由接入方据此驱动）。
+   *
+   * 读数与 `AutoUpdateClient.checkUpdate()` **同源**（共用 `toUpdateInfo`）：
+   * `available: true` 才有新版本号；`degraded: true` 表示宿主通道**答不了**，
+   * 此时不得显示"已是最新版本"。不传则与 `onRegistryChange` 同口径——控制器不猜
+   * 接入方怎么展示，但结果就没人读（接线点在接入方）。
+   */
+  onUpdaterCheck?: (info: UpdateInfo) => void | Promise<void>;
+  /**
+   * 通知快照出口（宿主 `NOTIFICATION_TOPIC` 信号到达后**拉取**到的结果）。
+   *
+   * 为什么是"信号 + 拉取"而不是"事件里直接给正文"：`Manager::emit` 广播给**所有**
+   * webview，通知正文进广播就是跨插件内容泄露（轮 11 把载荷降成
+   * `{ id, pluginId, kind, ts }` 的原因）。正文的唯一权威出口是
+   * `host_notifications_list`，它按调用方身份过滤。所以监听端拿到的是
+   * "有新通知了"，必须再拉一次快照才能上屏——本方法交出的就是这个快照
+   * （`unread` 是角标要的真值，`items` 已按时间倒序）。
+   *
+   * 不传则**根本不订阅**：没有展示出口的订阅只会让每条通知多打一次命令。
+   */
+  onNotification?: (snapshot: NotificationsListResult) => void | Promise<void>;
+  /** 通知快照的拉取条数（`host_notifications_list` 的 `limit`），缺省 20。 */
+  notificationLimit?: number;
 }
 
 /**
@@ -87,20 +125,42 @@ export interface ShellControllerOptions {
  * 框架无关：不依赖 React/Vue/Svelte，纯 DOM 事件监听。
  */
 export class ShellController {
+  private readonly backend: Backend;
   private readonly client: ShellClient;
   private readonly admin: AdminClient;
   private readonly listeners: Array<{ el: EventTarget; type: string; fn: EventListener }> = [];
   private readonly _onError: (err: unknown, context: string) => void;
   private readonly _commandBudget: { attempts: number; intervalMs: number };
   private readonly _onRegistryChange: (() => void | Promise<void>) | undefined;
+  private readonly _currentVersion: string;
+  private readonly _onUpdaterCheck: ((info: UpdateInfo) => void | Promise<void>) | undefined;
+  private readonly _onNotification:
+    ((snapshot: NotificationsListResult) => void | Promise<void>) | undefined;
+  private readonly _notificationLimit: number;
+  /**
+   * 通知腿的代际令牌（与 `tauron-shell-matrix` 的 start/stop 同一纪律）。
+   *
+   * `listen()` 返回 Promise，`stop()` 可能比它先跑完；拉取快照本身也是异步的，
+   * 一条通知的 `host_notifications_list` 回帧完全可能落在 `stop()` 之后。没有
+   * 令牌，"已停止的控制器"会继续往接入方的回调里上屏。
+   */
+  private _notifGeneration = 0;
+  private _notifUnlisten: Unlisten | null | 'pending' = null;
+  private _notifInFlight: Promise<void> | null = null;
+  private _notifDirty = false;
 
   constructor(options: ShellControllerOptions) {
+    this.backend = options.backend;
     this.client = new ShellClient({ backend: options.backend });
     this.admin = new AdminClient({ backend: options.backend });
     this._onError =
       options.onError ?? ((err, context) => console.warn(`ShellController: ${context} 失败`, err));
     this._commandBudget = options.commandResultBudget ?? { attempts: 50, intervalMs: 100 };
     this._onRegistryChange = options.onRegistryChange;
+    this._currentVersion = options.currentVersion?.trim() ?? '';
+    this._onUpdaterCheck = options.onUpdaterCheck;
+    this._onNotification = options.onNotification;
+    this._notificationLimit = options.notificationLimit ?? 20;
   }
 
   /** 统一的失败出口：交给 `onError`（缺省回落 console.warn）。 */
@@ -116,9 +176,109 @@ export class ShellController {
       .catch(this._fail('registry.refresh'));
   }
 
+  /**
+   * 更新对话框的「检查更新」：打宿主**真更新通道**，判定与
+   * `AutoUpdateClient.checkUpdate()` 共用同一个 `toUpdateInfo`。
+   *
+   * 轮 31 之前这里调的是 `host_market_check`（宿主硬编码桩，恒
+   * `available: false` + `simulated: true`），**并把返回值整个丢掉**。后果不是"难看"
+   * 而是同一次用户动作得到两个相反的答案：SDK 侧（轮 29 已改读真通道）能报
+   * `UpdateAvailable`，壳层对话框却永远显示"没有更新"——宿主注入真端点后依然如此。
+   *
+   * 缺 `currentVersion` 时**什么都不调**：桩命令会给出一个长得像结论的
+   * `available: false`，那等于把"答不了"演成"已是最新版本"（正是轮 29 立的那条口径）。
+   */
+  private async _checkForUpdate(): Promise<void> {
+    const currentVersion = this._currentVersion;
+    if (currentVersion === '') {
+      this._onError(
+        new Error(
+          '未配置 currentVersion：host_updater_check 把当前版本当必填入参。' +
+            '缺参时不检查，也不回落 host_market_check——那会把"答不了"显示成"已是最新版本"。',
+        ),
+        'updater.check',
+      );
+      return;
+    }
+    const info = toUpdateInfo(await this.client.updaterCheck(currentVersion), currentVersion);
+    if (this._onUpdaterCheck === undefined) return;
+    // 「没有更新」与「通道答不了」都还需要一句**为什么**（轮 33）：灰度百分比、
+    // 崩溃门禁、宿主进程内账本这三件事实只有 `host_updater_status` 一个出口，
+    // 而它此前在 TS 侧零消费者——于是"你不在灰度批次""更新被崩溃门禁停发"
+    // "宿主根本没配端点"在 UI 上都是同一句含糊的"没有更新"。
+    // 合并口径与 SDK 的 `checkUpdate()` 共用 `enrichUpdaterInfoWithChannel`：
+    // 同一个用户动作的两条入口若各拼一句，就是轮 29 / 轮 31 修过的那类分叉再来一次。
+    await enrichUpdaterInfoWithChannel(info, () => this.client.updaterStatus());
+    await Promise.resolve(this._onUpdaterCheck(info)).catch(this._fail('updater.check'));
+  }
+
   /** ShellClient 实例（用于直接调用）。 */
   get shellClient(): ShellClient {
     return this.client;
+  }
+
+  /**
+   * 通知腿：订阅宿主的投递**信号**，收到信号就去拉快照。
+   *
+   * 这条腿的三个约束缺一就退回轮 36 修掉的那两个断链上：
+   * - **没人订阅就等于没有通知中心**：`emit` 每次返回 `Ok`，前端不接**不会有任何
+   *   报错**——与轮 31 那条「检查腿打桩且把返回值整个丢弃」是同一类静默断链，
+   *   发出端一路绿灯、用户永远看不到。
+   * - **事件载荷里没有正文**（`{ id, pluginId, kind, ts }`，见 [`NOTIFICATION_TOPIC`]
+   *   的说明：广播带正文就是跨插件泄露），所以拿到信号后**必须**拉
+   *   `host_notifications_list`，那里才按调用方身份过滤。
+   * - **突发要合并**：一次操作可以连发 N 条通知，逐条各拉一次就是 N 次命令。
+   *   这里在途只允许一个拉取，期间的到达合并成"这轮结束后再拉一次"。
+   *
+   * 没有 `onNotification` 出口时**不订阅**：控制器不该在没人展示的地方挂一条监听，
+   * 那会让每条通知白白多打一次命令。
+   */
+  private _subscribeNotifications(): void {
+    if (this._onNotification === undefined) return;
+    const generation = this._notifGeneration;
+    void this.backend
+      .listen(NOTIFICATION_TOPIC, () => {
+        void this._pullNotifications(generation);
+      })
+      .then((unlisten) => {
+        // 订阅回帧可能晚于 `stop()`：令牌不符就地退订，不留悬挂监听。
+        if (this._notifGeneration !== generation) {
+          unlisten();
+          return;
+        }
+        this._notifUnlisten = unlisten;
+      }, this._fail('notification.subscribe'));
+  }
+
+  /** 收到信号后的那一次拉取：合并并发、按代际令牌决定是否上屏。 */
+  private _pullNotifications(generation: number): void {
+    if (this._notifGeneration !== generation) return;
+    if (this._notifInFlight !== null) {
+      this._notifDirty = true;
+      return;
+    }
+    const pull = async (): Promise<void> => {
+      const snapshot = await this.client.notificationsList(this._notificationLimit);
+      // 快照回帧同样可能晚于 `stop()`——那时它不该再上屏（轮 25 的同一判据）。
+      if (this._notifGeneration !== generation) return;
+      // 用 try/await 而不是 `Promise.resolve(cb(x)).catch(...)`：后者在 `cb(x)`
+      // **同步抛出**时把错误归给外层，于是"接入方渲染炸了"会被报成"拉取失败"，
+      // 排查的人会去查命令面而不是渲染层。这条区分是测试逼出来的（轮 36）。
+      try {
+        await this._onNotification!(snapshot);
+      } catch (err) {
+        this._onError(err, 'notification.render');
+      }
+    };
+    this._notifInFlight = pull()
+      .catch(this._fail('notification.pull'))
+      .then(() => {
+        this._notifInFlight = null;
+        if (this._notifDirty) {
+          this._notifDirty = false;
+          this._pullNotifications(generation);
+        }
+      });
   }
 
   /**
@@ -138,10 +298,11 @@ export class ShellController {
       this.client.windowClose().catch(this._fail('window.close')),
     );
 
-    // 更新对话框事件：检查更新 → marketCheck；开始更新 = 下载 + 安装
-    // （宿主侧当前为 simulated 桩，`marketCheck`/`marketDownload` 的返回里
-    // 带 `simulated`/`reason`，接入方据此**如实**展示"模拟结果"而不是假装更新过；
-    // 对话框的状态展示由接入方通过其 `status` 属性驱动）。
+    // 更新对话框事件：检查更新 → 宿主**真更新通道** `host_updater_check`
+    // （判据见 [`_checkForUpdate`]）；开始更新 = 下载 + 安装（这两条宿主侧仍是
+    // `simulated` 桩，返回里带 `simulated`/`reason`，接入方据此**如实**展示"模拟结果"
+    // 而不是假装更新过；对话框的状态展示由接入方通过 `status` 属性驱动，
+    // 数据从 `onUpdaterCheck` 拿）。
     //
     // 「立即重启」(`oc-restart`)：轮 11 R8 起宿主有 `host_window_relaunch` 了
     // ——它**先**把恢复引擎的阶段判定对账回注册表、**再**请求重启（顺序反了会把
@@ -150,9 +311,9 @@ export class ShellController {
     // 跳过对账。降级路径（宿主没有重启原语 → `relaunchRequested === false`）
     // **不回退到 quit**：那会变成"点了重启却直接退出且不再起来"，比不动更糟；
     // 只如实把 reason 打到控制台。
-    this._listen(elements, SHELL_EVENTS.updaterCheck, () =>
-      this.client.marketCheck().catch(this._fail('market.check')),
-    );
+    this._listen(elements, SHELL_EVENTS.updaterCheck, () => {
+      void this._checkForUpdate().catch(this._fail('updater.check'));
+    });
     this._listen(elements, SHELL_EVENTS.updateStart, () => {
       void this.client
         .marketDownload()
@@ -185,14 +346,14 @@ export class ShellController {
     // 插件管理器：卸载按钮 → host_registry_admin（主窗特权命令）。
     // 补的是「有接口、无入口」：`host_registry_admin({op:'uninstall'})` 一直存在，
     // 但没有任何按钮能触发它。
+    //
+    // 轮 43（A83）：卸载走**预览 → 用户确认 → 提交令牌**两步。生产档宿主强制要求
+    // 这条链路（无令牌的 uninstall/purge 以 E_AUTH_DENIED 拒绝）；预览返回将被破坏
+    // 的事实（id/版本/状态），确认后才以一次性令牌提交——「点一下按钮就删库」的
+    // 无声破坏不再可能发生。
     this._listen(elements, SHELL_EVENTS.pluginUninstall, (e) => {
       const detail = (e as CustomEvent<PluginUninstallEventDetail>).detail;
-      if (detail !== undefined) {
-        void this.admin
-          .registryAdmin({ op: 'uninstall', id: detail.id })
-          .then(() => this._notifyRegistryChange())
-          .catch(this._fail('plugin.uninstall'));
-      }
+      if (detail !== undefined) void this._uninstallPlugin(detail.id);
     });
     this._listen(elements, SHELL_EVENTS.pluginInstall, (e) => {
       const detail = (e as CustomEvent<PluginInstallEventDetail>).detail;
@@ -209,6 +370,9 @@ export class ShellController {
       const detail = (e as CustomEvent<CommandSelectEventDetail>).detail;
       if (detail?.id) void this._runContributedCommand(detail.id);
     });
+
+    // 宿主 → 前端的投递信号（不是 DOM CustomEvent，走 backend 的 Tauri 事件层）。
+    this._subscribeNotifications();
   }
 
   /**
@@ -292,13 +456,21 @@ export class ShellController {
   }
 
   /**
-   * 停止所有事件监听。
+   * 停止所有事件监听（含宿主的投信号订阅）。
    */
   stop(): void {
     for (const { el, type, fn } of this.listeners) {
       el.removeEventListener(type, fn);
     }
     this.listeners.length = 0;
+    // 通知腿：**先升代再退订**。代际一升，在途拉取的回帧、已排队的信号、
+    // 尚未 resolve 的 `listen()` Promise 全都失去上屏资格；订阅句柄若已经拿到，
+    // 就地释放，若还在 pending，由 `_subscribeNotifications` 的令牌检查收尾。
+    this._notifGeneration++;
+    if (typeof this._notifUnlisten === 'function') this._notifUnlisten();
+    this._notifUnlisten = null;
+    this._notifInFlight = null;
+    this._notifDirty = false;
   }
 
   private _listen(targets: EventTarget[], type: string, fn: EventListener): void {
@@ -349,6 +521,42 @@ export class ShellController {
       window.alert('插件已安装、启用并启动。');
     } catch (error) {
       this._onError(error, 'plugin.install');
+    }
+  }
+
+  /**
+   * 轮 43（A83）：卸载的预览 → 确认 → 提交两步链。
+   *
+   * 第一步（`preview: true`）**不产生任何副作用**：宿主只回报将被破坏的事实
+   * （id/版本/状态）并铸发一次性令牌。用户拒绝即止——令牌未用，随 TTL 自然作废。
+   * 确认后以原样令牌提交，宿主在动作发生前重核 id/操作/版本（版本漂移 → 拒绝，
+   * 必须重新预览）。
+   *
+   * 老宿主（不认识 `preview`）在第一步就会直接执行，返回里没有 `kind: 'review'`
+   * 判别——此时**不再**重复提交，避免二次执行。
+   */
+  private async _uninstallPlugin(pluginId: string): Promise<void> {
+    try {
+      const outcome = await this.admin.registryAdmin({
+        op: 'uninstall',
+        id: pluginId,
+        preview: true,
+      });
+      if (outcome.kind === 'review') {
+        const allowed = window.confirm(
+          `确定卸载插件 ${outcome.pluginId}（${outcome.version}，当前状态 ${outcome.state}）？\n\n` +
+            '此操作将从本机移除该插件。',
+        );
+        if (!allowed) return;
+        await this.admin.registryAdmin({
+          op: 'uninstall',
+          id: pluginId,
+          reviewToken: outcome.reviewToken,
+        });
+      }
+      this._notifyRegistryChange();
+    } catch (error) {
+      this._fail('plugin.uninstall')(error);
     }
   }
 }

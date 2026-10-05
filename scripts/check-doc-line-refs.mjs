@@ -41,6 +41,8 @@ const DEFAULT_TARGETS = [
   'docs/architecture/app-layer-wire.md',
   'docs/architecture/overview.md',
   'docs/api/plugin-development-guide.md',
+  // 客户端配置接口文档：里面的 `类型::成员` 与文件路径都是宣称，同样要机器核。
+  'docs/api/client-config.md',
   // 生成物也要查：它的行内引用（专题文档路径、代码符号）同样是宣称。
   'docs/api/command-surface.md',
   'docs/integration/incremental-adoption.md',

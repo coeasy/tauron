@@ -63,11 +63,12 @@
 > ⚠️ **上图为架构愿景，不是实测接线状态**（轮 13 重测）：图中的
 > 「Rust Native Plugin」「B+ 混合模式」在代码里**无对应实现**——`PluginType`
 > 只有 `Rust` / `Js` / `Process` / `Wasm` 四变体，且 Rust / Wasm 返回
-> `E_PLUGIN_TYPE_NO_RUNTIME`；`tauron-wasm` 已在 **opt-in 的 `runtime-wasm-broker`**
-> 下进入适配层依赖表（配置校验与崩溃预算是真的，**执行层仍诚实失败**
-> `delivered: false`），「Extism / QuickJS-WASM 引擎」仍是设想。真实接线状态见
+> `E_PLUGIN_TYPE_NO_RUNTIME`；`tauron-wasm` 已在 **opt-in 的 `runtime-wasm-broker`** 下进入适配层依赖表（配置校验与崩溃预算是真的，**投递侧仍诚实失败**
+> `delivered: false`）。轮 22 更正：`tauron-wasm` 里现在**有真引擎**——
+> `wasmi = "2.0.0"` + `src/provider.rs` 真编译/真实例化/真调导出，缺的是适配层对
+> 它的消费；「Extism / QuickJS-WASM」仍是设想。真实接线状态见
 > 下方「接线状态（诚实披露）」表与
-> [full-architecture-refactor-plan.md](./full-architecture-refactor-plan.md) §1.2。
+> [v4-industrial-gap-closure-plan.md](./v4-industrial-gap-closure-plan.md)（逐轮执行台账）。
 
 ## 两层架构
 
@@ -173,7 +174,7 @@ tauron-*       ← 全部 Rust crate
 | **tauron-recovery** | 横切 | 崩溃恢复 |
 | **tauron-distribute** | 横切 | CI 分发运维 |
 | **tauron-proc** | 运行时 | 进程插件 Host（JSON-RPC sidecar） |
-| **tauron-wasm** | 运行时 | WASM Supervisor（配置校验 / 崩溃预算；引擎未接入，执行层诚实失败） |
+| **tauron-wasm** | 运行时 | WASM Supervisor（配置校验 / 崩溃预算 / **真 wasmi 执行层**，轮 22；适配层投递未接，回执诚实 `delivered: false`） |
 | **tauron-ffi** | 运行时 | 稳定 C ABI 所有权边界，供**非 Rust 宿主**接入 Universal Wire；仓内无 Rust 消费者是设计使然（契约见 `docs/contracts/ffi-v1.md`） |
 
 > **接线状态（诚实披露）**：上表是**架构组件全景**，不代表运行时已装配。
@@ -186,10 +187,18 @@ tauron-*       ← 全部 Rust crate
 > | **已接线** | `tauron-settings` | 设置走 `SettingsStore`（R7-2 激活孤儿 crate），不是适配层内建裸 KV；`host_settings_*` 的 schema 校验与版本迁移都在它里面 |
 > | **已接线** | `tauron-proc` | 进程插件用 `CommandSpawner` / `CrashTracker` / `validate_spawn_config`（P0-2 激活孤儿 crate）；崩溃窗口计数**唯一**来源是 `tauron_proc::CrashTracker` |
 > | **部分接线** | `tauron-market` / `tauron-acl` | 两者**已在** `tauron-adapter/Cargo.toml` 依赖表内，但仅 `plugin-install` feature 下被调（market 用于安装包验签、acl 用于授权判定）；`host_market_*` 命令仍是 `simulated: true` 桩 |
-> | **部分接线** | `tauron-wasm` | opt-in `runtime-wasm-broker` 下进入依赖表：配置校验与崩溃预算**真跑** `tauron-wasm`，执行层保持诚实失败（`delivered: false` → `E_PLUGIN_TYPE_NO_RUNTIME`）——没有任何 WASM 引擎 |
+> | **部分接线** | `tauron-wasm` | opt-in `runtime-wasm-broker` 下进入依赖表：配置校验与崩溃预算**真跑** `tauron-wasm`，投递回执保持诚实失败（`delivered: false` → `E_PLUGIN_TYPE_NO_RUNTIME`）——引擎本身轮 22 已落（`wasmi = "2.0.0"` + `src/provider.rs`），**没接的是适配层对它的消费** |
 > | **已接线** | `tauron-brand` | `cmd_brand_info` 走 `tauron-brand` 的校验链返回 `BrandInfo`；**env 未配置时**如实降级 `UnsupportedBody`，不伪装成空品牌数据 |
 > | **已接线** | `tauron-theme` | `SubstrateState::themes` 就是 `tauron_theme::ThemeRegistry`；`host_theme_list` / `host_theme_get` / `host_theme_set`（均仅主窗）落在它上面 |
 > | **已接线** | `tauron-distribute` | updater provider：`host_updater_check` / `host_updater_status` 真跑 `check_for_update`（灰度 + 签名 + 崩溃门禁），`InstallationIdentity` 落盘持久化；未注入 `EndpointClient` 时 fail-closed |
+> | **未接线** | `tauron-shell` | 框架层整层：它的 3 条 `plugin_*` 命令在仓库内**没有任何宿主注册**——示例 `main.rs` 只把 `tauron_shell::tauron_generate_handler![]` 写在**注释**里；且 `PluginDispatcher` 的**生产实现为零**（唯一 `impl` 是测试用的 `EchoDispatcher`），未装载分发器时 `plugin_invoke` 恒回 `SC-9001`。CI 会带 `tauri` feature 编译并自测该 crate，但那是库内自测，**不构成宿主装配证据** |
+>
+> **公共 API 的孤儿面另有台账**：12 条「文档宣称未接线」的公共 API（`to_capability`、
+> `resolve_best`、配置样张三件套、notify/i18n 的若干入口、TS 的三个 `create*Client`
+> 工厂等）与 5 条「已接线」反例逐条登记在 `contracts/orphan-public-api.json`，由 CI 步骤
+> `Orphan-Public-API（V7 轮 22）` 机器复核——未接线宣称必须在产品接线面查不到消费者，
+> 反例必须查得到，并以棘轮禁止新增孤儿。详见
+> [渐进接入指南 §5](../integration/incremental-adoption.md)。
 >
 > 对话框与 OS 深链接缺 provider 时返回 `UnsupportedBody`；剪贴板保留进程内回退并在结果中标明。未接线的部分不应被描述为可用能力。
 

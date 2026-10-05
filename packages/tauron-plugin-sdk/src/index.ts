@@ -10,6 +10,9 @@
 // ---- 宿主侧（PluginBridge）----
 export { PluginBridge, PLUGIN_TOKEN_FRAGMENT_KEY } from './bridge.js';
 
+// ---- 跨桥失败的带码错误（轮 35：宿主 `E_*` 与插件 `SC-####` 都原样交回调用方）----
+export { PluginBridgeError, codeFromThrown, isAppRetryable } from './errors.js';
+
 // ---- 宿主侧插件方法调用（__invoke:/__result: 协议客户端）----
 export { callPluginMethod, type HostInvokeOptions } from './host-invoke.js';
 

@@ -29,6 +29,7 @@ use crate::stream::{StreamFrame, StreamKind, StreamRegistry, StreamSink};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -630,6 +631,8 @@ impl Registry {
             return;
         }
         self.runtime.lock().remove_if_live(id.as_str());
+        // 终止失败会挂进待重试队列——立刻把它写进跨重启台账（锁已释放）。
+        self.flush_reap_ledger();
     }
 
     /// 管理操作（`host_registry_admin`，D15：主窗特权，非插件命令面）。
@@ -653,6 +656,7 @@ impl Registry {
             // 三把锁按域内锁序**顺序**取（pending/streams 已在上一步取完并释放），
             // 不嵌套持有。
             self.runtime.lock().remove_plugin(id.as_str());
+            self.flush_reap_ledger();
             self.active_order.lock().retain(|x| x != id);
         }
         Ok(out)
@@ -1346,7 +1350,11 @@ impl Registry {
             return Ok((existing, false));
         }
         let pid = start_pid()?;
-        Ok((runtime.register(id.as_str(), pid), true))
+        let handle = runtime.register(id.as_str(), pid);
+        drop(runtime);
+        // 换新路径会先终止旧 pid；失败入队的记录同样要立刻进跨重启台账。
+        self.flush_reap_ledger();
+        Ok((handle, true))
     }
 
     /// 该插件是否需要（重新）启动进程：无租约，或租约对应的进程已经崩过。
@@ -1359,17 +1367,86 @@ impl Registry {
 
     /// 注入租约终止能力（装配层调用：适配层把它接到 `ProcSpawner::kill`）。
     ///
-    /// 未注入时租约回收仍会摘表项，但每次终止都按**失败**留痕
-    /// （见 [`Self::runtime_reap_stats`]）——不注入不等于没发生。
+    /// 未注入时租约回收仍会摘表项，但每次终止都按**失败**留痕并进重试队列
+    /// （见 [`Self::runtime_reap_stats`] / [`Self::runtime_retry_pending_reaps`]）
+    /// ——不注入不等于没发生，也不等于没人再试。
     pub fn set_lease_reaper(&self, reaper: Arc<dyn crate::runtime::LeaseReaper>) {
         self.runtime.lock().set_reaper(reaper);
     }
 
-    /// 租约回收留痕快照（诊断/测试）：`attempts / terminated / already_gone / failures`。
+    /// 注入平台存活性探测（装配层调用：[`crate::liveness::SystemPidProbe`]）。
+    ///
+    /// 只有一个用途——启动扫描把上一轮台账里的 pid 定性（见
+    /// [`Self::open_reap_ledger`]）。不注入时扫描照跑，但每条都计
+    /// `sweep_unknown` 并留证：探针缺席不会让证据消失，也不会退化成盲杀。
+    pub fn set_system_pid_probe(&self) {
+        self.runtime.lock().set_pid_probe(Arc::new(crate::liveness::SystemPidProbe));
+    }
+
+    /// 打开跨重启回收台账并立刻做启动扫描（装配层在恢复数据目录上调用）。
+    ///
+    /// 顺序固定为三段：**读回**上一轮条目（只读，`configure_reap_ledger`）→
+    /// **定性**（`sweep_restart_reaps`，只探测不杀，见其文档的安全封口）→
+    /// **落盘**"已扫描"快照（[`Self::flush_reap_ledger`]）。
+    ///
+    /// 任一 IO / 完整性失败都返回 `Err`（装配期拒绝启动）：这份台账是"上一轮宿主
+    /// 是否有杀不掉的进程"的唯一跨重启事实来源，静默重置成空账等于把孤儿洗白。
+    pub fn open_reap_ledger(&self, dir: &Path) -> Result<(), crate::runtime::ReapLedgerError> {
+        {
+            let mut runtime = self.runtime.lock();
+            runtime.configure_reap_ledger(dir)?;
+            runtime.sweep_restart_reaps();
+        }
+        self.flush_reap_ledger();
+        Ok(())
+    }
+
+    /// 把台账的脏变更落盘：**锁内取快照、锁外写盘**（同 `AdminAuditSink::record`
+    /// 的"编码在锁内、IO 在锁外"，磁盘 IO 不占 `runtime` 锁）。
+    ///
+    /// 写失败回锁计 `ledger_write_failures`——持久化腿的失败不许静默，但也不许
+    /// 反过来打断租约回收（与终止失败同一取舍）。无路径 / 无脏变更时是空操作。
+    fn flush_reap_ledger(&self) {
+        let Some((path, bytes)) = self.runtime.lock().take_reap_ledger_write() else {
+            return;
+        };
+        if crate::durable::write_durable(&path, &bytes).is_err() {
+            self.runtime.lock().note_ledger_write_failure();
+        }
+    }
+
+    /// 租约回收留痕快照（诊断/测试）：`attempts / terminated / already_gone / failures`
+    /// 加上重试腿 `pending / retries / recovered / terminal / overflow /
+    /// skippedLivePid / terminalRecords`。
     ///
     /// 终止失败**不会**让卸载失败（租约必须消失），所以这里是它唯一的可查出口。
     pub fn runtime_reap_stats(&self) -> crate::runtime::ReapStats {
         self.runtime.lock().reap_stats()
+    }
+
+    /// 推进一轮**有界**的终止重试，返回本轮真正终止掉的条数。
+    ///
+    /// 唯一的生产驱动腿是 `cmd_resource_stats`（主窗轮询诊断 = 回收点，与
+    /// [`Self::gc_expired`] 同一口径）。刻意不做成公开命令：85 条命令面已被线门禁
+    /// 冻住，而"让插件自己轮询着驱动宿主杀进程"本来就不该存在。
+    ///
+    /// **重试会主动让位**：待重试的 pid 若已被某条在册租约持有（OS 重用同号 + 插件重装
+    /// 是真实形状），本轮**不打**那一枪——计 `skipped_live_pid` 并固化证据。终止器按 pid
+    /// 找子进程，分不清"旧进程已死、号被复用"与"旧进程还在"，误杀活 sidecar 比留下
+    /// 孤儿更糟。
+    pub fn runtime_retry_pending_reaps(&self) -> usize {
+        let recovered = self.runtime.lock().retry_pending_reaps();
+        self.flush_reap_ledger();
+        recovered
+    }
+
+    /// 代际台账读数（V7 §9 leak gate：abandoned generation 的有界指标）。
+    ///
+    /// 与 `runtime_reap_stats` 同为**全局**读数。租约回收会连带摘除代际跟踪
+    /// （`RuntimeTable::remove_plugin` → `GenerationRegistry::forget`），所以
+    /// `tracked_resources` 的上界是在管插件数；它涨到与插件数无关的量就是泄漏信号。
+    pub fn runtime_generation_stats(&self) -> crate::generation::GenerationStats {
+        self.runtime.lock().generation_stats()
     }
 
     /// 标记该租约的进程崩溃，返回是否为**首次**观测到（`true` = 本次首见）。
@@ -1401,7 +1478,9 @@ impl Registry {
     /// 必须先定义状态该落到哪里（`ErrorRetryable` / `Disabled` 还是新增 `DETACH`），
     /// 否则就是把断链接进产品路径。
     pub fn runtime_remove(&self, id: &PluginId) -> Option<RuntimeHandle> {
-        self.runtime.lock().remove_plugin(id.as_str())
+        let removed = self.runtime.lock().remove_plugin(id.as_str());
+        self.flush_reap_ledger();
+        removed
     }
 
     /// 租约表大小（诊断/测试）。
@@ -2011,8 +2090,10 @@ mod tests {
 
     #[test]
     fn call_admission_is_released_by_cancel_timeout_and_owner_teardown() {
-        let cfg = RegistryConfig { pending_ttl: Duration::from_millis(1), ..default_config() };
-        let r = Registry::new(cfg);
+        // 只有 timeout 腿需要短 TTL（方向是"睡够再 GC"，对负载不敏感）；cancel/teardown
+        // 腿用缺省 TTL——此前全用 1ms 时，两条相邻语句之间一次调度抖动就会让 call_cancel
+        // 拿到 E_CALL_TIMEOUT（轮 41 并行电池实录过 426/427 的抖动）。
+        let r = Registry::default();
         let id = r.install(&index(), manifest("com.example.a", None)).unwrap();
         enable(&r, &id);
 
@@ -2020,10 +2101,16 @@ mod tests {
         r.call_cancel(&canceled.call_id).unwrap();
         assert_eq!(r.call_admission_usage(), (0, 0));
 
-        r.call_begin(&id, "timeout", serde_json::json!({ "n": 2 })).unwrap();
+        let short = Registry::new(RegistryConfig {
+            pending_ttl: Duration::from_millis(1),
+            ..default_config()
+        });
+        let short_id = short.install(&index(), manifest("com.example.a", None)).unwrap();
+        enable(&short, &short_id);
+        short.call_begin(&short_id, "timeout", serde_json::json!({ "n": 2 })).unwrap();
         std::thread::sleep(Duration::from_millis(5));
-        assert_eq!(r.gc_expired(), 1);
-        assert_eq!(r.call_admission_usage(), (0, 0));
+        assert_eq!(short.gc_expired(), 1);
+        assert_eq!(short.call_admission_usage(), (0, 0));
 
         r.call_begin(&id, "teardown", serde_json::json!({ "n": 3 })).unwrap();
         assert_eq!(r.call_end_all(&id), 1);
@@ -3015,6 +3102,88 @@ mod tests {
         let s = r.runtime_reap_stats();
         assert_eq!((s.attempts, s.failures), (1, 1), "终止失败必须留痕");
         assert!(s.last_error.as_deref().unwrap_or("").contains("权限不足"));
+        assert_eq!(s.pending, 1, "卸载留下的活进程必须进重试队列");
+    }
+
+    /// 卸载时杀不掉的 pid 必须有下文：注册表侧的驱动腿再试一轮并把它救回来。
+    ///
+    /// 这一条钉的是 V7 §7 Process 行的 retry 腿。`tauron-proc` 失败时把子进程句柄
+    /// 放回跟踪表、错误里写着「可重试」，如果 `Registry` 这一侧没有驱动方，那句话
+    /// 就是断链——进程留在系统里，宿主却已经把它忘了。
+    #[test]
+    fn uninstall_kill_failure_is_retried_by_the_registry_driver() {
+        /// 第一次 kill 失败，之后成功：模拟"权限瞬时不可用 / 句柄尚在"。
+        struct Flaky {
+            fails_left: AtomicUsize,
+            killed: Mutex<Vec<u32>>,
+        }
+        impl crate::runtime::LeaseReaper for Flaky {
+            fn kill(&self, pid: u32) -> Result<crate::runtime::ReapOutcome, String> {
+                self.killed.lock().push(pid);
+                if self.fails_left.fetch_sub(1, Ordering::SeqCst) > 0 {
+                    return Err("拒绝访问（句柄已保留，可重试）".into());
+                }
+                Ok(crate::runtime::ReapOutcome::Terminated)
+            }
+        }
+
+        let reaper =
+            Arc::new(Flaky { fails_left: AtomicUsize::new(1), killed: Mutex::new(vec![]) });
+        let r = Registry::default();
+        r.set_lease_reaper(reaper.clone());
+        let id = r.install(&index(), manifest("com.example.proc", None)).unwrap();
+        r.runtime_ensure_lease(&id, || Ok(41)).unwrap();
+        r.admin_op(&id, crate::authz::RegistryAdminOp::Uninstall).unwrap();
+
+        assert_eq!(r.runtime_reap_stats().pending, 1, "失败的 pid 必须排队，不能蒸发");
+        assert_eq!(r.runtime_retry_pending_reaps(), 1, "驱动一轮就该真的停掉它");
+
+        let s = r.runtime_reap_stats();
+        assert_eq!((s.pending, s.retries, s.terminated, s.recovered, s.terminal), (0, 1, 1, 1, 0));
+        assert_eq!(s.terminal_records.len(), 0, "救回来的不该留终态证据");
+        assert_eq!(reaper.killed.lock().clone(), vec![41, 41], "重试打在同一个 pid 上");
+    }
+
+    /// 卸载杀不掉、随后**同一个 pid 被新进程用上**：驱动必须让位，不得误杀（轮 27）。
+    ///
+    /// 这条比表级那条更贴生产：走的是真的 `install → 起租约 → Uninstall → 重装 → 起租约
+    /// → 驱动`。`ProcSpawner` 按 pid 索引子进程句柄，旧回收记录与活进程在它是同一个号；
+    /// 宿主这一层不查归属，就会在"清理孤儿"的名义下杀掉刚起来的 sidecar。
+    #[test]
+    fn reap_retry_never_kills_the_restarted_process_that_reused_the_pid() {
+        struct AlwaysFailing {
+            killed: Mutex<Vec<u32>>,
+        }
+        impl crate::runtime::LeaseReaper for AlwaysFailing {
+            fn kill(&self, pid: u32) -> Result<crate::runtime::ReapOutcome, String> {
+                self.killed.lock().push(pid);
+                Err("拒绝访问（句柄已保留，可重试）".into())
+            }
+        }
+
+        let reaper = Arc::new(AlwaysFailing { killed: Mutex::new(vec![]) });
+        let r = Registry::default();
+        r.set_lease_reaper(reaper.clone());
+        let id = r.install(&index(), manifest("com.example.proc", None)).unwrap();
+        r.runtime_ensure_lease(&id, || Ok(61)).unwrap();
+        r.admin_op(&id, crate::authz::RegistryAdminOp::Uninstall).unwrap();
+        assert_eq!(r.runtime_reap_stats().pending, 1);
+
+        // OS 把同一个号给了重装后的新进程。
+        let id2 = r.install(&index(), manifest("com.example.proc", None)).unwrap();
+        let (_live, started) = r.runtime_ensure_lease(&id2, || Ok(61)).unwrap();
+        assert!(started, "重装后确实起了新进程");
+
+        assert_eq!(r.runtime_retry_pending_reaps(), 0, "让位＝本轮一个都没回收");
+        assert_eq!(reaper.killed.lock().clone(), vec![61], "只准打首试那一下，不得再打活 pid");
+        let s = r.runtime_reap_stats();
+        assert_eq!(
+            (s.pending, s.skipped_live_pid, s.retries, s.terminal, s.recovered),
+            (0, 1, 0, 1, 0),
+            "让位要出队、要计数、要留证据，但不许伪装成回收成功"
+        );
+        assert!(!r.runtime_needs_restart(&id2), "在册租约必须原样还在");
+        assert_eq!(r.runtime_handle_of(&id2).unwrap().pid, 61);
     }
 
     /// 租约回收的**唯一**执行点：任何"离开可用态"的迁移都必须终止仍在跑的进程。
@@ -3115,5 +3284,97 @@ mod tests {
         assert_eq!(removed, Some(h));
         assert_eq!(recorder.killed.lock().clone(), vec![8080]);
         assert_eq!(r.runtime_reap_stats().terminated, 1, "真杀必须计入 terminated");
+    }
+
+    /// V7 §9 leak gate：走**真实注册表路径**（安装→起租约→卸载）churn，代际跟踪不得累积。
+    #[test]
+    fn generation_tracked_resources_do_not_accumulate_across_plugin_churn() {
+        const CHURN: u32 = 200;
+        // 注册表默认只放 8 个条目（§4.1 硬上限）；这里要的是**运行期租约**的 churn，
+        // 与条目上限无关，因此把 max_plugins 放到 churn 规模之上而不是缩减规模。
+        let r = Registry::new(RegistryConfig { max_plugins: 512, ..default_config() });
+        for i in 0..CHURN {
+            let id = r
+                .install(&index(), manifest(&format!("com.example.churn{i}"), None))
+                .expect("合法 manifest 必须装得上");
+            let (h, _started) = r.runtime_ensure_lease(&id, || Ok(1000 + i)).unwrap();
+            assert_eq!(
+                r.runtime_generation_stats().tracked_resources,
+                1,
+                "在管数只随在飞插件走，不得随 churn 累积"
+            );
+            assert!(r.runtime_remove(&id).is_some());
+            assert!(r.runtime_lease(&h.lease).is_err(), "回收后旧租约必须失效");
+        }
+
+        let stats = r.runtime_generation_stats();
+        assert_eq!(stats.tracked_resources, 0, "churn 后不得留下代际跟踪");
+        assert_eq!(stats.live_leases, 0);
+        assert_eq!(stats.generations_issued, CHURN as u64, "号源只增不减");
+        assert_eq!(r.runtime_len(), 0);
+
+        // 回收租约后**同一插件**再起租约：必须拿到更大的号（号源全局；摘除跟踪不得导致复号）。
+        // 注：注册表条目在本版本永不移除，所以这里钉的是"再启动"而不是"重装同名 id"。
+        let id = r.install(&index(), manifest("com.example.revive", None)).unwrap();
+        let (before, _started) = r.runtime_ensure_lease(&id, || Ok(2000)).unwrap();
+        assert!(r.runtime_remove(&id).is_some());
+        let (after, _started) = r.runtime_ensure_lease(&id, || Ok(2001)).unwrap();
+        assert!(after.generation.0 > before.generation.0, "代际号不得复用");
+        assert!(r.runtime_lease(&before.lease).is_err(), "旧租约不得被放回场");
+        // 200 次 churn 只留下**在飞**的那一条跟踪——读数与在管插件一比一。
+        assert_eq!(r.runtime_generation_stats().tracked_resources, 1);
+        assert_eq!(r.runtime_generation_stats().generations_issued, CHURN as u64 + 2);
+    }
+
+    /// 轮 41：注册表侧的跨重启台账——卸载留下的失败重试**自动落盘**，
+    /// 新注册表在同一目录打开即做启动扫描（未注入探针 = Unknown 留证，绝不盲杀）。
+    #[test]
+    fn reap_ledger_is_flushed_and_swept_across_registry_restarts() {
+        struct Failing;
+        impl crate::runtime::LeaseReaper for Failing {
+            fn kill(&self, _pid: u32) -> Result<crate::runtime::ReapOutcome, String> {
+                Err("权限不足".into())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ledger_path = dir.path().join(crate::runtime::REAP_LEDGER_FILE);
+
+        let first = Registry::default();
+        first.set_lease_reaper(Arc::new(Failing));
+        first.open_reap_ledger(dir.path()).unwrap();
+        let id = first.install(&index(), manifest("com.example.proc", None)).unwrap();
+        first.runtime_ensure_lease(&id, || Ok(61)).unwrap();
+        first.admin_op(&id, crate::authz::RegistryAdminOp::Uninstall).unwrap();
+        assert_eq!(first.runtime_reap_stats().pending, 1, "终止失败必须入队");
+        // 落盘不是手工步骤：卸载引起的脏变更在命令返回前就该进台账文件。
+        let after_uninstall = std::fs::read_to_string(&ledger_path).unwrap();
+        assert!(after_uninstall.contains("\"pid\":61"), "待重试条目必须已落盘：{after_uninstall}");
+
+        // 「重启」：新注册表打开同一目录 → 读回上一轮条目 → 启动扫描定性。
+        let second = Registry::default();
+        second.open_reap_ledger(dir.path()).unwrap();
+        let s = second.runtime_reap_stats();
+        assert_eq!(s.sweep_unknown, 1, "未注入探针：不判定 ≠ 销账，按留证处理");
+        assert_eq!(s.sweep_resolved, 0);
+        assert_eq!(s.already_gone, 0, "扫描不许把'没探测'写成'已不存在'");
+        assert!(
+            s.terminal_records[0].reason.contains("不盲杀"),
+            "证据必须写清边界：{:?}",
+            s.terminal_records[0].reason
+        );
+        // 扫描后的新快照同样自动落盘：待重试池已清空、证据在册。
+        let after_sweep = std::fs::read_to_string(&ledger_path).unwrap();
+        assert!(after_sweep.contains("\"pending\":[]"), "销账后待重试池必须清空：{after_sweep}");
+        assert!(after_sweep.contains("不盲杀"), "扫描证据必须进台账：{after_sweep}");
+
+        // 第三次重启：文件里不再有 pending，也没有可扫的对象。
+        let third = Registry::default();
+        third.open_reap_ledger(dir.path()).unwrap();
+        let t = third.runtime_reap_stats();
+        assert_eq!(
+            (t.sweep_resolved, t.sweep_survivors, t.sweep_unknown),
+            (0, 0, 0),
+            "销过账的条目不得复活成第二次扫描对象"
+        );
     }
 }

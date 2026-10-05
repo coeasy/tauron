@@ -7,7 +7,7 @@
 // 本模块为纯状态层，不依赖 DOM 或 Lit，便于离线测试。
 // ──────────────────────────────────────────────────────────────────────────
 
-import type { Backend, HostErrorShape } from '@tauron/host';
+import type { Backend, HostErrorShape, RegistryAdminOutcome } from '@tauron/host';
 import { normalizeError as normalizeHostError } from '@tauron/host';
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -51,7 +51,42 @@ export interface PluginSummary {
 
 /** 插件操作结果。 */
 export type PluginActionResult =
-  { ok: true } | { ok: false; code: NormalizedErrorCode; message: string };
+  | { ok: true }
+  /**
+   * 用户在确认环节取消（轮 43 / A83）：操作**未执行**、无副作用——不是失败，
+   * 调用方不应把 `cancelled` 当错误展示。
+   */
+  | { ok: false; cancelled: true }
+  | { ok: false; code: NormalizedErrorCode; message: string };
+
+/** 破坏性操作预览后、提交前的确认请求（轮 43 / A83）。 */
+export interface AdminConfirmRequest {
+  /** 被确认的破坏性操作。 */
+  op: 'uninstall' | 'purge';
+  pluginId: string;
+  /** 预览时刻插件的安装版本。 */
+  version: string;
+  /** 预览时刻的生命周期状态（SCREAMING_SNAKE_CASE）。 */
+  state: string;
+}
+
+/**
+ * 确认钩子：返回 `true` = 用户同意提交；`false` = 取消。
+ *
+ * 默认实现走 `window.confirm`；无 DOM（如 Node）时**拒绝**（失败关闭）——
+ * 无法向用户呈现确认就不能执行破坏性操作。需要自定义对话框的接入方在构造
+ * Store 时注入自己的钩子。
+ */
+export type AdminConfirmHook = (request: AdminConfirmRequest) => boolean | Promise<boolean>;
+
+/** 默认确认钩子：`window.confirm`；无 DOM 即拒绝。 */
+function defaultAdminConfirm(request: AdminConfirmRequest): boolean {
+  if (typeof window === 'undefined' || typeof window.confirm !== 'function') return false;
+  const verb = request.op === 'purge' ? '清除（删除该插件的全部数据）' : '卸载';
+  return window.confirm(
+    `确定${verb}插件 ${request.pluginId}（${request.version}，当前状态 ${request.state}）？`,
+  );
+}
 
 /** 插件管理器配置。 */
 export interface PluginManagerConfig {
@@ -73,10 +108,12 @@ export class PluginManagerStore {
   private _state: PluginListState = { status: 'idle' };
   private _selectedId: string | null = null;
   private readonly _backend: Backend;
+  private readonly _confirm: AdminConfirmHook;
   private readonly _subscribers = new Set<(state: StoreSnapshot) => void>();
 
-  constructor(backend: Backend) {
+  constructor(backend: Backend, confirm?: AdminConfirmHook) {
     this._backend = backend;
+    this._confirm = confirm ?? defaultAdminConfirm;
   }
 
   /** 当前状态快照。 */
@@ -189,7 +226,9 @@ export class PluginManagerStore {
   /**
    * 卸载插件。
    *
-   * 调用 `host_registry_admin` 执行 uninstall 操作。
+   * 轮 43（A83）：uninstall 是破坏性操作，走**预览 → 确认 → 提交令牌**两步：
+   * 先以 `preview: true` 让宿主回报将被破坏的事实并铸发一次性令牌（无副作用），
+   * 确认钩子放行后才以令牌提交。用户取消 → `{ ok: false, cancelled: true }`。
    */
   async uninstall(pluginId: string): Promise<PluginActionResult> {
     return this._adminOp(pluginId, 'uninstall');
@@ -209,7 +248,8 @@ export class PluginManagerStore {
   /**
    * 清除插件。
    *
-   * 调用 `host_registry_admin` 执行 purge 操作（删除所有数据）。
+   * 轮 43（A83）：purge 与 uninstall 同走**预览 → 确认 → 提交令牌**两步
+   * （删除全部数据是最重的破坏面）。用户取消 → `{ ok: false, cancelled: true }`。
    */
   async purge(pluginId: string): Promise<PluginActionResult> {
     return this._adminOp(pluginId, 'purge');
@@ -224,10 +264,55 @@ export class PluginManagerStore {
    *
    * 线格式（D15 / Rust `HostAdminOp`）：`{ op: { op, id } }`——操作与目标插件 id
    * 同处一个结构体参数；插件身份不由本参数决定（主窗特权命令）。
+   * 破坏性操作（uninstall/purge）见 {@link _destructiveAdminOp}。
    */
   private async _adminOp(pluginId: string, op: AdminOp): Promise<PluginActionResult> {
+    if (op === 'uninstall' || op === 'purge') return this._destructiveAdminOp(pluginId, op);
     try {
       await this._backend.invoke('host_registry_admin', { op: { op, id: pluginId } });
+      return { ok: true };
+    } catch (err) {
+      const { code, message } = normalizeError(err);
+      return { ok: false, code, message };
+    }
+  }
+
+  /**
+   * 破坏性操作的两步链（轮 43 / A83）：预览 → 确认 → 提交令牌。
+   *
+   * - 预览（`preview: true`）无副作用；返回 `kind: 'review'` 时携带将在提交前
+   *   由宿主重核的事实（id/操作/版本）与一次性令牌；
+   * - 确认钩子拒绝 → 令牌未用自然作废，返回 `cancelled`；
+   * - 提交把令牌原样带回——宿主在动作发生前重核，版本漂移即拒绝（须重新预览）。
+   *
+   * 老宿主（不认识 `preview`）在第一步就按旧语义直接执行，返回里没有
+   * `kind: 'review'` 判别——此时**不再**重复提交，避免二次执行。
+   */
+  private async _destructiveAdminOp(
+    pluginId: string,
+    op: 'uninstall' | 'purge',
+  ): Promise<PluginActionResult> {
+    try {
+      const preview = await this._backend.invoke<RegistryAdminOutcome>('host_registry_admin', {
+        op: { op, id: pluginId, preview: true },
+      });
+      if (preview.kind !== 'review') return { ok: true };
+      let approved: boolean;
+      try {
+        approved = await this._confirm({
+          op,
+          pluginId: preview.pluginId,
+          version: preview.version,
+          state: preview.state,
+        });
+      } catch {
+        // 确认钩子自身异常 = 无法取得用户同意 → 失败关闭（不执行）。
+        approved = false;
+      }
+      if (!approved) return { ok: false, cancelled: true };
+      await this._backend.invoke('host_registry_admin', {
+        op: { op, id: pluginId, reviewToken: preview.reviewToken },
+      });
       return { ok: true };
     } catch (err) {
       const { code, message } = normalizeError(err);

@@ -90,14 +90,28 @@ if (packages.some((pkg) => pkg.name.startsWith('@tauron/')) && npmUser !== 'taur
 for (const pkg of packages) assertNpmWritable(pkg.name, npmUser);
 
 const cratesDir = join(ROOT, 'crates');
+// `publish = false` 的 workspace 成员（CI 的 sidecar 夹具）不是发布物：把它算进所有权
+// 预检集合，等于要一个永远不会上架的名字的 crates.io 写权限。排除必须点名打印，
+// 不能让集合静默少一个——静默变小是这一族门禁反复犯过的错（轮 19 P3、轮 21 P8）。
+const notForRegistry = [];
 const crateNames = readdirSync(cratesDir, { withFileTypes: true })
   .filter((entry) => entry.isDirectory())
   .map((entry) => {
     const manifest = readFileSync(join(cratesDir, entry.name, 'Cargo.toml'), 'utf8');
     const name = /^name\s*=\s*"([^"]+)"/m.exec(manifest)?.[1];
     if (!name) throw new Error(`Could not read crate name from crates/${entry.name}/Cargo.toml`);
-    return name;
-  });
+    return { name, excluded: /^\s*publish\s*=\s*false\b/m.test(manifest) };
+  })
+  .filter(({ name, excluded }) => {
+    if (excluded) notForRegistry.push(name);
+    return !excluded;
+  })
+  .map(({ name }) => name);
+if (notForRegistry.length > 0) {
+  console.log(
+    `Skipped ${notForRegistry.length} crate(s) marked publish = false: ${notForRegistry.join(', ')}`,
+  );
+}
 // crates.io does not accept API-token authentication on its account identity
 // endpoint. Probe the publish endpoint with an empty body instead: authentication
 // runs before archive validation, so a 400/422 confirms publish access without

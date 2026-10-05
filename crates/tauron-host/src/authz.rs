@@ -269,9 +269,11 @@ pub static COMMANDS: &[CommandAuth] = &[
 /// 已经落在 `tauron-adapter` 的核心函数里，与上面的 `privileged` 档**同一套写法、
 /// 同一个拒绝码**（`E_AUTH_DENIED`）。改这些命令时不要只看本表：
 ///
-/// - **仅主窗**（`require_main_window`）：`host_recover_trial_enable`、
-///   `host_market_check`、`host_market_download`、`host_market_install`
-///   （分别是"改别人的状态 + 烧别人的试验预算"、以及宿主级更新通道）；
+/// - **仅主窗**（`require_main_window`）：`host_recover_trial_enable`
+///   （"改别人的状态 + 烧别人的试验预算"）与 `host_market_check`（更新通道的检查腿；
+///   **仍是桩**，真实检查在 `host_updater_check`——按 `admin_audit` 的口径说明，
+///   真实接线时才连同档位登记一起移入表内；轮 40 的 `host_market_download` /
+///   `host_market_install` 即按此落位，已不在本清单）；
 ///   轮 11 第三批又补了两条**全局/应用级**状态：`host_i18n_set_locale`（切的是
 ///   宿主 UI + 所有插件共用的语言）、`host_deep_link_register`（注册的是应用级
 ///   OS 协议，且会注销上一个协议——R8 曾把它当 self-service，是错的）；
@@ -348,6 +350,23 @@ pub static ADMIN_COMMANDS: &[CommandAuth] = &[
         tier: AuthTier::Privileged,
         consumer: "宿主 UI 主窗（生产就绪自检 A109）",
         description: "读取机器可读的 production readiness 自检报告",
+    },
+    // 轮 40：更新装配腿落地——这两条从模拟桩变为「装配即真」（缺省未注入
+    // `UpgradeInstaller` 时仍如实模拟）。按 `admin_audit` 的口径说明，真实接线
+    // 必须**连同档位登记一起**纳入审计表：download 会写宿主磁盘、install 会替换
+    // 应用自身二进制并请求重启，是供应链入口级特权——与注册表安装同级。
+    CommandAuth {
+        command: "host_market_download",
+        tier: AuthTier::Privileged,
+        consumer: "宿主 UI 主窗（更新通道）",
+        description: "下载更新包并做 SHA-256 + 验签（staged；装配腿接入后为真，缺省 simulated）",
+    },
+    CommandAuth {
+        command: "host_market_install",
+        tier: AuthTier::Privileged,
+        consumer: "宿主 UI 主窗（更新通道）",
+        description:
+            "安装已 staged 的更新（备份/交换/健康检查/提交/重启；装配腿接入后为真，缺省 simulated）",
     },
 ];
 
@@ -960,11 +979,11 @@ mod tests {
             "既有 19 条插件命令 + 轮 7 补登记的能力协商入口 host_capabilities 1 条"
         );
         // 主窗面包含注册表管理、sidecar 管理、资源诊断、Event Approval Broker
-        // 与生产就绪自检（A109）。
+        // 审批、生产就绪自检（A109）与更新通道（轮 40 起两条为真）。
         assert_eq!(
             ADMIN_COMMANDS.len(),
-            8,
-            "核心注册的主窗特权命令 8 条；adapter 可按 feature 扩展"
+            10,
+            "核心注册的主窗特权命令 10 条（轮 40 起含更新通道 2 条）；adapter 可按 feature 扩展"
         );
     }
 

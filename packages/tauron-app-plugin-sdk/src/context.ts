@@ -92,7 +92,7 @@ export function createPluginContext(
   /**
    * 执行方侧失败码（0.4-A1）：命令不存在 / handler 抛异常时回填给发起方。
    *
-   * 应用层约定码（不是框架 `E_*` 枚举成员）：执行方对自己「能不能执行」负责，
+   * 约定码（不在宿主 `HOST_ERROR_CODES` 的 `E_*` 闭集内）：执行方对自己「能不能执行」负责，
    * 发起方据此知道失败来自执行方而不是宿主投递。
    */
   const CALL_EXEC_FAILED = 'E_CALL_EXEC_FAILED';

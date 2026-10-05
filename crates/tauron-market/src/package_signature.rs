@@ -154,27 +154,7 @@ pub struct SignedFile {
     pub hash: String,
 }
 
-/// Verify an in-memory CLI archive. Compatibility wrapper over the streaming verifier.
-pub fn verify_tpkg(
-    archive: &[u8],
-    sidecar_json: &str,
-    trusted_public_key: &[u8],
-) -> MarketResult<(PackageSignature, PluginManifest)> {
-    verify_tpkg_reader(std::io::Cursor::new(archive), sidecar_json, trusted_public_key)
-}
-
-/// Verify a package directly from a file without materializing the whole archive in memory.
-pub fn verify_tpkg_file(
-    path: &std::path::Path,
-    sidecar_json: &str,
-    trusted_public_key: &[u8],
-) -> MarketResult<(PackageSignature, PluginManifest)> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| MarketError::ManifestFormat(format!("打开安装包失败：{e}")))?;
-    verify_tpkg_reader(file, sidecar_json, trusted_public_key)
-}
-
-/// Streaming package verifier used by file/in-memory callers.
+/// Streaming package verifier used by file-backed callers.
 ///
 /// The only entry retained in memory is `manifest.json` (capped at 1 MiB). Every other entry
 /// is SHA-256 hashed through a fixed 64 KiB buffer, so verification RSS is independent of the

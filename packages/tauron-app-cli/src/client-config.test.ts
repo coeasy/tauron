@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { generateClientConfig, validateClientConfigFile } from './client-config.js';
+import {
+  generateClientConfig,
+  unknownClientConfigKeys,
+  unwiredClientConfigKeys,
+  validateClientConfigFile,
+} from './client-config.js';
 
 describe('generateClientConfig', () => {
   it('template 预设生成完整配置', () => {
@@ -196,5 +201,59 @@ describe('validateClientConfigFile', () => {
       }),
     );
     expect(errors).toHaveLength(0);
+  });
+});
+
+/**
+ * 轮 2 / F-1：配置键的**落点**必须能被问出来。
+ *
+ * `ClientConfig` 曾接受七个键而生产代码一个都不读，本包还把其中四个写进生成的
+ * 配置文件。这组用例守的不是"值合不合法"，而是"合法但不生效的键有没有被点名"，
+ * 以及"未知键有没有被当成致命错误"（Rust 侧 `deny_unknown_fields`：一个拼错的键
+ * 让**整份**配置加载失败，宿主随即回落默认装配——把它说成"这一项被忽略"是错的）。
+ */
+describe('配置键落点与未知键（轮 2 / F-1）', () => {
+  it('template 预设点出它写下的每个无落点键', () => {
+    const result = generateClientConfig({ preset: 'template' });
+    expect(result.errors).toHaveLength(0);
+    expect(result.unwired.sort()).toEqual(
+      [
+        'auto_update',
+        'crash_report_enabled',
+        'performance_monitoring',
+        'update_check_interval_secs',
+      ].sort(),
+    );
+  });
+
+  it('registry/data_dir/env_overrides 是有落点的键，不出现在报告里', () => {
+    expect(unwiredClientConfigKeys({ data_dir: 'd', env_overrides: { A: 'b' } })).toEqual([]);
+  });
+
+  it('只报实际写了的键（默认值不算被忽略）', () => {
+    expect(unwiredClientConfigKeys({})).toEqual([]);
+    expect(unwiredClientConfigKeys({ brand_id: 'acme', plugin_paths: ['plugins'] })).toEqual([
+      'brand_id',
+      'plugin_paths',
+    ]);
+    // 显式写 false 也算"写了"：用户确实以为它关掉了什么。
+    expect(unwiredClientConfigKeys({ auto_update: false })).toEqual(['auto_update']);
+  });
+
+  it('未知键被认出来（宿主会因此拒绝整份配置）', () => {
+    const config = { log_level: 'info', plugins: [], sandbox: {} };
+    expect(unknownClientConfigKeys(config as never)).toEqual(['plugins', 'sandbox']);
+    expect(unknownClientConfigKeys({ log_level: 'info' })).toEqual([]);
+  });
+
+  it('非正数一律拒绝（Rust 侧是无符号类型，负数在反序列化即失败）', () => {
+    for (const json of [
+      '{"registry":{"max_plugins":-1}}',
+      '{"registry":{"pending_ttl_secs":-30}}',
+      '{"update_check_interval_secs":-1}',
+    ]) {
+      expect(validateClientConfigFile(json), json).toHaveLength(1);
+    }
+    expect(validateClientConfigFile('{"registry":{"max_plugins":0}}')).toHaveLength(1);
   });
 });

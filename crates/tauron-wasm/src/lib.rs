@@ -27,10 +27,16 @@ use tauron_host::{
 
 pub mod error;
 pub mod execute;
+pub mod provider;
 
 pub use error::{WasmError, WasmResult};
 pub use execute::{
-    ExecutionResult, HostFnCallRecord, HostFnHandler, WasmEngine, WasmEngineConfig, WasmPluginStats,
+    ExecutionResult, HostFnCallRecord, HostFnHandler, LoadedModule, WasmEngine, WasmEngineConfig,
+    WasmPluginStats,
+};
+pub use provider::{
+    EngineInstance, EngineOutcome, ExecutionBudget, HostCallObserved, HostFnTable, ModuleFacts,
+    PreparedModule, WasmRuntimeProvider, WasmiProvider, HOST_FN_NAMESPACE,
 };
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -146,6 +152,20 @@ impl Default for CrashLimitConfig {
     }
 }
 
+/// 执行配额（provider 侧的真实预算，不由调用方自报）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionConfig {
+    /// 单次调用的 fuel 上限（wasmi 计量单位；0 表示拒绝执行）。
+    pub fuel_per_call: u64,
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self { fuel_per_call: 50_000_000 }
+    }
+}
+
 /// WASM 插件完整配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WasmPluginConfig {
@@ -165,6 +185,8 @@ pub struct WasmPluginConfig {
     pub module_cache: ModuleCacheConfig,
     /// 崩溃计数限制。
     pub crash_limit: CrashLimitConfig,
+    /// 执行配额（fuel 预算）。
+    pub execution: ExecutionConfig,
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -226,6 +248,14 @@ pub fn validate_crash_limit_config(config: &CrashLimitConfig) -> WasmResult<()> 
     Ok(())
 }
 
+/// 验证执行配额。
+pub fn validate_execution_config(config: &ExecutionConfig) -> WasmResult<()> {
+    if config.fuel_per_call == 0 {
+        return Err(WasmError::InvalidConfig("fuel_per_call 不能为 0（0 = 拒绝执行）".into()));
+    }
+    Ok(())
+}
+
 /// 验证完整插件配置。
 pub fn validate_plugin_config(config: &WasmPluginConfig) -> WasmResult<()> {
     if config.plugin_id.is_empty() {
@@ -242,6 +272,7 @@ pub fn validate_plugin_config(config: &WasmPluginConfig) -> WasmResult<()> {
     validate_instance_pool_config(&config.instance_pool)?;
     validate_module_cache_config(&config.module_cache)?;
     validate_crash_limit_config(&config.crash_limit)?;
+    validate_execution_config(&config.execution)?;
     Ok(())
 }
 
@@ -269,6 +300,19 @@ pub fn validate_abi(expected: &WasmAbiFingerprint, actual: &WasmAbiFingerprint) 
 // 实例池管理
 // ──────────────────────────────────────────────────────────────────────────
 
+/// 实例绑定的模块事实：一个实例**必须**属于某个已加载 generation，不能悬空。
+///
+/// V7-P0-02 的修正点：此前实例只有 `plugin_id`，`execute()` 又把 `plugin_id` 当成
+/// `instance_id` 去查池，导致复用分支永不命中、统计恒偏低。绑定 generation + hash 之后，
+/// 「换代后的旧实例」在查表阶段就被排除（见 [`InstancePool::find_idle_instance`]）。
+#[derive(Debug, Clone)]
+pub struct InstanceBinding {
+    /// 所属模块 generation（`PackCacheKey.generation`）。
+    pub generation: u64,
+    /// 所属模块内容 hash（来自 provider 的真字节，不是自报值）。
+    pub module_hash: String,
+}
+
 /// 实例状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstanceState {
@@ -295,12 +339,18 @@ pub struct WasmInstance {
     pub memory_pages: u32,
     /// 创建时间。
     pub created_at: Instant,
+    /// 绑定的模块 generation 事实。
+    pub binding: InstanceBinding,
 }
 
 /// 实例池。
+///
+/// 索引纪律（V7-P0-02）：实例本体按 `instance_id` 存，**按插件查必须走
+/// `plugin_index`**，绝不允许把 `plugin_id` 当 `instance_id` 传给 `get_instance`。
 pub struct InstancePool {
     config: InstancePoolConfig,
     instances: HashMap<String, WasmInstance>,
+    plugin_index: HashMap<String, Vec<String>>,
     order: Vec<String>, // LRU 顺序
     next_instance_id: u32,
 }
@@ -308,7 +358,13 @@ pub struct InstancePool {
 impl InstancePool {
     /// 创建新的实例池。
     pub fn new(config: InstancePoolConfig) -> Self {
-        Self { config, instances: HashMap::new(), order: Vec::new(), next_instance_id: 1 }
+        Self {
+            config,
+            instances: HashMap::new(),
+            plugin_index: HashMap::new(),
+            order: Vec::new(),
+            next_instance_id: 1,
+        }
     }
 
     /// 获取当前配置。
@@ -321,8 +377,12 @@ impl InstancePool {
         self.instances.len()
     }
 
-    /// 尝试创建实例。
-    pub fn try_create_instance(&mut self, plugin_id: &str) -> WasmResult<WasmInstance> {
+    /// 尝试为该插件创建一个绑定到 `binding` 的实例。
+    pub fn try_create_instance(
+        &mut self,
+        plugin_id: &str,
+        binding: InstanceBinding,
+    ) -> WasmResult<WasmInstance> {
         if !self.config.enable_pool {
             return Err(WasmError::InstancePoolFull { plugin_id: plugin_id.to_string() });
         }
@@ -341,12 +401,33 @@ impl InstancePool {
             last_used: Instant::now(),
             memory_pages: 0,
             created_at: Instant::now(),
+            binding,
         };
         self.next_instance_id += 1;
 
-        self.instances.insert(instance.instance_id.clone(), instance.clone());
-        self.order.push(instance.instance_id.clone());
+        self.insert_locked(instance.clone());
         Ok(instance)
+    }
+
+    fn insert_locked(&mut self, instance: WasmInstance) {
+        let instance_id = instance.instance_id.clone();
+        self.plugin_index.entry(instance.plugin_id.clone()).or_default().push(instance_id.clone());
+        self.instances.insert(instance_id.clone(), instance);
+        self.order.push(instance_id);
+    }
+
+    fn remove_locked(&mut self, instance_id: &str) -> Option<WasmInstance> {
+        let removed = self.instances.remove(instance_id)?;
+        if let Some(list) = self.plugin_index.get_mut(&removed.plugin_id) {
+            list.retain(|id| id != instance_id);
+            if list.is_empty() {
+                self.plugin_index.remove(&removed.plugin_id);
+            }
+        }
+        if let Some(pos) = self.order.iter().position(|x| x == instance_id) {
+            self.order.remove(pos);
+        }
+        Some(removed)
     }
 
     /// 回收实例。
@@ -364,6 +445,28 @@ impl InstancePool {
 
         // 获取并返回实例
         self.instances.get(instance_id).cloned()
+    }
+
+    /// 标记实例为在用（复用空闲实例时的必经一步）。
+    ///
+    /// 没有这一步，`execute()` 复用空闲实例后池里仍写着 `Idle`，LVR 驱逐就会把一个
+    /// 正在执行的实例当成空闲丢掉。
+    pub fn mark_in_use(&mut self, instance_id: &str) -> Option<WasmInstance> {
+        let instance = self.instances.get_mut(instance_id)?;
+        instance.state = InstanceState::InUse;
+        instance.last_used = Instant::now();
+        Some(instance.clone())
+    }
+
+    /// 记下引擎回报的真实内存页数（统计口径：引擎读数，不是初始配额猜测）。
+    pub fn note_memory_pages(&mut self, instance_id: &str, memory_pages: u32) -> bool {
+        match self.instances.get_mut(instance_id) {
+            Some(instance) => {
+                instance.memory_pages = memory_pages;
+                true
+            }
+            None => false,
+        }
     }
 
     /// 驱逐 LRU 空闲实例。
@@ -384,63 +487,88 @@ impl InstancePool {
             .collect();
 
         if let Some(id) = idle_ids.into_iter().next() {
-            self.instances.remove(&id);
-            let pos = self.order.iter().position(|x| x == &id)?;
-            self.order.remove(pos);
+            self.remove_locked(&id)?;
             Some(id)
         } else {
             None
         }
     }
 
-    /// 获取实例。
+    /// 按 **instance_id** 取实例。
+    ///
+    /// 名字保持 `get_instance`，但参数语义在文档里钉死：这里只接受实例 ID。
+    /// 按插件查请走 [`InstancePool::instances_of`] / [`InstancePool::find_idle_instance`]。
     pub fn get_instance(&self, instance_id: &str) -> Option<&WasmInstance> {
         self.instances.get(instance_id)
+    }
+
+    /// 该插件当前持有的所有实例 ID（结构化统计，V7-P0-02 验收项）。
+    pub fn instances_of(&self, plugin_id: &str) -> Vec<String> {
+        self.plugin_index.get(plugin_id).cloned().unwrap_or_default()
+    }
+
+    /// 找该插件**绑定到指定 generation** 的空闲实例。
+    ///
+    /// 换代（`generation` 变化）后旧实例不会被返回——它属于旧模块字节，
+    /// 继续执行就是 V7-P0-02 里「复用错实例」的那条路。
+    pub fn find_idle_instance(&self, plugin_id: &str, generation: u64) -> Option<&WasmInstance> {
+        self.instances_of(plugin_id).iter().filter_map(|id| self.instances.get(id)).find(
+            |instance| {
+                instance.state == InstanceState::Idle && instance.binding.generation == generation
+            },
+        )
+    }
+
+    /// 丢弃不属于该 generation 的实例，返回被丢弃的实例 ID（引擎据此释放真句柄）。
+    pub fn discard_stale_instances(&mut self, plugin_id: &str, generation: u64) -> Vec<String> {
+        let stale: Vec<String> = self
+            .instances_of(plugin_id)
+            .iter()
+            .filter_map(|id| {
+                let instance = self.instances.get(id)?;
+                (instance.binding.generation != generation).then(|| id.clone())
+            })
+            .collect();
+        for id in &stale {
+            self.remove_locked(id);
+        }
+        stale
+    }
+
+    /// 丢弃单个实例（引擎 trap / fuel 耗尽后不得复用）。
+    pub fn discard_instance(&mut self, instance_id: &str) -> Option<WasmInstance> {
+        self.remove_locked(instance_id)
     }
 
     /// 清理超时实例。
     pub fn cleanup_idle(&mut self) -> Vec<String> {
         let now = Instant::now();
         let timeout = std::time::Duration::from_millis(self.config.idle_timeout_ms);
-        let mut to_remove = Vec::new();
-
-        for (id, instance) in self.instances.iter() {
-            if instance.state == InstanceState::Idle
-                && now.duration_since(instance.last_used) > timeout
-            {
-                to_remove.push(id.clone());
-            }
-        }
+        let to_remove: Vec<String> = self
+            .instances
+            .iter()
+            .filter(|(_, instance)| {
+                instance.state == InstanceState::Idle
+                    && now.duration_since(instance.last_used) > timeout
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
 
         for id in &to_remove {
-            self.instances.remove(id);
-            let pos = self.order.iter().position(|x| x == id);
-            if let Some(pos) = pos {
-                self.order.remove(pos);
-            }
+            self.remove_locked(id);
         }
 
         to_remove
     }
 
-    /// 清除指定插件的所有实例。
-    pub fn clear_plugin(&mut self, plugin_id: &str) -> usize {
-        let to_remove: Vec<String> = self
-            .instances
-            .iter()
-            .filter(|(_, instance)| instance.plugin_id == plugin_id)
-            .map(|(id, _)| id.clone())
-            .collect();
-
+    /// 清除指定插件的所有实例，返回被清除的实例 ID。
+    pub fn clear_plugin(&mut self, plugin_id: &str) -> Vec<String> {
+        let to_remove = self.instances_of(plugin_id);
         for id in &to_remove {
-            self.instances.remove(id);
-            let pos = self.order.iter().position(|x| x == id);
-            if let Some(pos) = pos {
-                self.order.remove(pos);
-            }
+            self.remove_locked(id);
         }
-
-        to_remove.len()
+        self.plugin_index.remove(plugin_id);
+        to_remove
     }
 }
 
@@ -448,17 +576,39 @@ impl InstancePool {
 // 模块缓存
 // ──────────────────────────────────────────────────────────────────────────
 
-/// 缓存模块。
+/// 缓存模块：**必须**带 provider 产出的真编译产物。
+///
+/// V7-P0-01 的落地点：这条记录不是「有人声称加载过 plugin@hash」的便条，而是
+/// 字节经引擎解析/校验后的常驻事实（导出表、导入的 host_fn、内存声明、内容 hash）。
+/// 没有真字节就没有这条记录，`execute()` 也就没有任何可执行对象。
 #[derive(Debug, Clone)]
 pub struct CachedModule {
     /// 插件 ID。
     pub plugin_id: String,
-    /// 模块哈希。
+    /// 模块哈希（provider 从字节算出，非自报）。
     pub module_hash: String,
     /// 缓存时间。
     pub cached_at: DateTime<Utc>,
     /// 模块大小（字节）。
     pub size_bytes: u64,
+    /// provider 产出的模块事实。
+    pub facts: ModuleFacts,
+    /// 可复用的编译产物（`Arc`：同一 generation 的多个实例共享它）。
+    pub prepared: Arc<PreparedModule>,
+}
+
+impl CachedModule {
+    /// 由 provider 的编译产物构造——生产侧唯一的构造口。
+    pub fn resident(plugin_id: &str, prepared: Arc<PreparedModule>) -> Self {
+        Self {
+            plugin_id: plugin_id.to_string(),
+            module_hash: prepared.facts.module_hash.clone(),
+            cached_at: Utc::now(),
+            size_bytes: prepared.facts.byte_len,
+            facts: prepared.facts.clone(),
+            prepared,
+        }
+    }
 }
 
 /// 模块缓存。
@@ -518,6 +668,24 @@ impl ModuleCache {
             .map(|(_, module)| module)
     }
 
+    /// 当前 active generation 的**可执行**条目（key + 编译产物）。
+    ///
+    /// V7-P0-01 的门禁入口：`execute()` 只能拿这一份事实来跑，且必须在返回
+    /// `success` 之前把它查出来。active key 存在但字节已被 GC 掉时返回 `None`
+    /// ——调用方得到 `ModuleNotLoaded`，而不是一个没有载体执行的「成功」。
+    pub fn active_module(&self, plugin_id: &str) -> Option<(PackCacheKey, Arc<PreparedModule>)> {
+        let key = self.active_key(plugin_id)?;
+        let module = self.cache.get(&key)?;
+        Some((key, module.prepared.clone()))
+    }
+
+    /// active 条目的完整事实（含导出表），供 ABI 对账用。
+    pub fn active_entry(&self, plugin_id: &str) -> Option<(PackCacheKey, CachedModule)> {
+        let key = self.active_key(plugin_id)?;
+        let module = self.cache.get(&key)?.clone();
+        Some((key, module))
+    }
+
     fn touch(&mut self, key: &PackCacheKey) {
         if let Some(pos) = self.order.iter().position(|candidate| candidate == key) {
             self.order.remove(pos);
@@ -538,7 +706,10 @@ impl ModuleCache {
     }
 
     /// Insert and atomically activate immutable content. module_hash is the content version.
-    pub fn insert(&mut self, module: CachedModule) -> WasmResult<()> {
+    ///
+    /// 返回该条目实际占用的 cache key（含 generation）：实例必须按这个 key 绑定，
+    /// 否则「复用哪个 generation」就无从判定（V7-P0-02）。
+    pub fn insert(&mut self, module: CachedModule) -> WasmResult<PackCacheKey> {
         let plugin_id = module.plugin_id.clone();
         let version = module.module_hash.clone();
         let now_ms = wasm_now_ms();
@@ -566,7 +737,7 @@ impl ModuleCache {
                 }
                 self.cache.insert(active.clone(), module);
                 self.touch(&active);
-                return Ok(());
+                return Ok(active);
             }
         }
 
@@ -610,7 +781,7 @@ impl ModuleCache {
                 self.remove_local_key(&candidate);
             }
         }
-        Ok(())
+        Ok(key)
     }
 
     pub fn acquire_active_lease(
@@ -825,7 +996,30 @@ mod tests {
             instance_pool: InstancePoolConfig::default(),
             module_cache: ModuleCacheConfig::default(),
             crash_limit: CrashLimitConfig::default(),
+            execution: ExecutionConfig::default(),
         }
+    }
+
+    /// 实例绑定：本文件的池测试只关心「按 generation 查/丢」，模块内容用占位 hash。
+    fn binding(generation: u64) -> InstanceBinding {
+        InstanceBinding { generation, module_hash: format!("hash-{generation}") }
+    }
+
+    const TEST_WAT: &str = r#"(module (func (export "run") (result i32) i32.const 1))"#;
+
+    /// 构造常驻条目：字节仍走真 provider（`CachedModule::resident` 要求真编译产物），
+    /// 只把 `module_hash` 换成测试指定的版本标识。
+    ///
+    /// 存在的理由：下面这批测试是 A89 authority/GC 语义测试，关心的是 key、租约与
+    /// 驱逐门禁，不是内容门禁（内容门禁在 `execute.rs` 的加载测试里覆盖）。
+    fn resident(plugin_id: &str, module_hash: &str, size_bytes: u64) -> CachedModule {
+        let provider = WasmiProvider::new();
+        let bytes = wat::parse_str(TEST_WAT).unwrap();
+        let mut module =
+            CachedModule::resident(plugin_id, Arc::new(provider.prepare(&bytes).unwrap()));
+        module.module_hash = module_hash.to_string();
+        module.size_bytes = size_bytes;
+        module
     }
 
     // ── 配置验证测试 ──
@@ -969,9 +1163,10 @@ mod tests {
             InstancePoolConfig { max_instances: 2, idle_timeout_ms: 300000, enable_pool: true };
         let mut pool = InstancePool::new(config);
 
-        let instance = pool.try_create_instance("test.plugin").unwrap();
+        let instance = pool.try_create_instance("test.plugin", binding(1)).unwrap();
         assert!(instance.instance_id.starts_with("instance-"));
         assert_eq!(pool.instance_count(), 1);
+        assert_eq!(pool.instances_of("test.plugin"), vec![instance.instance_id.clone()]);
     }
 
     #[test]
@@ -980,9 +1175,9 @@ mod tests {
             InstancePoolConfig { max_instances: 1, idle_timeout_ms: 300000, enable_pool: true };
         let mut pool = InstancePool::new(config);
 
-        pool.try_create_instance("test.plugin").unwrap();
+        pool.try_create_instance("test.plugin", binding(1)).unwrap();
         // 第二个实例应失败（没有空闲实例可驱逐）
-        let result = pool.try_create_instance("test.plugin2");
+        let result = pool.try_create_instance("test.plugin2", binding(1));
         assert!(result.is_err());
     }
 
@@ -992,11 +1187,11 @@ mod tests {
             InstancePoolConfig { max_instances: 1, idle_timeout_ms: 300000, enable_pool: true };
         let mut pool = InstancePool::new(config);
 
-        let instance = pool.try_create_instance("test.plugin").unwrap();
+        let instance = pool.try_create_instance("test.plugin", binding(1)).unwrap();
         pool.reclaim_instance(&instance.instance_id);
 
         // 现在应该可以创建新实例（驱逐旧的）
-        let new_instance = pool.try_create_instance("test.plugin2").unwrap();
+        let new_instance = pool.try_create_instance("test.plugin2", binding(1)).unwrap();
         assert_ne!(new_instance.instance_id, instance.instance_id);
     }
 
@@ -1005,13 +1200,60 @@ mod tests {
         let config = InstancePoolConfig::default();
         let mut pool = InstancePool::new(config);
 
-        let instance = pool.try_create_instance("test.plugin").unwrap();
+        let instance = pool.try_create_instance("test.plugin", binding(1)).unwrap();
         assert!(pool.get_instance(&instance.instance_id).is_some());
+        assert_eq!(instance.state, InstanceState::InUse);
 
         pool.reclaim_instance(&instance.instance_id);
         let reclaimed = pool.get_instance(&instance.instance_id);
         assert!(reclaimed.is_some());
         assert_eq!(reclaimed.unwrap().state, InstanceState::Idle);
+
+        // 复用必须先把实例标回在用，否则 LRU 会驱逐正在执行的实例。
+        pool.mark_in_use(&instance.instance_id);
+        assert_eq!(pool.get_instance(&instance.instance_id).unwrap().state, InstanceState::InUse);
+        assert_eq!(pool.evict_lru(), None);
+    }
+
+    /// V7-P0-02：按插件查实例走 plugin index，把 `plugin_id` 当 `instance_id` 传进去
+    /// 查不到任何东西——这条断言把那个误用钉死在类型行为上。
+    #[test]
+    fn plugin_id_is_not_an_instance_id() {
+        let mut pool = InstancePool::new(InstancePoolConfig::default());
+        let instance = pool.try_create_instance("test.plugin", binding(1)).unwrap();
+
+        assert!(pool.get_instance("test.plugin").is_none());
+        assert!(pool.get_instance(&instance.instance_id).is_some());
+        assert_eq!(pool.instances_of("test.plugin").len(), 1);
+        assert_eq!(pool.instances_of("other.plugin"), Vec::<String>::new());
+    }
+
+    /// 换代后旧实例既查不到、也会被成批丢弃（它绑的是上一代字节）。
+    #[test]
+    fn generation_gate_blocks_and_discards_stale_instances() {
+        let mut pool = InstancePool::new(InstancePoolConfig::default());
+        let old = pool.try_create_instance("test.plugin", binding(1)).unwrap();
+        pool.reclaim_instance(&old.instance_id);
+
+        assert!(pool.find_idle_instance("test.plugin", 1).is_some());
+        assert!(pool.find_idle_instance("test.plugin", 2).is_none(), "不同代不得复用");
+
+        // 在用的实例不属于「空闲可复用」，但仍是旧代，必须被 discard 清掉。
+        let fresh = pool.try_create_instance("test.plugin", binding(2)).unwrap();
+        let discarded = pool.discard_stale_instances("test.plugin", 2);
+        assert_eq!(discarded, vec![old.instance_id]);
+        assert_eq!(pool.instances_of("test.plugin"), vec![fresh.instance_id.clone()]);
+        assert!(pool.discard_instance(&fresh.instance_id).is_some());
+        assert_eq!(pool.instance_count(), 0);
+    }
+
+    #[test]
+    fn note_memory_pages_records_engine_reading() {
+        let mut pool = InstancePool::new(InstancePoolConfig::default());
+        let instance = pool.try_create_instance("test.plugin", binding(1)).unwrap();
+        assert!(pool.note_memory_pages(&instance.instance_id, 7));
+        assert_eq!(pool.get_instance(&instance.instance_id).unwrap().memory_pages, 7);
+        assert!(!pool.note_memory_pages("instance-absent", 1));
     }
 
     #[test]
@@ -1019,20 +1261,21 @@ mod tests {
         let config = InstancePoolConfig::default();
         let mut pool = InstancePool::new(config);
 
-        pool.try_create_instance("plugin.a").unwrap();
-        pool.try_create_instance("plugin.b").unwrap();
-        pool.try_create_instance("plugin.a").unwrap();
+        pool.try_create_instance("plugin.a", binding(1)).unwrap();
+        pool.try_create_instance("plugin.b", binding(1)).unwrap();
+        pool.try_create_instance("plugin.a", binding(1)).unwrap();
 
         let cleared = pool.clear_plugin("plugin.a");
-        assert_eq!(cleared, 2);
+        assert_eq!(cleared.len(), 2);
         assert_eq!(pool.instance_count(), 1);
+        assert_eq!(pool.instances_of("plugin.a"), Vec::<String>::new());
     }
 
     #[test]
     fn test_instance_pool_disabled() {
         let config = InstancePoolConfig { enable_pool: false, ..Default::default() };
         let mut pool = InstancePool::new(config);
-        let result = pool.try_create_instance("test.plugin");
+        let result = pool.try_create_instance("test.plugin", binding(1));
         assert!(result.is_err());
     }
 
@@ -1043,13 +1286,7 @@ mod tests {
         let config = ModuleCacheConfig::default();
         let mut cache = ModuleCache::new(config);
 
-        let module = CachedModule {
-            plugin_id: "test.plugin".into(),
-            module_hash: "hash123".into(),
-            cached_at: Utc::now(),
-            size_bytes: 1024,
-        };
-        cache.insert(module).unwrap();
+        cache.insert(resident("test.plugin", "hash123", 1024)).unwrap();
         assert_eq!(cache.cache_count(), 1);
     }
 
@@ -1058,17 +1295,28 @@ mod tests {
         let config = ModuleCacheConfig::default();
         let mut cache = ModuleCache::new(config);
 
-        let module = CachedModule {
-            plugin_id: "test.plugin".into(),
-            module_hash: "hash123".into(),
-            cached_at: Utc::now(),
-            size_bytes: 1024,
-        };
-        cache.insert(module).unwrap();
+        cache.insert(resident("test.plugin", "hash123", 1024)).unwrap();
 
         let retrieved = cache.get("test.plugin");
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().module_hash, "hash123");
+    }
+
+    /// active key 存在但字节已不在本 owner 时，`active_module()` 必须给 `None`——
+    /// 这正是 `execute()` 要判的「有代际编号但没有可执行对象」。
+    #[test]
+    fn active_module_requires_resident_bytes() {
+        let mut cache = ModuleCache::new(ModuleCacheConfig::default());
+        assert!(cache.active_module("test.plugin").is_none());
+
+        cache.insert(resident("test.plugin", "hash123", 1024)).unwrap();
+        let (key, prepared) = cache.active_module("test.plugin").expect("active 且常驻");
+        assert_eq!(key.version, "hash123");
+        assert!(prepared.facts.exports_function("run"));
+
+        let (entry_key, entry) = cache.active_entry("test.plugin").unwrap();
+        assert_eq!(entry_key, key);
+        assert_eq!(entry.facts.module_hash, prepared.facts.module_hash);
     }
 
     #[test]
@@ -1076,18 +1324,8 @@ mod tests {
         let config = ModuleCacheConfig { max_cached_modules: 1, cache_ttl_secs: 3600 };
         let mut cache = ModuleCache::new(config);
 
-        let module1 = CachedModule {
-            plugin_id: "plugin.a".into(),
-            module_hash: "hash1".into(),
-            cached_at: Utc::now(),
-            size_bytes: 1024,
-        };
-        let module2 = CachedModule {
-            plugin_id: "plugin.b".into(),
-            module_hash: "hash2".into(),
-            cached_at: Utc::now(),
-            size_bytes: 2048,
-        };
+        let module1 = resident("plugin.a", "hash1", 1024);
+        let module2 = resident("plugin.b", "hash2", 2048);
 
         cache.insert(module1).unwrap();
         assert!(
@@ -1107,13 +1345,7 @@ mod tests {
         let config = ModuleCacheConfig::default();
         let mut cache = ModuleCache::new(config);
 
-        let module = CachedModule {
-            plugin_id: "test.plugin".into(),
-            module_hash: "hash123".into(),
-            cached_at: Utc::now(),
-            size_bytes: 1024,
-        };
-        cache.insert(module).unwrap();
+        cache.insert(resident("test.plugin", "hash123", 1024)).unwrap();
 
         let removed = cache.remove("test.plugin");
         assert!(removed.is_some());
@@ -1126,28 +1358,16 @@ mod tests {
         let config = ModuleCacheConfig { max_cached_modules: 2, cache_ttl_secs: 1 };
         let mut cache = ModuleCache::with_pack_lease_registry(config, authority);
 
-        cache
-            .insert(CachedModule {
-                plugin_id: "test.plugin".into(),
-                module_hash: "hash-v1".into(),
-                cached_at: Utc::now() - chrono::Duration::seconds(10),
-                size_bytes: 1024,
-            })
-            .unwrap();
+        let mut old_module = resident("test.plugin", "hash-v1", 1024);
+        old_module.cached_at = Utc::now() - chrono::Duration::seconds(10);
+        cache.insert(old_module).unwrap();
         let old_key = cache.active_key("test.plugin").unwrap();
         let lease = cache
             .acquire_active_lease("host-a", "test.plugin", wasm_now_ms(), 60_000)
             .unwrap()
             .unwrap();
 
-        cache
-            .insert(CachedModule {
-                plugin_id: "test.plugin".into(),
-                module_hash: "hash-v2".into(),
-                cached_at: Utc::now(),
-                size_bytes: 2048,
-            })
-            .unwrap();
+        cache.insert(resident("test.plugin", "hash-v2", 2048)).unwrap();
         assert_eq!(cache.generation_count("test.plugin"), 2);
         assert_eq!(cache.get("test.plugin").unwrap().module_hash, "hash-v2");
         assert!(cache.get_generation("test.plugin", old_key.generation).is_some());
@@ -1165,14 +1385,7 @@ mod tests {
         let mut cache = ModuleCache::with_pack_lease_registry(config, authority.clone());
 
         for hash in ["v1", "v2"] {
-            cache
-                .insert(CachedModule {
-                    plugin_id: "test.plugin".into(),
-                    module_hash: hash.into(),
-                    cached_at: Utc::now(),
-                    size_bytes: 1,
-                })
-                .unwrap();
+            cache.insert(resident("test.plugin", hash, 1)).unwrap();
         }
         let old = {
             let registry = authority.lock();
@@ -1184,23 +1397,11 @@ mod tests {
         };
         cache.set_rollback_pinned(&old, true).unwrap();
 
-        let result = cache.insert(CachedModule {
-            plugin_id: "other.plugin".into(),
-            module_hash: "other".into(),
-            cached_at: Utc::now(),
-            size_bytes: 1,
-        });
+        let result = cache.insert(resident("other.plugin", "other", 1));
         assert!(matches!(result, Err(WasmError::ModuleCacheFull { .. })));
 
         cache.set_rollback_pinned(&old, false).unwrap();
-        cache
-            .insert(CachedModule {
-                plugin_id: "other.plugin".into(),
-                module_hash: "other".into(),
-                cached_at: Utc::now(),
-                size_bytes: 1,
-            })
-            .unwrap();
+        cache.insert(resident("other.plugin", "other", 1)).unwrap();
         assert_eq!(cache.cache_count(), 2);
     }
 
@@ -1209,13 +1410,7 @@ mod tests {
         let config = ModuleCacheConfig::default();
         let mut cache = ModuleCache::new(config);
 
-        let module = CachedModule {
-            plugin_id: "test.plugin".into(),
-            module_hash: "hash123".into(),
-            cached_at: Utc::now(),
-            size_bytes: 1024,
-        };
-        cache.insert(module).unwrap();
+        cache.insert(resident("test.plugin", "hash123", 1024)).unwrap();
 
         let cleared = cache.clear_plugin("test.plugin");
         assert!(cleared.is_some());

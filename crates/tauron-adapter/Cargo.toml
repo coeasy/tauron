@@ -64,3 +64,6 @@ tauri = { version = "2", optional = true, default-features = false, features = [
 [dev-dependencies]
 # 恢复标记持久化的单测需要一个可删除的临时目录（已在 workspace dev-deps 中）。
 tempfile = { workspace = true }
+# 轮 40 装配腿测试：为 mock 更新包计算清单声明的 sha256（与 lib 的 optional sha2
+# 同版本；dev 构建不受 `plugin-install` feature 影响）。
+sha2 = { version = "0.10" }

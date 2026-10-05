@@ -13,6 +13,17 @@
 
 ## [1.1.0] - 2026-10-01
 
+### Changed
+
+- **删除无效历史文档（轮 50）**：`docs/architecture/capability-closure-plan.md`（0.4，自陈仅 A1–A3 落地、
+  §2 孤儿判定过期、`plugin-install` 默认特性口径被 1.1 反转）与 `full-architecture-refactor-plan.md`
+  （1.0，状态停在「其余待做」）整体删除；保留 0.3 roadmap（承载 §0 硬不变量与 M-9 现行判定）。
+  钉在被删文档上的轮 34 门禁针改挂 roadmap，并**收紧为终点锚定**（原 `[\s\S]{0,40}删除` 形态对「待删除」不变红）；
+  `contracts/orphan-public-api.json` 四条 `docRef`、`overview.md`、`competitive-analysis.md`、roadmap 两处链接
+  同步改挂现行载体。同轮更正 `crates/tauron-proc/src/lib.rs` 的「心跳监控尚未实现」注释——
+  host 侧 `generation.rs::heartbeat()` 续租与过期回收是真的，`tauron-proc` 自身不提供周期心跳。
+  删除理由与耐久产出去向见 `docs/architecture/README.md`「关于已清理的历史文档」。
+
 ### Added
 
 - **Production 的 origin 门必须有独立「装弹」事实（V4 §138.2 / Batch 0-1，轮 10）**：
@@ -100,7 +111,424 @@
   `reference-only` 的包一旦被人 import 就要求改判并补接线说明，`entry-point` 必须
   真的有 `bin` 或 `private`。判定结果与 `overview.md` 的说明段同源。
 
+- **Adapter 域所有权冻结台账（V7 §10-9「至少冻结」分支，轮 24）**：新增
+  `contracts/adapter-domain-ownership.json` + `scripts/check-adapter-domain-ownership.mjs`
+  （`pnpm gate:domain-ownership`，进 `gates:check` 聚合与 CI 两步）。V7 §10 第 9 条给的是
+  二选一——按域物理拆分 adapter，**或**至少冻结 domain ownership；拆分动的是已发布命令面的
+  落点、留作 Batch 5' 独立轮次，本轮把后者做成机器判定：每个顶层 `impl`（键=目标类型，
+  数量=块体第一层的 `fn` 数）与每组顶层自由 `fn`（键=函数名首段）都登记 `域 / owners 文件
+  集合 / 数量高点`，另加**每文件顶层条目总数封顶**。未登记即红、一个键两个域即红、归属集合
+  变了即红、数量长大即红、台账里登记的键或文件已不存在也判红（漂移同向封口）。当前基线
+  实录：`35 个 impl 类型 / 170 个方法、83 组顶层 fn / 357 个函数、18 个域、lib.rs 顶层条目
+  263 已封顶`。物理拆分没有发生，`lib.rs` 也没有被"改小"——本轮把方向钉死：**新增核心逻辑
+  要么开新域/独立文件，要么在 PR 里显式改台账**。
+- **Abandoned generation 的有界台账 + 跨 IPC 读数（V7 §9 leak gate，轮 25）**：新增
+  `tauron_host::GenerationStats{trackedResources, liveLeases, generationsIssued}`，随
+  `host_resource_stats.global.generations` 上线（TS 镜像同名接口，进 P0-2 的逐字段同构清单），
+  出口链 `GenerationRegistry::stats` → `RuntimeTable::generation_stats` →
+  `Registry::runtime_generation_stats`。新增 `GenerationRegistry::forget(resource)`：资源
+  **不再持有任何活跃租约**时摘除其代际跟踪，`RuntimeTable::remove_plugin` 在 `release` 之后
+  调用它——于是 `active` 键集合的上界是**在管插件数**，而不是"曾起过运行期的插件数"。
+  有租约时 `forget` 拒绝而非硬摘：那会让 `validate` 只剩 token 一道判据。三层 churn 证明
+  （台账 10,000 id / 租约表 5,000 次起停 / 注册表真实安装-起租约-回收 200 轮）+ 一条
+  句柄复用证明 + adapter 的活值核对，全绿。
+- **kill 失败的有界重试队列 + 终态证据（V7 §7 Process 行 / §9 leak gate，轮 26）**：新增
+  `tauron_host::TerminalReapRecord{pluginId, pid, attempts, reason}` 与 `ReapStats` 的重试腿
+  （`pending / retries / recovered / terminal / overflow / terminalRecords`）。三个上界全部是
+  `pub const`：`MAX_PENDING_REAPS = 64`（待重试队列）、`MAX_REAP_RETRY_ATTEMPTS = 3`（单条
+  pid 的重试次数）、`MAX_TERMINAL_REAPS = 16`（终态证据环形）。队列按 **pid 去重**——同一个
+  杀不掉的 pid 反复失败只会覆盖原因，不会把队列撑大；队满时最旧一条直接转终态并记
+  `overflow`，**不静默丢弃**。驱动腿接在既有主窗命令 `host_resource_stats` 内
+  （`Registry::runtime_retry_pending_reaps`，顺序在读数之前），因此**没有新增命令**：85 条
+  命令面不变。六条测试（表 4 / 注册表 1 / adapter 1）+ 一条把整条链钉住的 gate，
+  三次变异证明见 `docs/architecture/v4-industrial-gap-closure-plan.md` 轮 26 一节。
+- **重试前的 pid 归属判定（V7 §7 Process 行的安全封口，轮 27）**：`RuntimeTable` 新增私有
+  `pid_owner(pid)`（查**在册租约**，含已标崩溃的），`retry_pending_reaps` 在打第二枪之前先问
+  "这个号还有没有主人"；有则**让位**——出队、固化一条 `TerminalReapRecord`、计新字段
+  `ReapStats.skipped_live_pid`（线上 `skippedLivePid`，TS 镜像同名），且**不**计入 `retries`
+  （一枪没打就不算试过）。让位是第三种结局：既不是 `failures` 也不是 `recovered`，没有这个
+  读数，"正确地没误杀"与"驱动根本没跑"在 `reap` 上同形。表级正反两条 + 注册表走真路径
+  （`install → 起租约 → Uninstall → 重装并复用同号 → 驱动`）各一条测试。
+- **宣称链门禁（V7 §7 风险表，轮 28）**：新增 `wire-gate` 一条
+  「风险表的复核结论必须与代码同形」。它同时挡两个方向的漂移：文档把未闭合的行悄悄写成闭合
+  （正则钉住 Upgrade 行的 `**部分**` 与 `UpgradeRunner::run_phases` 符号证据，并禁止该行出现
+  裸的"已闭合"；ServiceGraph 行必须仍写 `**仍成立**`），以及代码悄悄多出
+  `crates/tauron-distribute` 之外的 `UpgradeRunner` 引用点（遍历 `crates/*/src/**/*.rs`、
+  剔除注释后要求命中集为空——真接装配腿的那一轮必须同批改表）。
+- **投递写侧的四种失败各有判据（轮 30）**：`crates/tauron-adapter` 的测试假启动器
+  `FakeSpawner` 新增 `fail_next_write_with(kind)`，能把 `write_frame` 的下一次调用注入成
+  任意 `std::io::ErrorKind`——写侧分码从此可用**确定态**证明，不再靠负载下碰运气复现。
+  配套两条用例：①`WouldBlock` / `BrokenPipe` / `NotFound` / `InvalidInput` 四例逐一对上
+  `E_CALL_PENDING_FULL` / `E_LEASE_EXPIRED` / `E_LEASE_EXPIRED` / `E_INVALID_MANIFEST`，
+  并连带断言 `retry_class()`、pending 表计数归零、且**一帧都没写出去**（失败不许留半程副作用）；
+  ②启动器返回 `Unsupported`（压根没有 stdin 通路）时走 `ProviderResult::Unsupported`，
+  与"有通路但写失败"分家。真 sidecar 洪峰用例同步加出处核对：拒绝必须由错误文本自证是
+  pending 表满还是写队列满。新增一条 `wire-gate` 直接读 `process_delivery.rs` 钉住这套映射，
+  并要求 `deliver()` 里不再出现 `E_STATE_INVALID_TRANSITION`。同轮 domain-ownership 台账（V7 §10-9）
+  如实调基线：`process_delivery.rs` 顶层条目 5→6、新登记 `fn stdin`（域 `process-delivery`），
+  理由写进 `contracts/adapter-domain-ownership.json` 的 `note`，**`lib.rs` 的 263 未动**。
+- **更新对话框的检查腿有了真消费者（轮 31）**：`ShellControllerOptions` 新增两个字段——
+  `currentVersion`（`host_updater_check` 的必填入参）与 `onUpdaterCheck(info)`（检查结论交回
+  接入方写 UI；控制器不猜展示方式）。`auto-update-client.ts` 的 `toUpdateInfo` 改为**导出**，
+  壳层与 SDK 从此共用同一份"什么算答不了"的判定（两处各写一份就是轮 29 修的那种双镜像点）。
+  `examples/minimal-app` 一侧：`index.html` 真正挂载 `<oc-updater-dialog id="updater-dialog">`
+  并加「打开更新对话框」入口，`main.ts` 把结论写回对话框的 `version` / `message` / `status`，
+  当前版本号从示例自己的 `package.json` 取（宿主不提供版本：`BrandInfo` 没有 version 字段，
+  `host_updater_check` 反过来把它当入参要；`tsconfig.json` 补 `resolveJsonModule`）。
+  配套门禁：`wire-gate` 新增「轮 31：更新对话框的检查腿与 SDK 同源」（五段，含页面挂载与
+  测试能力表不得再声明桩命令），`shell-controller.test.ts` 新增四条用例。
+- **更新流程状态词表进了契约包（轮 32）**：`@tauron/shell-events` 新增
+  `UPDATER_STATUSES`（`idle` / `checking` / `available` / `downloading` / `downloaded` /
+  `installing` / `ready` / `error`）、派生类型 `UpdaterStatus`，以及
+  `UPDATER_PRIMARY_ACTION: Record<UpdaterStatus, 事件名>`——更新对话框主按钮派发什么事件
+  由这张表推导，组件不再自己 `if/else` 写字面量状态。写侧 `@tauron/host` 的
+  `UpdateStatus` 改为 `UpdaterStatus` 的**类型别名**（不再是第二套字面量），读侧
+  `<oc-updater-dialog>` 的 `_status` 带类型并 `export type { UpdaterStatus }`，
+  接入方写错状态是编译错误。词表刻意不含 `done` / `updating`：它们从未被任何生产者产出。
+  配套：`shell-events` 契约自检 +3 用例（共 7）、`wc-shell.test.ts` +4 用例（该包 272）、
+  `wire-gate` 新增「轮 32：状态词表只有一个事实源」（六段）；`UpdaterStore`（第三套平行
+  状态机，无生产消费者）登记进 `contracts/orphan-public-api.json` 而不是静默删除。
+- **更新通道诊断成为两条入口共用的一条腿（轮 33）**：`@tauron/host` 的
+  `auto-update-client.ts` 新增 `enrichUpdaterInfoWithChannel(info, readChannel)`——
+  `AutoUpdateClient.checkUpdate()` 与 `ShellController._checkForUpdate()` 在
+  "`available: false` 或 `degraded: true`"这条分支上都调它，把 `host_updater_status` 的
+  灰度批次、崩溃门禁与宿主进程内账本并进 `info.reason`。该函数**只在模块内**，未从
+  `index.ts` 导出：它是展示口径而非对外 API，多一处对外拼写就多一处漂移。
+  宿主线形新增返回字段 `stateSimulated`（Rust `UpdaterStatus` 的 `state_simulated`），
+  与 `state` 成对读出；成对**做到装配形状上**——`UpdaterSink::status` 的账本对
+  （`ledger_state` / `ledger_simulated`）是必传参数，provenance 由 sink 推导
+  （`ledger_state.is_some() && ledger_simulated`）而不是自己声明；`ShellExtState` 同步加
+  `update_state_simulated`，
+  `host_market_download` / `host_market_install` 两条桩推进账本时**必须**同时写下出处。
+  **命令面不变**（加的是返回字段，不是新命令；85 条冻结未破）。配套：
+  `auto-update-client.test.ts` +3、`shell-controller.test.ts` +6、`wire-gate` 新增
+  「轮 33：更新通道诊断只有一个出口，账本的模拟推进不得被读成真实状态」（六段），
+  Rust 新增 `updater_status_must_say_whether_the_ledger_came_from_a_stub`。
+- **轮 34 施工单纠偏 + 两条孤儿账（V4 §Batch 2'，文档与门禁矛盾收口）**：`wire-gate` 新增
+  「轮 34：施工单不得再把已删除、且被门禁反向钉住的形状写成待办」——按 bullet 抽取方案文档的
+  A67/A68 待办、并钉住 A75 的改判措辞与复核命令的"期望零命中"；同一条门禁的第五段钉住**现状表**
+  里的 A75 行（本轮第二半：待办教人去做，现状表教人相信那两个字段还活着——同一矛盾的两侧，只钉
+  一侧下一轮就只改一侧）。`contracts/orphan-public-api.json`
+  新增两条未接线宣称：`@tauron/core` 的 TS `PluginRegistry`（`packages/tauron-core/src/registry.ts`）
+  与 `ConfigManager`（同包 `config.ts`），台账复核从 13 条增至 15 条。二者都是**零生产消费者**
+  （接线面内除声明文件与 core 自己的再导出之外无命中），登记后这句话由门禁代读；将来接线即红。
+  代码未改动：本轮修的是"文档指路到已被门禁禁止的形状"。
+- **轮 35 iframe 桥保码 + 形态判据归一（前后端最后一跳不再丢码）**：跨 iframe 的
+  `invoke` 失败此前在两半各丢一次码——写侧 `@tauron/plugin-sdk` 的 `PluginBridge`
+  把 handler 抛出的码硬换成通用 `SC-9001`，读侧 `PluginContext.invoke` 声明了
+  `error.code` 却只取 `message` 造裸 `Error`。轮 30 在宿主写侧按事实分好的码，到这
+  一跳整条被抹掉。新增 `@tauron/plugin-sdk` 的 `PluginBridgeError`
+  （`code` / `retryable` / `fallbackApplied`）与取码函数 `codeFromThrown`：先取错误
+  自带的码（**形态合法才算**，`code: 500` 这类业务字段不当码），再退消息文本里的码形态，
+  两处都没有才落 `SC-9001` 并标记 `fallbackApplied: true`。两套词表的**形态判据**
+  （`E_*` 前缀 / `^SC-\d{4}$`）收敛成一份，定义在 `@tauron/types`
+  （`APP_LAYER_ERROR_CODE_PATTERN` / `isAppLayerErrorCode` / `isCodeLike` /
+  `extractCodeLike`），`@tauron/host` 改为再导出（公开面不变）；`@tauron/plugin-sdk`
+  仍**不**依赖 `@tauron/host`（依赖方向由门禁钉住），因此它对宿主 `E_*` 的 `retryable`
+  一律给 `false` 而不猜。`wire-gate` 新增
+  「轮 35：iframe 桥两侧都必须把错误码带过去，不得塌成通用码」（八段：写侧取码链、
+  读侧带码拒绝、形态单一定义源、依赖方向、重试语义不复制第三份表、层归属用词、
+  两半各有真实测试、面向插件作者的文档已写）。
+  同轮抓到并修掉两处**用词与文档相反**的口径：`SC-####` 在 TS 注释里被称作"应用层词表"
+  （按 `docs/architecture/overview.md`，`SC-####` 属**框架层**、`E_*` 才是应用层宿主
+  底座——`tauron-shell` 用的就是 `SC` 那份表），以及 `plugin-development-guide`
+  一处仍写 "TS 侧 `HOST_ERROR_CODES` 按**声明顺序**比对"（门禁实为按**码名集合**比对，
+  同文档另一处与 V4 A69 都已是新口径）。
+- **轮 36 通知推送腿补上接收方（宿主 `emit` 不再无人监听，读端 API 不再是孤儿）**：
+  `TauriDispatchSink::send` 此前每次把通知 `emit` 到 `tauron://notification` 并返回 `Ok`，
+  而**全仓没有任何代码监听这个 topic**，读端 `ShellClient.notificationsList()` 也只有自己的
+  单测在调——发出端绿灯、接收方不存在，通知到不了用户且不报错。现在
+  `@tauron/host` 的 `ShellController` 新增 `onNotification` / `notificationLimit`
+  两个选项（**只加字段，85 条命令面未变**）：`start()` 订阅信号 → 拉
+  `host_notifications_list` → 把按身份过滤后的快照交给接入方；`stop()` 退订并推进代际令牌，
+  晚到的回帧就地退订、晚到的快照不上屏。事件载荷仍是 `{ id, pluginId, kind, ts }`
+  **不含正文**（广播带正文=跨插件内容泄露，轮 11 的性质保留），所以监听端必须是"信号 → 拉取"；
+  突发合并为"在途一次 + 收尾补拉一次"（5 条信号 = 2 次命令）；三个失败出口
+  `notification.subscribe` / `notification.pull` / `notification.render` 各归各并全走 `onError`。
+  线值的唯一事实源是 Rust `pub const NOTIFICATION_TOPIC`，TS 侧镜像在
+  `packages/tauron-host/src/host-topics.ts` 并从包入口导出，全仓出现第二处字面量即红。
+  真实消费者：`examples/minimal-app` 接 `onNotification` 上屏（按 id 去重、集合上界 200）。
+  `wire-gate` 新增「轮 36 通知推送腿」八段门禁（含 Rust 载荷字段封闭集、TS 侧消费者集合冻结、
+  以及"文档不得再写「本仓没有任何 `DispatchSink` 实现、`notify_sink` 无人注入」"这句旧事实的反向 needle）。同轮按"文档宣称与代码
+  相反即断链"改掉三处"发出=送达"叙事，以及 `incremental-adoption.md` 里同一事实的**两处镜像**
+  （§2.2 仍写「仓库内没有任何 `DispatchSink` 实现、也无人注入」，与 §5 及 `tauri.rs` 相反）；
+  Rust 侧改为**逐 topic 监听方清单**：菜单与通知=有监听方，`tauron://dialog-degraded` /
+  `tauron://deep-link-registration`=**零监听方**（best-effort 诊断，权威结论在命令返回值
+  `simulated` / `reason` / `native: false`）。
+- **轮 37 菜单/托盘点击腿：文档指着一条不通的路，托盘那条 lane 从未登记**：
+  四处叙述（`lib.rs` 的 `MenuItemSpec::event` 注释、`tauri.rs` 的命令注释、
+  `shell-client.ts`、由这两处生成的 `docs/api/command-surface.md`）都写着点击
+  「经 `host_events_*` 总线回传、用 `host_events_drain` 取件」，而实现一直是
+  `AppHandle::emit`——照文档接线的人会守着一条永远不会有菜单帧的队列且不报错
+  （那条总线是订阅 + 取件的拉模型，与点击回传没有接线关系）。同轮另查出两条更隐蔽的：
+  `TauriTraySink` **从未**把托盘菜单的路由登记过，托盘右键点击被静默丢弃；`ShellClient`
+  的六条 `host_menu_*` / `host_tray_*` 方法零生产消费者、零测试。现在
+  新增 `crates/tauron-adapter/src/menu_routes.rs`（**平台无关，不带 `tauri` feature
+  也能跑测试**）：`MenuRouteTable` 按 `MenuLane`（`AppMenu` / `TrayMenu`）分道存
+  `id → topic`，整条 lane 随来源一起替换；`TauriMenuSink::new` 只注册**一个** Tauri
+  全局菜单监听（`manager.menu.global_event_listeners` 全仓只有一张，托盘点击也进它），
+  命中即 `emit` 一帧 `{ id, source, native: true }`。托盘在**真的挂上菜单后**才登记
+  `TrayMenu` lane，`tray_remove` 只在真移除时清空它，`host_menu_reset` 只失效 `AppMenu`
+  lane。TS 侧新增 `MenuClickFrame` / `MenuClickSource` 与 `MENU_CLICK_TOPIC`
+  （Rust `pub const` 的镜像，从 `@tauron/host` 入口导出）；真实消费者是
+  `examples/minimal-app` 新增的第 9 节：`listen(MENU_CLICK_TOPIC)` 收帧并按 `source`
+  上屏，五个按钮走完六条命令。命令面**未新增一条**（85 条冻结）——roadmap 里那个
+  `host_menu_on_select` 提案名仍然不存在，回调链靠的是路由表 + 事件通道。
+  `wire-gate` 新增「轮 37 菜单/托盘点击腿」八段门禁（线值与 lane 词表同源、共享路由表
+  只剩唯一查询点、两条 lane 各自整体替换、回传帧字段两侧同集合、消费者集合逐文件冻结、
+  Rust 与 TS 两侧都有测试、README/命令面/roadmap/接入指南同口径，以及三句旧事实的
+  反向 needle）。**门禁在同一轮把我自己刚写的另一句判红了**：四处把 `MENU_CLICK_TOPIC`
+  说成"宿主会替你补的那个值"，而实现只对**显式填了** `event` 的项发帧、`None` 一个都不发——
+  宿主从不回填，措辞已在唯一事实源（Rust `///`）改掉并重新生成命令面文档；收尾复跑时
+  形状禁令又把施工单与本条自己的复述判红，于是文档改为**指向门禁本体**而不复述被禁形状。
+  同轮自查再补一处门禁**没**判红、但按本轮口径站不住的形状：示例的接收腿当初写成裸
+  `void backend.listen(...)`，而 `TauriBackend.listen()` 原样返回 Tauri 的 `listen()` Promise，
+  事件系统不可用时会拒绝——届时只剩一条 unhandled rejection，"前端已接上回传"又成了核对不了
+  的承诺。现在订阅失败会上屏为「点击回传腿未挂上：… 订阅失败（…）」，并把这句出口钉进⑤的
+  冻结集合（摘掉 `catch` 的变异确实把它打红）。
+- **事件 topic 词表全量同源（轮 38）**：`host-topics.ts` 从"两条 topic 的家"升级为**全部
+  五条**宿主 `emit` topic 的唯一 TS 镜像——新增 `DEEP_LINK_TOPIC` /
+  `DIALOG_DEGRADED_TOPIC` / `DEEP_LINK_NATIVE_TOPIC` 三个导出（均从 `@tauron/host`
+  入口再导出）；`DeepLinkClient` 的投递腿改按 `DEEP_LINK_TOPIC` 常量监听（此前是裸
+  字面量，宿主改名即静默零命中）。两条诊断帧的文档块写明**仓库内零监听方**、权威结论
+  在命令返回值。`wire-gate` 新增「轮 38 topic 词表两侧同源」六段门禁（Rust 常量全集 ↔
+  三层表逐字相等、线值在 TS 非测试源恰好一份镜像、投递腿禁裸字面量、监听方文件集合
+  逐条冻结、两侧文档同口径），14 次定向变异逐段变红。B 层
+  `HOST_SETTINGS_CHANGED_TOPIC`（`@tauron/app-plugin-sdk` 侧的镜像）与 C 层三个片段
+  （前/后缀，含 `://` 即红）同轮纳入同一张表——新增一条 topic 不进表，门禁直接红。
+- **跨重启孤儿扫描（轮 41，V7 §7 最后一条「未落」收口）**：此前终止失败的 pid 只活在
+  待重试队列里——宿主重启，队列连同"谁还活着"的记忆一起消失。现在待重试队列随每次
+  脏变更落进恢复数据目录的 `reap-ledger.json`（`DurableEnvelope`：校验和 + 代际，
+  复用既有 `durable.rs` 写盘腿，tmp + fsync + rename）；**撕裂或篡改的台账拒绝启动**
+  （`AssemblyError::ReapLedgerRejected`，不静默重置成空账）。下次启动由
+  `Registry::open_reap_ledger` 读回并逐条定性：新增平台存活探测
+  （`liveness.rs`：Unix `kill(pid, 0)`、Windows `OpenProcess` + `GetExitCodeProcess`，
+  其余平台 Unknown）——`Gone` 销账（计 `reap.sweepResolved`），`Alive` / 不可判定
+  **只留证据不盲杀**（`sweepSurvivors` / `sweepUnknown`，跨越宿主重启的 pid 身份不可
+  核实，瞎开枪就是拿证据赌一条人命）。重启读回的条目进独立 `restart_reaps` 池，
+  永不进终止重试腿；写盘失败计 `ledgerWriteFailures` 且保持脏状态待下轮重试——
+  写不进去不粉饰成"已记录"。`ReapStats` 新增四个计数器（TS `shell-client.ts` 镜像
+  同步），`wire-gate` 新增「轮 41」段钉住只探测不杀的形状（含 V7 §7 Process 行的
+  对外宣称与"不盲杀"边界；30 次定向变异逐段变红）。同轮电池实录一次负载抖动：
+  `call_admission_is_released_by_cancel_timeout_and_owner_teardown` 的 1ms TTL 窗口
+  在两枚电池并行时抖红一次（426/427）——timeout 腿改用独立 1ms 注册表、
+  cancel/teardown 腿回缺省 TTL，方向变为对负载不敏感。
+- **便携路径五维收口（轮 42，A85）**：`crates/tauron-host/src/portable_path.rs` 此前
+  只挡绝对路径 / `..` / 盘符 / UNC / NUL 五类**逃逸**；便携条目名的另五个口子在 Unix 上
+  静默通过、只在目标平台咬人，现在逐条判定补齐并各自具名：Windows 保留设备名（22 个
+  `WINDOWS_RESERVED_STEMS`，含带扩展名形式——`nul.txt` 的 stem 是 `nul`）、非 NFC
+  归一（`icu_normalizer` 的 `ComposingNormalizerBorrowed::new_nfc()`；`é` 的合成与分解
+  两种字节写法不再能各占一个条目）、尾点 / 尾空格（Windows 落盘静默剥离会制造清单外
+  名字）、长度上界（段 ≤ 255 字节、整条相对路径 ≤ 1023 字节——macOS `PATH_MAX` 是主流
+  平台里最紧的界）。判定为**词典序、平台中立**：段切分按 `['/', '\\']` 双分隔符，同一
+  输入在任何宿主给出同一结论。新增集合级 `validate_portable_entry_set` 承担第 5 维：
+  ASCII 大小写折叠冲突（`Icon.png` / `icon.png` 在大小写不敏感 FS 上互相覆盖）在
+  签名 / 常量阶段整体拒绝。zip 侧（`crates/tauron-market/src/lib.rs`，`signing`
+  生产面）**委派同一份判定**——`sanitize_entry_path` 逐条 + `validate_zip_constants`
+  集合级，解包前即拒；依赖方向经 `signing`（`dep:tauron-host`）与 `package_signature.rs`
+  先例一致，无环；非 `signing` 构建保持原形状。测试宿主 5 条 + 市场 2 条（后者
+  `signing` 门后）；既有 `end_to_end_malicious_path_traversal` 升级为 cfg 分流断言
+  （`signing` 开启时同一载荷**更早**在常量层被拒——分层前移的有意行为变更，注释已写明）。
+  `wire-gate` 新增「轮 42」段门禁（五维具名失败面 / 判定形状 / zip 侧两处委派与
+  signing 门 / 七条测试在场 / A85 台账行不许回写"未落"）；24 次定向变异逐段变红
+  （基线绿 → 24/24 → 恢复绿）。
+- **破坏性管理操作走审批令牌链，两域 TTL 改走可信时间（轮 43，A83 尾段 + A100 收口）**：
+  `host_registry_admin` 的 uninstall/purge 此前在生产档只需主窗身份即执行——与 install
+  域「预览→一次性令牌→提交重核」的承诺不对称。现在对称：预览（`preview: true`）只铸发
+  一次性 `AdminReviewToken`（绑 plugin_id / op / 预览版本 / nonce，`deny_unknown_fields`，
+  TTL 600s、容量 64 条），commit 时**先按 nonce 摘除再比对**、重核 op/插件/版本，全部
+  发生在注册表迁移之前；旧面无令牌入口在生产档（安装特性开启）直接拒 uninstall/purge。
+  线返回改判别形 `RegistryAdminResponse`（internally-tagged `kind`：`executed` 分支既有
+  `TransitionOutcome` 字段仍在顶层，老读者不破；`review` 分支零副作用），`HostAdminOp`
+  新增的 `preview`/`reviewToken` 都带 `serde(default)`——旧载荷仍合法，85 条命令面
+  冻结不破。同轮把 install 与管理两域的令牌 TTL 都改走 A100 咽喉
+  `review_now`/`review_unexpired`：provider 在则取 `trusted_time`（非 Trusted 失败
+  关闭）、None+Production 在铸发与消费两处都直接拒，仅开发/测试档回落墙钟（墙钟现只
+  服务 ACL 授权行的发放时间戳）。TS 两侧同形：`RegistryAdminOutcome` 判别联合、
+  `PluginManagerStore` 的预览→可注入确认钩子（无 DOM 失败关闭）→带令牌提交
+  （取消与失败在返回上区分）、壳层 `_uninstallPlugin` 同链。`wire-gate` 新增
+  「轮 43」段门禁（Rust 形状 / wire 形状 / TS 两侧 / 测试在场 / 台账行翻篇）。
+- **安装流内存门禁落在真实安装链上，整包内存入口删净（轮 44，A94）**：
+  `performance-budgets.json` 的 `process.maxPeakRssKb` 此前断言的是 wire 往返探针
+  （`perf_probe`）的 VmHWM，与内存最重的安装路径无关；本轮换成 `installStream`
+  （载荷下限 64 MiB、堆峰值 16384 KiB、VmHWM 32768 KiB），由新增
+  `tauron-adapter --example install_stream_probe` 生产：~96 MiB 载荷（3×32 MiB Stored
+  blob + manifest/js/html）走**生产同一条提交链**（`cmd_registry_install_preview_as`
+  → `cmd_registry_install_reviewed_as`），同时读出计数全局分配器的堆高水位
+  （`fetch_max`，跨平台、本地可断言）与 Linux `/proc/self/status` VmHWM；
+  `check-performance-size.mjs` 新增必需参数 `--install-probe` 与三道安装断言
+  （status=installed / payload ≥ 下限 / 堆、RSS 双上界，RSS 缺读数＝失败而非跳过），
+  `ci.yml` 的 performance-size job 相应构建并喂数据。同轮修掉探针抓出的**真实缺口**：
+  安装的激活摘要腿此前用 `std::fs::read` 整读每个文件——`ContentIdentity::from_reader`
+  （固定 64 KiB 缓冲）落地后全链（验签/解包/摘要）流式；`verify_tpkg(&[u8])` /
+  `verify_tpkg_file` 两个零调用者的整包入口删除。`wire-gate` 新增「轮 44」段门禁
+  （预算锚点 / 脚本断言 / CI 接线 / 探针形状 / 整包入口不得复活 / 台账行翻篇）。
+- **Profile V2：Tier 与 Capability Bundle 解耦，三张表与命令面同源（轮 45，A65）**：
+  V4 §87 的「Tier S != Window / Tier E != Desktop / Tier P != Marketplace UI」此前只是
+  判词——全仓没有对应的表或代码。本轮落地 `contracts/tier-bundles.json` 三张表：
+  ① tiers——S/E/P 三档深度的必备 bundle 严格单调（S={core} ⊂ E={core, plugin-runtime} ⊂
+  P={+marketplace}）；② bundles——§87.2 的 10 个能力/形态捆绑各带命令子集，85 条命令
+  **完全划分**（core 28 / desktop-ui 27 / plugin-runtime 20 / marketplace 7 /
+  observability 3），五个形态捆绑中仅 desktop-ui 有命令面，其余四处与 enterprise-policy
+  如实标 roadmap 空表（不白挂命令）；③ surfaceBundles——正交性断言的分母。
+  `scripts/check-tier-bundle.mjs` 作为表的机器读者判定六条不变量（表结构 / 与生成命令面
+  同源 / 完全划分 / 状态诚实 / 深度严格单调 / requires∩surfaceBundles=∅），
+  `gate:tier-bundle` 进 `gates:check` 链与 ci.yml 独立步骤；`wire-gate` 新增「轮 45」段
+  钉表形状与布线（3/10/5 键集、requires 字面、状态诚实、脚本与 CI 在场、台账行翻篇）。
+- **零 Surface 就绪从判词变为可求值集合 + 真跑 conformance（轮 46，A66）**：
+  V4 §87.3 的「headless 可零 Surface 运行」此前全仓只命中 `headless` 注释，就绪判定
+  散落为各子系统布尔量。本轮 `tauron-host/src/readiness.rs` 落地 `ReadinessFact`
+  （id/ready/reason）与 `ReadinessSet` 六组必备事实（kernel / contract /
+  required_providers / required_runtimes / required_surfaces / product_predicates）：
+  `headless()` 构造把 Surface 组留成**空集**（空集不阻塞），`evaluate()` 让每个未就绪
+  事实**具名**进 `blockers`（`id: reason` 或裸 id，不许静默跳过），`health()` 桥回
+  A103 的 `HealthReport`（就绪 → ready；未就绪 → alive_but_not_ready(blockers 合并)，
+  存活/就绪/降级分离的单一口径）。`v4_host_conformance.rs` 新增三条真跑用例：
+  ①底座服务图（contract → policy → runtime）可排序 + 零 Surface 就绪
+  （`evaluate().ready`、blockers 空、`can_accept_work()`）；②声明了 `main-window`
+  但未挂载 → `blockers == ["main-window: window-not-mounted"]` 且 NotReady 但 Alive；
+  ③kernel 未就绪时零 Surface **不豁免**（`kernel: substrate-graph-invalid` 具名拦下）。
+  `wire-gate` 新增「轮 46」段门禁（模块形状 / 三测试名在场 / 导出行 / 台账行翻篇）。
+- **故障边界扩到事件/审批/注册表三条子系统（轮 47，A91）**：
+  A91 判据「一个子系统 panic 不得升级为全宿主风险」此前只有 settings 一条生产边界，
+  事件/审批/注册表任一 panic 仍是全宿主风险。本轮把轮 11 拆出的三段式机制
+  （`run_subsystem_boundary`：ensure_ready → catch_unwind → record_panic，锁不跨闭包）
+  接到三条新边界，各带**自己的确定性修复语义**：①events——7 条事件命令走闸门，修复 =
+  会话态清零且**保留 topic 声明**（新增 `EventBus::reset_session_state`：清订阅/审批/
+  队列/排序/统计；声明是装配期结构事实，而发布端对未声明 topic 只静默丢弃不报错，
+  清掉声明等于让修复动作把可工作的消息面悄悄打哑）；②approval——4 个令牌消费点走
+  闸门，修复 = 重新 preview 清空两域令牌表（一次性瞬态物，清空让"消费了一半"的令牌
+  彻底失效）；③registry——5 条注册表命令走闸门，**没有会话内确定性重建**：修复尝试
+  如实推成 Quarantined 并在错误里写明"重启重装"，不伪造修复。`cmd_recover_boot`
+  驱动 events/registry 修复（修复前置判定 `begin_subsystem_reconcile` 对悬空
+  `Reconciling` 做确定性重做）；审批修复骑在两条 preview 命令上；四条边界的
+  state/generation/lastFault 并入 `host_resource_stats` 的 `faults` 读数。
+  三条新测试（`events_fault_boundary_rejects_bus_work_and_recover_boot_resets_session_state` /
+  `approval_fault_boundary_blocks_tokens_and_preview_reconcile_clears_them` /
+  `registry_fault_boundary_quarantines_until_reassembly_not_faked_ready`）+ host 单测
+  `session_reset_clears_subscriptions_but_keeps_topic_declarations` 钉住"声明存活"；
+  `wire-gate` 新增「轮 47」段门禁（形状 / 修复文案 / 布线 / 台账行翻篇）。
+- **HTTP 重定向/DNS 复检接进生产路径（轮 48，A96）**：
+  `authorize_redirect` / `authorize_resolution` 此前除模块自测外零调用者，逐跳授权与
+  解析复检在生产不可达。`HttpSink` 契约改为**单跳**：provider 不得自行跟随重定向
+  （3xx 原样返回并带 `location`），且必须在响应的 `resolvedAddrs` 里回报本跳实际解析
+  地址；声明非 `RedirectAndDns` 档的 provider 一律拒发（策略不可执行时拒绝执行）。
+  `cmd_http_request` 重写为宿主侧逐跳循环：`resolve_redirect_location`（`tauron-host`
+  新公开 fn，RFC 3986 相对解析）→ `authorize_redirect`（`maxRedirects` hop 上界 +
+  跨源剥离 `authorization`/`cookie`/`proxy-authorization`）→ 按 provider 回报地址
+  `authorize_resolution` 复检（不可解析/私网失败关闭）；`AdapterConfig::with_http_sink`
+  提供注入 builder；TS 线形新增可选 `resolvedAddrs` 回传。五条行为测试覆盖 RFC 3986
+  归一跳转链 / 跨源凭据剥离且被拒目标不发出 / `maxRedirects` 上界 / provider 解析地址
+  私网复检 / 非 `RedirectAndDns` 档拒发（UrlOnly provider 收不到请求）；
+  `wire-gate` 新增「轮 48」段门禁（形状 / 布线 / 测试名 / 台账行翻篇）。
+- **TargetSpec 变体过滤接进安装/更新装配腿（轮 49，A71）**：
+  `resolve_best`（`tauron-host/src/target.rs`）此前只有自测，安装/更新路径不过滤变体，
+  `ArtifactVariantResolver` 仅存在于注释，函数本体挂在孤儿台账里。现在：`resolve_best`
+  泛型化（`T: AsRef<TargetSpec>`，并列取后者）并新增 `ArtifactVariantResolver::resolve`
+  作为「任何 OS 加载动作之前」的具名入口；适配器新增 `UpdateArtifactVariant`（目标 +
+  平台专属清单）与 `DistributeUpgradeInstaller::with_variants`——变体列表非空时
+  `download()` / `install()` 在**任何下载、解压或 OS 加载动作之前**按本机编译目标
+  （`current_target_spec`，cfg 推导、调用方不可伪造）解析出最具体的兼容变体；解析不出即
+  `E_INVALID_MANIFEST` 硬拒（不静默回退单包默认），且 `install()` 以同一份被选中的清单
+  重建 runner options（download/install 同口径，避免重验时把变体包判成不一致）；空列表
+  保持既有单清单语义（已装配宿主行为不变）。`wire-gate` 新增「轮 49」段门禁（泛型签名 /
+  resolver 接线 / 硬拒文案 / 台账条目删除 / 台账行翻篇）；孤儿台账中
+  `TargetSpec::resolve_best` 条目同步删除。
+
 ### Changed
+
+- **宿主市场下载/安装从桩变为「装配即真」，两条命令升为特权并进审计（轮 40，行为变更）**：
+  `host_market_download` / `host_market_install` 此前恒 `simulated: true`（只推进进程内账本），
+  现在装配方注入 `UpgradeInstaller`（仓内实现 `DistributeUpgradeInstaller` 走完整
+  `UpgradeRunner`：staged 验签 → 备份树哈希 → 原子交换 → 健康检查 → 提交日志 → 重启/回滚）。
+  四点对外可见：①**缺省装配行为不变**——仍 `simulated: true` + reason 如实说"没有下载/替换
+  任何东西"；装配后为 `simulated: false`，且**失败路径零账本**（`updateState` 两个字段原样
+  不动；健康检查失败自动回滚后账本仍停在 `downloaded:<v>`）；②授权档位从"不在档位表、
+  仅主窗判定"落为表内 `Privileged`（与注册表安装同级），并连同进 `AUDITED_ADMIN_COMMANDS`
+  （6→8 条）：`_as` 包装改走 `admin_gate`（判定 + 结构化审计同一咽喉点，允许与拒绝都
+  留痕）；`host_market_check` 仍是桩、仍只判不入表；③命令线形一个字节没改（`window` 由
+  Tauri 注入，前端参数不变），`host_updater_status` 的账本标注自此有了能写"真实"值的
+  写入方——轮 33 说的"决定它的是账本写入方"至此成立；④distribute 侧把「下载上界」与
+  「SHA-256 + 注入验签」抽成 `download_bounded` / `verify_package` 两个共用实现
+  （`UpgradeRunner::run_phases` 与适配层下载腿共用同一份），内联重复被门禁反向钉住不许回归。
+- **插件侧能力可见性改按调用方主体过滤（轮 39，行为变更）**：`isAvailable()` /
+  `capabilityMatrix()` 此前只查"命令是否注册"，插件 webview 会把宿主构建级命令集里的
+  主窗特权命令（`host_registry_admin` / `host_runtime_spawn` / `host_production_doctor`
+  等 10 条）误报为可见。现在 `isAvailable()` 双判据：注册位 ∧（`consumer !==
+  'main-window'` ∨ `principal().kind === 'main-window'`），畸形主体（`invalid` label）
+  不按主窗放行；`capabilityMatrix()` 与之口径完全一致（逐条委托）。`ShellClient.supports()`
+  **未变**，仍是"注册与否"的构建/协商事实——插件 UI 做能力判断请用 `isAvailable()`。
+  宿主侧无变化：`cmd_host_capabilities` 仍是构建级返回，真正的执行判定在
+  `require_main_window`。
+- **插件侧 `ctx.invoke()` 的失败从裸 `Error` 变成带码的 `PluginBridgeError`（轮 35，对外可见）**：
+  ①`catch` 到的对象新增 `code`/`retryable`/`fallbackApplied` 三个字段，`code` 是桥上原样的
+  码——宿主能力抛的 `E_*` 不再被换成 `SC-9001`，插件自己抛的 `SC-####` 也保住；②本地发起的
+  失败开始带框架层码：超时 `SC-2001`、取消 `SC-2002`（此前是 `new Error('Cancelled')`）、
+  上下文销毁 `SC-2004`、权限未授予 `SC-1002`；③`retryable` 只对 `SC-####` 按
+  `RETRYABLE_ERROR_CODES` 判定，`E_*` 恒 `false`——**分流请读 `code`**，宿主的重试四档
+  （`retryClass`）在 `@tauron/host` 那份表里，插件包不复制它。
+  向后兼容边界：`PluginBridgeError extends Error`，只读 `message` 的旧插件行为不变。
+  **桥的成功路径与消息文本未改**，`message` 仍面向日志、不作分支依据。
+- **壳层「检查更新」改读真更新通道，且结论必须交回接入方（轮 31，行为变更）**：
+  `ShellController` 监听 `oc-updater-check` 的那条腿此前调 `host_market_check`（宿主本地桩，
+  恒 `available: false` + `simulated: true`）**并把返回值整个丢弃**。现在它调
+  `host_updater_check`（经 `ShellClient.updaterCheck(currentVersion)`），判定复用导出的
+  `toUpdateInfo`，结果经 `onUpdaterCheck(info)` 上屏。三点对外可见的变化：①装配壳层更新对话框
+  必须给 `currentVersion`，缺它时控制器**一条命令都不发**、直接走 `onError` 报缺参（回落桩会拿到
+  形似结论的 `available: false`，那是把"答不了"演成"已是最新版本"）；②同一次"检查更新"从
+  "两个入口两个相反答案"变成一个答案（SDK 与对话框同源）；③`ShellControllerOptions` 只增可选字段，
+  不传 `onUpdaterCheck` 时检查照做、结论不上屏。**下载 / 安装两条未变**，仍打 `host_market_*` 桩
+（轮 40 补记：装配了真实 `UpgradeInstaller` 时这两条腿改走真通道、成功即翻 `simulated: false`；
+未装配时保持桩，且失败路径零账本）。
+- **更新对话框主按钮的标签与动作改由契约映射决定（轮 32，行为 + 类型变更）**：
+  `<oc-updater-dialog>` 的 `status` 从裸 `string` 收窄成契约的 `UpdaterStatus`，主按钮
+  三态现在是 `UPDATER_PRIMARY_ACTION` 的查表结果。两点对外可见：①`ready` 的按钮从
+  「开始更新」变成「立即重启」——旧行为会把已经装好的更新**再下载并安装一遍**；
+  ②`error` 与 `idle`/`checking` 同归「检查更新」（这一轮的语义是"答不了/失败了"，
+  允许重试，不等于已装好）。`available`/`downloaded`/`downloading`/`installing` 仍是
+  「开始更新」，前两者不变、后两者额外渲染进度条。**类型层面**：接入方若曾自行声明
+  `status: string`，赋值非词表取值现在编译不过——这是刻意的，词表漂移正是本轮的病因。
+  `UpdaterStore` 那套 `…installing → restarting` 状态机**没有**被接成事实源：它无生产
+  消费者，本轮只登记孤儿账；收口或对齐属破坏性变更，需单独批准。
+- **「没有更新」开始带依据上屏，宿主账本区分模拟与真实（轮 33，对外可见的文本变更）**：
+  `checkUpdate()` / `onUpdaterCheck` 交回的 `info.reason` 在"`available: false` 或
+  `degraded: true`"时现在追加一段通道事实（`更新通道已装配｜灰度 30%｜崩溃门禁未停发｜
+  宿主账本 installed:2.0.0（模拟推进，未真的装上）`）。三点对外可见：①示例
+  `describeUpdate()` 的"没有更新"分支不再直接说"已是最新版本"——有反向依据时说
+  "没有可用更新（当前 x）——依据：…"，那句话只在**没有**依据时才说得出口；②`state` 单独
+  出现的地方少了：账本的出处随 `stateSimulated` 一起给，读侧不再靠猜（桩阶段有 `state` 时
+  恒 `true`，决定它的仍是**账本写入方**的 provenance 标记——未落地的 `UpgradeRunner` 装配腿
+  要把 `update_state_simulated` 写 `false`；本轮没有把它翻成真实（轮 40 已落地：装配了
+  `DistributeUpgradeInstaller` 时两条市场腿在真实生效后写 `update_state_simulated = false`，
+  桩路径保持 `true`）；③诊断**不改判定**：
+  `available` / `degraded` 仍只来自 `host_updater_check`，命令缺席 / 报错 / 答空三种情况都
+  原样返回结论，`available: true` 时不多打这条命令。旧宿主（无 `host_updater_status`）下
+  行为与轮 33 之前一致，不会因此报错。**Rust 侧一处签名变更**：`UpdaterSink::status` 现在要求
+  调用方传入账本对（`ledger_state` / `ledger_simulated`）。这不是整理风格——首版让 sink 自己
+  写 `state_simulated: false`，被 `check-simulated-never-commits.mjs` 的 cross-check 判红
+  （被网关源不得声明"这不是模拟的"），而 needle 放宽等于绕过门禁，故改成"声明写不出来"的形状。
+  仓内唯一实现是 `DistributeUpdaterSink`；外部若自行实现该 trait 需同步签名，这是刻意的破坏。
+- **进程投递写侧失败改码（轮 30，对外可见的错误码变更）**：`ProcessCallDelivery::deliver`
+  写入 sidecar stdin 失败时，此前不论哪种失败一律上抛 `E_STATE_INVALID_TRANSITION`；现在按
+  事实分三码（外加一条"未装配"通道），调用方拿到的处置方向随之改变：①队列满 →
+  `E_CALL_PENDING_FULL`（与 pending 表满同码，因为调用方动作一致）；②pid 的 stdin 通路已不在
+  （`NotFound` / `BrokenPipe`）→ `E_LEASE_EXPIRED`，即"要重新 `host_runtime_spawn`"而不是
+  "重投这一帧"；③帧超 `MAX_FRAME_BYTES` 或入参不可序列化 → `E_INVALID_MANIFEST`，
+  即"改载荷才有用，退避重投无用"。`E_STATE_INVALID_TRANSITION` 从此不再出现在这条通路上。
+  **没有任何消费者需要改代码**：85 条命令面、24 码词表、`retry_class()` 表均未变。可见的变化是
+  写侧失败过去一律落在 `E_STATE_INVALID_TRANSITION`（`Never`），现在"stdin 通路已不在"那一类
+  如实落在 `E_LEASE_EXPIRED`（词表里唯一的 `AfterReconnect`）——同一件事的重试语义不再被误标。
+- **`AutoUpdateClient.checkUpdate()` 改读真更新通道（轮 29，行为变更）**：它过去调
+  `host_market_check`（宿主本地桩，恒 `simulated: true`），现在调 `host_updater_check`
+  （`DistributeUpdaterSink` 注入端点后即真跑清单校验 + 灰度 + 签名判定）。三点对外可见的
+  变化：①必须在 `config.currentVersion` 声明当前版本，缺它 `checkUpdate()` **抛错**
+  （返回 `available: false` 会被 UI 显示成"已是最新版本"，那是拿缺参冒充结论）；
+  ②新增读数 `info.degraded`——端点未注入 / 不可达 / 签名非法时为 `true`，状态落 `'error'`，
+  只有"确实没有更新"才落 `'idle'`；③`config.endpoints` / `pubkey` 明确为**不生效**字段
+  （更新端点的权威来源只能是宿主装配：让 webview 指定宿主去哪取更新清单，等于把宿主的
+  更新通道交给调用方）。下载/安装两条命令**未变**，仍是宿主桩。
+- **`host_capabilities` 的 `market-update` 域措辞更正（轮 29）**：原因文本从"未接入更新源"
+  改为指名真通道在 `updater` 域（`host_updater_check`）。域名的判定与线形不变。
 
 - **A69 / §89：错误码声明顺序不再是协议约束**（轮 10）。穿越 IPC 的一直是**码名**
   （`ErrorCode` 未配 `rename_all`，serde 表示即变体名），而三处测试却按声明顺序比对，
@@ -127,6 +555,23 @@
   的口径统一到 `README`、插件开发指南与增量接入指南三处；production doctor 的检查项
   清单写成 9 项 `id` 表（全部 `requiredInProduction`），并明确
   `productionSafe` 在非 Production 恒为 `false`。
+- **`Generation` 号源从「每资源各自递增」改为「全局单调计数器」（V7 §9 leak gate，轮 25）**：
+  `GenerationRegistry::activate` 现在从台账级 `high_water` 取号（`saturating_add(1)`，首次激活
+  仍是 `Generation(1)`），不再读该资源自己的高点。这是**对外可观察的语义变化**：第二个插件的
+  首个租约拿到的号不再恰好是 `1`，而是紧接上一个号的下一个值。原因是本轮给 `active` 加了下界
+  （`forget` 可在回收时摘除跟踪）——只要号源仍是每资源的，摘除就把高点一起抹掉，重装同名资源
+  会退回旧号、旧句柄重新被接纳。改为全局号源后，「不丢高点」不再依赖「条目永远留着」，
+  防句柄复用的判据从"记得多久"升级为"号永不复用"。依赖旧形状的两条既有测试
+  （`runtime_generation_advances_and_old_handle_becomes_stale`、
+  `versioned_runtime_lookup_rejects_old_generation`）现在钉的是新形状。调用方无需改代码：
+  `Generation` 只作为不透明序号在句柄与回帧里传递，没有任何地方假设它从 1 开始按资源连续。
+- **回收留痕的线上形状扩大（轮 26，纯增量）**：`host_resource_stats.global.reap` 与
+  `host_runtime_health.reap` 两处用的 `ReapStats` 新增 6 个字段（`pending / retries / recovered /
+  terminal / overflow / terminalRecords`，线上为 camelCase）。这是**向后兼容的加字段**：旧消费者
+  读到的既有键名与语义不变，只是多了可读的重试/终态证据；`@tauron/host` 相应导出
+  `TerminalReapRecord` 类型。命令面仍是 85 条（重试腿复用既有诊断命令，不新增命令）。
+- **`reap` 再加一个读数 `skippedLivePid`**（轮 27，仍是纯增量）：与上一条同一条链，
+  让"重试主动让位"从只有日志变成查得到。旧消费者的键名与语义不变。
 
 ### Removed
 
@@ -664,7 +1109,253 @@ fmt 后代码复算过一遍）：
   都过滤 `private === true`（本仓唯一的 private 包是 `@tauron/contract-tests`），
   没有轮 19 那类硬编码计数。
 
+- **轮 22 sidecar 写路径与收尸的无界等待**：`CommandSpawner::write_frame` 此前在宿主命令
+  线程里直接 `write_all`，并靠「两级锁」串行化——一个连上却不读 stdin 的 sidecar 能把命令
+  线程**永久钉住**。改为 `WRITE_QUEUE_FRAMES = 32` 的同步队列（最坏 32 MiB，与读侧
+  `MAX_FRAME_BYTES` 同一道上界）+ 每 pid 专属写线程，`write_frame` 只做 `try_send`，
+  `NotFound` / `InvalidInput` / `WouldBlock` / `BrokenPipe` 四种结局全部如实上抛；
+  终止后的阻塞 `Child::wait()` 换成 `reap_bounded` + `KILL_REAP_TIMEOUT_MS = 2s` 的
+  `try_wait` 轮询，取不到结局时保留句柄如实报告，绝不当成已回收（`crates/tauron-proc/src/spawner.rs`）。
+  「两级锁即修复完成」的旧叙述在同轮从重构方案与代码注释里更正为中间态。
+
+- **轮 22 孤儿公共 API 整类问题上门禁**：新增 `contracts/orphan-public-api.json` +
+  `scripts/check-orphan-public-api.mjs`（CI 步骤 `Orphan-Public-API（V7 轮 22）`，
+  `pnpm gates:check` 同源）。判据双向：12 条「文档说未接线」的公共 API 必须在产品接线面
+  **查不到**消费者，5 条已接线反例必须**查得到**，另加自动发现棘轮（635 ≤ 基线 635）。
+  判据本身翻过一次车：首版把 Rust 源文件在第一个 `#[cfg(test)]` 处截断，抹掉了它之后的
+  生产代码，把真在安装链路里调用的 `draft_grant_set` / `validate_grants` 判成孤儿——
+  改为大括号配对删除测试模块，并把它们连同 `validate_zip_constants` 一起钉成反例，
+  使「检查器自己坏掉」也只能变红。
+
+- **轮 23 两条门禁把排版当语义**：① wire-gate 断言 `autoDownload` 后台下载吸收 rejection
+  时要求 `downloadUpdate()` 后 12 字符内出现 `.catch(`，prettier 把 `.catch(` 换行缩进 14 格
+  后必然假红（实测 147 项里 1 红），改为语句内锚定 `(?:(?!;)[\s\S])*` 并以三个变异自证
+  非空转（现状命中／删 `.catch` 红／裸调用红）。② §8-20b 的 ClientConfig 落点表解析要求
+  `(` 与键名相邻，rustfmt 把长条目折成三行后**静默少读键**（实测只剩 2 条，而结构体有 10 个
+  字段 → `tauron-host` 3 failed｜404 passed）；改为忽略排版并把扫描截在表体 `];`，
+  修后 **407 passed (407)**。教训写进两份文档：门禁核的是语义，换行不是契约的一部分。
+
+- **轮 23 复查后确认「不是缺陷」的三件事（只登记，不硬改）**：`GenerationRegistry::active`
+  只进不出是防句柄复用的代数高点（清掉会让重装同名插件回到 `INITIAL` 并接纳旧句柄），
+  该性质已由 `runtime_generation_advances_and_old_handle_becomes_stale` 钉住，本轮补的是
+  WHY 注释；
+  **↩︎ 轮 25 更正：这条判定被推翻了**。它把「高点不能丢」当成了「条目不能删」，而二者可以分开
+  （号源改全局单调计数器后，摘除条目不再退回旧号）；V7 §9 的 leak gate 要求 abandoned
+  generation 有界，注释里有理由不等于有界，故本轮补了代码、读数与三层 churn 测试（见 Added
+  与下方轮 25 条目）。TS `UpdaterCheckOutcome` / `UpdaterStatus` 与 Rust `deny_unknown_fields` 的
+  camelCase 结构逐字段对齐，`downloadUpdate` / `installUpdate` 对 `simulated` 与 `ok: false`
+  一律 `throw`；恢复引擎唯一驱动入口 `recoverReport` 确有生产消费者
+  （`examples/minimal-app/src/main.ts`），`recoverBoot` 保持只读。Windows 参考实现的
+  `serve_one` 仍是编译进库的无界等待（`ConnectNamedPipe`/`ReadFile` 传空 OVERLAPPED，
+  Unix 侧有 20s 交换上界），overlapped 改造属 Batch 5'，本轮把它从代码注释里的自认
+  升格为 A86 行的对外判定并写明调用方契约。
+
+- **轮 23 发布链被 `publish = false` 的测试夹具踩穿**：轮 22 新增的
+  `crates/tauron-test-sidecar`（真 sidecar 端到端夹具）在 manifest 里写了
+  `publish = false`，但 `scripts/publish-crates.mjs` 的发布集合是按 `cargo metadata` 的
+  `crates/` 成员枚举的，**不看 `publish` 字段**——它因此被排进发布顺序，`--publish` 会在
+  拓扑序中途被 cargo 拒绝，而那时靠前的 crate 已经发出、收不回来。`check-registry-ownership.mjs`
+  同族：它 `readdirSync(crates/)` 取名，等于为一个永不上架的名字索要 crates.io 写权限。
+  两处改为「切开集合 + 点名打印排除」，并新增一条 fail-closed：任何可发布 crate 的依赖指向
+  `publish = false` 成员时，预检阶段直接报错（发布产物里该依赖无法解析）。
+  **判据形状是实测纠正的**：第一版按文档判 `publish === false`，`--check` 仍报 17 个——
+  `cargo metadata` 把 `publish = false` 表达成**空数组**（默认成员是 `null`），现在两种形状都认，
+  修后 `--check` rc=0 且 `crate 共 16 个；产物校验失败 0 个`，排除行点名
+  `tauron-test-sidecar@1.1.0`。
+
+- **轮 24 新门禁自己有两处「看着在管、其实空转」，落地当轮就翻出来修掉**：① 第一版只登记
+  `impl` 块，而本仓 adapter 的主体形状是**顶层自由 `fn`**（`lib.rs` 顶层 153 个 `pub fn` +
+  75 个 `fn`，其中 `cmd_*` 136 个）——不登记它们，「别再往单文件追加核心逻辑」对最常说的
+  那条路完全免检。② 自证夹具第一版按**单条目**比数量高点，137 个 `cmd_*` 被看成 137 条各自
+  合格的条目 ⇒ 高点规则对该形状空转；改为按 `kind:key` **聚合后**判定，与校验路径同构。
+  两条都由变异实录封口：往 `lib.rs` 追加 `pub fn zzz_domain_probe_new_group() {}` 会同时报出
+  文件条目超限（264 > 263）与未登记域归属，从台账删掉全部 `fn` 条目会让 `wire-gate` 的
+  「台账缺少顶层 fn 类条目」变红；三次破坏后都按 md5 逐字节还原复绿。
+  另记一条口径：门禁数的是**声明级条目**而不是行数——轮 22/23 刚实测过两次「把排版当语义」
+  （prettier 换行让断言假红、rustfmt 折行让 10 个键读成 2 个），`--self-test` 里因此专门放了
+  一条折行 `impl` 头夹具，钉住「排版不得改变判定」。
+
+- **轮 25：V7 §9 leak gate 当时只成立在注释里**：`GenerationRegistry::active` 的键集合随
+  「曾经起过运行期的插件数」单调增长，回收路径不摘除、没有上界读数、没有 churn 测试——
+  「abandoned generation 必须有 bounded metric」这一行按本仓「已落地 = 真代码 + 真消费者 + 门禁」
+  的口径并不成立。本轮补齐：`forget`（有活跃租约时拒绝，避免把还在被校验的资源的高点抹掉）、
+  `remove_plugin` 在 `release` 之后连带摘除跟踪、`GenerationStats` 随 `host_resource_stats`
+  上线，以及台账/租约表/注册表三层 churn 证明。变异实录证明门禁有牙齿：删掉 `remove_plugin`
+  里的 `forget` ⇒ 两条 churn 测试红；把 `activate` 改回每资源序号 ⇒ 连既有的两条代际测试一起红
+  （**摘除跟踪与每资源序号不可共存**，这就是号源必须全局的证据）；删掉命令面那行读数 ⇒
+  adapter 活值测试与 `wire-gate` 的 leak gate 同时红。另两条本轮结论一并登记：
+  `generations_issued` 刻意只增不减（`u64`，不随 churn 增内存，却是"号永不复用"的唯一证据），
+  注册表条目本版本永不移除，故有界对象是**运行期代际台账**而非"插件条目集合"——后者属
+  A83/A84 既有限制，本轮不动。
+- **轮 26：下层承诺「可重试」，上层没有任何重试者**：`tauron-proc::ProcSpawner::kill` 在
+  杀不掉时**保留跟踪句柄**并在错误文本里写「句柄已保留，可重试」，但整仓没有第二个调用者——
+  `RuntimeTable::terminate` 唯一的调用点是回收路径本身，失败即成为孤儿进程，而 V7 §9 当时
+  只有 `attempts/failures/lastError` 三个计数器（"只留日志"）。这一条按 V7 §7 Process 行的
+  判据（kill retry/backoff + evidence）不成立。本轮补齐：失败入队（按 pid 去重、上界 64、
+  满则转终态并记 `overflow`）、既有诊断命令 `host_resource_stats` 作为唯一驱动腿（读数前
+  先重试，故无新命令）、单条至多 3 次后转为**可查询的终态记录**（`terminalRecords`，环形
+  上界 16）。三处"看起来正常"的陷阱各有对应测试：漏注入终止器记失败而非静默、进程本已退出
+  记 `alreadyGone` 不混入失败、400 次连续失败风暴后队列仍是 64/证据仍是 16。同步修正了两处
+  与代码相反的文档口径（`docs/api/plugin-development-guide.md` 的"只写日志"句、
+  `docs/architecture/app-layer-wire.md` 缺重试腿的描述）。仍未落、如实登记的：V7 §7 的
+  **启动时孤儿扫描**与独立后台驱动（Batch 5'）——没有调用者就没有重试，这点在文档里写死。
+- **轮 27：轮 26 的重试队列会误杀同号的活进程**（缺陷由上一轮的修复引入）：待重试记录拿的是
+  **pid**，而 `tauron-proc` 的子进程跟踪表同样按 pid 索引、登记用普通 `insert`（同号即同键、
+  后写覆盖先写）。真实序列：卸载杀不掉 ⇒ 队列留下 `{P, 100}`；旧进程随后自行退出、OS 重用
+  该号；用户重装 P 并起新 sidecar ⇒ 新进程拿到 100（`register` 时表里没有旧租约，不会触发
+  "先终止旧 pid"）；下一次 `host_resource_stats` 轮询 ⇒ 驱动腿对 100 打第二枪，打死的是宿主
+  自己刚起的活进程。修法是重试前的一次归属判定（见 Added 的 `pid_owner` / `skippedLivePid`），
+  并配三条测试：表级"同号在册即让位、活租约原样还在"、表级反向"号不同就必须照旧重试"
+  （防止这条封口退化成"永远不重试"的借口）、注册表级走真实 install→uninstall→重装→驱动。
+  同轮把 V7 §7 的 Process 行按事实改写（原文"无重试方"自轮 26 起已不成立），并保留
+  "审计当时的事实"前缀，避免把历史句悄悄变成现状宣称。
+- **轮 29：宿主有真更新通道，SDK 读的却是桩**（轮 28 逐行复核查出的功能级断链）：
+  `cmd_updater_check` 是真实现（注入 `EndpointClient` 后直接调 `tauron_distribute::check_for_update`：
+  清单校验 + 灰度分桶 + 签名），而 `cmd_market_check` 是硬编码桩（恒 `available: false,
+  simulated: true`，且按设计不读调用方下发的 `endpoints`/`pubkey`）。对外 SDK 的
+  `AutoUpdateClient.checkUpdate()` 打的是**桩**，还把 `simulated` 一律折成"没有更新"——
+  结果是宿主就算注入真端点、真通道报出 `UpdateAvailable`，SDK 侧的 `available` 也永远为假、
+  `info` 永远进不了 `'available'` 状态。这不是"难看"而是**功能不存在**：更新提示链路断在
+  客户端选错了数据源。修法是把检查腿改读 `host_updater_check`（版本作入参、缺参抛错、
+  `Unsupported`/`degraded` 与"没有更新"分家）；下载/安装两条**保持**打桩命令不变，因此
+  真替换仍 fail-closed（`UpgradeRunner` 的装配腿仍待接，见 V7 §7 的 Upgrade 行）。
+  客户端测试整文件重写为真通道用例（`auto-update-client.test.ts` 33 条，本轮合批日志全绿）。
+- **轮 30：跨层错误码塌缩把"投递落空"说成"非法状态迁移"**（只在负载下露馅的断链）：真 sidecar
+  洪峰用例在 CPU 争用下间歇红——修复前同一负载 3 跑红 2，panic 载荷里记到 32 条、复跑记到 73 条
+  计划外的 `E_STATE_INVALID_TRANSITION`。根因不在测试也不在负载：`ProcessCallDelivery::deliver`
+  把 `CommandSpawner::write_frame` 的**四种**如实失败（`NotFound` / `InvalidInput` /
+  `WouldBlock` / `BrokenPipe`，各自处置方向不同）一律折成同一个码。那既是对系统的**假陈述**
+  （这一帧从未写进管道，没有任何状态迁移发生），又抹掉了 `AfterReconnect` 这一层本该传给调用方的
+  信息，还把两道不同的界（pending 表 100、pid 写队列 32）混成一个动作。修法是在写侧按 `kind`
+  分码（见 Changed），并补确定态注入用例 + E2E 出处核对 + `wire-gate` 静态钉死；负载下的
+  洪峰用例从此只断言不等式化的界（`accepted <= 100`、`pending == accepted`），因为接受数本身
+  取决于两道界谁先触顶，把它写死等号就是拿测试假装世界是确定的。
+  同轮更正轮 2 的一处旧断言（"写侧失败全部如实上抛"）——它只在下沉一层时成立。
+- **轮 31：一次点击两个相反答案（壳层更新对话框还读着宿主桩，且把结果丢掉）**：轮 29 只改了
+  SDK 那一侧（`AutoUpdateClient`），漏掉同一动作的另一条入口——`ShellController` 的
+  `oc-updater-check` 监听器仍调 `marketCheck()`（桩，恒 `available: false`），`void` 掉返回值，
+  既不上屏也不进状态。宿主注入真端点之后，SDK 能报 `UpdateAvailable`、对话框却显示"没有更新"，
+  而控制器注释宣称的"宿主侧检查仍是桩"从轮 29 起已经是**文档与代码相反**。同轮查出示例页面被
+  轮 29 弄坏的两处回归：`#btn-update` 缺 `currentVersion` 因而**恒抛错**（红字取代结果），
+  展示代码先判 `available` 于是把 `degraded`（"答不了"）显示成"已是最新版本"。修法见 Added /
+  Changed：判定同源（导出 `toUpdateInfo`）、示例真正挂载 `<oc-updater-dialog>` 让那条腿有真用户、
+  `describeUpdate` 先判 `degraded`。`wire-gate` 五段 + 控制器四条用例钉住，变异反证为
+  "改回 `marketCheck` 即 gate 红 + 三条单测红"。
+- **轮 32 附带修掉：孤儿公共 API 台账把自己的规则用反了**：`scripts/check-orphan-public-api.mjs`
+  的接线面声明"剔除 re-export 行"，但再导出状态机只认 `export {`，**不认 `export type {`**——
+  多行 `export type { … }` 块里的成员行（如 `  UpdaterConfig,`）既不含 `from` 也不是声明行，
+  于是被算成"有人在用"。本轮给 `updater-dialog.ts` 的类型导出登记第一条 TS 纯类型 orphan 时
+  撞上它：门禁报 `UpdaterStore 已接线（消费者：packages/tauron-ui-primitives/src/index.ts）`，
+  而那个"消费者"正是把它公开出去的再导出。判据本身没放宽（补 `export(\s+type)?\s*[*{]` 一支，
+  这行本来就是 re-export），非空洞性反证：把该条 probe 换成 `\bShellController\b` → 门禁 rc=1
+  并点名 `examples/minimal-app/src/main.ts` 与 `shell-controller.ts` 两处真消费者，换回即绿。
+  同一轮的第一次变异因 bash 双引号把 `\\b` 变成退格字符（0x08）而得到"假绿"，读回字节才纠正——
+  变异测试自身也要被证明有效。
+- **轮 32：「立即重启」在真装配里点不出来（更新状态词表有三面镜像）**：轮 31 把检查腿接通之后，
+  对话框剩下的按钮里 `ready` 那一格仍然空转——写侧 `AutoUpdateClient` 安装成功的终态叫
+  `ready`（8 值：`idle`/`checking`/`available`/`downloading`/`downloaded`/`installing`/`ready`/`error`），
+  而组件渲染分支认的是 `done`（另有 `updating`），全仓没有任何代码产出这两个值。后果不止"少一个
+  按钮"：`ready` 落进兜底分支显示「开始更新」，用户点一下会把**已经装好**的更新重新下载+安装一遍；
+  `oc-restart` → `host_window_relaunch` 整条腿在真实装配里没有入口（事件有监听方、有实现，就是
+  派发不出来）。组件的 `status` 是裸 `string`，所以这次漂移既过不了编译也过不了原有任何门禁。
+  修法是把词表与「状态 → 主按钮动作」映射一起搬进契约包（见 Added），两侧同源；变异反证：把
+  `ready` 映射改成 `updateStart`，轮 32 门禁**与**反向孤儿监听门禁同时红（`rc=1`）。
+
 ### Docs
+
+- **轮 34 文档纠偏：三份"施工单"里与代码相反的说法各改判，并补轮 33 的装配形状**：
+  `docs/architecture/v4-industrial-gap-closure-plan.md` 的 Batch 2' 三条重写——A75 不再命令
+  "装配走 `service_startup_order` / 逆序 `service_shutdown_order`"（轮 11 已删除，且有反向门禁），
+  改为"先造出服务级回收动作，才谈得上按拓扑序执行"，并把该方案复核命令块里那条 rg 补上
+  **期望零命中**；A67/A68 把落地顺序倒转为"协商结果并入既有命令的返回字段"（引轮 33 的
+  `stateSimulated` 为先例），并写明新增根命令必须显式过 85 条冻结门禁；A71 注明 `resolve_best`
+  当前的零消费者状态与"接线即须删台账条目"。`docs/architecture/multi-plugin-substrate-roadmap.md`
+  的 M-9 从 🟡 改判为"已消除（轮 34 复核）"并给出依据；`docs/architecture/capability-closure-plan.md`
+  的状态横幅补一条过期声明：`bootstrap.ts` 已删除，本文 §2 / P1-1 / P1-10 里把它读作"活线拖着
+  死线"的段落须按新口径重读。轮 33 的装配形状同步到 `docs/architecture/app-layer-wire.md`
+  （成对读做到 `UpdaterSink::status` 的必传参数上）与 V7 §7 的轮 33 条目。
+- **轮 33 接口文档：`host_updater_status` 第一次有了带线形的说明**：
+  `docs/api/command-surface.md`（由 `command-surface:gen` 从 `tauri.rs` 的命令文档生成）里
+  这一行现在写全返回形状 `{ available, state, stateSimulated, grayscalePercent,
+  crashGateStopped, reason }`，并写明 `state` 与 `stateSimulated` **必须成对读**、
+  `state === null` 时后者恒 `false`；`packages/tauron-host/README.md` 补「没有更新会带依据」
+  与一条**命名坑**记录（本包 `UpdaterStatus` 同名两义：契约状态词表 vs 通道线读数；后者是
+  1.0 起的公开导出，改名属破坏性变更，本轮用导入别名分开而非偷改）；
+  `docs/architecture/app-layer-wire.md` 增补轮 33 段（唯一出口、两条入口共用口径、
+  诊断不改判定）；`docs/installation.md` 的更新诚实边界补一句"报没有更新时会带依据"；
+  `docs/integration/incremental-adoption.md` 的「市场监管 / 更新链」行与
+  `examples/minimal-app/README.md` 的壳层动作行同步；`v4-industrial-gap-closure-plan.md`
+  立轮 33 一节（发现路径、两半都断的对照表、四件修法、六段门禁、三条变异反证、诚实边界）。
+
+- **轮 32 接口文档：更新流程的"状态"第一次只有一处定义**：`packages/tauron-shell-events/README.md`
+  补 `UPDATER_STATUSES` / `UpdaterStatus` / `UPDATER_PRIMARY_ACTION` 三个导出与"为什么状态词表
+  也要进契约包"一节（并把 wire-gate 锁死的不变量从两条写成三条）；`packages/tauron-ui-primitives/README.md`
+  新增「`<oc-updater-dialog>` 的状态契约」小节（status → 主按钮 → 事件名对照表 + 进度条条件），
+  并把导出表里的 `UpdaterStore` 标为**未接线**；`packages/tauron-host/README.md` 的
+  `ShellController` / `AutoUpdateClient` 两行说明 `UpdateStatus` 现在是契约别名、`ready` 是唯一
+  点亮重启按钮的状态，且今天只能由**真实**下载+安装到达（宿主桩到不了，这是设计不是缺陷）；
+  `docs/architecture/app-layer-wire.md` 增补词表收口段；`docs/integration/incremental-adoption.md`
+  与 `examples/minimal-app/README.md` 的壳层动作行补上「装好之后 `ready` → `oc-restart` →
+  `host_window_relaunch`」这条此前根本没写进文档的腿；V7 §7 已闭合清单加轮 32 一条。
+  同时改正 `v4-industrial-gap-closure-plan.md` 轮 31 一节里的一处**本轮新错**：那句"示例 `status`
+  只在 `available` 时推进到 `ready`（主按钮变「开始更新」）"混用了客户端终态与按钮标签，检查阶段
+  写的就是 `available`，`ready` 属于安装成功之后——按轮 32 的事实重写并注明出处。
+
+- **轮 31 接口文档：把"检查更新"两条入口写成同一条通道**（此前四处文档各说一半）：
+  `docs/installation.md` 的「检查更新」点验行与诚实边界说明改为真通道（`degraded` 不得显示成
+  "已是最新版本"，下载/安装仍是桩）；`docs/architecture/app-layer-wire.md` 增补壳层检查腿一节
+  （`_checkForUpdate` → `host_updater_check`、共享 `toUpdateInfo`、两个新构造参数、缺参零调用）；
+  `packages/tauron-host/README.md` 的 `ShellController` / `AutoUpdateClient` 两行按轮 29/31 的事实
+  重写；`examples/minimal-app/README.md` 的「系统能力」与「壳层动作」两行改正——它们此前仍写
+  `AutoUpdateClient.checkUpdate()` → `host_market_check`（模拟响应），且漏掉更新对话框那条腿与
+  `currentVersion` / `onUpdaterCheck`；`docs/integration/incremental-adoption.md`、
+  `docs/competitive-analysis/competitive-analysis.md`（"商城"行现在指名真通道在哪）与 V7 §7 的
+  `AutoUpdateClient` 行同步；`v4-industrial-gap-closure-plan.md` 立轮 31 一节（发现路径、
+  两入口对照表、示例回归两处、落地三件、门禁五段、变异反证、三条诚实边界）。
+
+- **轮 30 接口文档：错误码表按新的写侧事实改写四行**（`docs/api/plugin-development-guide.md`）：
+  `E_STATE_INVALID_TRANSITION` 明确自轮 30 起**不再**用于进程投递写侧失败；
+  `E_CALL_PENDING_FULL` 补第二道界（pid 写队列 32 帧）并说明为何同码（调用方动作一致）与为何
+  仍要在错误文本里交代出处（两道界的修复方向不同）；`E_LEASE_EXPIRED` 补投递侧的
+  `NotFound` / `BrokenPipe`，与"旧代际回帧"并列为同一事实的两种出现方式；
+  `E_INVALID_MANIFEST` 补"帧超 `MAX_FRAME_BYTES` 或入参不可序列化 → 改载荷，退避重投无用"。
+  另在 `v4-industrial-gap-closure-plan.md` 立轮 30 一节（发现路径、形状、为何是误判而非瑕疵、
+  落地下场、四条门禁、复现计数、变异证明、四条诚实边界——含"没有新增错误码"与"退避重投本身
+  仍未实现，见 A70/§90"），并给 V7 §62 的"真 sidecar 全链路"行加补记：该宣称当时为真，
+  但它的覆盖面从未包含错误码路由。
+
+- **轮 28 逐行复核：V7 §7 风险表与 §2.2 补证表按今天的代码改写**：`docs/Tauron-Deep-Audit-and-Optimization-Plan-V7.md`
+  §7 原表保留并冠"审计当时的事实"前缀，另立「轮 28 复核结论」表逐行给判据（真代码 + 真生产消费者
+  + 门禁）与**符号**证据。判为已闭合 5 行、`Upgrade` **部分**（清理腿闭合、装配腿断：`UpgradeRunner`
+  在 `tauron-distribute` 之外零引用）、`ServiceGraph` **仍成立**（按处方的"降级为纯 validator"分支
+  处置，`shutdown_order()` 零生产调用者已现场核对）。§2.2 两条已被后续轮次推翻的旧断言一并改正：
+  "仓库没有可执行的正式 sidecar fixture"（已被 `crates/tauron-test-sidecar` + `tests/sidecar_e2e.rs`
+  真进程用例证伪，改为**已验证**并附 `publish = false` 边界）、四平台打包的"MSI 以 CI 为准"
+  （实际发布走 `--bundles nsis`，MSI 属主动放弃）。同轮复核**新发现的断链**登记在
+  `v4-industrial-gap-closure-plan.md` 轮 28 一节，作为轮 29 的输入：`cmd_updater_check` 是真实现、
+  `cmd_market_check` 是硬编码桩，而对外 SDK 的 `AutoUpdateClient` 读的是后者——宿主注入真端点后
+  SDK 仍永远看不到可用更新。
+
+- **轮 23 安装包重建：把「当前发布产物」的口径换成实测值**：`pnpm -r build` rc=0（前端
+  `dist/assets/main-C948Pxbw.js` 86.74 kB／gzip 24.61 kB）后，`tauri build` 按 `--bundles nsis`
+  与 `--bundles msi` 分两次跑，各自 rc=0，产出 NSIS `Tauron Minimal App_1.1.0_x64-setup.exe`
+  **3,574,475 B**、MSI `Tauron Minimal App_1.1.0_x64_en-US.msi` **5,431,296 B**。分跑而不是走
+  `bundle.targets = "all"`，是为了不让一次 WiX 失败掩掉另一个已成功的产物。重建 MSI 才是本轮重点：
+  动手前 `bundle/msi/` 里躺的是**轮 18 的 5,410,816 B**，文件名却已经是 1.1.0——按文件名取件就会把
+  两轮前的构建当成当前源码发出去。`v4-industrial-gap-closure-plan.md` 的轮 18 安装包行因此补了
+  「数字只对应轮 18」的指向，轮 23 一节登记当前口径。如实两条边界：两个包**均未签名**（本机无代码
+  签名证书），且**未做安装-卸载验证**。
+
+- **轮 22 框架层的诚实边界（对外口径与代码同批）**：README 的「给已有 Tauri 应用加一套插件
+  系统」从 `✅ 接框架层` 改为**双向回答**——要现成能跑就走应用层，只要信封协议就必须自带
+  `PluginDispatcher`（仓内生产 impl 为 0，否则恒 `SC-9001`）；快速上手「框架层」片段删掉
+  「零 capability 配置」的假承诺（Tauri v2 下未匹配的 webview 根本拿不到 IPC），并加警告块
+  说明该段只注册命令、不能服务真实调用；`incremental-adoption.md` 附录 A 补同一事实的警告块，
+  §5 记分卡新增「孤儿公共 API」整类行；`overview.md` 接线表补 `tauron-shell` 未接线行 +
+  孤儿台账段落，`contracts/module-maturity.json` 的 `overviewWiring` 置 `unwired`（让这行被
+  门禁要求而非容忍）；新增 `docs/api/client-config.md` 客户端配置参考并被 README /
+  `docs/installation.md` / `docs/architecture/README.md` 三处索引，`tauron-app-cli` 的
+  「写了不生效」提示直接指向它。
 
 - **轮 18 发布终审：把两条已改行为的用户契约补进接口文档**（代码零改动，本轮只跑门禁
   与补文档）：① `tauron doctor` / `tauron-app doctor` 的**退出码是契约**——有 `fail` 项

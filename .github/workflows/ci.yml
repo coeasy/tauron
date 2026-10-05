@@ -104,6 +104,49 @@ jobs:
       - name: No-Lock-Across-Await（V4 A104）
         run: node scripts/check-no-lock-across-await.mjs
 
+      # V7 §9 语义门禁（轮 22 落地）。它们不查风格，只钉四类**已经修过**的缺陷形态：
+      # 装配冲突被降级成日志、WASM 在未加载的代际上执行、升级没提交凭据就报成功、
+      # simulated 结果被当成真效果并走进 install/update/restart。
+      # 每条规则都在同一轮做过反向验证（破坏不变量 → 门禁必须变红），
+      # `wire-gate` 再钉住「脚本存在 + pnpm 入口 + CI 调用」这三点。
+      - name: Runtime-Assembly-Singleton（V7 §9）
+        run: node scripts/check-runtime-assembly-singleton.mjs
+
+      - name: Wasm-Loaded-Generation（V7 §9）
+        run: node scripts/check-wasm-loaded-generation.mjs
+
+      - name: Upgrade-File-Hash（V7 §9）
+        run: node scripts/check-upgrade-file-hash.mjs
+
+      - name: Success-Requires-Effect（V7 §9）
+        run: node scripts/check-success-requires-effect.mjs
+
+      - name: Simulated-Never-Commits（V7 §9）
+        run: node scripts/check-simulated-never-commits.mjs
+
+      # 孤儿公共 API 台账（轮 2）：文档宣称「X 未接线」的每条都必须真的查不到消费者，
+      # 宣称「X 已接线」的每条反例都必须真的查得到；同时禁止新增孤儿（棘轮 635）。
+      # 这个门禁本身曾经因为「从第一处 #[cfg(test)] 截断文件」而把已接线的 ACL 授予链
+      # 误报成孤儿——假红会驱动人去「收口」一条好链路，所以反例条目是强制的。
+      - name: Orphan-Public-API（V7 轮 22）
+        run: node scripts/check-orphan-public-api.mjs
+
+      # Adapter 域所有权冻结（V7 §10-9 的「至少冻结」分支，轮 24）。物理拆分仍是 Batch 5'，
+      # 但「继续往 lib.rs 单文件追加核心逻辑」从口头约定变成红灯：每个顶层 `impl` 类型与
+      # 每组顶层 `fn` 都必须登记域/归属/数量高点，文件级条目数各自封顶。
+      - name: Adapter-Domain-Ownership（V7 §10-9）
+        run: node scripts/check-adapter-domain-ownership.mjs
+
+      # 新门禁自带变异夹具：规则若对某个形状空转，这一步就会红（不是靠人记得去验）。
+      - name: Adapter-Domain-Ownership 自证（变异夹具）
+        run: node scripts/check-adapter-domain-ownership.mjs --self-test
+
+      # Profile V2（轮 45 / A65）：Tier↔Bundle↔命令子集三张表（contracts/tier-bundles.json）
+      # 与生成命令面（85 条）逐条核对——完全划分、深度严格单调 S⊂E⊂P、形态正交
+      # （requires ∩ surfaceBundles = ∅）都是机器断言，不是文档修辞。
+      - name: Tier-Bundle 一致性（A65）
+        run: node scripts/check-tier-bundle.mjs
+
       - name: 测试（第 3 步）
         run: pnpm -r --no-bail test
 
@@ -292,6 +335,27 @@ jobs:
       - name: 测试 tauron-adapter（tauri + plugin-install feature）
         run: cargo test -p tauron-adapter --features tauri,plugin-install --locked
 
+      # 轮 2 / F-2：`runtime-wasm-broker` 是**参考宿主默认打开**的 feature
+      # （`examples/minimal-app/src-tauri/Cargo.toml`），但那个工程被根 Cargo.toml
+      # `exclude` 在外，adapter 的 `default = []` 里也没有它——于是
+      # `cargo test --workspace` 从不编译 `crates/tauron-adapter/src/wasm_delivery.rs`
+      # （连同它的全部用例）。此前只有 `cargo check --all-features` 挡编译：
+      # 这条链是"编译过、从没跑过"。下面两步把它的测试真正执行一遍，
+      # 并覆盖宿主实际使用的 `tauri + broker` 组合。
+      - name: 测试 tauron-adapter（runtime-wasm-broker feature）
+        run: cargo test -p tauron-adapter --features runtime-wasm-broker --locked
+
+      - name: 测试 tauron-adapter（tauri + runtime-wasm-broker feature）
+        run: cargo test -p tauron-adapter --features tauri,runtime-wasm-broker --locked
+
+      # 轮 43 补齐：与上面的 wasm_delivery 同类。`signing` 打开 package_signature
+      # 与 zip 侧五维便携校验（A94/A100/A85 的安全用例：篡改、过期、路径维度），
+      # 但 `cargo test --workspace` 是缺省特性、`-p tauron-adapter` 又不会跑
+      # market 自己的用例（它只把 market 当依赖编译）——全 feature 检查只挡编译。
+      # 于是这 14 条安全用例曾是「编译过、从没跑过」。下面这条把 signing 用例真正执行一遍。
+      - name: 测试 tauron-market（signing feature）
+        run: cargo test -p tauron-market --features signing --locked
+
       # 全 feature 组合的编译检查。放在这个 job 里是因为 `--all-features`
       # 会打开 tauri，需要上面那批系统库。
       - name: 全特性编译检查
@@ -370,13 +434,18 @@ jobs:
         run: |
           cargo build -p tauron-host --example perf_probe --release --locked
           cargo build -p tauron-host --example local_host_reference --release --locked
+          # 轮 44（A94）：内存门禁落在**真实安装流**上——probe 以 96 MiB 载荷走
+          # preview→reviewed 提交链，堆峰值由计数分配器读数、RSS 由 Linux VmHWM 读数。
+          cargo build -p tauron-adapter --example install_stream_probe --release --locked --features plugin-install
           cargo build -p tauron-ffi --release --locked
 
       - name: Runtime / binary budgets
         run: |
           target/release/examples/perf_probe > /tmp/tauron-perf-probe.json
+          target/release/examples/install_stream_probe > /tmp/tauron-install-probe.json
           node scripts/check-performance-size.mjs \
             --probe=/tmp/tauron-perf-probe.json \
+            --install-probe=/tmp/tauron-install-probe.json \
             --ffi=target/release/libtauron_ffi.so \
             --local-host=target/release/examples/local_host_reference \
             --out=performance-evidence/performance-size-report.json

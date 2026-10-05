@@ -177,6 +177,14 @@ pub fn sanitize_entry_path(name: &str, entry: &ZipEntryInfo) -> MarketResult<Str
             return Err(MarketError::PathTraversal(format!("路径含空段：`{name}`")));
         }
     }
+    // 轮 42（A85 zip 侧同步）：签名的生产面（`signing` 同时启用 zip 与 tauron-host）
+    // 追加五维便携校验，与宿主侧共用**同一份** `tauron_host::portable_path` 判定——
+    // 保留名/非 NFC/尾点空格/超长在解析阶段拒绝，而不是解压到一半才按平台报错。
+    #[cfg(feature = "signing")]
+    {
+        tauron_host::portable_path::validate_portable_relative(name)
+            .map_err(|e| MarketError::PathTraversal(format!("便携路径校验 `{name}`：{e}")))?;
+    }
     Ok(name.to_string())
 }
 
@@ -215,6 +223,15 @@ pub fn validate_zip_constants(entries: &[ZipEntryInfo]) -> MarketResult<(u64, u6
                 limit: MAX_COMPRESSION_RATIO,
             });
         }
+    }
+    // 轮 42（A85）：集合级大小写冲突——Windows/macOS 默认大小写不敏感，条目集里的
+    // `A.txt` 与 `a.txt` 互相覆盖的结局取决于平台顺序；签名/解析阶段整体拒绝
+    // （生产面同样是 `signing` 腿，与逐条校验共用同一份宿主判定）。
+    #[cfg(feature = "signing")]
+    {
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        tauron_host::portable_path::validate_portable_entry_set(&names)
+            .map_err(|e| MarketError::PathTraversal(format!("条目集路径冲突：{e}")))?;
     }
     Ok((
         total_uncompressed,
@@ -871,7 +888,12 @@ mod tests {
     #[test]
     fn end_to_end_malicious_path_traversal() {
         let entries = vec![entry("safe/index.js", 100, 50), entry("../../etc/passwd", 200, 100)];
-        // 校验常量先通过（大小没问题）。
+        // 轮 42：signing 生产面的集合门在常量校验处就整体拒绝含穿越路径的条目集——
+        // 「验签成功 → 解压到一半才失败」的窗口被关掉，不再有「常量先过、逐条再拒」
+        // 的分层；缺省特性下 zip 代码路径不存在，维持旧形状。
+        #[cfg(feature = "signing")]
+        assert!(matches!(validate_zip_constants(&entries), Err(MarketError::PathTraversal(_))));
+        #[cfg(not(feature = "signing"))]
         assert!(validate_zip_constants(&entries).is_ok());
         // 但路径清洗应拒绝。
         for entry in &entries {
@@ -927,5 +949,39 @@ mod tests {
             Some(manifest.permissions.clone()),
         );
         assert!(log.verify_chain());
+    }
+}
+
+/// 轮 42（A85）：zip 侧五维便携校验只在 `signing` 生产面生效（zip/host 依赖同属
+/// `signing`），测试与生产同门——不在缺省特性下伪装覆盖。
+#[cfg(all(test, feature = "signing"))]
+mod portable_entry_tests {
+    use super::*;
+
+    fn entry(name: &str) -> ZipEntryInfo {
+        ZipEntryInfo {
+            name: name.to_string(),
+            is_symlink: false,
+            is_file: true,
+            uncompressed_size: 1,
+            compressed_size: 1,
+        }
+    }
+
+    #[test]
+    fn zip_side_rejects_five_dim_paths_before_extraction() {
+        for bad in ["NUL.txt", "dir/con", "a.", "a ", "e\u{0301}.txt"] {
+            let err = sanitize_entry_path(bad, &entry(bad)).unwrap_err();
+            assert!(matches!(err, MarketError::PathTraversal(_)), "{bad}: {err:?}");
+        }
+        assert!(sanitize_entry_path("assets/icon.png", &entry("assets/icon.png")).is_ok());
+    }
+
+    #[test]
+    fn zip_side_rejects_case_colliding_entry_sets() {
+        let metas = vec![entry("assets/Icon.png"), entry("assets/icon.png")];
+        let err = validate_zip_constants(&metas).unwrap_err();
+        assert!(matches!(err, MarketError::PathTraversal(_)), "{err:?}");
+        assert!(validate_zip_constants(&[entry("a.txt"), entry("b.txt")]).is_ok());
     }
 }

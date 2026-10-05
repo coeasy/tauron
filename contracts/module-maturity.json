@@ -69,8 +69,13 @@
     },
     "tauron-shell": {
       "adapterDependency": null,
-      "overviewWiring": null,
+      "overviewWiring": "unwired",
       "ownersTable": "迁移中"
+    },
+    "tauron-test-sidecar": {
+      "adapterDependency": null,
+      "overviewWiring": null,
+      "ownersTable": null
     },
     "tauron-theme": {
       "adapterDependency": "default",

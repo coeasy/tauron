@@ -11,6 +11,7 @@ import { HOST_ERROR_CODES, HOST_RETRY_CLASS, RETRYABLE_HOST_ERROR_CODES } from '
 import { CAPABILITIES } from './capabilities.js';
 import { CHANNEL_KINDS, MAX_QUEUE, OVERFLOW_STREAK_LIMIT } from './channels.js';
 import { GRANT_SET_SCHEMA_VERSION, IDENTITY_LABEL_PREFIX, RISKS } from './grants.js';
+import { CLIENT_CONFIG_LANDING } from './client-config.js';
 
 import { describe, expect, it } from 'vitest';
 
@@ -428,5 +429,105 @@ describe('门禁 §8-20：客户端配置聚合（ClientConfig）', () => {
     expect(tsConfig).toContain('export function fullLoadConfig');
     expect(tsConfig).toContain('export function minimalConfig');
     expect(tsConfig).toContain('export function templateConfig');
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// 轮 2 / F-1：配置键的**落点**三侧一致（Rust 权威表 ↔ TS 镜像 ↔ app-cli 副本）。
+//
+// 为什么要有这条门禁：`ClientConfig` 曾长期接受七个键（`auto_update`、
+// `crash_report_enabled`、`brand_id`、`plugin_paths` …），而生产代码一个都不读；
+// `tauron-app-cli` 还把它们写进生成的配置文件。三份清单（Rust 结构体、TS 类型、
+// CLI 校验列表）各自演进，失真就发生在"谁都没检查另一份"的缝隙里。
+// 这里把三份**逐键对齐**：加字段忘了分类、TS 把死键说成活的、CLI 少列一个键，
+// 都会让本用例变红。
+// ──────────────────────────────────────────────────────────────────────────
+describe('门禁 §8-20b：ClientConfig 落点表跨语言一致', () => {
+  const config = read('crates/tauron-host/src/config.rs');
+  const cliConfig = read('packages/tauron-app-cli/src/client-config.ts');
+
+  /** 从 Rust 权威表里解析出 `键 → consumed|deferred`。 */
+  function rustLanding(): Map<string, string> {
+    const start = config.indexOf('pub const CLIENT_CONFIG_LANDING');
+    // 只取表体（截到 `];`）：表后面的实现与 `#[cfg(test)]` 里也会出现
+    // `ClientConfigLanding::Deferred(_)` 这类写法，整文件扫会把它们当条目数进去。
+    const table = config.slice(start, config.indexOf('];', start) + 2);
+    // **不要求 `(` 与键名相邻**：rustfmt 会把长条目折成
+    // `(\n "data_dir",\n ClientConfigLanding::Consumed(…))`，按排版匹配的正则会在
+    // 第一次折行时静默漏键（实测漏到只剩 2 条，三条断言全红）。门禁要核的是
+    // 「键有没有落点」，不是这张表怎么换行。
+    const entries = [
+      ...table.matchAll(/"([a-z_]+)",\s*ClientConfigLanding::(Consumed|Deferred)\(/g),
+    ];
+    expect(entries.length).toBeGreaterThan(0);
+    return new Map(entries.map((m) => [m[1]!, m[2] === 'Consumed' ? 'consumed' : 'deferred']));
+  }
+
+  /** 从 `pub struct ClientConfig { … }` 解析出字段名（独立第二基准）。 */
+  function rustStructFields(): string[] {
+    const start = config.indexOf('pub struct ClientConfig');
+    const body = config.slice(start, config.indexOf('\n}', start));
+    return [...body.matchAll(/pub ([a-z_]+): Option</g)].map((m) => m[1]!);
+  }
+
+  function cliList(name: string): string[] {
+    const block = cliConfig.slice(
+      cliConfig.indexOf(name),
+      cliConfig.indexOf('];', cliConfig.indexOf(name)),
+    );
+    return [...block.matchAll(/^\s+'([a-z_]+)',$/gm)].map((m) => m[1]!);
+  }
+
+  it('Rust 落点表覆盖结构体的每个字段，且没有幽灵键', () => {
+    const tableKeys = [...rustLanding().keys()].sort();
+    expect(rustStructFields().sort()).toEqual(tableKeys);
+  });
+
+  it('TS 镜像的键集合与 consumed/deferred 划分与 Rust 逐键相同', () => {
+    const table = rustLanding();
+    const ts = Object.entries(CLIENT_CONFIG_LANDING).map(
+      ([key, landing]) => [key, landing.kind] as const,
+    );
+    expect(ts.map(([key]) => key).sort()).toEqual([...table.keys()].sort());
+    for (const [key, kind] of ts) {
+      expect(table.get(key), `键 ${key} 的落点两侧不一致`).toBe(kind);
+    }
+  });
+
+  it('每个落点都必须带说明（consumed 指向消费者，deferred 指向原因）', () => {
+    for (const [key, landing] of Object.entries(CLIENT_CONFIG_LANDING)) {
+      const detail = landing.kind === 'consumed' ? landing.target : landing.reason;
+      expect(detail.trim().length, `键 ${key} 的 ${landing.kind} 说明为空`).toBeGreaterThan(8);
+    }
+  });
+
+  it('app-cli 的键清单与 Rust 表一致（合法键 + 无落点键）', () => {
+    const table = rustLanding();
+    expect(cliList('CLIENT_CONFIG_KEYS').sort()).toEqual([...table.keys()].sort());
+    expect(cliList('CLIENT_CONFIG_UNWIRED_KEYS').sort()).toEqual(
+      [...table.entries()]
+        .filter(([, kind]) => kind === 'deferred')
+        .map(([key]) => key)
+        .sort(),
+    );
+  });
+
+  it('落点真的接进了装配层（env_overrides 有 SpawnConfig::env 消费者）', () => {
+    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    expect(adapter).toContain('pub plugin_env_overrides:');
+    expect(adapter).toContain(
+      'apply_host_env_overrides(&mut cfg.env, &state.plugin_env_overrides)',
+    );
+    expect(adapter).toContain(
+      'plugin_env_overrides: cfg.env_overrides.clone().unwrap_or_default()',
+    );
+  });
+
+  it('未接线的键必须在宿主启动横幅里说出来（不再静默接受）', () => {
+    expect(config).toContain('pub fn unwired_fields');
+    const host = read('examples/minimal-app/src-tauri/src/main.rs');
+    expect(host).toContain('cfg.unwired_fields()');
+    // 生成的宿主模板与示例同源：改一处必须改两处，否则新项目继续静默。
+    expect(read('packages/tauron-app-cli/src/scaffold.ts')).toContain('cfg.unwired_fields()');
   });
 });

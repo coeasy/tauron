@@ -137,7 +137,7 @@ mod tests {
             url: "https://example.com/app.zip".into(),
             signature: "abc123def456".into(),
             release_date: "2026-09-21T00:00:00Z".into(),
-            platform_notes: Default::default(),
+            ..Default::default()
         }
     }
 

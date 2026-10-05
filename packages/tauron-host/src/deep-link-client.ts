@@ -19,6 +19,7 @@
 
 import type { Backend } from './backend.js';
 import type { ProviderResult } from './dialog-client.js';
+import { DEEP_LINK_TOPIC } from './host-topics.js';
 
 /** 深链接事件 */
 export interface DeepLinkEvent {
@@ -116,7 +117,9 @@ export class DeepLinkClient {
    * 监听深链接事件（内部方法）。
    */
   private async _listen(): Promise<() => void> {
-    return this._backend.listen('deep-link', (payload) => {
+    // 线值取自 `host-topics.ts`（Rust `DEEP_LINK_TOPIC` 的镜像）——这里曾是裸字面量，
+    // 宿主侧改名会让这条腿静默零命中而 `emit` 照旧成功（轮 38）。
+    return this._backend.listen(DEEP_LINK_TOPIC, (payload) => {
       const event = this._parseEvent(payload as DeepLinkEvent);
       for (const fn of this._subscribers) {
         try {

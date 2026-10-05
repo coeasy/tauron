@@ -13,15 +13,21 @@ export type {
   SandboxConfig,
   SandboxContext,
   SandboxResult,
+  SandboxErrorCode,
   HostFunction,
   BridgeMessage,
   PluginLifecycleHooks,
 } from './types.js';
 
-export { DEFAULT_SANDBOX_CAPABILITIES } from './types.js';
+export { DEFAULT_SANDBOX_CAPABILITIES, SANDBOX_ERROR_CODES } from './types.js';
 
 // ---- Sandbox ----
-export { createSandbox, registerHostFunction, type SandboxInstance } from './sandbox.js';
+export {
+  createSandbox,
+  registerHostFunction,
+  SandboxDestroyedError,
+  type SandboxInstance,
+} from './sandbox.js';
 
 // ---- Bridge ----
 export { createBridge, DEFAULT_BRIDGE_CONFIG, type Bridge, type BridgeConfig } from './bridge.js';

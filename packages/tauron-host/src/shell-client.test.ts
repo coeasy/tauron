@@ -2,7 +2,9 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ShellClient, SIDECAR_ABI_CONTRACT } from './shell-client.js';
-import type { RecoveryOutcome } from './shell-client.js';
+import type { MenuClickFrame, RecoveryOutcome } from './shell-client.js';
+import { MENU_CLICK_TOPIC } from './host-topics.js';
+import { isUnsupportedBody } from './dialog-client.js';
 import { MockBackend } from './backend.js';
 
 const ALL_SHELL_CAPS = [
@@ -477,5 +479,73 @@ describe('ShellClient', () => {
         retryable: false,
       });
     });
+  });
+});
+
+// ── 轮 37：菜单 / 托盘面与它的点击回传腿 ─────────────────────────────────
+//
+// 这六条命令此前在 TS 侧**一条测试都没有**，加上零消费者，于是「文档说走
+// `host_events_drain`、实现走 `AppHandle::emit`」这种断裂既没人调用也没人核对。
+// 两组各钉一件事：命令层把规格原样交给宿主；接收层监听的是**事件 topic**，
+// 收的是宿主写死的那个形状。
+describe('ShellClient 菜单与托盘（R9，轮 37）', () => {
+  const MENU_CAPS = [
+    'host_menu_set',
+    'host_menu_popup',
+    'host_menu_reset',
+    'host_tray_create',
+    'host_tray_set_menu',
+    'host_tray_remove',
+  ];
+  const spec = { items: [{ id: 'a', label: 'A', event: MENU_CLICK_TOPIC }] };
+
+  it('六条命令打到对应命令名，spec 原样透传', async () => {
+    const backend = new MockBackend({ capabilities: MENU_CAPS, pluginId: 'p.menu' });
+    const client = new ShellClient({ backend });
+    await client.menuSet(spec);
+    await client.menuPopup(spec);
+    await client.menuReset();
+    await client.trayCreate({ tooltip: 't', menu: spec });
+    await client.traySetMenu(spec);
+    await client.trayRemove();
+    expect(backend.invocations.map((i) => i.cmd)).toEqual(MENU_CAPS);
+    expect(backend.invocations[0]?.args).toEqual({ spec });
+    expect(backend.invocations[3]?.args).toEqual({ spec: { tooltip: 't', menu: spec } });
+    // 无参命令不带 args（宿主侧的 require_main_window 之后走默认分支）。
+    expect(backend.invocations[2]?.args).toBeUndefined();
+    expect(backend.invocations[5]?.args).toBeUndefined();
+  });
+
+  it('缺省装配的 Unsupported 原样交给调用方（不造成功）', async () => {
+    const backend = new MockBackend({
+      capabilities: MENU_CAPS,
+      cases: [
+        {
+          cmd: 'host_menu_set',
+          result: {
+            supported: false,
+            reason: '宿主未注入 MenuSink（缺省装配）',
+            fallback: '注入 TauriMenuSink',
+          },
+        },
+      ],
+    });
+    const client = new ShellClient({ backend });
+    const out = await client.menuSet(spec);
+    expect(isUnsupportedBody(out)).toBe(true);
+  });
+
+  it('点击回传经事件 topic 送达，退订后不再收帧', async () => {
+    const backend = new MockBackend({ capabilities: MENU_CAPS });
+    const frames: MenuClickFrame[] = [];
+    const unlisten = await backend.listen(MENU_CLICK_TOPIC, (payload) => {
+      frames.push(payload as MenuClickFrame);
+    });
+    // 宿主 `on_menu_event` 命中路由表后发的正是这一帧。
+    backend.emit(MENU_CLICK_TOPIC, { id: 'a', source: 'tray', native: true });
+    expect(frames).toEqual([{ id: 'a', source: 'tray', native: true }]);
+    unlisten();
+    backend.emit(MENU_CLICK_TOPIC, { id: 'b', source: 'menu', native: true });
+    expect(frames).toHaveLength(1);
   });
 });

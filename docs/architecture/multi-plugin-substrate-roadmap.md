@@ -134,7 +134,8 @@
 > | S-7 / S-9 / M-3~M-10 | — | **未变**（S-9 的 `relaunch` 已由轮 11 修正，见 `auto-update-client.ts` 单测） |
 >
 > **新发现的断链不在本节**（调用投递不存在、框架层链路死、进程插件不能通信等），
-> 统一登记在 [capability-closure-plan.md](./capability-closure-plan.md) §6。
+> 当年统一登记在 0.4 收口方案 §6；那几条断链已在 0.4-A1–A3 与其后的审计轮次逐条收口，
+> 逐轮收口记录见 [执行台账](./v4-industrial-gap-closure-plan.md) 与 `CHANGELOG.md`。
 > 本节保留作为历史口径，不再作为选型依据。
 
 ### 2.1 任意宿主底座线
@@ -155,7 +156,7 @@
 
 | # | 残差 | 证据 | 档 |
 |---|---|---|---|
-| M-1 | ~~**无 install 入口**~~ → **已实现**（2026-09-27 复核）：`host_registry_install` / `_preview` 已存在并注册，挂 `#[cfg(feature = "plugin-install")]`；该 feature 曾于 1.0-W6 进 `default`，**1.1 按 V4 minimal-substrate 规则改回 opt-in**（`crates/tauron-adapter/Cargo.toml` 现为 `default = []`），故默认构建不含这两条，需接入方显式开启；`plugin_install_dir` 未配置时仍如实不可用；TS 侧能力表原无条件列出（误报已注册），已由 0.4-A2 改为运行期 `host_capabilities` 开门 | `tauri.rs` 符号 `host_registry_install`、`crates/tauron-adapter/Cargo.toml` 的 `[features] default = []`；修正在 `capability-closure-plan.md` A2 | 🟠 |
+| M-1 | ~~**无 install 入口**~~ → **已实现**（2026-09-27 复核）：`host_registry_install` / `_preview` 已存在并注册，挂 `#[cfg(feature = "plugin-install")]`；该 feature 曾于 1.0-W6 进 `default`，**1.1 按 V4 minimal-substrate 规则改回 opt-in**（`crates/tauron-adapter/Cargo.toml` 现为 `default = []`），故默认构建不含这两条，需接入方显式开启；`plugin_install_dir` 未配置时仍如实不可用；TS 侧能力表原无条件列出（误报已注册），已由 0.4-A2 改为运行期 `host_capabilities` 开门 | `tauri.rs` 符号 `host_registry_install`、`crates/tauron-adapter/Cargo.toml` 的 `[features] default = []`；修正原登记在 0.4-A2（该历史文档已清理，口径以本行为准） | 🟠 |
 | M-2 | ~~**无任何 per-plugin 配额**~~ → **已接线 4 类**（2026-09-26 改判）：pending 100/插件、stream 32/插件 + 256 全局、订阅 256/插件 + 4096 全局、通知 64/插件 + 512 全局。**剩余缺口**：通知环仍是全局单实例（逐插件只是裁剪）、无内存/CPU 配额 | `registry.rs:33`、`stream.rs:113/122`、`eventbus.rs:49/52`、`tauron-notify/src/lib.rs:129/161` | 🟡 |
 | M-3 | **Js 型插件无执行器**：`entry.js` 零消费点；真实路径是「宿主开窗 + 插件自举」，但文档没这么写 | `manifest.rs:344-350` | 🔴 |
 | M-4 | **Rust 型插件完全无落点**：`PluginType::Rust` 仅出现在 manifest 校验与 1 个测试；插件开发指南的形态表**缺 Rust 整行** | `manifest.rs:335/392/732`、`registry.rs:1874`；`docs/api/plugin-development-guide.md:24-29` | 🔴 |
@@ -163,7 +164,7 @@
 | M-6 | ~~**contributes 不对账、不驱动 UI**~~ → **已闭环**（2026-09-27 改判）：对账命令 `host_contributes_reconcile`（self 档，`authz.rs:189`）+ `E_CONTRIBUTES_DRIFT`（`error.rs:97`）已在代码里；`ShellController` 已接 `oc-command-select` → `host_contributes_list('command')` 解析归属 → 跨主体投递（`shell-controller.ts:203`，wire-gate 有断链门禁）。**剩余**：命令面板的**填充**仍由接入方喂数（哑组件），框架不做自动灌入 | `wire-gate.test.ts:1552`、`shell-controller.ts:203`、`tauri.rs:1421` | 🟢 |
 | M-7 | **无 plugin-to-plugin 协作**：`cmd_plugin_call` 用 `resolve_self_identity` → 插件只能调自己；跨插件调用只会命中拒绝测试 | `lib.rs:1424`、`eventbus.rs:770` | 🟡 |
 | M-8 | **市场/更新链全桩**：只改进程内 `updateState` 字符串，不下载/不验签/不换文件 | `lib.rs:3729/3752/3776` | 🟠 |
-| M-9 | **两份注册表无桥接**：`@tauron/core` 的 `PluginRegistry`（`maxPlugins: 32`）与 Rust `tauron-host::Registry`（`max: 8`）互不感知 | `registry.ts:49`、`bootstrap.ts:148/207` | 🟡 |
+| M-9 | ~~**两份注册表无桥接、上限各自硬编码且矛盾**~~ → **已消除（轮 34 复核）**：矛盾载体 `bootstrap.ts`（曾 `new PluginRegistry({ maxPlugins: 32 })`）已随 W1-b 删除，并有两条反向门禁钉住不回归（「`bootstrap.ts` 是已删除的死导出，不得回归」「TS 出现硬编码 `maxPlugins` 字面量＝第二事实源回归」）。今天生产路径上只有**一份**注册表：Rust `tauron-host::Registry`（`max_plugins` 有并发下不突破容量的测试）。`@tauron/core` 的 TS `PluginRegistry`（容量默认取 `Infinity`）与 `ConfigManager` **无生产消费者**，轮 34 已登记进 `contracts/orphan-public-api.json`——所以「互不感知」不再是两份活实现的冲突，而是「这份历史 SDK 面要不要收口」的决策 | `packages/tauron-core/src/registry.ts`、`crates/tauron-host/src/registry.rs`、`wire-gate.test.ts` | 🟢 |
 | M-10 | **无多插件可观测**：无 per-plugin 调用数/耗时/错误/资源占用指标 | 命令面无 metrics | 🟡 |
 
 ---
@@ -239,9 +240,14 @@ pub trait MenuProvider: Send + Sync {
 
 - 每个域一组命令（`host_menu_set` / `host_menu_on_select` …），**命令属于底座集合**，
   未注册 provider 时返回 `Unsupported`（见 S3 的统一形状），而不是恒成功。
-  > 本节是**提案名**：`host_menu_on_select` 从未注册，现行菜单面只有
-  > `host_menu_set` / `host_menu_popup` / `host_menu_reset` 三条；「选中项回传宿主」
-  > 这条回调链**仍是缺口**（`MenuSink` 没有 on-select 口），别按本节的命令名去找实现。
+  > 本节是**提案名**：`host_menu_on_select` 从未注册，也不需要注册。现行面是
+  > `host_menu_set` / `host_menu_popup` / `host_menu_reset` 与
+  > `host_tray_create` / `host_tray_set_menu` / `host_tray_remove` 六条；「选中项回传宿主」
+  > 这条回调链**已经存在**（轮 37 核对），只是形状不同：`MenuSink` 没有 `on_select` 口，
+  > 点击由 `crate::menu_routes()`（`menu_routes.rs` 的 `MenuRouteTable`）按
+  > `MenuItemSpec::event` 登记的 topic 经 `AppHandle::emit` 回传，前端
+  > `listen(MENU_CLICK_TOPIC)` 收，载荷 `MenuClickFrame`。**别按本节的命令名去找实现**，
+  > 也别反过来把它写成"缺口"——一个走 trait 回调、一个走事件通道，达成的同一件事。
 - Tauri 实现放在 feature-gated 的 binding 层（允许新增 `tauri-plugin-*` 依赖，见 §4 约束变更）。
 - 优先级排序：**fs > http > updater > menu > tray**。
   fs/http 是插件刚需（几乎所有插件都要读写与联网），且 Tauri 有官方插件；
@@ -405,8 +411,11 @@ UI 无安装入口。也就是说今天的插件只能"生而有之"（宿主预
 2. **验签**：接入 `@tauron/market` 已有的 **Ed25519**（TS 侧真实现）+ `tauron-acl` 的 HMAC 授予签名。
    验签失败 = 安装中止，**不留半安装状态**。
 3. **权限授予**：`tauron-acl` 接线（S4）——manifest 声明的权限 → 审批行 → 授予集落盘 →
-   可物化为 Tauri Capability（acl crate 的 `to_capability` 已有）。
-   权限**扩张**才需重审（acl 的 diff 语义已实现，直接复用）。
+   可物化为 Tauri Capability（acl crate 的 `to_capability` **只有库内 API 与形态单测，
+   宿主从不调 `add_capability`——此物化步骤仍未接线**，见
+   [渐进接入指南 §5](../integration/incremental-adoption.md) 的同名披露行）。
+   权限**扩张**才需重审（acl 的 diff 语义已实现，直接复用；`AclStore::diff` 本身
+   同样零生产消费者）。
 4. **安装命令**：`host_registry_install`（privileged，仅主窗）+ `host_registry_install_progress`
    （走 S1 的流式通道回传阶段进度）。
    > **现状（2026-10-02 复核）**：本条**部分落地**。已在命令面的是
@@ -602,6 +611,19 @@ legacy SDK 的行为与文档标注一致。
 **验证**：`simulated` 真 → UI 走"未接入"分支；接入 mock endpoint → 走真实分支并验证签名。
 
 **影响**：更新链从"假可用"变成"可用或明确不可用"。**量级：中（与 M1 合并 1 轮）**。
+
+> **轮 29 更正（本节的第 1 步方向部分作废）**：这一步当年按"`simulated: true` 时显示
+> '未接入更新源'"做完后，留下一个本节没预见的后果——**宿主其实早就有真通道**
+> （`host_updater_check` / `DistributeUpdaterSink`，轮 13 就已接好），而 SDK 的
+> `AutoUpdateClient.checkUpdate()` 读的始终是那张桩表。于是"诚实的桩"把真能力一起
+> 挡在了外面：宿主注入端点、真通道报出 `UpdateAvailable`，SDK 仍永远报"无更新可用"。
+> 今天检查腿改读 `host_updater_check`（`config.currentVersion` 为必填入参，缺参直接抛错；
+> `Unsupported` / `degraded` 落 `'error'` 而不是 `'idle'`）。**第 2 步"真实"仍未完成**，
+> 且缺的不是 downloader/verifier（那两个 `UpgradeRunner` 里已有），而是**装配腿**：
+> `UpgradeRunner` 在 `crates/tauron-distribute` 之外零引用（**轮 40 更正：装配腿已落地**——
+> `crates/tauron-adapter` 的 `DistributeUpgradeInstaller` 是唯一仓内消费者，缺省装配仍如实
+> 模拟；网络下载器与验签器仍由装配方注入）。所以下面那条不变量今天仍成立，
+> 只是判据换了地方：桩域（`host_market_*`）不得被当成可用性结论。
 
 ---
 

@@ -58,6 +58,80 @@ export interface ClientConfig {
 const VALID_LOG_LEVELS = ['error', 'warn', 'info', 'debug', 'trace'] as const;
 export type LogLevel = (typeof VALID_LOG_LEVELS)[number];
 
+/**
+ * 一个 `ClientConfig` 键的**落点事实**（与 Rust `ClientConfigLanding` 镜像）。
+ *
+ * - `consumed`：已接线，`target` 写出真实消费者位置；
+ * - `deferred`：写了不生效，`reason` 说明为什么今天没有落点。
+ *
+ * 为什么要把它暴露给前端：`ClientConfig` 是"第三方集成唯一入口"，而配置文件由
+ * `tauron-app-cli` 生成。若前端/CLI 无法查询"这个键到底有没有人读"，生成的配置
+ * 就会持续把假接口包装成产品能力（轮 2 / F-1）。权威表在 Rust 侧
+ * `tauron_host::config::CLIENT_CONFIG_LANDING`，两侧一致性由
+ * `src/gates.test.ts` 机器校验（键集合 + consumed/deferred 划分必须逐字相同）。
+ */
+export type ClientConfigLanding =
+  | { readonly kind: 'consumed'; readonly target: string }
+  | { readonly kind: 'deferred'; readonly reason: string };
+
+/** 落点表（顺序与 Rust 表一致，便于两侧 diff）。 */
+export const CLIENT_CONFIG_LANDING: Readonly<Record<string, ClientConfigLanding>> = {
+  registry: { kind: 'consumed', target: 'AdapterConfig::registry' },
+  log_level: { kind: 'consumed', target: 'reference host load_adapter_config -> RUST_LOG' },
+  data_dir: { kind: 'consumed', target: 'AdapterConfig::recovery_data_dir' },
+  env_overrides: {
+    kind: 'consumed',
+    target: 'AdapterConfig::plugin_env_overrides -> SpawnConfig::env',
+  },
+  auto_update: {
+    kind: 'deferred',
+    reason: '更新开关在前端 AutoUpdateClient 的 endpoints/autoDownload，本键没有映射过去',
+  },
+  update_check_interval_secs: {
+    kind: 'deferred',
+    reason: '检查周期同上：AutoUpdateConfig::checkIntervalSecs 不从本键派生',
+  },
+  crash_report_enabled: {
+    kind: 'deferred',
+    reason: '没有崩溃报告导出器；CrashTracker 只做窗口计数',
+  },
+  brand_id: {
+    kind: 'deferred',
+    reason: '品牌是 env 提供的单个 BrandConfig，不存在按 id 选择的品牌目录',
+  },
+  plugin_paths: {
+    kind: 'deferred',
+    reason: '没有目录扫描注册入口；安装侧只有单个 plugin_install_dir 根',
+  },
+  performance_monitoring: {
+    kind: 'deferred',
+    reason: 'BusStats/QueueStats 未接命令，也没有 CPU/内存采样器',
+  },
+};
+
+/**
+ * 本配置里**用户实际写了、却没有宿主落点**的键。
+ *
+ * 只列出现的键（`undefined` = 没写，谈不上不生效）。返回顺序 = 表顺序。
+ * 与 Rust `ClientConfig::unwired_fields` 同语义。
+ */
+export function clientConfigUnwiredKeys(
+  config: ClientConfig,
+): Array<{ key: string; reason: string }> {
+  const written = config as Readonly<Record<string, unknown>>;
+  return Object.entries(CLIENT_CONFIG_LANDING).flatMap(([key, landing]) => {
+    if (landing.kind !== 'deferred' || written[key] === undefined) {
+      return [];
+    }
+    return [{ key, reason: landing.reason }];
+  });
+}
+
+/** [`clientConfigUnwiredKeys`] 的一行式文案（CLI / 启动横幅用）。 */
+export function clientConfigUnwiredSummary(config: ClientConfig): string[] {
+  return clientConfigUnwiredKeys(config).map(({ key, reason }) => `${key}：${reason}`);
+}
+
 /** 校验配置合法性（纯函数，无 IO）。 */
 export function validateClientConfig(config: ClientConfig): string[] {
   const errors: string[] = [];

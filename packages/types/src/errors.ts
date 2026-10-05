@@ -107,3 +107,44 @@ export function errorMessage(code: PluginErrorCode): string {
 export function isValidErrorCode(code: string): code is PluginErrorCode {
   return Object.values(PluginErrorCode).includes(code as PluginErrorCode);
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// 码形态（轮 35）：仓里有**两套**错误词表（宿主 `E_*` / 框架层 `SC-####`），
+// 穿越 iframe 桥时最常见的破坏是"把带码的失败换成通用码"——码一丢，调用方
+// 就只剩一句 "Internal error"，宿主侧按事实分码的工作全部白做。
+//
+// 层归属按 `docs/architecture/overview.md` 的口径：`SC-####` 属**框架层**（由
+// `tauron-shell` 与 `@tauron/types` 共用），`E_*` 属**应用层**宿主底座。符号名里
+// 的 `APP_LAYER_` 前缀是 1.0 公开面遗留命名——注释按文档口径改，导出名不改。
+//
+// 形态识别放在这一层，因为 `@tauron/types` 是两套词表都能触到的最低依赖点：
+// `@tauron/host`（宿主词表）与 `@tauron/plugin-sdk`（框架层词表、且**不得**
+// 依赖 host，否则整个宿主客户端会打进插件包）都用这同一份判据。判据只认
+// **形态**，不认"这条码在不在某套词表里"——后者仍是各层自己的清单。
+// ──────────────────────────────────────────────────────────────────────────
+
+/** 框架层错误码形态（`SC-####`）。 */
+export const APP_LAYER_ERROR_CODE_PATTERN = /^SC-\d{4}$/;
+
+/** 是否为框架层错误码形态（识别形态 ≠ 接受语义）。 */
+export function isAppLayerErrorCode(v: string): boolean {
+  return APP_LAYER_ERROR_CODE_PATTERN.test(v);
+}
+
+/**
+ * 是否"像错误码"的串：宿主 `E_*` 前缀或框架层 `SC-####`。
+ *
+ * 只做形态判断：宿主码的**合法集**在 `@tauron/host` 的 `HOST_ERROR_CODES`，
+ * 框架层码的合法集是上面的 {@link PluginErrorCode}——这里都不重复。
+ */
+export function isCodeLike(v: string): boolean {
+  return v.startsWith('E_') || isAppLayerErrorCode(v);
+}
+
+/**
+ * 从任意串里抽出第一个码形态（宿主 `E_*` 优先匹配整词，再试 `SC-####`）。
+ * 找不到返回 `null`——调用方据此决定"保码"还是"落到通用码"。
+ */
+export function extractCodeLike(s: string): string | null {
+  return s.match(/\b(E_[A-Z0-9_]+|SC-\d{4})\b/)?.[1] ?? null;
+}

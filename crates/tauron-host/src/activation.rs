@@ -15,7 +15,24 @@ pub struct ContentIdentity {
 
 impl ContentIdentity {
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        Self { sha256: hex::encode(Sha256::digest(bytes)), size: bytes.len() as u64 }
+        Self::from_reader(bytes).expect("读内存切片不会失败")
+    }
+
+    /// 从任意 `Read` 流式构造（固定 64 KiB 缓冲）：内容身份只由摘要与长度决定，
+    /// 安装路径的大文件不必整读进内存（A94）。
+    pub fn from_reader(mut reader: impl std::io::Read) -> std::io::Result<Self> {
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        let mut size = 0u64;
+        loop {
+            let read = reader.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            size += read as u64;
+        }
+        Ok(Self { sha256: hex::encode(hasher.finalize()), size })
     }
 
     pub fn verify(&self, bytes: &[u8]) -> bool {

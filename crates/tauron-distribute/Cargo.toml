@@ -13,6 +13,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+# 升级执行侧真实文件效果：zip 解压（与 adapter/market 同参数，非 optional）
+# + 包摘要哈希。
+zip = { version = "2", default-features = false, features = ["deflate"] }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

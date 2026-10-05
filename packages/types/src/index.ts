@@ -33,6 +33,10 @@ export {
   errorCategory,
   errorMessage,
   isValidErrorCode,
+  APP_LAYER_ERROR_CODE_PATTERN,
+  isAppLayerErrorCode,
+  isCodeLike,
+  extractCodeLike,
 } from './errors.js';
 
 // ---- 插件状态与事件（§4.3/§2.3）----

@@ -17,8 +17,12 @@ import {
   buildInvokeMessage,
   buildEmitMessage,
   isHostToPlugin,
+  isCodeLike,
+  PluginErrorCode,
   type BridgeToPluginMessage,
 } from '@tauron/types';
+
+import { PluginBridgeError } from './errors.js';
 
 /** 待处理调用 */
 interface PendingCall {
@@ -162,7 +166,17 @@ export function createPluginContext(options: PluginContextOptions = {}): PluginC
         if (result.ok) {
           pending.resolve(result.result);
         } else {
-          pending.reject(new Error(result.error?.message ?? 'Unknown error'));
+          // 轮 35：把桥送回来的码交到插件作者手上。此前这里只取 `message` 造裸
+          // `Error`——`code` 在局部类型里声明了却没人读，等于声明了但没人接。
+          const raw = typeof result.error?.code === 'string' ? result.error.code : null;
+          const code = raw !== null && isCodeLike(raw) ? raw : PluginErrorCode.INTERNAL;
+          pending.reject(
+            new PluginBridgeError(
+              code,
+              result.error?.message ?? 'Unknown error',
+              raw === null || code !== raw,
+            ),
+          );
         }
       }
     } else if (msg.action === 'event') {
@@ -183,7 +197,7 @@ export function createPluginContext(options: PluginContextOptions = {}): PluginC
       const payload = msg.payload as { callId: string };
       const pending = takePending(payload.callId);
       if (pending) {
-        pending.reject(new Error('Cancelled'));
+        pending.reject(new PluginBridgeError(PluginErrorCode.CANCELLED, 'Cancelled'));
       }
     }
   };
@@ -213,7 +227,12 @@ export function createPluginContext(options: PluginContextOptions = {}): PluginC
             ? setTimeout(() => {
                 // 超时后必须移除，否则 pendingCalls 无界增长
                 pendingCalls.delete(callId);
-                reject(new Error(`Invoke timed out after ${defaultTimeout}ms: ${method}`));
+                reject(
+                  new PluginBridgeError(
+                    PluginErrorCode.TIMEOUT,
+                    `Invoke timed out after ${defaultTimeout}ms: ${method}`,
+                  ),
+                );
               }, defaultTimeout)
             : undefined;
 
@@ -251,7 +270,7 @@ export function createPluginContext(options: PluginContextOptions = {}): PluginC
       window.removeEventListener('message', handleMessage);
       for (const [, pending] of pendingCalls) {
         if (pending.timer !== undefined) clearTimeout(pending.timer);
-        pending.reject(new Error('Context destroyed'));
+        pending.reject(new PluginBridgeError(PluginErrorCode.CHANNEL_BROKEN, 'Context destroyed'));
       }
       pendingCalls.clear();
       eventHandlers.clear();

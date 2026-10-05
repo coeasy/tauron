@@ -5,9 +5,12 @@
 // **stdout**，`CommandSpawner` 的读线程把回帧路由到 `ProcessFrameSinkImpl`，最终
 // 调 `Registry::settle_call` 闭合链路。
 //
-// **诚实边界**：本仓没有可执行的 sidecar 二进制，测试不起真进程，因此"sidecar 真的
-// 收到帧 / 真的回帧 / 宿主真的据此结算"没有运行期证据（见 `tauron-proc` 的文档）。
-// 这里验证的是帧格式与契约；带真 sidecar 的 E2E 需另起集成环境。
+// **运行期证据（轮 22 / V7-P1-05）**：`crates/tauron-test-sidecar` 提供仓内可执行的
+// sidecar 夹具（`publish = false`，永不上架），其 `tests/sidecar_e2e.rs` 真起进程、
+// 真走 stdio 帧回路，并且**走的就是本文件的投递/结算面**——"sidecar 真的收到帧 /
+// 真的回帧 / 宿主真的据此结算"已不再是只有契约与格式级的推导。
+// 那份 E2E 同时覆盖了真崩溃计数、超长帧、旧代际回帧、EOF 回收、pending 上限与
+// 静默不回帧的 sidecar。
 
 use std::sync::Arc;
 
@@ -83,6 +86,51 @@ fn stale_process_call(
     )
 }
 
+/// 把一次 stdin 写入失败映射成**调用方可分流**的错误码（轮 30）。
+///
+/// 写侧有四类完全不同的事实（见 `CommandSpawner::write_frame` 的四种如实失败），
+/// 从前这里一律塌成 `E_STATE_INVALID_TRANSITION`，后果不是"码不好看"而是**可执行的
+/// 误判**：
+///
+/// - 那个码的语义是「状态机没有匹配的规则」——而这里状态机**放行了**（调用已经进
+///   pending 表），只是写侧落空。把它报给调用方，等于把人往"检查插件状态/改调用
+///   序列"上支，而正确处置是"把在飞的调用取件腾额度"或"重新 spawn 运行期"；
+/// - sidecar 已退出 / 管道已断（`NotFound`/`BrokenPipe`）本质是**租约没了**，与
+///   [`stale_process_call`] 同一个事实，必须同一个码：`E_LEASE_EXPIRED` 的 retry
+///   class 是 `AfterReconnect`，塌成非法状态迁移就把这条机器可读的"先重连再试"信号
+///   整个丢掉了；
+/// - 写队列满（`WouldBlock`）与 pending 表满对调用方是**同一件事**——"这个目标的受理
+///   额度满了，退避后重投"，所以同码 `E_CALL_PENDING_FULL`。V4 刻意不给这两个码
+///   自动重试权（`RetryClass::Never`：幂等性未被证明前不自动重放），这里不翻案。
+///
+/// 帧超过协议上界（`InvalidInput`）报 `E_INVALID_MANIFEST`：它是仓内既有的
+/// 「入参不合协议」码（`host_updater_check` 的空 `current_version`、
+/// `host_recover_report` 的表外 `outcome` 都用它），比"状态迁移非法"更贴近事实。
+///
+/// 两种容量失败的**出处**都留在 message 里（写队列上界与 pending 表上界是两个不同
+/// 的界，排查时必须能分辨），码只承载"该怎么处置"。
+fn stdin_write_failure(pid: u32, e: &std::io::Error) -> HostError {
+    let kind = e.kind();
+    let (code, advice) = match kind {
+        std::io::ErrorKind::WouldBlock => (
+            ErrorCode::E_CALL_PENDING_FULL,
+            "sidecar 写队列已满：这次调用的额度已被占满，退避后重投即可（与 pending 表满同一处置）",
+        ),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::BrokenPipe => (
+            ErrorCode::E_LEASE_EXPIRED,
+            "该 pid 的 stdin 通路已不存在：需要重新 host_runtime_spawn，而不是重投这一帧",
+        ),
+        _ => (
+            ErrorCode::E_INVALID_MANIFEST,
+            "这一帧无法成形投递（超过协议上界或入参不可序列化）：修正调用参数，重试无用",
+        ),
+    };
+    HostError::new(
+        code,
+        format!("写入 sidecar stdin 失败（pid {pid}，kind {kind:?}）：{e}；处置：{advice}"),
+    )
+}
+
 impl CallDelivery for ProcessCallDelivery {
     fn target_kind(&self) -> DeliveryKind {
         DeliveryKind::Process
@@ -119,19 +167,22 @@ impl CallDelivery for ProcessCallDelivery {
         });
         let bytes = serde_json::to_vec(&frame).map_err(|e| {
             HostError::new(
-                ErrorCode::E_STATE_INVALID_TRANSITION,
-                format!("序列化进程调用帧失败：{e}"),
+                ErrorCode::E_INVALID_MANIFEST,
+                format!("序列化进程调用帧失败（这次调用无法成形）：{e}"),
             )
         })?;
 
-        self.proc_runtime.spawner().write_frame(pid, &bytes).map_err(|e| {
-            HostError::new(
-                ErrorCode::E_STATE_INVALID_TRANSITION,
-                format!("写入 sidecar stdin 失败（pid {pid}）：{e}"),
-            )
-        })?;
-
-        Ok(DeliveryReceipt { delivered: true, reason: None })
+        match self.proc_runtime.spawner().write_frame(pid, &bytes) {
+            Ok(()) => Ok(DeliveryReceipt { delivered: true, reason: None }),
+            // 启动器根本没有「写 sidecar stdin」这条通路：这不是失败，是**未装配投递**——
+            // 与上面「没有 runtime 不投递」同一个形状，上层据此转成 `Unsupported`，
+            // 让调用方看见「没有通路」而不是拿到一个误导性的错误码。
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => Ok(DeliveryReceipt {
+                delivered: false,
+                reason: Some(format!("该启动器不支持写入 sidecar stdin（pid {pid}）：{e}")),
+            }),
+            Err(e) => Err(stdin_write_failure(pid, &e)),
+        }
     }
 
     fn settle(&self, call_id: &str, outcome: CallOutcome) -> HostResult<tauron_host::PendingCall> {

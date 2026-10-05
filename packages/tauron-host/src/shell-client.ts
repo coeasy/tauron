@@ -363,7 +363,7 @@ export interface MenuItemSpec {
   id: string;
   /** 显示文本。 */
   label: string;
-  /** 点击时发布到事件总线的 topic；缺省 = 只记录不发布。 */
+  /** 点击时由宿主 `emit` 到该 topic 的帧即为一次真实点击；缺省 = 只记录不发布。 */
   event?: string;
   /** 是否可点（缺省 true）。 */
   enabled?: boolean;
@@ -396,6 +396,30 @@ export interface TraySpec {
 export interface TrayOutcome {
   applied: boolean;
   reason: string | null;
+}
+
+/**
+ * 一次点击来自哪个菜单（Rust `MenuLane::as_str()` 的取值）。
+ *
+ * 与 Rust 侧词表一一对应，由 `wire-gate` 的「轮 37」门禁比对；两侧各写一份必然漂移，
+ * 所以这里**不**接受任意字符串。
+ */
+export type MenuClickSource = 'menu' | 'tray';
+
+/**
+ * 菜单 / 托盘点击的回传帧（宿主 `on_menu_event` 命中路由表后经 `AppHandle::emit` 发出）。
+ *
+ * 送达方式与 `host_events_*` 总线**无关**：用 `backend.listen(MENU_CLICK_TOPIC, …)` 收，
+ * 去 `host_events_drain` 取件永远取不到一次点击（轮 37 之前文档写的正是那条通路）。
+ * `native: true` 是宿主侧唯一会写的值——它标出"这是原生菜单的一次真实点击"，
+ * 降级装配（`MemoryMenuSink`）不会有任何帧。
+ */
+export interface MenuClickFrame {
+  /** 被点的菜单项 id（`MenuItemSpec.id`）。 */
+  id: string;
+  /** 来自应用菜单还是托盘右键菜单。 */
+  source: MenuClickSource;
+  native: true;
 }
 
 /** 目录项（`host_fs_list` 的行；Rust `FsEntry`）。 */
@@ -462,6 +486,8 @@ export interface HttpResponseSpec {
   /** 响应体（UTF-8 有损）。 */
   body: string;
   truncated: boolean;
+  /** 本跳实际解析地址（provider 契约上报；宿主据此复检私网规则）。空 = 未回报。 */
+  resolvedAddrs?: string[];
 }
 
 /** `host_updater_check` 结果（Rust `UpdaterCheckOutcome`）。 */
@@ -481,6 +507,15 @@ export interface UpdaterStatus {
   available: boolean;
   /** 进程内更新状态机线值；无则 `null`。 */
   state: string | null;
+  /**
+   * `state` 是否来自**模拟**推进（轮 33）。
+   *
+   * `state` 的两个写入方今天都是宿主桩（`host_market_download` / `host_market_install`），
+   * 桩把进程内账本推到 `downloaded:<v>` / `installed:<v>` 是如实行为，但字符串本身
+   * 分不出真假——只看 `state` 就会把"点了一下模拟安装"显示成"已安装"。
+   * `state === null` 时本值必为 `false`（没有状态，谈不上它是怎么来的）。
+   */
+  stateSimulated: boolean;
   grayscalePercent: number;
   crashGateStopped: boolean;
   reason: string | null;
@@ -558,10 +593,16 @@ export interface RuntimeHandle {
 /**
  * 租约回收统计（**全局**：不属某条租约）。
  *
- * 终止失败的唯一可查出口——"杀不掉"必须能被宿主 UI 看到，否则等于只写日志。
+ * 终止失败的可查出口——"杀不掉"必须能被宿主 UI 看到，否则等于只写日志。
+ * 重试腿（`pending` / `retries` / `recovered` / `terminal` / `overflow` /
+ * `skippedLivePid` / `terminalRecords`）是 V7 §7 与 §9 的落点：kill 失败必须有 retry
+ * 或终态证据，且两者都有上界；`skippedLivePid` 是安全封口——待重试的 pid 若已被在册
+ * 租约持有（OS 重用同号），重试**让位**而不误杀活进程。
+ * 重启腿（`sweepResolved` / `sweepSurvivors` / `sweepUnknown` / `ledgerWriteFailures`，
+ * 轮 41）覆盖跨重启：上一轮台账读回后**只探测不杀**，任何 pid 都不盲杀。
  */
 export interface ReapStats {
-  /** 尝试终止的次数。 */
+  /** 尝试终止的次数（首试 + 重试的总和）。 */
   attempts: number;
   /** 确认已终止。 */
   terminated: number;
@@ -571,6 +612,50 @@ export interface ReapStats {
   failures: number;
   /** 最近一次失败原因。 */
   lastError: string | null;
+  /** 当前还在等重试的 pid 数（上界 64；涨到与失败插件数无关的量就是泄漏信号）。 */
+  pending: number;
+  /** 驱动推进的重试次数（不含首试）。 */
+  retries: number;
+  /** 重试后终于终止掉的条数。 */
+  recovered: number;
+  /** 放弃重试、固化为终态证据的条数。 */
+  terminal: number;
+  /** 重试队列已满、只能直接固化证据的次数（增长被拒 = 有界的证据）。 */
+  overflow: number;
+  /**
+   * 重试**主动让位**的次数：该 pid 现由某条在册租约持有。
+   *
+   * pid 会被操作系统回收重用。卸载时"杀不掉"→ 排队，之后同一号被新起的 sidecar 用上，
+   * 拿旧记录再打一下就等于杀宿主自己的活进程（终止器按 pid 查表，分不出新旧）。
+   * 让位既不是失败也不是回收成功：旧进程按定义已退出，这里只计数并留一条终态证据。
+   */
+  skippedLivePid: number;
+  /**
+   * 重启扫描**销账**数：上一轮宿主留下的 pid 经平台探测确认已不存在（轮 41）。
+   *
+   * 跨重启无法验明进程身份，因此扫描**只探测不杀**：`Gone` 销账留证，`Alive` / `Unknown`
+   * 同样只留证（见 `sweepSurvivors` / `sweepUnknown`），绝不盲杀。
+   */
+  sweepResolved: number;
+  /** 重启扫描**存活**数：pid 仍在，但无法验明是不是本宿主的旧子进程——留证待人查。 */
+  sweepSurvivors: number;
+  /** 重启扫描**无法判定**数：探测不可用/结论不可靠——同样不杀、留证。 */
+  sweepUnknown: number;
+  /** 回收台账 durable 写盘失败次数（持久化腿不得静默：与 `lastError` 分开计数）。 */
+  ledgerWriteFailures: number;
+  /** 终态证据（环形，最多 16 条）：带着查得动的 pid / 插件 / 原因。 */
+  terminalRecords: TerminalReapRecord[];
+}
+
+/** 一条**不再重试**的回收证据（V7 §7「kill retry/backoff + evidence」的 evidence 腿）。 */
+export interface TerminalReapRecord {
+  /** 归属插件 id（租约此刻已消失，但进程可能还活着）。 */
+  pluginId: string;
+  pid: number;
+  /** 一共尝试过几次（含首试）。 */
+  attempts: number;
+  /** 最后一次失败原因。 */
+  reason: string;
 }
 
 export interface HealthReport {
@@ -578,6 +663,23 @@ export interface HealthReport {
   readiness: 'ready' | 'not-ready';
   degradation: 'full' | 'degraded';
   diagnostics: string[];
+}
+
+/**
+ * 代际台账读数（V7 §9 leak gate：abandoned generation 的**有界**指标）。
+ *
+ * `trackedResources` 的上界是**在管插件数**：回收租约会连带摘除代际跟踪
+ * （`RuntimeTable::remove_plugin` → `GenerationRegistry::forget`），所以反复安装/卸载
+ * 不同插件不会把它推高。它涨到与在飞插件数无关的量，就是泄漏信号——这个读数挂在
+ * `host_resource_stats` 上，就是为了让人在宿主演示期也能查到，而不只活在 Rust 测试里。
+ */
+export interface GenerationStats {
+  /** 在管资源数（当前挂着租约的插件数）。 */
+  trackedResources: number;
+  /** 活跃代际租约数（与运行时租约表一比一）。 */
+  liveLeases: number;
+  /** 累计发号数：号源只增不减，是「代际号跨卸载/重装永不复用」的读数（2^53 内精确）。 */
+  generationsIssued: number;
 }
 
 /** sidecar 健康快照（`host_runtime_health`）。 */
@@ -604,6 +706,13 @@ export interface ResourceStats {
     streams: { used: number; limit: number };
     subscriptions: { used: number; limit: number };
     notifications: { used: number; limit: number; perPluginLimit: number; evictedTotal: number };
+    /** V7 §9 leak gate：代际台账的有界读数（全局，不属某个插件）。 */
+    generations: GenerationStats;
+    /**
+     * V7 §7 / §9：回收留痕与重试腿。读这条命令的同一个调用点会先推进一轮有界重试
+     * （`RuntimeTable::retry_pending_reaps`），因此这里的数与刚发生的回收一致。
+     */
+    reap: ReapStats;
   };
   perPlugin: {
     pendingCallsLimit: number;
@@ -673,7 +782,12 @@ export class ShellClient {
     return { ...caps, adopted };
   }
 
-  /** 查询当前传输层是否注册指定命令。 */
+  /**
+   * 查询当前传输层是否注册指定命令。
+   *
+   * 只回答**注册与否**（构建 / 协商事实）；可见性（主窗特权命令对插件主体不可见）
+   * 由 `isAvailable()` 判定——插件侧 UI 做能力判断时别只看这里。
+   */
   supports(command: string): boolean {
     return this.backend.capabilities().has(command);
   }
@@ -863,10 +977,14 @@ export class ShellClient {
   // ── 市场 ──
 
   /**
-   * 检查更新。
+   * 检查更新（**本地桩**）。
    *
-   * **当前恒为模拟结果**（`simulated: true` + `reason` 写明"未接入更新源"）：
-   * 没有请求任何 endpoint，`available: false` 是**本地桩结论**而不是网络结论。
+   * **当前恒为模拟结果**（`simulated: true` + `reason` 写明桩身份）：没有请求任何
+   * endpoint，`available: false` 是**本地桩结论**而不是网络结论，也不是"已是最新版本"。
+   *
+   * 轮 29 起真更新通道在 [`updaterCheck`]（`host_updater_check`：清单校验 + 灰度分桶 +
+   * 签名判定）。要给用户答"有没有新版本"请用那条；本方法保留是给市场域自身的数据面，
+   * 拿它的 `available` 当更新结论就是轮 29/31 两轮修掉的那条断链。
    */
   async marketCheck(): Promise<MarketCheckResult> {
     return this.call<MarketCheckResult>('host_market_check');
@@ -1091,40 +1209,50 @@ export class ShellClient {
   // ── 菜单（R9，主窗专属）──
   // 缺省装配（非 Tauri 宿主 / 无 MenuSink）时宿主返回 `Unsupported`；
   // Tauri 宿主注入 `TauriMenuSink` 后为真实现（`tauri::menu`）。
+  //
+  // **点击的回传走 Tauri 事件通道，不走 `host_events_*` 总线**（轮 37 纠正：此前这四行
+  // 与 `lib.rs`、`tauri.rs`、`docs/api/command-surface.md` 的叙述都写着"`host_events_drain`
+  // 取件"，而实现一直是 `AppHandle::emit`——照旧文档接线的人会在一个永远为空的队列上
+  // 等一次真实点击）。接收方是 `backend.listen(MENU_CLICK_TOPIC, …)`，载荷 `MenuClickFrame`。
 
   /**
    * 设置应用菜单。
    *
-   * 菜单点击**不新造传输**：宿主按 `MenuItemSpec.event` 指定的 topic 经既有
-   * 事件总线回传（`host_events_drain` 取件），事件载荷含 `{ id, source:'menu' }`。
+   * 菜单点击**不新造传输**：宿主按 `MenuItemSpec.event` 指定的 topic 用
+   * `AppHandle::emit` 回传 `MenuClickFrame`（`{ id, source:'menu', native:true }`），
+   * 前端 `listen` 该 topic 收。要收帧就得**自己把 `event` 填上**——宿主不会替你补
+   * 默认 topic，仓库内约定值见 `MENU_CLICK_TOPIC`。
    */
   async menuSet(spec: MenuSpec): Promise<ProviderResult<MenuOutcome>> {
     return this.call<ProviderResult<MenuOutcome>>('host_menu_set', { spec });
   }
 
-  /** 弹出上下文菜单（目标为主窗）。 */
+  /** 弹出上下文菜单（目标为主窗；点击同样回传 `source:'menu'`）。 */
   async menuPopup(spec: MenuSpec): Promise<ProviderResult<MenuOutcome>> {
     return this.call<ProviderResult<MenuOutcome>>('host_menu_popup', { spec });
   }
 
-  /** 移除应用菜单。 */
+  /** 移除应用菜单（只失效应用菜单那条点击路由，托盘右键菜单的路由不受影响）。 */
   async menuReset(): Promise<ProviderResult<MenuOutcome>> {
     return this.call<ProviderResult<MenuOutcome>>('host_menu_reset');
   }
 
   // ── 系统托盘（R9，主窗专属）──
+  // 托盘菜单的点击与菜单点击**共用宿主那一个全局菜单监听**（Tauri 只有一张全局监听
+  // 表），差别只在载荷 `source:'tray'`。因此 `trayCreate` / `traySetMenu` 只登记路由，
+  // 不需要也不该再有一条托盘专属通路。
 
-  /** 创建/更新系统托盘（id 恒为宿主固定值；重复调用即更新既有托盘）。 */
+  /** 创建/更新系统托盘（id 恒为宿主固定值；重复调用即更新既有托盘，路由整体替换）。 */
   async trayCreate(spec: TraySpec): Promise<ProviderResult<TrayOutcome>> {
     return this.call<ProviderResult<TrayOutcome>>('host_tray_create', { spec });
   }
 
-  /** 设置托盘右键菜单（托盘不存在时宿主如实返回 `applied: false`）。 */
+  /** 设置托盘右键菜单（托盘不存在时宿主如实返回 `applied: false`，且不会登记路由）。 */
   async traySetMenu(spec: MenuSpec): Promise<ProviderResult<TrayOutcome>> {
     return this.call<ProviderResult<TrayOutcome>>('host_tray_set_menu', { spec });
   }
 
-  /** 移除系统托盘。 */
+  /** 移除系统托盘（连同托盘那条点击路由一起失效）。 */
   async trayRemove(): Promise<ProviderResult<TrayOutcome>> {
     return this.call<ProviderResult<TrayOutcome>>('host_tray_remove');
   }

@@ -20,7 +20,7 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
 
 | 层 | 面向 | 拿到什么 |
 |---|---|---|
-| **框架层** | 通用集成 | 信封协议 `plugin_invoke`、`PluginType` 四形态（Js / Process 有生产执行器；Rust / Wasm 诚实返回 `E_PLUGIN_TYPE_NO_RUNTIME`，代码里**不存在**「B+ 混合模式」）、双层 ACL、事件总线、插件市场（Ed25519 验签）、CLI。**诚实边界**：`@tauron/dual-world` 的进程内沙箱是 fail-closed 模拟（`SANDBOX_UNAVAILABLE`），进程内 WASM 运行时仍为路线图项 |
+| **框架层** | 通用集成 | 信封协议 `plugin_invoke`、`PluginType` 四形态（Js / Process 有生产执行器；Rust / Wasm 诚实返回 `E_PLUGIN_TYPE_NO_RUNTIME`，代码里**不存在**「B+ 混合模式」）、双层 ACL、事件总线、插件市场（Ed25519 验签）、CLI。**诚实边界**：`@tauron/dual-world` 的进程内沙箱是 fail-closed 模拟（`SANDBOX_UNAVAILABLE`），进程内 WASM 运行时仍为路线图项；`plugin_invoke` 的**执行体**（`PluginDispatcher`）仓库内只有测试实现（`EchoDispatcher`），宿主不装载自己的 dispatcher 就只会拿到 `SC-9001` |
 | **应用层** | 完整客户端交付 | `host_*` 命令族（83 条 = 底座 61 + 插件运行时 22；`plugin-install` 另加 2 条，该 feature 是 **opt-in**（`crates/tauron-adapter/Cargo.toml` 的 `default = []`，V4 minimal-substrate 规则）→ 显式开启后共 85 条；示例应用已开启，故其装配为 85 条）、生命周期状态机、三档授权、设置中心、白标、主题、菜单/托盘、允许根内的文件 I/O、更新通道、崩溃恢复、Event 审批与生产就绪自检（1.1）、UI 组件 |
 
 ### 它不是什么
@@ -56,7 +56,7 @@ tauron 是**跑在 Tauri 2 之上的插件化桌面客户端基础设施**。它
 
 | 场景 | 适不适合 |
 |---|---|
-| 给已有 Tauri 应用加一套插件系统 | ✅ 接框架层 |
+| 给已有 Tauri 应用加一套插件系统 | ⚠️ 分两种：**要现成能跑**→ 接应用层（`host_*`，见三档装配）；**只要信封协议**→ 接框架层，但你必须自己实现并装载 `PluginDispatcher`——仓库内没有生产实现，未装载时 `plugin_invoke` 恒回 `SC-9001` |
 | 做一个要装第三方插件的桌面客户端 | ✅ 接应用层，按「三档装配」选档 |
 | 需要一个带设置中心 / 白标 / 崩溃恢复的客户端底座 | ✅ 接应用层 |
 | 想要开箱即用的成品桌面应用 | ❌ 这是框架，没有成品 |
@@ -168,7 +168,9 @@ fn main() {
         // 状态 + 事件出口（不注册命令）
         .plugin(tauron_shell::commands::state_init())
         // root 注册 plugin_invoke / plugin_cancel / plugin_emit
-        //（裸命令名，与 @tauron/core createTauriBackend() 直接匹配，零 capability 配置；
+        //（裸命令名，与 @tauron/core createTauriBackend() 直接匹配；
+        //  **不是「零 capability」**：Tauri v2 下不匹配任何 capability 的 webview 完全没有
+        //  IPC 访问，所以任何形态都至少需要一份 capability 文件，示例已随仓提供。
         //  若改用 .plugin(tauron_shell::commands::init()) 插件形态，
         //  则必须为 `tauron-shell` 插件配置 capability——Tauri v2 对 plugin:* 命令强制 ACL）
         .invoke_handler(tauron_shell::tauron_generate_handler![])
@@ -176,6 +178,12 @@ fn main() {
         .expect("error while running tauri application");
 }
 ```
+
+> ⚠️ 上面这段能注册命令，但**跑不通一次真实调用**：框架层的信封需要
+> `PluginDispatcher` 的生产实现，仓库内只有测试用的 `EchoDispatcher`。
+> 未装载分发器时 `plugin_invoke` 一律返回 `SC-9001`（`tauron-shell` 的
+> `dispatch.rs` 明写「装载插件分发器。未装载时 `plugin_invoke` 返回 `SC-9001`」）。
+> 想要**装完就能用**的插件系统，请走应用层（下一节 `tauron_adapter::tauron_generate_handler![]`）。
 
 ### 3. 初始化前端运行时
 
@@ -493,6 +501,8 @@ tauron/
 │   ├── tauron-distribute/           # CI 分发运维
 │   ├── tauron-proc/                 # 进程插件 Host
 │   ├── tauron-wasm/                 # WASM Supervisor
+│   ├── tauron-test-sidecar/         # CI 真 sidecar 夹具（`publish = false`，永不上架）：
+│   │                                #   可执行 stdio 帧回路端，仅供 tauron-proc 的端到端测试起真进程
 │   └── tauron-ffi/                  # 稳定 C ABI 所有权边界（供**非 Rust 宿主**接入 Universal Wire；
 │                                    #   仓内没有 Rust 消费者是设计使然，契约见 docs/contracts/ffi-v1.md）
 ├── packages/                        # npm 包（21 个目录：20 公开 + 私有 `tauron-contract-tests`；下面按层分组）
@@ -624,6 +634,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 | [V5 架构竞分析与优化方案](./docs/Tauron-Architecture-Competitive-Analysis-Optimization-Plan-V5.md) | 七 Plane 目标架构、`RuntimeDriver` / HostProtocol / Manifest V3 契约、Phase A–G 优先级与退出门槛、能力诚实分级——**轮 13 起的对照基线**（前瞻方案，不描述现状） |
 | [渐进接入指南](./docs/integration/incremental-adoption.md) | 三档装配：只取底座 / 底座 + 插件运行时 / 完整客户端 |
 | [插件开发指南](./docs/api/plugin-development-guide.md) | 创建、测试、打包、发布插件（含 CLI 各命令的真实边界） |
+| [客户端配置参考](./docs/api/client-config.md) | `ClientConfig` 的 10 个键：哪些有宿主落点、哪些写了不生效及原因、加载路径与校验规则 |
 | [竞品分析](./docs/competitive-analysis/competitive-analysis.md) | 竞品全景图、功能对比矩阵、头条特性兑现度标记 |
 | [示例应用](./examples/minimal-app/README.md) | 最小集成示例 |
 | [CHANGELOG](./CHANGELOG.md) | 版本变更记录与「已知债务」清单 |

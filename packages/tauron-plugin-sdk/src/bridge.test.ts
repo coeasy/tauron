@@ -208,11 +208,126 @@ describe('PluginBridge', () => {
       const resultMsg = sentMessages().find((m) => m.action === 'invoke-result');
       expect(resultMsg).toBeDefined();
       const result = (
-        resultMsg!.payload as { result: { ok: boolean; error: { code: string; message: string } } }
+        resultMsg!.payload as {
+          result: { ok: boolean; error: { code: string; message: string; retryable: boolean } };
+        }
       ).result;
       expect(result.ok).toBe(false);
       expect(result.error.code).toBe('SC-9001');
       expect(result.error.message).toBe('boom');
+      // 轮 35：`SC-9001` 在框架层词表里就是**可重试**码（`RETRYABLE_ERROR_CODES`），
+      // 桥此前一律报 `retryable: false`，与对外码表相反。现在判定由词表给出。
+      expect(result.error.retryable).toBe(true);
+    });
+
+    it('轮 35：handler 抛出的宿主码原样过桥，不被换成 SC-9001', async () => {
+      // 宿主能力 handler 抛的多是 `HostException`（带 `E_*`）。轮 30 把写侧四种失败
+      // 分成四种码，就是为了读侧能区分——桥在这里换码等于把那份工作抹掉。
+      const codes = [
+        { thrown: 'E_LEASE_EXPIRED', want: 'E_LEASE_EXPIRED', retryable: false },
+        { thrown: 'E_CALL_TIMEOUT', want: 'E_CALL_TIMEOUT', retryable: false },
+        { thrown: 'SC-3001', want: 'SC-3001', retryable: false },
+        // `SC-2001`（TIMEOUT）在框架层词表里可重试
+        { thrown: 'SC-2001', want: 'SC-2001', retryable: true },
+      ];
+      for (const { thrown, want, retryable } of codes) {
+        const coded = new PluginBridge(
+          [],
+          async () => {
+            const err = new Error(`host said: ${thrown}`);
+            (err as unknown as { code: string }).code = thrown;
+            throw err;
+          },
+          async () => {},
+        );
+        (coded as unknown as { iframe: unknown }).iframe = mockIframe;
+        (coded as unknown as { ready: boolean }).ready = true;
+        (
+          coded as unknown as { handleMessage: (e: { data: unknown; source: unknown }) => void }
+        ).handleMessage({
+          data: {
+            type: BRIDGE_MESSAGE_TYPE,
+            direction: 'plugin-to-host',
+            action: 'invoke',
+            callId: `call-${want}`,
+            payload: { method: 'm', args: {} },
+          },
+          source: mockIframe.contentWindow,
+        });
+        await new Promise((r) => setTimeout(r, 10));
+        const resultMsg = sentMessages().find(
+          (m) => (m.payload as { callId: string }).callId === `call-${want}`,
+        );
+        expect(resultMsg, `${want} 没有回帧`).toBeDefined();
+        const result = (
+          resultMsg!.payload as {
+            result: { ok: boolean; error: { code: string; message: string; retryable: boolean } };
+          }
+        ).result;
+        expect(result.ok).toBe(false);
+        expect(result.error.code, `${want} 的码被改写了`).toBe(want);
+        expect(result.error.retryable, `${want} 的可重试判定应来自词表`).toBe(retryable);
+      }
+    });
+
+    it('轮 35：错误对象没有 code 时，从消息里取码；两处都没有才落 SC-9001', async () => {
+      let seq = 0;
+      const run = async (
+        thrownError: Error,
+      ): Promise<{ code: string; message: string; retryable: boolean }> => {
+        const callId = `call-msg-${++seq}`;
+        const b = new PluginBridge(
+          [],
+          async () => {
+            throw thrownError;
+          },
+          async () => {},
+        );
+        (b as unknown as { iframe: unknown }).iframe = mockIframe;
+        (b as unknown as { ready: boolean }).ready = true;
+        (
+          b as unknown as { handleMessage: (e: { data: unknown; source: unknown }) => void }
+        ).handleMessage({
+          data: {
+            type: BRIDGE_MESSAGE_TYPE,
+            direction: 'plugin-to-host',
+            action: 'invoke',
+            callId,
+            payload: { method: 'm', args: {} },
+          },
+          source: mockIframe.contentWindow,
+        });
+        await new Promise((r) => setTimeout(r, 10));
+        const msg = sentMessages().find(
+          (m) => (m.payload as { callId?: string }).callId === callId,
+        );
+        expect(msg, `${callId} 没有回帧`).toBeDefined();
+        return (
+          msg!.payload as {
+            result: { error: { code: string; message: string; retryable: boolean } };
+          }
+        ).result.error;
+      };
+
+      const fromMessage = await run(new Error('调用失败：E_PLUGIN_DISABLED'));
+      expect(fromMessage.code, '消息里的码形态应当被取用').toBe('E_PLUGIN_DISABLED');
+      expect(fromMessage.retryable, '宿主 E_* 不在框架层重试表内，SDK 不替宿主猜').toBe(false);
+
+      // 消息里带框架层码时，重试判定要真的查表，而不是跟着"没有 code 字段"一起塌成 false。
+      const scFromMessage = await run(new Error('桥不通了 SC-2004'));
+      expect(scFromMessage.code, '消息里的 SC 码应当被取用').toBe('SC-2004');
+      expect(scFromMessage.retryable, 'SC-2004（CHANNEL_BROKEN）在词表里可重试').toBe(true);
+
+      const fallback = await run(new Error('彻底没有码'));
+      expect(fallback.code).toBe('SC-9001');
+      expect(fallback.message).toBe('彻底没有码');
+      expect(fallback.retryable, '兜底码 SC-9001 的重试判定同样来自词表').toBe(true);
+
+      // 非码形态的 `code` 字段（如 HTTP 状态数）不得被当成线上码传出去。
+      const bogus = await run(
+        Object.assign(new Error('http failed'), { code: 500 }) as unknown as Error,
+      );
+      expect(bogus.code, '数字 code 不是码形态，必须落通用码').toBe('SC-9001');
     });
 
     it('配置了方法权限且未授予时拒绝（SC-1002）', async () => {

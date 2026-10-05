@@ -4,7 +4,8 @@ import {
   readHandshakeTokenFromUrl,
   PLUGIN_TOKEN_FRAGMENT_KEY,
 } from './plugin-context.js';
-import { BRIDGE_MESSAGE_TYPE, type BridgeToPluginMessage } from '@tauron/types';
+import { BRIDGE_MESSAGE_TYPE, PluginErrorCode, type BridgeToPluginMessage } from '@tauron/types';
+import { PluginBridgeError } from './errors.js';
 
 describe('PluginContext', () => {
   beforeEach(() => {
@@ -282,6 +283,82 @@ describe('PluginContext', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    // 轮 35：写半（bridge.ts）把码送出桥后，读半必须真把码交到插件作者手上。
+    // 此前这里只读 `message` 造裸 Error，`code` 在局部类型里声明了却没人接。
+    describe('invoke 失败时错误码过桥后的归属', () => {
+      const deliverFailure = (
+        error: { code?: string; message?: string } | undefined,
+      ): Promise<unknown> => {
+        const messageHandlers: Array<(event: { data: unknown }) => void> = [];
+        vi.stubGlobal('window', {
+          addEventListener: (_event: string, handler: (e: { data: unknown }) => void) => {
+            messageHandlers.push(handler);
+          },
+          removeEventListener: vi.fn(),
+          parent: { postMessage: vi.fn() },
+        });
+
+        const ctx = createPluginContext();
+        const promise = ctx.invoke('cmd', {});
+        messageHandlers.forEach((h) =>
+          h({
+            data: {
+              type: BRIDGE_MESSAGE_TYPE,
+              direction: 'host-to-plugin',
+              token: 't',
+              action: 'invoke-result',
+              payload: {
+                callId: 'test-call-id-123',
+                result: { ok: false, ...(error === undefined ? {} : { error }) },
+              },
+            },
+          }),
+        );
+        return promise;
+      };
+
+      const rejected = async (promise: Promise<unknown>): Promise<PluginBridgeError> => {
+        const err = await promise.then(
+          () => null,
+          (e: unknown) => e,
+        );
+        expect(err, '失败调用必须 reject，不能假成功').toBeInstanceOf(PluginBridgeError);
+        return err as PluginBridgeError;
+      };
+
+      it('宿主 24 码原样保留在 reject 上，不被换成框架层码', async () => {
+        const err = await rejected(
+          deliverFailure({ code: 'E_LEASE_EXPIRED', message: 'lease gone' }),
+        );
+        expect(err.code).toBe('E_LEASE_EXPIRED');
+        expect(err.message).toBe('lease gone');
+        expect(err.fallbackApplied).toBe(false);
+        // 宿主码不在框架层重试表里：这里不能替宿主猜重试语义。
+        expect(err.retryable).toBe(false);
+      });
+
+      it('框架层码同样保留，且按框架层重试表判定', async () => {
+        const err = await rejected(deliverFailure({ code: 'SC-2001', message: 'boom' }));
+        expect(err.code).toBe('SC-2001');
+        expect(err.retryable).toBe(true);
+      });
+
+      it('码缺失或不是码的形状时才落 SC-9001，并标记 fallbackApplied', async () => {
+        for (const error of [
+          undefined,
+          { message: 'no code at all' },
+          { code: 'BOGUS', message: 'not a code' },
+          { code: '', message: 'empty code' },
+        ]) {
+          const err = await rejected(deliverFailure(error));
+          expect(err.code, `错误码 ${JSON.stringify(error)} 必须降级到 SC-9001`).toBe(
+            PluginErrorCode.INTERNAL,
+          );
+          expect(err.fallbackApplied).toBe(true);
+        }
+      });
     });
   });
 });

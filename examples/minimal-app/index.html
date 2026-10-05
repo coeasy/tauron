@@ -33,6 +33,7 @@
         <button id="btn-minimize">最小化窗口</button>
         <button id="btn-clipboard">读剪贴板</button>
         <button id="btn-update">检查更新</button>
+        <button id="btn-updater-dialog">打开更新对话框（壳层链路）</button>
         <pre id="host-out"></pre>
       </section>
 
@@ -71,8 +72,32 @@
         </p>
         <button id="btn-command-palette">打开命令面板</button>
       </section>
+
+      <section>
+        <h2>7. 菜单与托盘（R9 主窗能力 + 点击回传）</h2>
+        <p>
+          点一次菜单项后，宿主经 Tauri 事件通道（<code>AppHandle::emit</code>，
+          <strong>不是</strong> <code>host_events_drain</code>）把
+          <code>{ id, source, native: true }</code> 发到 <code>MENU_CLICK_TOPIC</code>， 本页
+          <code>listen</code> 它并把帧打在下面。托盘右键菜单的点击与菜单点击共用
+          宿主那一个全局监听，差别只在 <code>source: "tray"</code>。非 Tauri 宿主 /
+          缺省装配时这些命令如实返回 <code>Unsupported</code>，不会假装弹出。
+        </p>
+        <button id="btn-menu-set">① 装应用菜单栏 + 托盘</button>
+        <button id="btn-menu-popup">② 在主窗弹上下文菜单</button>
+        <button id="btn-tray-menu">③ 换托盘右键菜单</button>
+        <button id="btn-menu-reset">④ 撤应用菜单</button>
+        <button id="btn-tray-remove">⑤ 撤托盘</button>
+        <pre id="menu-out"></pre>
+      </section>
     </main>
     <oc-command-palette></oc-command-palette>
+    <!--
+      更新对话框挂在本示例页面上（轮 31）：`ShellController` 接 `oc-updater-check`
+      → `host_updater_check` 真通道，结论再写回这里的 `version` / `message`。
+      没有这个元素，壳层那条检查腿就只活在单测里——页面上没有任何用户能点到它。
+    -->
+    <oc-updater-dialog id="updater-dialog"></oc-updater-dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

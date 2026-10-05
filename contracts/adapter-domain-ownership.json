@@ -1,0 +1,960 @@
+{
+  "version": 1,
+  "note": "V7 §10-9 adapter domain ownership 冻结。收紧靠直接编辑本文件；调高 maxCount / maxItems 必须在 PR 里写明理由（默认应当开新域/模块文件，而不是往 lib.rs 追加）。轮 30 调高记录：process_delivery.rs 5→6 + 新增 `fn stdin`（域 process-delivery）——落地投递写侧分码时多出的一个私有纯函数 `stdin_write_failure`，它是 `deliver()` 写腿自己的 io→错误码映射，只有一个调用点；把它拆成第 6 个文件只会让一次调用读遍两个文件，且 lib.rs 预算（263）分毫未动。轮 37 记录：新增 `menu_routes.rs`（顶层条目 4 / 文件预算 4），键 `fn menu`（3 文件 4 函数）与 `impl MenuLane` / `impl MenuRouteTable` 全部来自这张菜单点击路由表。**没有调高任何文件预算**（lib.rs 仍 263、tauri.rs 仍 137），`fn menu` 的函数高点 2→4 是这张表新增的两个访问器（`menu_routes` / `menu_routes_of`）落在**新文件**里造成的，不是 god file 长高。走「开新域文件」而不是「往 lib.rs 追加」的理由是实质的，不只是卫生：`TauriMenuSink` 与 `TauriTraySink` 都在 feature-gated 的 `tauri.rs` 里，而这张表是它们共享的状态——放在 `lib.rs` 就让平台无关层持有一份只有 `tauri` feature 才会读写的路由，且 `cargo test --workspace`（默认不开 `tauri`）连一条它的测试都跑不了。`fn menu` 跨三个文件是既有形状（`lib.rs` 的降级 helper 与 `tauri.rs` 的 `menu_build_err` 本就在），本文件原样登记，不假装已拆干净。轮 40 记录：更新通道装配腿落 lib.rs——新增 `impl NoUpgradeInstaller`（域 distribute）/ `impl UpgradeInstaller for DistributeUpgradeInstaller` + 固有 impl（2 块，域 distribute）/ `impl StagedPackageDownloader`（域 distribute）与 `fn map_distribute_error`，`cmd` 组 136→140（`cmd_market_download` / `cmd_market_install` 的 `_wired` / `_simulated` 四条调度双胞胎），lib.rs 顶层条目 263→272。没有开新域文件，理由：这五组条目的调度、`_as` 身份判定、账本写入点（`shell_ext`）与既有 market 命令/注册全在同一文件，只把双胞胎拆出去会让「一条命令的调度 + 判定 + 账本」跨两个文件读；`map_distribute_error` 只有一个调用点（同块 `install()` 的错误映射）。物理拆分按 V7 Batch 5 的方向留给后续轮次。轮 43 记录：A83 尾段（管理域审批令牌链）落 lib.rs——新增 `struct AdminReviewToken` / `enum RegistryAdminResponse` / `struct RegistryAdminReview` 三个类型、`ADMIN_REVIEW_TTL_SECS` / `MAX_ADMIN_REVIEWS` 两个常量、`fn trusted_time_provider` / `fn system_time_to_unix_secs` / `fn review_now` / `fn review_unexpired` / `fn admin_review_required` / `fn is_destructive_admin_op` / `fn mint_admin_review` / `fn validate_admin_review` 八个函数与命令入口 `fn cmd_registry_admin_reviewed_as`，lib.rs 顶层条目 272→281；键高点 `mint` 1→2、`review` 1→3、`admin` 1→2、`validate` 3→4、`cmd` 140→141，新增键 `fn trusted` / `fn system` / `fn is`（均域 misc）。没有开新域文件，理由与轮 40 同径并再加一条实质约束：令牌类型是 `tauri.rs` 的 `HostAdminOp.review_token` 与 wire 返回 `RegistryAdminResponse` 的直接引用面（`crate::AdminReviewToken` / `crate::RegistryAdminResponse`），而「命令入口 + 预览/提交双分支判定 + 令牌类型 + 时间咽喉」是一条要在一次调用里读完的单链；物理拆分随 V7 Batch 5 的模块化一道做（届时连同轮 40 的 market 装配腿一起搬），本轮维持单文件。轮 47 记录：A91 主体（事件/审批/注册表三个子系统的故障边界）落 lib.rs——新增 `fn subsystem_fault_to_host_error` / `fn begin_subsystem_reconcile` 两个函数与七个闸门/修复函数（`run_subsystem_boundary` 与三个 `run_*_boundary`、`reconcile_events_boundary` / `reconcile_review_boundary` / `reconcile_registry_boundary`），lib.rs 顶层条目 281→290；键高点 `run` 1→5、`reconcile` 2→5，新增键 `fn subsystem` / `fn begin`（均域 misc）。没有开新域文件的理由：三段式闸门 + 修复函数与既有的 `run_settings_boundary` / `reconcile_settings_boundary` 是同一模式的四个实例，判定（`SubstrateState` 的三个边界字段）与修复触发点（`cmd_recover_boot` 与两条 preview 命令）全在 lib.rs——拆出模块会让「一条命令的判定 + 闸门 + 修复」跨文件读；物理拆分随 V7 Batch 5 与轮 40/43 的既记条目一道做。同轮 `tauron-host` 新增 `EventBus::reset_session_state`（只清会话态、保留装配期 topic 声明）；本门禁只管 adapter 侧，登记在此仅为溯源。轮 48 记录：A96（HTTP provider 重定向/DNS 复检接生产）落 lib.rs——新增 `fn http_policy_denied`（NetworkPolicyError→HostError 映射，唯一调用点）与 `impl AdapterConfig` 的 `with_http_sink` 注入 builder，`cmd_http_request` 重写为宿主侧单跳循环（`resolve_redirect_location` → `authorize_redirect` 逐跳判定 + 跨源凭据剥离 → `authorize_resolution` 复检 provider 上报地址），lib.rs 顶层条目 290→291；新增键 `fn http`（域 misc），`impl AdapterConfig` 方法 17→18。没有开新域文件的理由：单跳循环、策略错误映射与配置注入是**同一条请求路径**的组成部分（循环体要求一次读完「sink 单跳契约 + 逐跳授权 + 凭据剥离 + 解析地址复检」），拆出任何一段都会让这条链跨文件读；物理拆分随 V7 Batch 5 与轮 40/43/47 条目一道做。同轮 `tauron-host` 新增 `pub fn resolve_redirect_location`（RFC 3986 相对解析，基于 `Url::join`）；本门禁只管 adapter 侧，登记在此仅为溯源。轮 49 记录：A71（TargetSpec 变体过滤接进安装/更新装配腿）落 lib.rs——新增 `struct UpdateArtifactVariant`（目标 + 平台清单载荷，唯一 `impl AsRef<tauron_host::TargetSpec>` 单方法，域 distribute）与 `DistributeUpgradeInstaller` 的 `with_variants` 注入 builder / `select_manifest` 解析器（域 distribute，方法数 6→8），`download()` / `install()` 都改为经 `select_manifest` 按本机编译目标（`current_target_spec`）解析最具体兼容变体，解析不出即 `E_INVALID_MANIFEST` 硬拒（失败关闭）；lib.rs 顶层条目 291→292。没有开新域文件的理由：变体类型与两个方法就是 `DistributeUpgradeInstaller` 装配腿自身的注入/判定/消费单链（`with_variants` 注入 → `select_manifest` 解析 → download/install 同口径复验），把任一环拆出去会让这条链跨文件读；物理拆分随 V7 Batch 5 与轮 40/43/47/48 条目一道做。同轮 `tauron-host` 侧 `resolve_best` 泛型化并新增 `ArtifactVariantResolver`；本门禁只管 adapter 侧，登记在此仅为溯源。",
+  "fileBudgets": [
+    {
+      "file": "crates/tauron-adapter/src/lib.rs",
+      "maxItems": 292
+    },
+    {
+      "file": "crates/tauron-adapter/src/menu_routes.rs",
+      "maxItems": 4
+    },
+    {
+      "file": "crates/tauron-adapter/src/process_delivery.rs",
+      "maxItems": 6
+    },
+    {
+      "file": "crates/tauron-adapter/src/recovery.rs",
+      "maxItems": 7
+    },
+    {
+      "file": "crates/tauron-adapter/src/tauri.rs",
+      "maxItems": 137
+    },
+    {
+      "file": "crates/tauron-adapter/src/wasm_delivery.rs",
+      "maxItems": 3
+    }
+  ],
+  "entries": [
+    {
+      "kind": "fn",
+      "key": "activation",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "admin",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "fn",
+      "key": "apply",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "atomic",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "attach",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "authorize",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "authz",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "begin",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "boot",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "brand",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 3
+    },
+    {
+      "kind": "fn",
+      "key": "build",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "call",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "canonical",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "canonicalize",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "channel",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "cleanup",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "clear",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "cmd",
+      "domain": "command-handlers",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 141
+    },
+    {
+      "kind": "fn",
+      "key": "collect",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "command",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "commit",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "context",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/recovery.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "declared",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "deep",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "default",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "fn",
+      "key": "deliver",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs", "crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "fn",
+      "key": "delivery",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "digest",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "fn",
+      "key": "fs",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "fn",
+      "key": "host",
+      "domain": "command-bridge",
+      "owners": ["crates/tauron-adapter/src/lib.rs", "crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 92
+    },
+    {
+      "kind": "fn",
+      "key": "http",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "i18n",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "init",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 3
+    },
+    {
+      "kind": "fn",
+      "key": "install",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "fn",
+      "key": "installed",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "is",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "load",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 4
+    },
+    {
+      "kind": "fn",
+      "key": "make",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "manage",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "map",
+      "domain": "distribute",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "menu",
+      "domain": "misc",
+      "owners": [
+        "crates/tauron-adapter/src/lib.rs",
+        "crates/tauron-adapter/src/menu_routes.rs",
+        "crates/tauron-adapter/src/tauri.rs"
+      ],
+      "maxCount": 4
+    },
+    {
+      "kind": "fn",
+      "key": "migrate",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "mint",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "fn",
+      "key": "notification",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "notifications",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "now",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/recovery.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "origin",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "fn",
+      "key": "parse",
+      "domain": "recovery",
+      "owners": ["crates/tauron-adapter/src/recovery.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "fn",
+      "key": "permission",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "persist",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "fn",
+      "key": "phase",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "plugin",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs", "crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 4
+    },
+    {
+      "kind": "fn",
+      "key": "proc",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "production",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "prune",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "quarantine",
+      "domain": "recovery",
+      "owners": ["crates/tauron-adapter/src/recovery.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "read",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs", "crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "fn",
+      "key": "reconcile",
+      "domain": "settings",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 5
+    },
+    {
+      "kind": "fn",
+      "key": "record",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "recovery",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "refuse",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "registry",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "fn",
+      "key": "report",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "require",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 3
+    },
+    {
+      "kind": "fn",
+      "key": "review",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 3
+    },
+    {
+      "kind": "fn",
+      "key": "run",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 5
+    },
+    {
+      "kind": "fn",
+      "key": "runtime",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "scope",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "scoped",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "fn",
+      "key": "settings",
+      "domain": "settings",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 5
+    },
+    {
+      "kind": "fn",
+      "key": "stage",
+      "domain": "process-delivery",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "fn",
+      "key": "stale",
+      "domain": "process-delivery",
+      "owners": ["crates/tauron-adapter/src/process_delivery.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "state",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "fn",
+      "key": "stdin",
+      "domain": "process-delivery",
+      "owners": ["crates/tauron-adapter/src/process_delivery.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "subscriber",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "subsystem",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "system",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "to",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "tray",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "trusted",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "unix",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "unsupported",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "updater",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "validate",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 4
+    },
+    {
+      "kind": "fn",
+      "key": "validated",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 4
+    },
+    {
+      "kind": "fn",
+      "key": "verify",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "visible",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "wasm",
+      "domain": "wasm-delivery",
+      "owners": ["crates/tauron-adapter/src/wasm_delivery.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "wire",
+      "domain": "wire-contract",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 13
+    },
+    {
+      "kind": "fn",
+      "key": "with",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "fn",
+      "key": "write",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "impl",
+      "key": "AdapterConfig",
+      "domain": "config",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 18
+    },
+    {
+      "kind": "impl",
+      "key": "AssemblyError",
+      "domain": "assembly-token",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "impl",
+      "key": "AssemblyToken",
+      "domain": "assembly-token",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "impl",
+      "key": "Caller",
+      "domain": "caller-identity",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 4
+    },
+    {
+      "kind": "impl",
+      "key": "ChannelSink",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "impl",
+      "key": "ContributesRegistry",
+      "domain": "install",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 5
+    },
+    {
+      "kind": "impl",
+      "key": "DistributeUpdaterSink",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 9
+    },
+    {
+      "kind": "impl",
+      "key": "DistributeUpgradeInstaller",
+      "domain": "distribute",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 8
+    },
+    {
+      "kind": "impl",
+      "key": "InstallCleanupStage",
+      "domain": "install",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "impl",
+      "key": "LoadSource",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/recovery.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "impl",
+      "key": "MemoryMenuSink",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 5
+    },
+    {
+      "kind": "impl",
+      "key": "MemoryTraySink",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 5
+    },
+    {
+      "kind": "impl",
+      "key": "MemoryWindowSink",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 11
+    },
+    {
+      "kind": "impl",
+      "key": "MenuLane",
+      "domain": "menu-click",
+      "owners": ["crates/tauron-adapter/src/menu_routes.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "impl",
+      "key": "MenuRouteTable",
+      "domain": "menu-click",
+      "owners": ["crates/tauron-adapter/src/menu_routes.rs"],
+      "maxCount": 3
+    },
+    {
+      "kind": "impl",
+      "key": "NoopDeepLinkSink",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 3
+    },
+    {
+      "kind": "impl",
+      "key": "NoopDialogSink",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 4
+    },
+    {
+      "kind": "impl",
+      "key": "NoUpgradeInstaller",
+      "domain": "distribute",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "impl",
+      "key": "PluginAssetTrust",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 4
+    },
+    {
+      "kind": "impl",
+      "key": "PluginRuntimeState",
+      "domain": "runtime-facade",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 12
+    },
+    {
+      "kind": "impl",
+      "key": "ProcessCallDelivery",
+      "domain": "delivery",
+      "owners": ["crates/tauron-adapter/src/process_delivery.rs"],
+      "maxCount": 5
+    },
+    {
+      "kind": "impl",
+      "key": "ProcessFrameSinkImpl",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/process_delivery.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "impl",
+      "key": "ProcRuntime",
+      "domain": "process-runtime",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 9
+    },
+    {
+      "kind": "impl",
+      "key": "RecoveryStore",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/recovery.rs"],
+      "maxCount": 8
+    },
+    {
+      "kind": "impl",
+      "key": "RegistryFlagSink",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "impl",
+      "key": "RuntimeSpawnProfile",
+      "domain": "process-runtime",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "impl",
+      "key": "SpawnerReaper",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "impl",
+      "key": "StagedPackageDownloader",
+      "domain": "distribute",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "impl",
+      "key": "StdFsSink",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 7
+    },
+    {
+      "kind": "impl",
+      "key": "SubstrateState",
+      "domain": "substrate-assembly",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "impl",
+      "key": "TauriCallerSource",
+      "domain": "misc",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 4
+    },
+    {
+      "kind": "impl",
+      "key": "TauriDeepLinkSink",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 5
+    },
+    {
+      "kind": "impl",
+      "key": "TauriDialogSink",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 6
+    },
+    {
+      "kind": "impl",
+      "key": "TauriDispatchSink",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 2
+    },
+    {
+      "kind": "impl",
+      "key": "TauriMenuSink",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 6
+    },
+    {
+      "kind": "impl",
+      "key": "TauriTraySink",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 5
+    },
+    {
+      "kind": "impl",
+      "key": "TauriWindowSink",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/tauri.rs"],
+      "maxCount": 12
+    },
+    {
+      "kind": "impl",
+      "key": "UnavailableHttpSink",
+      "domain": "platform-sinks",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "impl",
+      "key": "UnconfiguredEndpointClient",
+      "domain": "distribute",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "impl",
+      "key": "UpdateArtifactVariant",
+      "domain": "distribute",
+      "owners": ["crates/tauron-adapter/src/lib.rs"],
+      "maxCount": 1
+    },
+    {
+      "kind": "impl",
+      "key": "WasmCallDelivery",
+      "domain": "delivery",
+      "owners": ["crates/tauron-adapter/src/wasm_delivery.rs"],
+      "maxCount": 6
+    }
+  ]
+}

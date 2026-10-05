@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { generateClientConfig } from './client-config.js';
 import { doctor, type DoctorCheck } from './doctor.js';
 
 // src/ → 包根 → packages/ → 仓库根
@@ -86,6 +87,74 @@ describe('doctor 工作区包探测', () => {
       expect(check.message).toContain('@tauron/ui');
       expect(check.message).toContain('@tauron/app-cli');
       expect((await doctor(dir)).ok).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * 轮 2 / F-1：`checkClientConfig` 曾经检查一份**仓库里不存在**的十节结构
+ * （registry/plugins/sandbox/security/lifecycle/i18n/recovery/observability/brand/
+ * upgrade），而生成器写的是 `ClientConfig`。结果是 `tauron-app doctor` 对每个刚
+ * 跑过 `client config` 的项目都报"缺少配置节"——把集成方引去修一个没坏的东西，
+ * 同时**从没检查过**真正会让宿主拒绝整份配置的未知键。
+ */
+describe('doctor 客户端配置检查（轮 2 / F-1）', () => {
+  function configCheck(checks: DoctorCheck[]): DoctorCheck {
+    const found = checks.find((c) => c.name === 'client-config.json');
+    if (!found) throw new Error('doctor 未输出「client-config.json」检查项');
+    return found;
+  }
+
+  async function checkOf(content: string): Promise<DoctorCheck> {
+    const dir = mkdtempSync(join(tmpdir(), 'tauron-doctor-config-'));
+    try {
+      writeFileSync(join(dir, 'client-config.json'), content, 'utf8');
+      return configCheck((await doctor(dir)).checks);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('生成的 template 配置：不再谎报"缺少配置节"，改为点出无落点键', async () => {
+    const check = await checkOf(generateClientConfig({ preset: 'template' }).content);
+    expect(check.status, check.message).toBe('warn');
+    expect(check.message).toContain('没有宿主落点');
+    expect(check.message).toContain('auto_update');
+    expect(check.message).not.toContain('缺少配置节');
+  });
+
+  it('键全部有落点时如实 pass', async () => {
+    const check = await checkOf(JSON.stringify({ data_dir: 'd', env_overrides: { A: 'b' } }));
+    expect(check.status, check.message).toBe('pass');
+  });
+
+  it('未知键 = fail：Rust 侧 deny_unknown_fields，整份配置会被拒绝而不是跳过这一项', async () => {
+    const check = await checkOf(JSON.stringify({ log_level: 'info', sandbox: {} }));
+    expect(check.status, check.message).toBe('fail');
+    expect(check.message).toContain('未知配置键');
+    expect(check.message).toContain('sandbox');
+  });
+
+  it('值非法、JSON 破损、顶层不是对象各自如实 fail', async () => {
+    const badValue = await checkOf(JSON.stringify({ registry: { max_plugins: 0 } }));
+    expect(badValue.status, badValue.message).toBe('fail');
+    expect(badValue.message).toContain('max_plugins');
+    const broken = await checkOf('{ not json');
+    expect(broken.status).toBe('fail');
+    expect(broken.message).toContain('解析失败');
+    const arrayShape = await checkOf('[]');
+    expect(arrayShape.status).toBe('fail');
+    expect(arrayShape.message).toContain('顶层必须是配置对象');
+  });
+
+  it('缺文件仍是 fail（本项没坏，只是不再检查假结构）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tauron-doctor-noconfig-'));
+    try {
+      const check = configCheck((await doctor(dir)).checks);
+      expect(check.status).toBe('fail');
+      expect(check.message).toContain('未找到 client-config.json');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

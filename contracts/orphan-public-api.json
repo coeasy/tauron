@@ -1,0 +1,187 @@
+{
+  "schemaVersion": 1,
+  "note": [
+    "孤儿公共 API 台账（V7 轮 22 / 审计轮 2 收口）。",
+    "「孤儿」的判据不是「没人 import 就删」，而是：**文档或路线图把它当作可用能力宣传，",
+    "而仓库产品接线面（crates/*/src、packages/*/src、examples、apps；剔除测试、注释、",
+    "re-export 行）里没有任何消费者**。这类 API 的存在本身可以是合法的（对外 SDK 面），",
+    "不合法的是「一边没人用一边说它能用」。所以每条都必须写清 disposition。",
+    "",
+    "本文件由 `node scripts/check-orphan-public-api.mjs` 机器复核：",
+    "  - orphan 条目：probe 在接线面（除声明文件）必须**零命中**；一旦命中说明已接线，",
+    "    必须删除条目并同步更新文档，否则门禁红。",
+    "  - wiredWitness 条目：probe 在接线面（除声明文件）必须**至少一处命中**；",
+    "    它们是非空洞性证明——如果哪天连它们都查不到消费者，说明判定逻辑本身坏了。",
+    "  - discovery：重跑自动发现，孤儿候选总数不得超过 discoveryBaseline。",
+    "    这是「不许新增孤儿」的棘轮；基线里的存量是历史债务，逐条收口后应当**下调**基线。"
+  ],
+  "plane": {
+    "include": ["crates/*/src", "packages/*/src", "examples", "apps"],
+    "exclude": [
+      "tests 目录",
+      "*.test.ts / *.spec.ts",
+      "// 与 /// 注释",
+      "/* */ 块注释",
+      "Rust #[cfg(test)] 之后的整段",
+      "pub use / export {} / export * from 等纯再导出行",
+      "scripts 与 contracts（工具与台账不是产品消费者）"
+    ]
+  },
+  "orphans": [
+    {
+      "symbol": "AclStore::to_capability",
+      "declaredIn": "crates/tauron-acl/src/grant.rs",
+      "lang": "rust",
+      "probe": "\\bto_capability\\b",
+      "disposition": "未接线：审批结果从未物化成 Tauri Capability（宿主从不调 add_capability）。运行时权限边界实际由代码层身份判定 + 构建期 capability 清单承担。",
+      "docRef": "docs/integration/incremental-adoption.md"
+    },
+    {
+      "symbol": "AclStore::load_unverified",
+      "declaredIn": "crates/tauron-acl/src/grant.rs",
+      "lang": "rust",
+      "probe": "\\bload_unverified\\b",
+      "disposition": "未接线：安装链路只走 HMAC 校验后的 load，「跳过校验读授予」这条后门路径没有任何生产者调用它。",
+      "docRef": "docs/architecture/v4-industrial-gap-closure-plan.md"
+    },
+    {
+      "symbol": "build_approval_rows",
+      "declaredIn": "crates/tauron-acl/src/approval.rs",
+      "lang": "rust",
+      "probe": "\\bbuild_approval_rows\\b",
+      "disposition": "未接线：审批行由安装预览链路直接构造，这个「从 manifest 批量生成审批行」的入口无人调用。",
+      "docRef": "docs/architecture/v4-industrial-gap-closure-plan.md"
+    },
+    {
+      "symbol": "FaultBoundary::run",
+      "declaredIn": "crates/tauron-host/src/fault.rs",
+      "lang": "rust",
+      "probe": "\\bFaultBoundary::run\\b",
+      "disposition": "有意不用（不是遗漏）：run 要求整段闭包持有边界锁，适配层的 settings 边界因此改走三段式（enter → 干活 → record/exit），见 adapter 的 `run_settings_boundary` 文档注释与 wire-gate 的对应断言。",
+      "docRef": "docs/integration/incremental-adoption.md"
+    },
+    {
+      "symbol": "template_json / full_load_json / minimal_json",
+      "declaredIn": "crates/tauron-host/src/config.rs",
+      "lang": "rust",
+      "probe": "\\btemplate_json\\b|\\bfull_load_json\\b|\\bminimal_json\\b",
+      "disposition": "未接线：三份 Rust 配置样张只被自己的单测消费；给用户看的样张实际来自 `tauron-app-cli` 的 TS 模板。落点表见 docs/api/client-config.md。",
+      "docRef": "docs/api/client-config.md"
+    },
+    {
+      "symbol": "NotifyStore::trim_to",
+      "declaredIn": "crates/tauron-notify/src/lib.rs",
+      "lang": "rust",
+      "probe": "\\btrim_to\\b",
+      "disposition": "未接线：容量裁剪只有库内 API + 单测；宿主命令面没有「收缩通知环形缓冲」的入口，用户侧无法触发。",
+      "docRef": "docs/integration/incremental-adoption.md"
+    },
+    {
+      "symbol": "validate_group_key",
+      "declaredIn": "crates/tauron-notify/src/lib.rs",
+      "lang": "rust",
+      "probe": "\\bvalidate_group_key\\b",
+      "disposition": "未接线：分组键校验只在 notify 内部与单测里跑，宿主接收任意 group 字符串不经它。",
+      "docRef": "docs/integration/incremental-adoption.md"
+    },
+    {
+      "symbol": "remove_resource_bundle",
+      "declaredIn": "crates/tauron-i18n/src/lib.rs",
+      "lang": "rust",
+      "probe": "\\bremove_resource_bundle\\b",
+      "disposition": "未接线：语言包卸载没有命令面入口，插件撤下时其 i18n bundle 常驻内存。属于「装得下、退不掉」的泄漏类孤儿。",
+      "docRef": "docs/integration/incremental-adoption.md"
+    },
+    {
+      "symbol": "is_downgrade / is_monotonic",
+      "declaredIn": "crates/tauron-market/src/lib.rs",
+      "lang": "rust",
+      "probe": "\\bis_downgrade\\b|\\bis_monotonic\\b",
+      "disposition": "未接线：版本序关系已实现且有测试，但更新链的降级门禁另有实现（distribute 侧），安装路径不调用这两个谓词。注意 `cmp_version` 不是孤儿——它是这两个谓词与 `VersionRange::contains` 的底座。",
+      "docRef": "docs/architecture/v4-industrial-gap-closure-plan.md"
+    },
+    {
+      "symbol": "validateClientConfig / fullLoadConfig / minimalConfig / templateConfig",
+      "declaredIn": "packages/tauron-host/src/client-config.ts",
+      "lang": "ts",
+      "probe": "\\bvalidateClientConfig\\b|\\bfullLoadConfig\\b|\\bminimalConfig\\b|\\btemplateConfig\\b",
+      "disposition": "未接线（TS 侧对偶）：TS 没有 ClientConfig 的运行期读取路径，这四个函数只被自己的单测与「存在性门禁」消费。真正被 CLI 使用的是 app-cli 的 `validateClientConfigFile`。",
+      "docRef": "docs/api/client-config.md"
+    },
+    {
+      "symbol": "createAutoUpdateClient / createDialogClient / createDeepLinkClient / startAutoCheck",
+      "declaredIn": "packages/tauron-host/src/auto-update-client.ts",
+      "lang": "ts",
+      "probe": "\\bcreateAutoUpdateClient\\b|\\bcreateDialogClient\\b|\\bcreateDeepLinkClient\\b|\\bstartAutoCheck\\b",
+      "disposition": "对外 SDK 面，仓库内零消费者：示例应用与两处 UI 都不用工厂函数，自动检查的定时器（startAutoCheck）在仓库内没有装配点。第三方可用，但仓库不提供「它真的跑起来」的证据。",
+      "docRef": "docs/integration/incremental-adoption.md"
+    },
+    {
+      "symbol": "UpdaterStore / UpdaterState / UpdaterConfig",
+      "declaredIn": "packages/tauron-ui-primitives/src/updater-dialog.ts",
+      "lang": "ts",
+      "probe": "\\bUpdaterStore\\b|\\bUpdaterState\\b|\\bUpdaterConfig\\b",
+      "disposition": "未接线的平行实现（轮 32 登记）：§4.10 的纯状态层，15 个动作方法在仓库里只被自己的单测调用——`<oc-updater-dialog>` 自己持有 `_status`/`_progress`，不读本 store；更新流程对外的状态机是 `@tauron/host` 的 `AutoUpdateClient`（真命令 + 示例真消费者）。它的 `status` 词表（`restarting`，且无 `ready`）与契约包 `UPDATER_STATUSES` 不同一套，`UpdaterConfig` 还留着 `endpoint` / `retryCount` / `maxDownloadSpeed` 三个**本 store 从不使用**的字段（轮 29 口径：更新端点的权威来源只能是宿主装配，本 store 也不碰网络）。不静默删除：该导出随 v1.0.0 发布过，收口或对齐属破坏性变更，需单独批准。",
+      "docRef": "packages/tauron-ui-primitives/README.md"
+    },
+    {
+      "symbol": "PluginRegistry",
+      "declaredIn": "packages/tauron-core/src/registry.ts",
+      "lang": "ts",
+      "probe": "\\bPluginRegistry\\b",
+      "disposition": "未接线的历史 SDK 面（轮 34 登记）：`@tauron/core` 的 TS 侧插件注册表，接线面内除 core 自己的再导出与自身测试外零消费者。它的容量默认 `maxPlugins ?? Infinity`（`registry.ts` 第 48 行），生产路径上唯一的注册表是 Rust `tauron-host::Registry`（`max_plugins: 8`）。轮 34 之前 `multi-plugin-substrate-roadmap.md` 的 M-9 仍把它写成「与 Rust 注册表互不感知的第二份活注册表」——那个矛盾的载体 `bootstrap.ts`（曾写 `maxPlugins: 32`）已随 W1-b 删除，并有反向门禁「bootstrap.ts 是已删除的死导出，不得回归」与「TS 不得出现硬编码 maxPlugins 字面量」。不静默删除：随 v1.0.0 发布过，收口属破坏性变更，需单独批准。",
+      "docRef": "docs/architecture/multi-plugin-substrate-roadmap.md"
+    },
+    {
+      "symbol": "ConfigManager",
+      "declaredIn": "packages/tauron-core/src/config.ts",
+      "lang": "ts",
+      "probe": "\\bConfigManager\\b",
+      "disposition": "未接线的历史 SDK 面（轮 34 登记，与 `PluginRegistry` 同批）：`@tauron/core` 的分层配置容器，接线面内除 core 自己的再导出与自身测试外零消费者；设置事实源的读写在 Rust 侧（`cmd_settings_*` + `DurableEnvelope`），TS 侧没有第二份配置账本。`capability-closure-plan.md` 的 P1-1/P1-10 把它与 `PluginRegistry` 写成「活线拖着死线」的现存耦合，载体同样已删除——那份文档（0.4 收口方案，轮 50 作为无效历史文档清理删除）的状态横幅只声明 §1/§2 是施工前状态，未点名这两个类今天无人消费，故在此登记。不静默删除：随 v1.0.0 发布过。",
+      "docRef": "docs/architecture/multi-plugin-substrate-roadmap.md"
+    }
+  ],
+  "wiredWitnesses": [
+    {
+      "symbol": "validate_zip_constants",
+      "declaredIn": "crates/tauron-market/src/lib.rs",
+      "lang": "rust",
+      "probe": "\\bvalidate_zip_constants\\b",
+      "meaning": "zip 常量复核确实进了签名校验链路（package_signature.rs 调它）。用它当反例，证明门禁不是「查不到=已接线」。"
+    },
+    {
+      "symbol": "settle_call",
+      "declaredIn": "crates/tauron-host/src/call_delivery.rs",
+      "lang": "rust",
+      "probe": "\\bsettle_call\\b",
+      "meaning": "回帧结算真被适配层与 sidecar E2E 消费（轮 22 的运行期证据）。"
+    },
+    {
+      "symbol": "unwired_fields",
+      "declaredIn": "crates/tauron-host/src/config.rs",
+      "lang": "rust",
+      "probe": "\\bunwired_fields\\b",
+      "meaning": "配置落点表的读端有真实生产者：参考宿主与脚手架模板都在启动横幅里打印它。"
+    },
+    {
+      "symbol": "draft_grant_set",
+      "declaredIn": "crates/tauron-acl/src/approval.rs",
+      "lang": "rust",
+      "probe": "\\bdraft_grant_set\\b",
+      "meaning": "安装预览与安装链路真调它。用它当反例锁死一个具体回归：本门禁曾经把「从第一处 #[cfg(test)] 截断整份文件」当成摘除测试模块，于是 adapter 里 4217/4333 两处真消费者被抹掉，已接线的 ACL 授予链被误报成孤儿。摘除必须配对花括号。"
+    },
+    {
+      "symbol": "validate_grants",
+      "declaredIn": "crates/tauron-acl/src/approval.rs",
+      "lang": "rust",
+      "probe": "\\bvalidate_grants\\b",
+      "meaning": "同上：安装路径 validate_grants 是真实调用点，不是测试专用。"
+    }
+  ],
+  "discoveryBaseline": 635,
+  "discoveryNote": [
+    "自动发现口径：`pub fn` / `export function` / `export class` 声明中，在接线面（除声明文件）零命中者。",
+    "存量（轮 2 实测 635 条）里绝大多数是**合法的对外库 API**（发布出去的 crate/包的公开面），棘轮只保证「不再新增」，不代表这 635 条都要删。",
+    "逐条收口后必须下调本数字；635 是本轮门禁实测值（同轮日志见 CHANGELOG 轮 22 条目），写死不动等于把债务固化。"
+  ]
+}

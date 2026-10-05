@@ -1154,7 +1154,9 @@ describe('门禁：能力表（命令 → 档位）TS ↔ Rust 同构', () => {
         `${cmd} 的 TS 档位必须同为 privileged`,
       ).toBe('privileged');
     }
-    // 特权档命令**不得**出现在插件可见能力里。
+    // 特权档命令**不得**出现在插件可见能力里。（轮 40：`host_market_download` /
+    // `host_market_install` 从模拟桩升为装配腿真路径后进特权面——供应链操作没有
+    // "某个插件"能成为主体，判定与审计同源，见 `cmd_market_download_as`。）
     expect(
       CAPABILITIES.filter((c) => c.tier === 'privileged')
         .map((c) => c.command)
@@ -1163,6 +1165,8 @@ describe('门禁：能力表（命令 → 档位）TS ↔ Rust 同构', () => {
       'host_events_approvals',
       'host_events_approve',
       'host_events_revoke',
+      'host_market_download',
+      'host_market_install',
       'host_production_doctor',
       'host_registry_admin',
       'host_registry_install',
@@ -1581,7 +1585,14 @@ describe('门禁：启动恢复阶段线值（Rust BootPhase::as_str ↔ TS Reco
     // （底座 + 插件运行时，共享同一份底座 Arc）。断言意图不变：宿主入口必须走
     // 同一个装配函数（它才打开恢复持久化），而不是各自 manage。
     expect(src).toMatch(/manage_states\(/);
-    expect(src).toMatch(/manage_states\([\s\S]{0,120}command_state_with_dir_and_config\(/);
+    // 轮 22（V7 §9 `runtime_assembly_singleton`）：装配现在返回
+    // `Result<CommandState, AssemblyError>`，所以顺序**反过来**了——结果必须先 `?`
+    // 传播，再交给 manage。把装配调用塞进 `manage_states(..)` 里等于让冲突重新回到
+    // Tauri 的 state 表（那里只会 panic，不会给接入方一个结构化错误）。
+    expect(src).toMatch(
+      /command_state_with_dir_and_config\([\s\S]{0,140}\?;\s*manage_states\(app, state\);/,
+    );
+    expect(src).not.toMatch(/manage_states\([\s\S]{0,80}command_state_with_dir_and_config\(/);
     // 单测用的 new() 不允许出现在宿主入口。
     expect(src).not.toMatch(/app\.manage\(CommandState::new\(\)\)/);
     // 轮 7 收口：`init_with_config` 曾 `manage(CommandState::with_config(..))` 自建
@@ -1871,7 +1882,11 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
 
   it('autoDownload 后台下载必须吸收 rejection（否则 unhandled rejection 炸进程）', () => {
     const src = read('packages/tauron-host/src/auto-update-client.ts');
-    expect(src).toMatch(/this\.downloadUpdate\(\)\.catch\(/);
+    // 只断言**语义**（后台下载挂了 .catch 吸收 rejection），不断言排版：
+    // prettier 会把链式调用换行缩进，固定字符窗口会因此假红。
+    // `(?!;)` 把搜索限制在同一条语句内——删掉 .catch 后窗口里不会出现别的
+    // .catch 来蒙混过关，只会因为撞上语句结尾的 `;` 而变红。
+    expect(src).toMatch(/this\.downloadUpdate\(\)(?:(?!;)[\s\S])*\.catch\(/);
     // 桩阶段进度回调不得假装工作：必须如实声明不会被调用。
     expect(src).toMatch(/onProgress[\s\S]{0,240}被回调/);
   });
@@ -1897,9 +1912,29 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     return map;
   }
 
-  /** 提取某文件里以契约常量名派发的所有事件 key。 */
+  /**
+   * 提取某文件里以契约常量派发的所有事件 key。
+   *
+   * 两种形态都算派发（轮 32）：
+   * - `new CustomEvent(SHELL_EVENTS.<key>, …)`：直接按常量派发；
+   * - `new CustomEvent(UPDATER_PRIMARY_ACTION[…], …)`：从契约的「状态 → 主按钮
+   *   动作」映射派发（更新对话框）。此时真实事件名是那张映射表的值域，因此
+   *   **只有在本文件确实这样派发时**才并入映射表的 key——无条件并入等于替映射表
+   *   里的动作凭空发明派发方，反向门禁就会放过真孤儿监听。
+   */
   function dispatchedKeys(rel: string): string[] {
-    return [...read(rel).matchAll(/new CustomEvent\(SHELL_EVENTS\.([a-zA-Z]+)/g)].map((m) => m[1]!);
+    const src = read(rel);
+    const keys = [...src.matchAll(/new CustomEvent\(SHELL_EVENTS\.([a-zA-Z]+)/g)].map((m) => m[1]!);
+    if (/new CustomEvent\(UPDATER_PRIMARY_ACTION\[/.test(src)) {
+      keys.push(
+        ...[
+          ...read('packages/tauron-shell-events/src/index.ts').matchAll(
+            /^  [a-z]+: SHELL_EVENTS\.([a-zA-Z]+),$/gm,
+          ),
+        ].map((m) => m[1]!),
+      );
+    }
+    return keys;
   }
 
   it('@tauron/ui-primitives 不得依赖 @tauron/host（底座可取组件而不取宿主）', () => {
@@ -2039,6 +2074,91 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       read('packages/tauron-host/src/shell-controller.ts'),
       '控制器不得监听 oc-updater-dismiss（收起对话框不是宿主命令）',
     ).not.toMatch(/_listen\(elements, SHELL_EVENTS\.updaterDismiss/);
+  });
+
+  it('更新状态词表只有一个事实源，「立即重启」只能由 ready 触发（轮 32）', () => {
+    // 断链回归：轮 32 之前「更新到哪一步了」有三套平行字面量——契约事件名、
+    // `@tauron/host` 的 `UpdateStatus`（安装成功终态 `'ready'`）、`<oc-updater-dialog>`
+    // 的渲染分支（安装成功终态 `'done'`）。全仓没有任何生产者产出 `'done'`，于是
+    // 「立即重启」在真装配里**永远点不出来**，`oc-restart` → `host_window_relaunch`
+    // 整条腿是死的；更糟的是 `'ready'` 落进兜底分支显示「开始更新」，用户点一下会把
+    // 下载+安装重跑一遍。组件的 `status` 当时是裸 `string`，漂移无处显形。
+    const events = read('packages/tauron-shell-events/src/index.ts');
+
+    // ① 词表：事实源在契约包，取值必须与客户端对外 API 完全一致。
+    const list = /export const UPDATER_STATUSES = \[([\s\S]*?)\] as const;/.exec(events);
+    expect(list, '契约里没有 UPDATER_STATUSES（状态词表必须有事实源）').not.toBeNull();
+    const statuses = [...list![1]!.matchAll(/'([a-z]+)'/g)].map((m) => m[1]!);
+    expect(statuses, '状态词表变了：它同时是 host 客户端的对外 API').toEqual([
+      'idle',
+      'checking',
+      'available',
+      'downloading',
+      'downloaded',
+      'installing',
+      'ready',
+      'error',
+    ]);
+
+    // ② 映射：每个状态一个主按钮动作，且重启只属于 ready。
+    const body = /export const UPDATER_PRIMARY_ACTION:[\s\S]*?\{([\s\S]*?)\n\};/.exec(events);
+    expect(body, '契约里没有 UPDATER_PRIMARY_ACTION（主按钮动作必须有唯一映射）').not.toBeNull();
+    const mapped = [...body![1]!.matchAll(/([a-z]+): SHELL_EVENTS\.([a-zA-Z]+)/g)];
+    expect(mapped.map((m) => m[1]!).sort(), '映射覆盖的状态与词表不一致').toEqual(
+      [...statuses].sort(),
+    );
+    expect([...new Set(mapped.map((m) => m[2]!))].sort()).toEqual([
+      'restart',
+      'updateStart',
+      'updaterCheck',
+    ]);
+    expect(
+      mapped.filter((m) => m[2] === 'restart').map((m) => m[1]),
+      'ready 是唯一能点亮「立即重启」的状态，别的状态点它就是重装一遍',
+    ).toEqual(['ready']);
+
+    // ③ 写侧：host 的 UpdateStatus 必须是契约类型的**别名**，不是第二套字面量。
+    const client = read('packages/tauron-host/src/auto-update-client.ts');
+    expect(client, 'UpdateStatus 必须引自契约词表（UPDATER_STATUSES 派生类型）').toMatch(
+      /export type UpdateStatus = UpdaterStatus;/,
+    );
+    expect(
+      client,
+      'auto-update-client 里重新声明了状态联合字面量——这就是第二套词表的开端',
+    ).not.toMatch(/export type UpdateStatus\s*=[^;]*'/);
+
+    // ④ 读侧：组件状态必须带类型，动作必须从映射取，且派发点唯一。
+    const shell = stripComments(read('packages/tauron-ui-primitives/src/wc-shell.ts'));
+    expect(shell, '<oc-updater-dialog> 的 status 又变回裸 string 了').toMatch(
+      /private _status: UpdaterStatus = 'idle';/,
+    );
+    expect(
+      [...shell.matchAll(/new CustomEvent\(UPDATER_PRIMARY_ACTION\[/g)].length,
+      '主按钮派发点必须唯一：多处各写一遍事件名，就会再次各写一遍状态',
+    ).toBe(1);
+    expect(
+      shell,
+      '渲染分支不得再写字面量状态——「done/updating」那一版就是没人产出的死分支',
+    ).not.toMatch(/'(done|updating)'/);
+    expect(
+      [...shell.matchAll(/SHELL_EVENTS\.restart/g)].length,
+      '组件里 SHELL_EVENTS.restart 只允许出现在「标签由动作推导」那一处',
+    ).toBe(1);
+
+    // ⑤ 真消费者：示例页写回的是契约状态，而不是自己发明一套。
+    const example = read('examples/minimal-app/src/main.ts');
+    expect(example, '示例对话框的 status 又退回裸 string').toMatch(/status: UpdateStatus;/);
+    expect(
+      example,
+      '检查失败必须写契约的 error：显示成「已是最新版本」是把答不了说成没有更新',
+    ).toMatch(/info\.degraded === true \? 'error'/);
+
+    // ⑥ 第三套词表（`UpdaterStore` 状态机）没有生产消费者：必须留在孤儿账上。
+    // 不静默删除——它随 v1.0.0 发布过，收口或对齐属破坏性变更，需单独批准。
+    expect(
+      read('contracts/orphan-public-api.json'),
+      'UpdaterStore 从孤儿账上消失了（要么真接线，要么重新登记，不能静默失踪）',
+    ).toContain('UpdaterStore');
   });
 
   it('@tauron/host 不得静态引入 UI 包（保持宿主入口 DOM/lit 无关）', () => {
@@ -2828,6 +2948,73 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
   });
 
   // ────────────────────────────────────────────────────────────────────────
+  // 轮 22（V7 §9）：五条语义门禁自己也需要链路证明
+  // ────────────────────────────────────────────────────────────────────────
+
+  it('V7 §9 语义门禁必须存在、有 pnpm 入口、且被 CI 调用', () => {
+    // 门禁脚本最容易烂成的形态不是「报错」，而是**没人调用**：源码里那条不变量
+    // 被改回去时，CI 依然是绿的。这里钉的是「脚本存在 + pnpm 入口 + CI 步骤 +
+    // 聚合入口」四件，缺任何一件即红。
+    const gates: Array<[string, string, string]> = [
+      [
+        'gate:assembly-singleton',
+        'scripts/check-runtime-assembly-singleton.mjs',
+        'V7 §9 runtime_assembly_singleton',
+      ],
+      [
+        'gate:wasm-generation',
+        'scripts/check-wasm-loaded-generation.mjs',
+        'V7 §9 wasm_loaded_generation',
+      ],
+      ['gate:upgrade-hash', 'scripts/check-upgrade-file-hash.mjs', 'V7 §9 upgrade_file_hash'],
+      [
+        'gate:success-effect',
+        'scripts/check-success-requires-effect.mjs',
+        'V7 §9 success_requires_effect',
+      ],
+      [
+        'gate:simulated-commits',
+        'scripts/check-simulated-never-commits.mjs',
+        'V7 §9 simulated_never_commits',
+      ],
+      [
+        'gate:domain-ownership',
+        'scripts/check-adapter-domain-ownership.mjs',
+        'V7 §10-9 adapter domain ownership 冻结',
+      ],
+    ];
+    const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
+    const ci = read('.github/workflows/ci.yml');
+    const aggregate = pkg.scripts['gates:check'] ?? '';
+    for (const [script, file, label] of gates) {
+      expect(existsSync(resolve(workspaceRoot, file)), `缺门禁脚本 ${file}`).toBe(true);
+      expect(pkg.scripts[script], `缺 pnpm ${script}（${label}）`).toBe(`node ${file}`);
+      expect(ci, `CI 未调用 ${file}（${label}）`).toContain(`run: node ${file}`);
+      expect(aggregate, `${script} 未纳入 gates:check 聚合入口`).toContain(file);
+    }
+    // 所有权台账必须**两类形状都登记**：只钉 `impl` 的话，往 `lib.rs` 追加自由函数
+    // （本仓 `cmd_*` 的主体形状）完全不受约束——这条断言是轮 24 落地时实测出来的。
+    const ownership = JSON.parse(read('contracts/adapter-domain-ownership.json')) as {
+      entries: Array<{ kind: string; key: string; domain: string; owners: string[] }>;
+      fileBudgets: Array<{ file: string; maxItems: number }>;
+    };
+    const kinds = new Set(ownership.entries.map((e) => e.kind));
+    expect(kinds.has('impl'), '台账缺少 impl 类条目').toBe(true);
+    expect(kinds.has('fn'), '台账缺少顶层 fn 类条目（cmd_* 就是这一类）').toBe(true);
+    expect(ownership.fileBudgets.length, '台账没有文件级条目预算').toBeGreaterThan(0);
+    // 门禁自证（变异夹具）也得真的被调用，否则「规则空转」只能靠人记得去验。
+    expect(aggregate, '门禁自证未纳入 gates:check').toContain(
+      'node scripts/check-adapter-domain-ownership.mjs --self-test',
+    );
+    expect(ci, 'CI 未调用门禁自证').toContain(
+      'run: node scripts/check-adapter-domain-ownership.mjs --self-test',
+    );
+    // 共享扫描原语必须抹平**模板字面量**：轮 22 的反向验证里，CLI 那句
+    // `` `…simulated: true…` `` 提示语让诚实性门禁自己变绿了——文档字符串不能充当代码证据。
+    expect(read('scripts/lib/gate-scan.mjs'), 'gate-scan 不再抹平模板字面量').toMatch(/inTemplate/);
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
   // 轮 12：命令面的**全量**接口参考必须是生成物
   // ────────────────────────────────────────────────────────────────────────
 
@@ -3421,12 +3608,17 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       errorsTs.indexOf('HOST_ERROR_CODES = ['),
       errorsTs.indexOf('] as const;'),
     );
-    expect(hostCodes, '宿主码表混入应用层码').not.toMatch(/SC-\d{4}/);
-    const appCodes = read('packages/types/src/errors.ts');
-    expect(appCodes, '应用层码表混入宿主码').not.toMatch(/'E_[A-Z_]+'/);
+    expect(hostCodes, '宿主码表混入框架层码').not.toMatch(/SC-\d{4}/);
+    const scTable = read('packages/types/src/errors.ts');
+    expect(scTable, '框架层码表混入宿主码').not.toMatch(/'E_[A-Z_]+'/);
     // 形态识别 ≠ 语义接受：非宿主码仍归 E_UNKNOWN，只保留原始码。
-    expect(errorsTs).toMatch(/export function isAppLayerErrorCode\(/);
-    expect(errorsTs).toMatch(/export function isCodeLike\(/);
+    // 轮 35：`isAppLayerErrorCode` 的本体搬到 `@tauron/types`（两套词表共用的形态判据
+    // 只能有一份），宿主侧改成再导出。公开面不变（1.0 兼容），所以门禁认两种形态：
+    // 自家定义 或 再导出——但**只允许一处定义**（见轮 35 那条门禁）。
+    expect(errorsTs).toMatch(
+      /export function isAppLayerErrorCode\(|export \{[^}]*isAppLayerErrorCode/,
+    );
+    expect(errorsTs).toMatch(/export function isCodeLike\(|export \{[^}]*isCodeLike/);
   });
 
   // ────────────────────────────────────────────────────────────────────────
@@ -3574,11 +3766,14 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     const rust = read('crates/tauron-adapter/src/lib.rs');
     // `RuntimeHandle`/`RuntimeLease` 是宿主侧类型（租约表的行形态）。
     const rustHost = read('crates/tauron-host/src/runtime.rs');
+    // 代际台账的行形态在 `generation.rs`（leak gate 的读数），同样要逐字段同构。
+    const rustGen = read('crates/tauron-host/src/generation.rs');
     const ts = read('packages/tauron-host/src/shell-client.ts');
 
     const rustFields = (structName: string): string[] => {
       const m =
         new RegExp(`pub struct ${structName} \\{([\\s\\S]*?)\\n\\}`).exec(rustHost) ??
+        new RegExp(`pub struct ${structName} \\{([\\s\\S]*?)\\n\\}`).exec(rustGen) ??
         new RegExp(`pub struct ${structName} \\{([\\s\\S]*?)\\n\\}`).exec(rust);
       expect(m, `Rust 侧缺 ${structName}`).not.toBeNull();
       const body = m![1]!.replace(/\/\/[^\n]*/g, '');
@@ -3600,6 +3795,8 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       ['RuntimeBinarySignature', 'RuntimeBinarySignature'],
       ['RuntimeAbiFingerprint', 'RuntimeAbiFingerprint'],
       ['ReapStats', 'ReapStats'],
+      ['TerminalReapRecord', 'TerminalReapRecord'],
+      ['GenerationStats', 'GenerationStats'],
     ] as const) {
       expect(tsFields(tsName), `${tsName} 字段与 Rust ${rustName} 不一致`).toEqual(
         rustFields(rustName),
@@ -3611,6 +3808,1542 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       expect(tsFields(name)).not.toContain('generatedAt');
       expect(rustFields(name)).not.toContain('generatedAt');
     }
+  });
+
+  it('V7 §9 leak gate：abandoned generation 必须有界，且读数跨 IPC 可查', () => {
+    // 泄漏形态（轮 25 翻出来的隐患）：`GenerationRegistry::active` 曾按资源各自记高点、
+    // **只进不出**，于是内存占用由"曾起过运行期的插件数"决定——那个上界只写在注释里，
+    // 没有代码把它钉住、没有读数可查、没有测试跑一遍 churn。这里钉四件：号源全局单调
+    // （摘除跟踪后仍不得复用号）、回收连带摘除跟踪、有界读数一路走到线上、churn 测试存在。
+    const gen = read('crates/tauron-host/src/generation.rs');
+    const runtime = read('crates/tauron-host/src/runtime.rs');
+    const registry = read('crates/tauron-host/src/registry.rs');
+    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    const ts = read('packages/tauron-host/src/shell-client.ts');
+
+    // ① 号源必须是全局单调计数器，不是每资源序号：否则摘除跟踪后重装会退回旧号。
+    expect(gen, '代际号源已退回每资源序号（forget 之后会复用号）').toMatch(
+      /self\.high_water = self\.high_water\.saturating_add\(1\)/,
+    );
+    expect(gen, '缺少摘除跟踪的出口').toMatch(/pub fn forget\(&mut self, resource: &str\) -> bool/);
+    const forgetBody = /pub fn forget[\s\S]*?\n    \}/.exec(gen)?.[0] ?? '';
+    expect(
+      forgetBody,
+      'forget 未拒绝仍有活跃租约的资源（会让 validate 只剩 token 一道判据）',
+    ).toContain('return false');
+    expect(forgetBody, 'forget 没有真的摘除 active 条目').toContain('self.active.remove(resource)');
+
+    // ② 回收链路：先释放代际租约、再摘除跟踪，顺序反了就会被自己的闸门拒绝。
+    const removeBody = /pub fn remove_plugin[\s\S]*?\n    \}/.exec(runtime)?.[0] ?? '';
+    const releaseAt = removeBody.indexOf('generations.release(&lease)');
+    const forgetAt = removeBody.indexOf('generations.forget(plugin_id)');
+    expect(releaseAt, '回收路径不再释放代际租约').toBeGreaterThan(-1);
+    expect(forgetAt, '回收路径未连带摘除代际跟踪（abandoned generation 会累积）').toBeGreaterThan(
+      releaseAt,
+    );
+
+    // ③ 有界读数必须一路走到线上：台账 → 租约表 → 注册表 → host_resource_stats → TS 类型。
+    expect(gen, '台账没有读数出口').toMatch(/pub fn stats\(&self\) -> GenerationStats/);
+    expect(runtime, 'RuntimeTable 未暴露代际读数').toMatch(
+      /pub fn generation_stats\(&self\) -> GenerationStats/,
+    );
+    expect(registry, 'Registry 未暴露代际读数').toMatch(/pub fn runtime_generation_stats\(&self\)/);
+    expect(adapter, 'host_resource_stats 的读数不是来自注册表（另造计数器＝第二事实源）').toMatch(
+      /let generations = state\.registry\.runtime_generation_stats\(\)/,
+    );
+    expect(adapter, 'host_resource_stats 未带上代际读数').toMatch(/"generations": generations/);
+    expect(ts, 'TS 侧 ResourceStats 缺 generations 字段').toMatch(/generations: GenerationStats/);
+
+    // ④ churn 证明：「有界」这件事只有真跑一遍大量 id 才钉得住，注释里的上界不算。
+    expect(gen, '缺台账级 churn 测试').toMatch(
+      /tracked_resources_stay_bounded_under_churn_of_distinct_ids/,
+    );
+    expect(gen, '缺句柄复用测试').toMatch(
+      /abandoned_generation_handle_stays_rejected_after_forget_and_reactivation/,
+    );
+    expect(runtime, '缺租约表级 churn 测试').toMatch(
+      /generation_tracking_stays_bounded_under_plugin_churn/,
+    );
+    expect(registry, '缺注册表真实路径 churn 测试').toMatch(
+      /generation_tracked_resources_do_not_accumulate_across_plugin_churn/,
+    );
+    expect(adapter, 'host_resource_stats 的测试没核对代际读数').toMatch(
+      /\["global"\]\["generations"\]/,
+    );
+
+    // 口径必须成文：否则下一个人只会看见 `forget` 这个新出口，把它当成"可以随便摘"。
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案未成文轮 25 的 abandoned generation 口径').toMatch(
+      /abandoned generation/,
+    );
+    expect(plan, '缺口方案未成文 forget 的拒绝语义').toMatch(/仍有活跃租约时 `forget` 拒绝/);
+    expect(plan, '复核命令未给出三条变异配方').toMatch(/摘除跟踪与每资源序号不可共存/);
+  });
+
+  it('V7 §7/§9：kill 失败必须有 retry 或终态证据，两者都有上界，且重试不得误杀同号活进程', () => {
+    // 泄漏/断链形态（轮 26 翻出来的）：`tauron-proc::kill` 失败时把子进程句柄放回自己的
+    // 跟踪表、错误里写「句柄已保留，可重试」，而 `RuntimeTable::terminate` 以前只记一笔
+    // `failures` 就把租约摘掉——下层留着可重试的句柄，上层没有任何重试方。V7 §9 要的是
+    // "retry/terminal evidence，不能只留日志"，这里钉四件：有人重试、重试有上界、到顶有
+    // 查得动的证据、证据跨 IPC 可查。
+    const runtime = read('crates/tauron-host/src/runtime.rs');
+    const registry = read('crates/tauron-host/src/registry.rs');
+    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    const proc = read('crates/tauron-proc/src/spawner.rs');
+    const ts = read('packages/tauron-host/src/shell-client.ts');
+
+    // ① 下层那句"可重试"必须兑现：失败入队 + 驱动出口存在。
+    expect(proc, '进程侧不再声明"可重试"（这一侧的队列就失去理由了）').toMatch(/可重试/);
+    const terminateBody = /fn terminate\(&mut self[\s\S]*?\n    \}/.exec(runtime)?.[0] ?? '';
+    expect(terminateBody, 'terminate 失败后不再排队（kill 失败又只剩日志了）').toContain(
+      'self.enqueue_pending(plugin_id, pid, reason)',
+    );
+    expect(runtime, '缺少驱动出口').toMatch(/pub fn retry_pending_reaps\(&mut self\) -> usize/);
+
+    // ② 三重上界：队列长度、每条尝试次数、证据条数。少一个就是无限增长。
+    expect(runtime, '待重试队列失去上界').toMatch(/pub const MAX_PENDING_REAPS: usize = \d+;/);
+    expect(runtime, '重试次数失去上界').toMatch(/pub const MAX_REAP_RETRY_ATTEMPTS: u32 = \d+;/);
+    expect(runtime, '终态证据台账失去上界').toMatch(/pub const MAX_TERMINAL_REAPS: usize = \d+;/);
+    const enqueueBody = /fn enqueue_pending\(&mut self[\s\S]*?\n    \}/.exec(runtime)?.[0] ?? '';
+    expect(enqueueBody, '队列满时不再计数（静默丢弃＝另一种泄漏）').toContain(
+      'self.reap.overflow += 1',
+    );
+    expect(enqueueBody, '同一 pid 可以重复排队（队列会随失败次数增长）').toContain(
+      'self.pending_reaps.iter().any(|p| p.pid == pid)',
+    );
+
+    // ③ 读数必须一路走到线上：表 → 注册表 → host_resource_stats → TS，且顺序不能反
+    //    （先重试、后取快照，读到的才与刚发生的回收一致）。
+    const statsBody = /pub fn reap_stats\(&self\)[\s\S]*?\n    \}/.exec(runtime)?.[0] ?? '';
+    expect(statsBody, 'reap_stats 不再合成队列读数').toContain(
+      's.pending = self.pending_reaps.len()',
+    );
+    expect(statsBody, 'reap_stats 不再带出终态证据').toContain(
+      's.terminal_records = self.terminal_reaps',
+    );
+    expect(registry, 'Registry 未暴露重试驱动').toMatch(
+      /pub fn runtime_retry_pending_reaps\(&self\)/,
+    );
+    const cmdBody =
+      /pub fn cmd_resource_stats\(state: &PluginRuntimeState\)[\s\S]*?\n    \}/.exec(
+        adapter,
+      )?.[0] ?? '';
+    const retryAt = cmdBody.indexOf('state.registry.runtime_retry_pending_reaps()');
+    const readAt = cmdBody.indexOf('let reap = state.registry.runtime_reap_stats()');
+    expect(retryAt, 'host_resource_stats 不再驱动重试（断链回来）').toBeGreaterThan(-1);
+    expect(readAt, 'host_resource_stats 取读数不再经过注册表（第二事实源）').toBeGreaterThan(
+      retryAt,
+    );
+    expect(adapter, 'host_resource_stats 未带上回收留痕').toMatch(/"reap": reap/);
+    expect(ts, 'TS 侧 ResourceStats.global 缺 reap 字段').toMatch(
+      /generations: GenerationStats;[\s\S]{0,600}reap: ReapStats;/,
+    );
+    expect(ts, 'TS 侧 ReapStats 缺重试腿字段').toMatch(
+      /pending: number;[\s\S]*retries: number;[\s\S]*recovered: number;[\s\S]*terminal: number;[\s\S]*overflow: number;[\s\S]*skippedLivePid: number;[\s\S]*sweepResolved: number;[\s\S]*sweepSurvivors: number;[\s\S]*sweepUnknown: number;[\s\S]*ledgerWriteFailures: number;[\s\S]*terminalRecords: TerminalReapRecord\[\];/,
+    );
+
+    // ⑤ 安全封口（轮 27）：重试打第二枪之前必须先问"这个 pid 还有没有主人"。
+    //    pid 会被 OS 重用，而终止器按 pid 查自己的跟踪表——旧回收记录与刚起来的活进程
+    //    在它眼里是同一个号。少了这道判定，"清理孤儿"就会变成"误杀 sidecar"。
+    const retryBody =
+      /pub fn retry_pending_reaps\(&mut self\)[\s\S]*?\n    \}/.exec(runtime)?.[0] ?? '';
+    expect(runtime, '缺少 pid 归属判定函数').toMatch(
+      /fn pid_owner\(&self, pid: u32\) -> Option<String>/,
+    );
+    expect(retryBody, '重试不再核对 pid 归属（会误杀同号活进程）').toContain(
+      'self.pid_owner(entry.pid)',
+    );
+    expect(retryBody, '让位不计数（"没误杀"与"没重试"在读数上同形）').toContain(
+      'self.reap.skipped_live_pid += 1',
+    );
+    const guardAt = retryBody.indexOf('self.pid_owner(entry.pid)');
+    const retryCountAt = retryBody.indexOf('self.reap.retries += 1');
+    expect(retryCountAt, '重试计数在归属判定之前（让位会被误计成试过）').toBeGreaterThan(guardAt);
+    expect(ts, 'TS 侧读不到让位次数').toContain('skippedLivePid: number;');
+    expect(adapter, '线上没有 skippedLivePid').toMatch(/\["reap"\]\["skippedLivePid"\]/);
+
+    // ④ 证明必须真跑：恢复、固化、风暴下的上界、重复失败去重，外加命令侧的活值核对。
+    for (const name of [
+      'driver_retries_a_failed_reap_and_recovers_it',
+      'exhausted_reap_retries_become_terminal_evidence',
+      'reap_failure_storm_keeps_queue_and_evidence_bounded',
+      'repeated_failure_for_one_pid_queues_it_once',
+      'reap_retry_yields_when_a_live_lease_owns_the_pid',
+      'reap_retry_still_runs_when_the_live_lease_has_a_different_pid',
+    ]) {
+      expect(runtime, `缺租约表级测试 ${name}`).toMatch(new RegExp(name));
+    }
+    expect(registry, '缺注册表卸载路径的重试驱动测试').toMatch(
+      /uninstall_kill_failure_is_retried_by_the_registry_driver/,
+    );
+    expect(registry, '缺"重装复用同号 ⇒ 驱动让位"的生产路径测试').toMatch(
+      /reap_retry_never_kills_the_restarted_process_that_reused_the_pid/,
+    );
+    expect(adapter, 'host_resource_stats 的测试没核对回收留痕').toMatch(/\["global"\]\["reap"\]/);
+
+    // 口径必须成文：否则下一个人会把重试队列当成"永远兜底的回收器"。
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案未成文 kill failure 的 retry/terminal 口径').toMatch(
+      /kill failure 必须有 retry\/terminal evidence/,
+    );
+    expect(plan, '缺口方案未登记 startup orphan sweep 的落地（轮 41）').toMatch(
+      /startup orphan sweep/,
+    );
+    expect(plan, '缺口方案未成文"重试不得误杀同号活进程"的口径（轮 27）').toMatch(
+      /轮 27 重试的第二枪/,
+    );
+  });
+
+  it('轮 41：跨重启孤儿扫描只探测不杀，台账可校验且读不开不洗白', () => {
+    // 形态（V7 §7「未落：startup orphan sweep」的收口）：宿主上一轮"杀不掉"的 pid
+    // 必须跨重启有下文。收口的关键安全边界是**跨重启 pid 身份不可验**——同一号可能
+    // 已被无关新进程复用，因此扫描只探测定性（Gone 销账 / Alive、Unknown 留证），
+    // **任何**按 pid 的终止都不允许出现在扫描体里；台账走 durable 校验和，撕裂/篡改
+    // 拒绝装配（不静默重置成空账）。
+    const runtime = read('crates/tauron-host/src/runtime.rs');
+    const registry = read('crates/tauron-host/src/registry.rs');
+    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    const ts = read('packages/tauron-host/src/shell-client.ts');
+
+    // ① 分池铁律：读回的条目进 restart_reaps，杀进程重试腿（pending_reaps）不许碰它。
+    expect(runtime, '缺少独立的重启待扫描池').toMatch(/restart_reaps: VecDeque<ReapLedgerEntry>/);
+    const retryBody =
+      /pub fn retry_pending_reaps\(&mut self\)[\s\S]*?\n    \}/.exec(runtime)?.[0] ?? '';
+    expect(retryBody, '重试腿触碰重启条目（跨重启盲杀风险回来了）').not.toContain('restart_reaps');
+
+    // ② 只探测不杀：扫描体里不许出现终止调用；三分支各自计数并留证。
+    const sweepBody =
+      /pub fn sweep_restart_reaps\(&mut self\)[\s\S]*?\n    \}/.exec(runtime)?.[0] ?? '';
+    expect(sweepBody.length, '定位不到 sweep_restart_reaps（改签名要同步门禁）').toBeGreaterThan(
+      100,
+    );
+    expect(sweepBody, '扫描体出现终止调用：跨重启盲杀封口被打开').not.toContain('.kill(');
+    expect(sweepBody, '存活/不可判定条目未留证（"还在跑"必须有人查得动）').toContain('不盲杀');
+    expect(sweepBody, '销账路径未计 sweep_resolved').toContain('self.reap.sweep_resolved += 1');
+    expect(sweepBody, '存活路径未计 sweep_survivors').toContain('self.reap.sweep_survivors += 1');
+    expect(sweepBody, '不可判定路径未计 sweep_unknown').toContain('self.reap.sweep_unknown += 1');
+
+    // ③ 台账：durable 校验和 + 读不开拒绝 + 扫描后自动落盘（不等别的动作）。
+    expect(runtime, '台账未走 durable 信封（撕裂无法发现）').toMatch(/REAP_LEDGER_SCHEMA/);
+    const configureBody =
+      /pub fn configure_reap_ledger\(&mut self[\s\S]*?\n    \}/.exec(runtime)?.[0] ?? '';
+    expect(configureBody, '台账读取不做校验（撕裂会被当空账）').toContain('decode_durable');
+    expect(configureBody, '读取失败未按 Integrity 拒绝').toContain('ReapLedgerError::Integrity');
+    expect(registry, '注册表未提供开账入口').toMatch(
+      /pub fn open_reap_ledger\(&self, dir: &Path\)/,
+    );
+    expect(registry, '开账入口没有扫描').toMatch(/runtime\.sweep_restart_reaps\(\)/);
+    expect(registry, '落盘腿未走 durable 原子写').toMatch(
+      /crate::durable::write_durable\(&path, &bytes\)/,
+    );
+    // 装配腿：探测注入 + 开账都在生产装配路径上（不是只在测试里接的）。
+    expect(adapter, '装配层未注入平台探测').toContain('registry.set_system_pid_probe()');
+    expect(adapter, '装配层未在恢复数据目录开账').toMatch(/\.open_reap_ledger\(dir\)/);
+    expect(adapter, '台账被拒未按装配错误上抛（静默重置成空账）').toMatch(
+      /AssemblyError::ReapLedgerRejected/,
+    );
+
+    // ④ 线上四字段 + 证据闭环。
+    expect(ts, 'TS 侧读不到重启扫描销账数').toContain('sweepResolved: number;');
+    expect(ts, 'TS 侧读不到重启扫描存活数').toContain('sweepSurvivors: number;');
+    expect(ts, 'TS 侧读不到重启扫描不可判定数').toContain('sweepUnknown: number;');
+    expect(ts, 'TS 侧读不到台账写失败计数').toContain('ledgerWriteFailures: number;');
+    expect(adapter, '线上没有 sweepResolved').toMatch(/\["reap"\]\["sweepResolved"\]/);
+    expect(adapter, '线上没有 ledgerWriteFailures').toMatch(/\["reap"\]\["ledgerWriteFailures"\]/);
+
+    // ⑤ 证明必须真跑：往返、不盲杀、不可判定、撕裂拒绝、注册表全链、装配两例。
+    for (const name of [
+      'reap_ledger_round_trips_across_a_restart_scan',
+      'restart_sweep_never_kills_even_when_the_probe_says_alive',
+      'unknown_or_missing_probe_is_evidence_not_a_guess',
+      'torn_or_tampered_ledger_is_rejected_not_reset',
+      'empty_sweep_still_records_a_scanned_ledger',
+      'unconfigured_table_yields_no_snapshot_and_no_fake_failure',
+    ]) {
+      expect(runtime, `缺租约表级测试 ${name}`).toMatch(new RegExp(name));
+    }
+    expect(registry, '缺注册表跨重启全链测试').toMatch(
+      /reap_ledger_is_flushed_and_swept_across_registry_restarts/,
+    );
+    expect(adapter, '缺装配开账测试').toMatch(/assembly_opens_the_reap_ledger_on_the_recovery_dir/);
+    expect(adapter, '缺撕裂台账拒绝装配测试').toMatch(/assembly_rejects_a_torn_reap_ledger/);
+
+    // 口径必须成文：边界（活的只留证、不许自动清理）是结论的一部分。
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案未成文轮 41 的跨重启扫描口径').toMatch(/轮 41/);
+    expect(plan, '缺口方案未写明"只探测不杀"的边界').toMatch(/只探测不杀|不盲杀/);
+    // V7 §7 的 Process 行是这条链的**对外宣称**：轮 41 的收口与"不盲杀"边界必须写进行文，
+    // 且不许被改写成"已自动清理"（该行自称的落地门禁就是本段）。锁措辞本身，不锁行号。
+    const v7 = read('docs/Tauron-Deep-Audit-and-Optimization-Plan-V7.md');
+    const v7ProcessRow = /^\| Process \|.*$/m.exec(v7)?.[0] ?? '';
+    expect(v7ProcessRow, 'V7 §7 缺 Process 行（行名改了就要重新复核）').not.toBe('');
+    expect(v7ProcessRow, 'V7 §7 Process 行未登记轮 41 的收口').toMatch(/轮 41/);
+    expect(v7ProcessRow, 'V7 §7 Process 行丢了"不盲杀"边界（假宣称已自动清理？）').toMatch(
+      /不盲杀|只探测不杀/,
+    );
+  });
+
+  it('轮 42：便携路径五维各自具名，zip 侧与宿主共用同一份判定', () => {
+    // 形态（A85 收口）：五维判定必须可指认、可变异——每维一个具名错误面，判定是
+    // 词典序、平台中立的（不依赖运行宿主 std::path 方言）；第 5 维是集合级的，归宿主的
+    // 逐条校验管不到。zip 侧（市场 signing 生产面）不许抄第二份实现，必须委派同一份。
+    const pp = read('crates/tauron-host/src/portable_path.rs');
+    const market = read('crates/tauron-market/src/lib.rs');
+
+    // ① 五维各自具名：保留名 / 非 NFC / 尾点尾空格 / 超长 / 集合级折叠冲突。
+    for (const variant of [
+      'ReservedName',
+      'NotNfc',
+      'TrailingDotOrSpace',
+      'TooLong',
+      'CaseCollision',
+    ]) {
+      expect(pp, `缺具名失败面 ${variant}（五维退回一个泛型错误？）`).toMatch(
+        new RegExp(`\\b${variant}\\b`),
+      );
+    }
+
+    // ② 判定本身：设备名表、NFC 归一器、尾缀、长度上界、双分隔符切分、ASCII 折叠。
+    expect(pp, '缺 22 个 Windows 保留设备名表').toMatch(/WINDOWS_RESERVED_STEMS: \[&str; 22\]/);
+    expect(pp, 'NFC 判定未用 icu 归一器（自己写近似判定？）').toMatch(
+      /ComposingNormalizerBorrowed::new_nfc\(\)/,
+    );
+    expect(pp, '尾点/尾空格判定被改写（Windows 会静默剥掉尾缀）').toMatch(
+      /segment\.ends_with\('\.'\) \|\| segment\.ends_with\(' '\)/,
+    );
+    expect(pp, '段长上界常量被动').toMatch(/const MAX_SEGMENT_BYTES: usize = 255;/);
+    expect(pp, '整条相对路径上界常量被动').toMatch(/const MAX_RELATIVE_BYTES: usize = 1023;/);
+    expect(pp, '段切分未按双分隔符（换了宿主平台结论就变）').toContain("path.split(['/', '\\\\'])");
+    const setBody = /pub fn validate_portable_entry_set[\s\S]*?\n\}/.exec(pp)?.[0] ?? '';
+    expect(setBody, '定位不到集合级判定（改签名要同步门禁）').toContain('to_ascii_lowercase()');
+
+    // ③ zip 侧委派：两处调用都必须在各自函数体内，且常量腿明确在 signing 门后
+    // （不是抄第二份判定，也不是缺省构建里炸的裸调用）。
+    const sanitizeBody = /pub fn sanitize_entry_path[\s\S]*?\n\}/.exec(market)?.[0] ?? '';
+    expect(sanitizeBody, '逐条校验未委派宿主的 portable_path').toContain(
+      'tauron_host::portable_path::validate_portable_relative(name)',
+    );
+    const constantsBody = /pub fn validate_zip_constants[\s\S]*?\n\}/.exec(market)?.[0] ?? '';
+    expect(constantsBody, '集合级校验未委派宿主的 portable_path').toContain(
+      'tauron_host::portable_path::validate_portable_entry_set(&names)',
+    );
+    expect(market, 'zip 侧集合级委派不在 signing 门后').toMatch(
+      /#\[cfg\(feature = "signing"\)\]\s*\n\s*\{\s*\n\s*let names: Vec<&str> = entries/,
+    );
+
+    // ④ 证明必须真跑：宿主五条 + 市场两条（signing 门后）。
+    for (const name of [
+      'rejects_windows_reserved_device_names_in_any_case_or_extension',
+      'rejects_trailing_dot_or_space_that_windows_would_strip',
+      'rejects_non_nfc_forms_but_accepts_the_precomposed_one',
+      'rejects_segments_or_paths_over_the_portable_length_bounds',
+      'entry_set_rejects_ascii_case_collisions_and_duplicates',
+    ]) {
+      expect(pp, `缺宿主五维测试 ${name}`).toMatch(new RegExp(name));
+    }
+    for (const name of [
+      'zip_side_rejects_five_dim_paths_before_extraction',
+      'zip_side_rejects_case_colliding_entry_sets',
+    ]) {
+      expect(market, `缺 zip 侧委派测试 ${name}`).toMatch(new RegExp(name));
+    }
+
+    // ⑤ 口径必须成文：A85 台账行已翻篇（不许回写"未落"），轮 42 小节在场。
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案未登记轮 42').toMatch(/轮 42/);
+    const a85Row = /^\| A85 .*$/m.exec(plan)?.[0] ?? '';
+    expect(a85Row, 'A85 台账行消失（行名改了要重新复核）').not.toBe('');
+    expect(a85Row, 'A85 台账行未登记轮 42 落地').toMatch(/轮 42/);
+    expect(a85Row, 'A85 台账行仍写"未落"（代码与宣称脱节）').not.toMatch(/未落/);
+  });
+
+  it('轮 43：破坏性管理操作的令牌链两侧同形，TTL 走 A100 可信时间', () => {
+    // 形态（A83 尾段 + A100 收口）。五段钉住：
+    // ① Rust——令牌绑事实、一次消费（先摘除再比对）、两域时间源与过期判定共用
+    //    review_now/review_unexpired、旧面无令牌入口在生产档拒破坏性操作、预览零副作用；
+    // ② wire——HostAdminOp 两字段 serde(default)（旧载荷仍合法）、wire 层转调 reviewed
+    //    入口、返回判别形且 executed 分支老字段留顶层；
+    // ③ TS——token/判别联合镜像、管理面与壳层两条腿的预览→确认→提交链、无 DOM 失败关闭；
+    // ④ 测试在场（Rust 定向 + TS 两条腿）；⑤ 台账行翻篇 + 轮 43 小节在场。
+    const lib = read('crates/tauron-adapter/src/lib.rs');
+    const tauri = read('crates/tauron-adapter/src/tauri.rs');
+    const events = read('packages/tauron-host/src/events.ts');
+    const host = read('packages/tauron-host/src/host.ts');
+    const manager = read('packages/tauron-ui/src/plugin-manager.ts');
+    const shell = read('packages/tauron-host/src/shell-controller.ts');
+    const bodyOf = (src: string, pattern: RegExp): string => pattern.exec(src)?.[0] ?? '';
+
+    // ① Rust 形状。
+    const tokenBody = bodyOf(lib, /pub struct AdminReviewToken \{[\s\S]*?\n\}/);
+    expect(tokenBody, 'AdminReviewToken 消失（行名改了要重新复核）').not.toBe('');
+    for (const field of ['plugin_id', 'op', 'version', 'issued_at', 'expires_at', 'nonce']) {
+      expect(tokenBody, `令牌缺事实绑定字段 ${field}（重核会退化成只认 nonce）`).toMatch(
+        new RegExp(`\\b${field}\\b`),
+      );
+    }
+    expect(lib, '令牌缺 deny_unknown_fields（未知字段被静默吞掉？）').toMatch(
+      /#\[serde\(rename_all = "camelCase", deny_unknown_fields\)\]\s*\n\s*pub struct AdminReviewToken/,
+    );
+    expect(lib, 'TTL 常量被动（600s 是台账成文承诺）').toMatch(
+      /const ADMIN_REVIEW_TTL_SECS: u64 = 10 \* 60;/,
+    );
+    expect(lib, '令牌容量上界被动（无界 pending 集）').toMatch(
+      /const MAX_ADMIN_REVIEWS: usize = 64;/,
+    );
+
+    // 时间源与过期判定：两域共用同一对咽喉（provider 在 → trusted_time；None+Production 拒）。
+    const reviewNow = bodyOf(lib, /fn review_now\([\s\S]*?\n\}/);
+    expect(reviewNow, 'review_now 未走 trusted_time（TTL 建立在墙钟上？）').toContain(
+      'tauron_host::TrustedTimeProvider::trusted_time(provider.as_ref())',
+    );
+    expect(reviewNow, 'review_now 未对非 Trusted 失败关闭').toContain(
+      'trusted.state != tauron_host::TimeTrustState::Trusted',
+    );
+    expect(reviewNow, 'review_now 丢了 None+Production 拒绝分支').toMatch(
+      /state\.deployment_mode == tauron_host::DeploymentMode::Production/,
+    );
+    const reviewUnexpired = bodyOf(lib, /fn review_unexpired\([\s\S]*?\n\}/);
+    expect(reviewUnexpired, '过期判定未复用 A100 的 require_unexpired').toContain(
+      'tauron_host::require_unexpired(provider.as_ref(), expires)',
+    );
+    expect(reviewUnexpired, 'review_unexpired 丢了 None+Production 拒绝分支').toMatch(
+      /state\.deployment_mode == tauron_host::DeploymentMode::Production/,
+    );
+    const mintAdmin = bodyOf(lib, /fn mint_admin_review\([\s\S]*?\n\}/);
+    expect(mintAdmin, '管理域铸发未走 review_now（墙钟回退到铸发了？）').toContain(
+      'review_now(state)?',
+    );
+    expect(mintAdmin, '铸发未做容量上界处理').toContain('reviews.len() >= MAX_ADMIN_REVIEWS');
+    const mintInstall = bodyOf(lib, /fn mint_install_review\([\s\S]*?\n\}/);
+    expect(mintInstall, 'install 域铸发未走 review_now（A100 只覆盖一半？）').toContain(
+      'review_now(state)?',
+    );
+    expect(lib, 'install 域消费未走 review_unexpired（两域判定分家）').toMatch(
+      /review_unexpired\(state, review_token\.expires_at\)\?/,
+    );
+    const validateBody = bodyOf(lib, /fn validate_admin_review\([\s\S]*?\n\}/);
+    expect(validateBody, '消费顺序不是先摘除（伪造令牌能留下可用条目？）').toContain(
+      '.remove(&token.nonce)',
+    );
+    expect(validateBody, '消费未比对存储值').toContain('stored != *token');
+    expect(validateBody, '消费未做过期判定').toContain(
+      'review_unexpired(state, token.expires_at)?',
+    );
+    expect(validateBody, '消费未重核 op/plugin_id').toMatch(
+      /token\.op != op \|\| token\.plugin_id != plugin_id/,
+    );
+    expect(validateBody, '消费未重核预览版本（预览后换版本仍放行？）').toContain(
+      'entry.manifest.version.to_string() != token.version',
+    );
+
+    // 生产档强制条件：feature+Production；旧面拒、新面 preview 零副作用。
+    const reviewRequired = bodyOf(lib, /pub fn admin_review_required\([\s\S]*?\n\}/);
+    expect(reviewRequired, 'admin_review_required 丢了 feature 门').toContain(
+      'cfg!(feature = "plugin-install")',
+    );
+    expect(reviewRequired, 'admin_review_required 丢了 Production 条件').toContain(
+      'DeploymentMode::Production',
+    );
+    expect(lib, '旧面无令牌入口未拒生产档破坏性操作').toMatch(
+      /admin_review_required\(state\) && is_destructive_admin_op\(op\)/,
+    );
+    const reviewed = bodyOf(lib, /pub fn cmd_registry_admin_reviewed_as\([\s\S]*?\n\}/);
+    expect(reviewed, 'reviewed 入口丢了 preview 铸发').toContain(
+      'mint_admin_review(state, plugin_id, op, &version)?',
+    );
+    expect(reviewed, 'reviewed 入口丢了令牌消费').toContain(
+      'validate_admin_review(state, plugin_id, op, token)?',
+    );
+    expect(reviewed, 'reviewed 入口未把执行结果包进 Executed').toContain(
+      'RegistryAdminResponse::Executed(outcome)',
+    );
+    const responseEnum = bodyOf(lib, /pub enum RegistryAdminResponse \{[\s\S]*?\n\}/);
+    expect(responseEnum, '返回未判别为 Executed/Review 两态').toMatch(
+      /Executed\(TransitionOutcome\)/,
+    );
+    expect(responseEnum, '返回缺 Review 分支').toMatch(/Review\(RegistryAdminReview\)/);
+    expect(lib, '判别形未用 internally-tagged kind（老读者凭 kind 分流）').toMatch(
+      /#\[serde\(tag = "kind", rename_all = "camelCase"\)\]\s*\n\s*pub enum RegistryAdminResponse/,
+    );
+
+    // ② wire 形状。
+    const adminOpBody = bodyOf(tauri, /pub struct HostAdminOp \{[\s\S]*?\n\}/);
+    expect(
+      adminOpBody,
+      '旧载荷断供：preview 无 serde(default)（老客户端不带新键即反序列化失败）',
+    ).toMatch(/#\[serde\(default\)\]\s*\n\s*pub preview: Option<bool>/);
+    expect(adminOpBody, '旧载荷断供：reviewToken 无 serde(default)').toMatch(
+      /#\[serde\(default\)\]\s*\n\s*pub review_token: Option<crate::AdminReviewToken>/,
+    );
+    const wire = bodyOf(tauri, /pub fn wire_registry_admin\([\s\S]*?\n\}/);
+    expect(wire, 'wire 层未转调 reviewed 入口（预览/令牌面绕行）').toContain(
+      'cmd_registry_admin_reviewed_as(',
+    );
+    expect(wire, 'wire 层丢了 preview 默认 false').toContain('op.preview.unwrap_or(false)');
+    expect(wire, 'wire 层丢了令牌透传').toContain('op.review_token.as_ref()');
+    expect(tauri, 'host_registry_admin 返回类型未换判别形').toMatch(
+      /Result<crate::RegistryAdminResponse, TauriError>/,
+    );
+
+    // ③ TS 两侧。
+    expect(events, 'TS 缺 AdminReviewToken 镜像').toMatch(/export interface AdminReviewToken \{/);
+    expect(events, 'RegistryAdminOp 缺 preview 可选字段').toMatch(/preview\?: boolean;/);
+    expect(events, 'RegistryAdminOp 缺 reviewToken 可选字段').toMatch(
+      /reviewToken\?: AdminReviewToken;/,
+    );
+    expect(events, '返回判别联合缺 executed 分支').toMatch(/kind: 'executed';/);
+    expect(events, '返回判别联合缺 review 分支').toMatch(/kind: 'review';/);
+    expect(host, 'HostClient.registryAdmin 未返回判别联合').toMatch(
+      /async registryAdmin\(op: RegistryAdminOp\): Promise<RegistryAdminOutcome>/,
+    );
+    const destructive = bodyOf(manager, /private async _destructiveAdminOp\([\s\S]*?\n  \}/);
+    expect(destructive, '管理面破坏性操作未先预览').toMatch(/preview: true/);
+    expect(destructive, '管理面未消费确认钩子').toContain('approved = await this._confirm(');
+    expect(destructive, '管理面取消未与失败区分').toContain(
+      'return { ok: false, cancelled: true };',
+    );
+    expect(destructive, '管理面未把令牌原样带回').toContain('reviewToken: preview.reviewToken');
+    expect(destructive, '老宿主（预览即执行）被重复提交').toContain(
+      "if (preview.kind !== 'review') return { ok: true };",
+    );
+    const defaultConfirm = bodyOf(manager, /function defaultAdminConfirm\([\s\S]*?\n\}/);
+    expect(defaultConfirm, '无 DOM 默认钩子未失败关闭（静默放行破坏性操作？）').toMatch(
+      /typeof window === 'undefined' \|\| typeof window\.confirm !== 'function'\)\s*return false/,
+    );
+    const uninstall = bodyOf(shell, /private async _uninstallPlugin\([\s\S]*?\n  \}/);
+    expect(uninstall, '壳层卸载腿未先预览').toMatch(/preview: true/);
+    expect(uninstall, '壳层未按判别形分流').toContain("outcome.kind === 'review'");
+    expect(uninstall, '壳层未带令牌提交').toContain('reviewToken: outcome.reviewToken');
+
+    // ④ 测试在场。
+    for (const name of [
+      'admin_review_preview_binds_facts_and_commits_once',
+      'admin_review_rejects_op_mismatch_and_stays_consumed',
+      'admin_review_version_drift_forces_a_fresh_preview',
+      'admin_review_protocol_rejects_non_destructive_mixing',
+      'production_destructive_admin_op_requires_the_review_path',
+      'admin_review_ttl_follows_the_trusted_provider',
+      'demoted_clock_after_startup_fails_closed_for_admin_review',
+      'install_review_ttl_follows_the_trusted_provider',
+      'production_without_trusted_time_is_rejected_at_startup',
+      'production_with_suspicious_clock_is_rejected_at_startup',
+      'production_preview_fails_closed_without_trusted_time_in_substrate_builds',
+    ]) {
+      expect(lib, `缺轮 43 定向测试 ${name}`).toMatch(new RegExp(name));
+    }
+    const managerTests = read('packages/tauron-ui/src/plugin-manager.test.ts');
+    const shellTests = read('packages/tauron-host/src/shell-controller.test.ts');
+    for (const name of [
+      'uninstall 走预览 → 确认 → 提交令牌（轮 43 / A83）',
+      'uninstall 用户取消 → cancelled，无提交调用（轮 43 / A83）',
+      'uninstall 默认确认在无 DOM 环境失败关闭（拒绝而非静默放行）',
+      'purge 走预览 → 确认 → 提交令牌（轮 43 / A83）',
+    ]) {
+      expect(managerTests, `缺管理面轮 43 测试「${name}」`).toContain(name);
+    }
+    expect(shellTests, '缺壳层两步链测试').toContain(
+      'oc-plugin-uninstall 两步链：预览（无副作用）→ 确认 → 以令牌提交（轮 43 / A83）',
+    );
+
+    // ⑤ 口径成文：A83/A100 台账行翻篇，轮 43 小节在场。
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案缺轮 43 小节').toMatch(/### 轮 43：/);
+    const a83Row = /^\| A83 .*$/m.exec(plan)?.[0] ?? '';
+    expect(a83Row, 'A83 台账行消失（行名改了要重新复核）').not.toBe('');
+    expect(a83Row, 'A83 台账行未登记轮 43 落地').toMatch(/轮 43/);
+    expect(a83Row, 'A83 台账行仍只写 install 域（代码与宣称脱节）').not.toMatch(/仅 install 域/);
+    const a100Row = /^\| A100 .*$/m.exec(plan)?.[0] ?? '';
+    expect(a100Row, 'A100 台账行消失（行名改了要重新复核）').not.toBe('');
+    expect(a100Row, 'A100 台账行未登记两域 TTL 收口').toMatch(/轮 43/);
+    expect(a100Row, 'A100 台账行仍写"A83 的 token TTL 仍用墙钟"（已在代码中收口）').not.toMatch(
+      /仍用墙钟/,
+    );
+  });
+
+  it('轮 44：安装流内存门禁落在真实安装链上，整包内存入口已删', () => {
+    // A94 收口。五段钉住：
+    // ① budgets——`process.maxPeakRssKb` 被 `installStream` 取代（载荷下限 + 堆/VmHWM 双上界）；
+    // ② 门禁脚本——`--install-probe` 必需、三道安装断言在场、`budgets.process` 不再被读；
+    // ③ CI——release 构建探针并把它喂给门禁（VmHWM 只在 Linux runner 上有读数）；
+    // ④ 代码形状——探针走生产提交链、计数分配器 + VmHWM 双读数且载荷下限被结构保证；
+    //    整包入口删净；激活摘要流式（本轮门禁抓出的真实缺口）；perf_probe 不再装作测过内存；
+    // ⑤ 台账行翻篇 + 轮 44 小节在场。
+    const budgets = JSON.parse(read('contracts/performance-budgets.json'));
+    expect(budgets.installStream, 'installStream 预算块消失（内存门禁失去锚点）').toBeTruthy();
+    expect(
+      budgets.installStream.minPayloadBytes,
+      '载荷下限被改（小包跑低内存什么都证明不了）',
+    ).toBe(67108864);
+    expect(budgets.installStream.maxPeakHeapKib, '堆峰值上界被改（计数分配器断言失锚）').toBe(
+      16384,
+    );
+    expect(budgets.installStream.maxPeakRssKb, 'VmHWM 上界被改（Linux 断言失锚）').toBe(32768);
+    expect(budgets.process, '旧 process 预算块仍在（两条读数链并存会分家）').toBeUndefined();
+
+    const script = read('scripts/check-performance-size.mjs');
+    expect(script, '门禁未要求 --install-probe（安装流读数可缺席）').toContain(
+      "required('install-probe')",
+    );
+    expect(script, '门禁丢了载荷下限断言').toContain('budgets.installStream.minPayloadBytes');
+    expect(script, '门禁丢了堆峰值断言').toContain('budgets.installStream.maxPeakHeapKib');
+    expect(script, '门禁丢了 VmHWM 断言').toContain('budgets.installStream.maxPeakRssKb');
+    expect(script, '缺 RSS 读数被当作跳过（必须失败关闭）').toContain(
+      'install peak RSS was not observed on the Linux performance runner',
+    );
+    expect(script, '旧 budgets.process 读取仍在（影子预算）').not.toContain('budgets.process');
+    expect(script, 'wire 轮数断言被拆（回归天花板必须还在）').toContain(
+      'budgets.wireRoundTrip.iterations',
+    );
+    expect(script, 'wire 耗时断言被拆').toContain('budgets.wireRoundTrip.maxElapsedMs');
+
+    const ci = read('.github/workflows/ci.yml');
+    expect(ci, 'CI 未构建安装流探针（门禁读不到真实读数）').toContain(
+      'cargo build -p tauron-adapter --example install_stream_probe --release --locked --features plugin-install',
+    );
+    expect(ci, 'CI 未运行安装流探针').toContain(
+      'target/release/examples/install_stream_probe > /tmp/tauron-install-probe.json',
+    );
+    expect(ci, 'CI 未把探针输出喂给门禁').toContain(
+      '--install-probe=/tmp/tauron-install-probe.json',
+    );
+
+    // ④ 代码形状。
+    const probeSrc = read('crates/tauron-adapter/examples/install_stream_probe.rs');
+    expect(probeSrc, '探针缺计数全局分配器（跨平台堆读数）').toContain('#[global_allocator]');
+    expect(probeSrc, '探针堆读数为普通 load（高水位只能 fetch_max 记录）').toContain(
+      'PEAK.fetch_max',
+    );
+    expect(probeSrc, '探针未读 VmHWM（Linux 侧读数）').toContain('/proc/self/status');
+    expect(probeSrc, '探针未走 install 预览（绕过审批链的内存什么都不代表）').toContain(
+      'cmd_registry_install_preview_as',
+    );
+    expect(probeSrc, '探针未走 reviewed 提交（真实提交链缺席）').toContain(
+      'cmd_registry_install_reviewed_as',
+    );
+    expect(probeSrc, '缺省特性下的空壳退出口消失（会静默成功？）').toContain(
+      'std::process::exit(2)',
+    );
+    // 载荷下限的结构保证：探针自报的常量乘积必须 ≥ 预算下限——不然「探针包变小、
+    // 门禁按自报数通过」会成为绕过路径。
+    const blobEntries = Number(/const BLOB_ENTRIES: usize = (\d+);/.exec(probeSrc)?.[1]);
+    const blobBytes = Number(/const BLOB_BYTES: u64 = (\d+) \* 1024 \* 1024;/.exec(probeSrc)?.[1]);
+    expect(blobEntries, '探针载荷条目常量消失（下限结构保证失效）').toBeGreaterThan(0);
+    expect(blobBytes, '探针载荷块常量消失').toBeGreaterThan(0);
+    expect(
+      blobEntries * blobBytes * 1024 * 1024,
+      '探针载荷上限外于预算下限（门禁载荷断言会空转）',
+    ).toBeGreaterThanOrEqual(budgets.installStream.minPayloadBytes);
+    expect(probeSrc, '探针包改用压缩（载荷/包装关系不再简单可核）').toContain(
+      'CompressionMethod::Stored',
+    );
+
+    const signature = read('crates/tauron-market/src/package_signature.rs');
+    expect(signature, '整包入口 verify_tpkg 复活（零调用者整包读）').not.toMatch(
+      /pub fn verify_tpkg\s*\(/,
+    );
+    expect(signature, 'verify_tpkg_file 复活').not.toMatch(/pub fn verify_tpkg_file\s*\(/);
+    expect(signature, '流式入口 verify_tpkg_reader 消失（验签整读回来了？）').toContain(
+      'pub fn verify_tpkg_reader<',
+    );
+    expect(signature, '流式入口 verify_tpkg_reader_with_time 消失').toContain(
+      'pub fn verify_tpkg_reader_with_time<',
+    );
+
+    const activation = read('crates/tauron-host/src/activation.rs');
+    expect(activation, 'ContentIdentity 缺流式构造').toContain(
+      'pub fn from_reader(mut reader: impl std::io::Read)',
+    );
+    expect(activation, 'from_bytes 不再委托流式构造（内存切片也要走同一咽喉）').toContain(
+      'Self::from_reader(bytes)',
+    );
+
+    const lib = read('crates/tauron-adapter/src/lib.rs');
+    const collectBody = /fn collect_plugin_activation_records\([\s\S]*?\n\}/.exec(lib)?.[0] ?? '';
+    expect(collectBody, 'collect_plugin_activation_records 消失（行名改了要重新复核）').not.toBe(
+      '',
+    );
+    expect(collectBody, '激活摘要未走流式（整读回归会让堆门禁重新变红）').toContain(
+      'ContentIdentity::from_reader',
+    );
+    expect(collectBody, '激活摘要仍在整读（std::fs::read 回归）').not.toContain('std::fs::read(');
+    expect(collectBody, '激活摘要未经文件句柄流入').toContain('std::fs::File::open');
+
+    const hostProbe = read('crates/tauron-host/examples/perf_probe.rs');
+    expect(hostProbe, 'perf_probe 仍在读 VmHWM（装饰性未断言读数）').not.toContain(
+      '/proc/self/status',
+    );
+    expect(hostProbe, 'perf_probe 仍在输出 peakRssKb（门禁已不读它）').not.toContain('peakRssKb');
+
+    // ⑤ 口径成文。
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案缺轮 44 小节').toMatch(/### 轮 44：/);
+    const a94Row = /^\| A94 .*$/m.exec(plan)?.[0] ?? '';
+    expect(a94Row, 'A94 台账行消失（行名改了要重新复核）').not.toBe('');
+    expect(a94Row, 'A94 台账行未登记轮 44 落地').toMatch(/轮 44/);
+    expect(a94Row, 'A94 台账行仍写"部分"（代码与宣称脱节）').not.toMatch(/\*\*部分\*\*/);
+  });
+
+  it('轮 45：Tier↔Bundle↔命令子集三张表与命令面同源（A65 Profile V2）', () => {
+    // 轮 45 立的规矩：Profile V2 的「深度档 × 能力捆绑」从修辞变成三张可判定表。
+    // 这条门禁钉表形状本身（键集 / requires 字面 / 状态诚实）与布线（脚本、链、CI、
+    // 台账行）；语义一致性（85 条命令单属划分、§87 正交性）由
+    // scripts/check-tier-bundle.mjs 在本地 gates:check 与 CI 上实跑判定。
+    const tiers = JSON.parse(read('contracts/tier-bundles.json')) as {
+      tiers: Record<string, { requires: string[] }>;
+      surfaceBundles: string[];
+      bundles: Record<string, { kind: string; status: string; commands: string[] }>;
+    };
+    expect(Object.keys(tiers.tiers).sort(), '三档必须恰为 S/E/P').toEqual(['E', 'P', 'S']);
+    expect(
+      Object.keys(tiers.bundles).sort(),
+      'bundles 键必须恰为 §87.2 的 10 个（改名/别名都得同时改门禁）',
+    ).toEqual([
+      'core',
+      'desktop-ui',
+      'enterprise-policy',
+      'headless',
+      'marketplace',
+      'mobile-ui',
+      'observability',
+      'plugin-runtime',
+      'remote-client',
+      'service',
+    ]);
+    expect([...tiers.surfaceBundles].sort(), '形态捆绑清单被改动（正交性断言的分母）').toEqual([
+      'desktop-ui',
+      'headless',
+      'mobile-ui',
+      'remote-client',
+      'service',
+    ]);
+    // requires 字面锁死：S⊂E⊂P 的单调链是 Profile V2 的核心语义，改链必须同时改这里。
+    const requiresOf = (tier: string): string[] => tiers.tiers[tier]?.requires ?? [];
+    expect(requiresOf('S'), 'S 档必备捆绑变了').toEqual(['core']);
+    expect(requiresOf('E'), 'E 档必备捆绑变了').toEqual(['core', 'plugin-runtime']);
+    expect(requiresOf('P'), 'P 档必备捆绑变了').toEqual(['core', 'plugin-runtime', 'marketplace']);
+    // 状态诚实：已落 ⇔ 非空（门禁脚本另有一份运行时判定，这里钉的是形状不可空转）。
+    for (const [bundle, spec] of Object.entries(tiers.bundles)) {
+      if (spec.status === '已落') {
+        expect(spec.commands.length, `${bundle} 标已落却零命令`).toBeGreaterThan(0);
+      } else {
+        expect(spec.status, `${bundle} 状态不在口径内`).toBe('roadmap');
+        expect(spec.commands.length, `${bundle} 标 roadmap 却挂命令`).toBe(0);
+      }
+    }
+
+    // 布线三件：脚本在场（含关键判定文本）→ pnpm 入口在 gates:check 链上 → CI 独立步骤。
+    const tierGate = read('scripts/check-tier-bundle.mjs');
+    for (const needle of ['tier-bundles.json', 'command-surface.md', 'Tier-Bundle gate FAILED']) {
+      expect(tierGate, `门禁脚本缺 ${needle}（判定被掏空）`).toContain(needle);
+    }
+    const pkg = read('package.json');
+    const gatesChain = /"gates:check":\s*"([^"]+)"/.exec(pkg)?.[1] ?? '';
+    expect(gatesChain, 'gates:check 链缺 check-tier-bundle（本地不再跑它）').toContain(
+      'check-tier-bundle.mjs',
+    );
+    const ci = read('.github/workflows/ci.yml');
+    expect(ci, 'CI 缺 Tier-Bundle 步骤').toContain('node scripts/check-tier-bundle.mjs');
+
+    // 口径成文：A65 台账行翻篇 + 轮 45 小节在场 + 轮 11「未做」清单已划掉 A65。
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案缺轮 45 小节').toMatch(/### 轮 45：/);
+    const a65Row = /^\| A65 .*$/m.exec(plan)?.[0] ?? '';
+    expect(a65Row, 'A65 台账行消失（行名改了要重新复核）').not.toBe('');
+    expect(a65Row, 'A65 台账行未登记轮 45 落地').toMatch(/轮 45/);
+    expect(a65Row, 'A65 台账行仍写"未落"（代码与宣称脱节）').not.toMatch(/未落/);
+    expect(plan, '轮 11 未做清单未划掉 A65').toContain('~~A65');
+  });
+
+  it('轮 46：零 Surface 就绪集合与真跑 conformance 同形（A66 ReadinessSet）', () => {
+    // 轮 46 立的规矩：「headless 可零 Surface 运行」从判词变成可求值集合 + 真跑用例。
+    // 这条门禁钉模块形状（六组事实 / 具名 blockers 入口 / headless 构造）、三条
+    // conformance 测试名在场、导出行、台账行翻篇与 CHANGELOG；语义（空集不阻塞 /
+    // 声明即须兑现 / kernel 不豁免）由 v4_host_conformance.rs 三条用例在 cargo test
+    // 与本地电池上实跑判定——删掉任一用例必须同时改这里。
+    const readiness = read('crates/tauron-host/src/readiness.rs');
+    for (const needle of [
+      'pub struct ReadinessSet',
+      'pub fn headless(',
+      'pub required_surfaces: Vec<ReadinessFact>,',
+      'pub blockers: Vec<String>,',
+    ]) {
+      expect(readiness, `readiness.rs 缺 ${needle}（A66 形状被掏空）`).toContain(needle);
+    }
+    const hostLib = read('crates/tauron-host/src/lib.rs');
+    expect(hostLib, 'readiness 未导出（消费者拿不到）').toContain(
+      'pub use readiness::{ApplicationReadiness, ReadinessFact, ReadinessSet};',
+    );
+    const conformance = read('crates/tauron-host/tests/v4_host_conformance.rs');
+    for (const name of [
+      'conform_zero_surface_host_reaches_ready_without_any_surface',
+      'conform_declared_surface_blocks_readiness_with_named_reason',
+      'conform_unready_kernel_blocks_even_without_surfaces',
+    ]) {
+      expect(conformance, `conformance 缺 ${name}（零 Surface 就绪判定被删）`).toContain(name);
+    }
+
+    // 口径成文：A66 台账行翻篇 + 轮 46 小节在场 + 轮 11「未做」清单已划掉 A66 + CHANGELOG 条目。
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    // 行首锚定：变异证明第一遍暴露过 `/### 轮 46：/` 会被 `#### 轮 46：` 子串命中的假绿。
+    expect(plan, '缺口方案缺轮 46 小节').toMatch(/^### 轮 46：/m);
+    const a66Row = /^\| A66 .*$/m.exec(plan)?.[0] ?? '';
+    expect(a66Row, 'A66 台账行消失（行名改了要重新复核）').not.toBe('');
+    expect(a66Row, 'A66 台账行未登记轮 46 落地').toMatch(/轮 46/);
+    expect(a66Row, 'A66 台账行仍写"未落"（代码与宣称脱节）').not.toMatch(/未落/);
+    expect(plan, '轮 11 未做清单未划掉 A66').toContain('~~A66');
+    const changelog = read('CHANGELOG.md');
+    expect(changelog, 'CHANGELOG 缺轮 46 条目').toMatch(/轮 46，A66/);
+  });
+
+  it('轮 47：事件/审批/注册表三条故障边界各带确定性修复语义与实测（A91）', () => {
+    // 轮 47 立的规矩：A91 的「一个子系统 panic 不得升级为全宿主风险」从 settings
+    // 一条边界扩到三条，且每条修复语义必须诚实——events 保留 topic 声明（发布端对
+    // 未声明 topic 只静默丢弃不报错，清声明=把可工作的消息面悄悄打哑）、approval
+    // 重新 preview 清令牌、registry 无会话内重建就如实 Quarantined。这条门禁钉
+    // 形状/接线数/修复文案/负向回潮/台账翻篇；语义（清零后声明仍在、Quarantined 不
+    // 假 Ready、修复后旧令牌失效）由 adapter 三条测试在 cargo test 与电池上实跑判定。
+    const eventbus = read('crates/tauron-host/src/eventbus.rs');
+    for (const needle of [
+      // 带签名收尾：裸名是 `..._x` 改名的字符串前缀，`.includes()` 会放过（轮 47 变异
+      // W4 实测假绿，同轮 46 未锚定 regex 一类）。
+      'pub fn reset_session_state(&self)',
+      'session_reset_clears_subscriptions_but_keeps_topic_declarations',
+    ]) {
+      expect(eventbus, `eventbus.rs 缺 ${needle}（会话态重置/声明存活被掏空）`).toContain(needle);
+    }
+
+    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    for (const needle of [
+      'fn run_subsystem_boundary<T>(',
+      'fn run_events_boundary<T>(',
+      'fn run_review_boundary<T>(',
+      'fn run_registry_boundary<T>(',
+      'fn begin_subsystem_reconcile(',
+      'fn reconcile_events_boundary(',
+      'fn reconcile_review_boundary(',
+      'fn reconcile_registry_boundary(',
+      'events_fault: Arc<Mutex<tauron_host::FaultBoundary>>',
+      'review_fault: Arc<Mutex<tauron_host::FaultBoundary>>',
+      'registry_fault: Arc<Mutex<tauron_host::FaultBoundary>>',
+      'tauron_host::FaultBoundary::new("events")',
+      'tauron_host::FaultBoundary::new("approval")',
+      'tauron_host::FaultBoundary::new("registry")',
+      'events_fault_boundary_rejects_bus_work_and_recover_boot_resets_session_state',
+      'approval_fault_boundary_blocks_tokens_and_preview_reconcile_clears_them',
+      'registry_fault_boundary_quarantines_until_reassembly_not_faked_ready',
+      // 三条修复文案：各带具名的下一步动作，操作者读错误就知道怎么修
+      'topic declarations are kept',
+      'clears pending approval tokens',
+      'no in-session rebuild exists',
+    ]) {
+      expect(adapter, `lib.rs 缺 ${needle}（轮 47 的边界形状/修复语义被掏空）`).toContain(needle);
+    }
+
+    // 接线数：定义在场还不够，闸门要真的包在命令面上（定义与测试调用不匹配该计数模式）。
+    const countSites = (re: RegExp): number => [...adapter.matchAll(re)].length;
+    expect(countSites(/run_events_boundary\(state, "/g), '事件命令闸门接线数变了（7 条）').toBe(7);
+    expect(countSites(/run_review_boundary\(state, "/g), '令牌消费点闸门接线数变了（4 个）').toBe(
+      4,
+    );
+    expect(countSites(/run_registry_boundary\(state, "/g), '注册表命令闸门接线数变了（5 条）').toBe(
+      5,
+    );
+    expect(
+      countSites(/reconcile_review_boundary\(state\)\?;/g),
+      '审批修复不在两条 preview 上骑车了',
+    ).toBe(2);
+
+    // 负向钉：禁止整重置回潮——`EventBus::default()` 连 topic 声明一起清，
+    // 发布端静默丢弃不报错，等于让修复动作把可工作的消息面打哑。
+    expect(adapter, '事件修复重新用整重置（topic 声明会被清掉，发布静默丢弃）').not.toMatch(
+      /\*state\.bus\.lock\(\)\s*=\s*EventBus::default\(\);/,
+    );
+    // 修复驱动：cmd_recover_boot 必须驱动 events+registry 两条修复（审批修复另有骑点）。
+    const boot = adapter.slice(adapter.indexOf('pub fn cmd_recover_boot('));
+    expect(boot, 'cmd_recover_boot 不再驱动事件修复').toContain('reconcile_events_boundary(state)');
+    expect(boot, 'cmd_recover_boot 不再驱动注册表修复').toContain(
+      'reconcile_registry_boundary(state)',
+    );
+
+    // 口径成文：A91 台账行翻篇 + 轮 47 小节在场 + 轮 11「未做」清单已划掉 A91 + CHANGELOG。
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案缺轮 47 小节').toMatch(/^### 轮 47：/m);
+    const a91Row = /^\| A91 .*$/m.exec(plan)?.[0] ?? '';
+    expect(a91Row, 'A91 台账行消失（行名改了要重新复核）').not.toBe('');
+    expect(a91Row, 'A91 台账行未登记轮 47 落地').toMatch(/轮 47/);
+    expect(a91Row, 'A91 台账行仍写"未落"（代码与宣称脱节）').not.toMatch(/未落/);
+    expect(plan, '轮 11 未做清单未划掉 A91').toContain('~~A91');
+    const changelog = read('CHANGELOG.md');
+    expect(changelog, 'CHANGELOG 缺轮 47 条目').toMatch(/轮 47，A91/);
+  });
+
+  it('轮 48：HTTP 重定向/DNS 复检接生产——单跳契约 + 宿主侧逐跳授权（A96）', () => {
+    // 轮 48 立的规矩：A96 的「重定向/解析尊重 scope」此前只有策略实现（模块自测），
+    // 生产命令只做首跳授权。这条门禁钉：单跳 sink 契约（不得自行跟随 3xx、必须回报
+    // 解析地址）、宿主侧逐跳链（resolve_redirect_location → authorize_redirect →
+    // authorize_resolution）真的在 cmd_http_request 里、跨源凭据剥离在场、能力闸把
+    // 非 RedirectAndDns 档挡住；语义（RFC 3986 归一转、被拒目标不发、hop 上界、
+    // 私网复检）由 adapter 四条测试在 cargo test 与电池上实跑判定。
+    const netpol = read('crates/tauron-host/src/network_policy.rs');
+    for (const needle of [
+      // 带签名收尾：裸名可能成为改名后的字符串前缀（轮 47 变异 W4 实测假绿一类）。
+      'pub fn resolve_redirect_location(base: &str, location: &str)',
+      'base.join(location)',
+    ]) {
+      expect(netpol, `network_policy.rs 缺 ${needle}（RFC 3986 相对解析被掏空）`).toContain(needle);
+    }
+    const hostLib = read('crates/tauron-host/src/lib.rs');
+    const hostExport = hostLib.slice(hostLib.indexOf('pub use network_policy::{'));
+    expect(hostExport, 'tauron-host 未导出 resolve_redirect_location').toContain(
+      'resolve_redirect_location',
+    );
+
+    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    for (const needle of [
+      'fn http_policy_denied(',
+      'pub fn with_http_sink(mut self, sink: Arc<dyn HttpSink>) -> Self',
+      'pub resolved_addrs: Vec<String>',
+      // 单跳契约成文（provider 责任 + 宿主职责）
+      '发起**单跳**请求',
+      '实现**不得**自行跟随 redirect',
+      '实现**必须**在响应里回报本跳解析地址',
+      // 宿主逐跳链：归一转址 → 授权 → 解析复检 → 凭据剥离
+      'tauron_host::resolve_redirect_location(&current_url, location)',
+      '.authorize_redirect(&current, &next_url, hop, has_credentials)',
+      '.authorize_resolution(&current, &resolved)',
+      'raw.parse::<std::net::IpAddr>()',
+      'if !authorization.forward_credentials',
+      'http_sink: cfg.http_sink.clone().unwrap_or_else(|| Arc::new(UnavailableHttpSink))',
+      // 五条行为测试
+      'http_redirect_flow_follows_hops_with_rfc_3986_resolution',
+      'http_redirect_cross_origin_strips_credentials_and_denied_target_never_sent',
+      'http_redirect_loop_is_bounded_by_policy_max_redirects',
+      'http_provider_resolution_is_rechecked_against_private_network_policy',
+      'http_provider_without_redirect_enforcement_is_rejected_before_any_request',
+    ]) {
+      expect(adapter, `lib.rs 缺 ${needle}（轮 48 的单跳契约/逐跳授权被掏空）`).toContain(needle);
+    }
+
+    // 接线数：三处策略调用必须各有一段——定义在场 ≠ 宿主在跑这条链。
+    const countSites = (re: RegExp): number => [...adapter.matchAll(re)].length;
+    expect(countSites(/\.authorize_redirect\(/g), 'authorize_redirect 调用点变了（应 1 处）').toBe(
+      1,
+    );
+    expect(
+      countSites(/\.authorize_resolution\(/g),
+      'authorize_resolution 调用点变了（应 1 处）',
+    ).toBe(1);
+    expect(
+      countSites(/"authorization" \| "cookie" \| "proxy-authorization"/g),
+      '跨源凭据剥离三头不在（判定 + 剥离应各一处）',
+    ).toBe(2);
+
+    // 能力闸：非 RedirectAndDns 档不得放行（策略不可执行时拒绝发请求，而非裸发）。
+    const cmd = adapter.slice(adapter.indexOf('pub fn cmd_http_request('));
+    expect(cmd, '能力闸被拆（非 RedirectAndDns 档会裸发请求）').toContain(
+      'tauron_host::NetworkEnforcement::RedirectAndDns',
+    );
+
+    const shell = read('packages/tauron-host/src/shell-client.ts');
+    expect(shell, 'TS 线形缺 resolvedAddrs（provider 回报地址的线形出口）').toContain(
+      'resolvedAddrs?: string[];',
+    );
+
+    // 口径成文：A96 台账行翻篇 + 轮 48 小节在场 + 轮 11「未做」清单已划掉 A96 + CHANGELOG。
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案缺轮 48 小节').toMatch(/^### 轮 48：/m);
+    const a96Row = /^\| A96 .*$/m.exec(plan)?.[0] ?? '';
+    expect(a96Row, 'A96 台账行消失（行名改了要重新复核）').not.toBe('');
+    expect(a96Row, 'A96 台账行未登记轮 48 落地').toMatch(/轮 48/);
+    expect(a96Row, 'A96 台账行仍写"部分"（代码与宣称脱节）').not.toMatch(/\*\*部分\*\*/);
+    expect(
+      (plan.match(/~~A96/g) ?? []).length,
+      'A96 未做清单划线数变了（轮 11 与 Batch 5 应各 1 处）',
+    ).toBe(2);
+    expect(plan, '能力矩阵行未翻篇').toMatch(
+      /^\| network redirects\/resolution respect scope \| ✅ \|/m,
+    );
+    const surface = read('docs/api/command-surface.md');
+    expect(surface, '命令面文档未登记单跳契约').toContain('resolvedAddrs');
+    const changelog = read('CHANGELOG.md');
+    expect(changelog, 'CHANGELOG 缺轮 48 条目').toMatch(/轮 48，A96/);
+  });
+
+  it('轮 49：A71 变体过滤接进安装/更新路径——resolve_best 从在册孤儿变为消费者', () => {
+    // 轮 49 立的规矩：`resolve_best` 此前是台账在册孤儿（「安装/更新路径不过滤变体」），
+    // `ArtifactVariantResolver` 只存在于注释。这条门禁钉：resolver 实现在场、装配腿在
+    // **任何下载/解压/OS 加载之前**做变体解析、无兼容即硬拒（不静默回退单清单）、
+    // 台账条目已删除（仍留着 = 文档在说「未接线」而代码已接）；语义（选中最具体、
+    // 无兼容失败关闭、download/install 同口径）由 host/adapter 四条测试在 cargo 上实跑判定。
+    const target = read('crates/tauron-host/src/target.rs');
+    for (const needle of [
+      // 带签名收尾：改名或泛型收窄都会破配（子串针会放过后缀式改名）。
+      "pub fn resolve_best<'a, T: AsRef<TargetSpec>>(",
+      "pub fn resolve<'a, T: AsRef<TargetSpec>>(",
+      // 测试名带 `fn ` 与左括号收尾：后缀式改名会破配（裸名会被 `_x` 后缀骗过）。
+      'fn artifact_variant_resolver_returns_none_when_no_variant_is_runnable(',
+    ]) {
+      expect(target, `target.rs 缺 ${needle}（resolve_best 泛型化/Resolver 入口被掏空）`).toContain(
+        needle,
+      );
+    }
+    const hostLib = read('crates/tauron-host/src/lib.rs');
+    // 带逗号分界：裸名针会被 `ArtifactVariantResolverX` 这类后缀改名骗过（轮 49 变异 W11 实测）。
+    expect(hostLib, 'tauron-host 未导出 ArtifactVariantResolver').toContain(
+      'ArtifactVariantResolver, TargetAbi,',
+    );
+
+    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    for (const needle of [
+      'pub struct UpdateArtifactVariant {',
+      // 带 ` {` 收尾：`UpdateArtifactVariantX {` 后缀式改名必须破配（轮 49 变异 W8 实测）。
+      'impl AsRef<tauron_host::TargetSpec> for UpdateArtifactVariant {',
+      'pub fn with_variants(mut self, variants: Vec<UpdateArtifactVariant>) -> Self',
+      'tauron_host::ArtifactVariantResolver::resolve(&self.variants, &host)',
+      // 全量文案针：只有「无一兼容本机目标」短语会被测试文件的断言文本喂饱（轮 49 变异 C2 实测）。
+      '更新清单提供 {} 个变体，无一兼容本机目标（os={:?} arch={:?}）：拒绝下载，不静默回退单包',
+      'fn variant_list_without_compatible_target_is_rejected_before_any_download(',
+      'fn download_and_install_both_use_the_variant_compatible_with_this_host(',
+    ]) {
+      expect(adapter, `lib.rs 缺 ${needle}（轮 49 的变体过滤被掏空）`).toContain(needle);
+    }
+    // 计数钉：resolver 调用点恰一处（select_manifest），download/install 都经它。
+    const countSites49 = (re: RegExp): number => [...adapter.matchAll(re)].length;
+    expect(
+      countSites49(/ArtifactVariantResolver::resolve\(/g),
+      'ArtifactVariantResolver::resolve 调用点变了（应 1 处：select_manifest）',
+    ).toBe(1);
+
+    // 台账：条目必须删除（仍在 = 文档还在宣称「resolve_best 未接线」而代码已接）。
+    const ledger = read('contracts/orphan-public-api.json');
+    expect(
+      (ledger.match(/resolve_best/g) ?? []).length,
+      '孤儿台账仍登记 resolve_best（A71 已接线，条目必须删除）',
+    ).toBe(0);
+
+    // 口径成文：A71 台账行翻篇（不得再写「部分」）+ 轮 49 小节在场 + CHANGELOG。
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案缺轮 49 小节').toMatch(/^### 轮 49：/m);
+    const a71Row = /^\| A71 .*$/m.exec(plan)?.[0] ?? '';
+    expect(a71Row, 'A71 台账行消失（行名改了要重新复核）').not.toBe('');
+    expect(a71Row, 'A71 台账行未登记轮 49 落地').toMatch(/轮 49/);
+    expect(a71Row, 'A71 台账行仍写「部分」（代码与宣称脱节）').not.toMatch(/\*\*部分\*\*/);
+    const changelog = read('CHANGELOG.md');
+    expect(changelog, 'CHANGELOG 缺轮 49 条目').toMatch(/轮 49，A71/);
+  });
+
+  it('V7 §7：风险表的复核结论必须与代码同形（宣称链不得悄悄升级）', () => {
+    // 轮 28 立的规矩：审计风险表一旦被逐行复核，"结论"就成了对外宣称。这条门禁挡两种漂移：
+    // ①代码没动、文档把「部分／仍成立」改成「已闭合」（假宣称）；②文档没动、代码悄悄多了
+    // 引用点（假孤儿）。两侧任一变动都必须同时改另一侧。
+    const v7 = read('docs/Tauron-Deep-Audit-and-Optimization-Plan-V7.md');
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(v7, 'V7 §7 缺轮 28 的逐行复核表').toMatch(/轮 28 复核结论/);
+    expect(plan, '缺口方案未登记轮 28 的逐行复核').toMatch(/轮 28 逐行复核/);
+
+    // 只在复核表里找行：§7 上面还留着"审计当时的事实"原表，同名行的措辞是**历史句**，
+    // 拿它当现状判据会让这条门禁查错对象（第一次跑就是这么红的）。
+    const review = v7.slice(v7.indexOf('轮 28 复核结论'));
+    expect(review.length, '复核表之后没有内容（定位失败）').toBeGreaterThan(200);
+
+    // Upgrade / ServiceGraph 两行是本轮判为"未闭合"的：措辞是结论的一部分。
+    const row = (name: string): string => {
+      const m = new RegExp(`^\\| ${name} \\|.*$`, 'm').exec(review);
+      expect(m, `V7 §7 复核表找不到 ${name} 行（行名改了就要重新复核）`).not.toBeNull();
+      return m![0]!;
+    };
+    const upgrade = row('Upgrade');
+    expect(upgrade, 'Upgrade 行未写明"部分"（清理腿已闭合≠整行闭合）').toContain('**部分**');
+    expect(upgrade, 'Upgrade 行删掉了真执行器的符号证据').toContain('UpgradeRunner::run_phases');
+    // 轮 40：装配腿落地到适配层 seam——行文必须点明消费者与仍成立的边界
+    // （网络下载/证书验签仍由装配方注入、check 仍是桩），不能改写成"已闭合"。
+    expect(upgrade, 'Upgrade 行未写明轮 40 的仓内消费者').toMatch(/DistributeUpgradeInstaller/);
+    expect(upgrade, 'Upgrade 行丢了"网络/验签仍由装配方注入"的边界').toMatch(/装配方注入/);
+    expect(row('ServiceGraph'), 'ServiceGraph 行不得伪装成已闭合').toContain('**仍成立**');
+
+    // 代码侧核对：`UpgradeRunner` 的仓内消费者**恰好一处**——适配层的装配腿 seam。
+    // （轮 28 复核时这里断言的是"零引用点"；轮 40 结论变了，门禁换断言而不是删门禁。）
+    const refs = ((): string[] => {
+      const hits: string[] = [];
+      const walk = (dir: string): void => {
+        for (const e of readdirSync(dir, { withFileTypes: true })) {
+          const p = join(dir, e.name);
+          if (e.isDirectory()) walk(p);
+          else if (e.name.endsWith('.rs')) {
+            const src = readFileSync(p, 'utf8');
+            // 注释里"引用"它不算消费者（这里要的是装配点）。
+            const code = src.replace(/^\s*\/\/.*$/gm, '').replace(/^\s*\/\/\/.*$/gm, '');
+            if (
+              /\bUpgradeRunner\b|create_default_upgrade_runner|create_upgrade_runner/.test(code)
+            ) {
+              hits.push(p.slice(workspaceRoot.length + 1).replace(/\\/g, '/'));
+            }
+          }
+        }
+      };
+      for (const crate of readdirSync(join(workspaceRoot, 'crates'), { withFileTypes: true })) {
+        if (!crate.isDirectory() || crate.name === 'tauron-distribute') continue;
+        const src = join(workspaceRoot, 'crates', crate.name, 'src');
+        if (existsSync(src)) walk(src);
+      }
+      return hits;
+    })();
+    expect(refs, `UpgradeRunner 的仓内消费者集合变了：V7 §7 的结论必须同步改写`).toEqual([
+      'crates/tauron-adapter/src/lib.rs',
+    ]);
+    // 消费者必须**恰好是一条装配腿**：runner 构造点只有一处（`create_upgrade_runner`），
+    // 且注入面是 `UpgradeInstaller` seam。命令层绕过 seam 直连 runner（第二个构造点）
+    // 或增删消费者都会在这里红。
+    const adapterSrc = read('crates/tauron-adapter/src/lib.rs');
+    const runnerBuilds = [...adapterSrc.matchAll(/create_upgrade_runner\(/g)];
+    expect(runnerBuilds.length, '装配腿的 runner 构造点必须恰好一处').toBe(1);
+    expect(adapterSrc, '装配腿 seam 丢失（UpgradeInstaller 是唯一注入面）').toMatch(
+      /pub trait UpgradeInstaller/,
+    );
+  });
+
+  it('轮 29：更新可用性只有一条权威通道（SDK 不得再拿宿主桩当结论）', () => {
+    const sdk = read('packages/tauron-host/src/auto-update-client.ts');
+    const adapter = read('crates/tauron-adapter/src/lib.rs');
+
+    // ① 检查腿：真通道。`host_updater_check` 是被调的一方，`host_market_check` 不得再出现。
+    expect(sdk, 'SDK 的检查没有走真通道 host_updater_check').toContain("'host_updater_check'");
+    expect(sdk, 'SDK 又回到宿主桩 host_market_check 取可用性结论').not.toContain(
+      "'host_market_check'",
+    );
+    // 版本是入参而不是猜测：宿主不给 currentVersion 就不检查。
+    expect(sdk, 'currentVersion 不再作为入参下发').toMatch(
+      /'host_updater_check',\s*\{ currentVersion \}/,
+    );
+    // 缺参/无通道两种"答不了"都必须与"没有更新"分家。
+    expect(sdk, '缺 currentVersion 时必须抛错而不是返回 available:false').toMatch(
+      /if \(currentVersion === ''\) \{[\s\S]*?throw new Error/,
+    );
+    expect(sdk, 'Unsupported 不再落 degraded').toMatch(
+      /isUnsupportedBody\(result\)[\s\S]*?degraded: true/,
+    );
+    expect(sdk, '降级路径不再被当成 idle（"查过了，没更新"）').toMatch(
+      /degraded === true \? 'error' : 'idle'/,
+    );
+
+    // ② 下载/安装腿：轮 40 起装配腿注入后为真；**缺省装配仍是有意的模拟桩**，
+    // 且分派必须问 `native_supported()`——装好的腿不得被悄悄钉回桩，桩不得被
+    // 悄悄当成真。SDK 侧守卫不变：见 `simulated` 一律抛错。
+    for (const cmd of ['host_market_download', 'host_market_install']) {
+      expect(sdk, `SDK 不再调 ${cmd}（下载/安装腿被悄悄摘掉）`).toContain(`'${cmd}'`);
+    }
+    expect(sdk, 'simulated 守卫丢失（桩结果可能被推进为已下载）').toMatch(
+      /result\?\.simulated[\s\S]{0,200}?throw new Error/,
+    );
+    expect(adapter, 'market 模拟腿不再如实标 simulated').toMatch(
+      /fn cmd_market_download_simulated\([\s\S]*?simulated: true/,
+    );
+    expect(adapter, 'market 分派没有问装配腿是否注入（装好的腿会被钉回桩）').toMatch(
+      /fn cmd_market_download\([\s\S]{0,400}?native_supported\(\)[\s\S]{0,200}?cmd_market_download_wired/,
+    );
+
+    // ③ 桩必须把"真通道在哪"说清楚：两条命令对同一问题给相反答案，就是轮 28 的分裂。
+    expect(adapter, 'market 桩的 reason 不再指向真通道 host_updater_check').toMatch(
+      /fn cmd_market_check\([\s\S]*?host_updater_check/,
+    );
+    expect(adapter, 'capabilities 的 market-update 域不再说明真通道在哪').toMatch(
+      /"market-update",\s*\n?\s*"缺省装配无更新通道[\s\S]*?updater 域/,
+    );
+  });
+
+  it('轮 31：更新对话框的检查腿与 SDK 同源（壳层不读宿主桩，也不自造判定）', () => {
+    const shell = read('packages/tauron-host/src/shell-controller.ts');
+    const sdk = read('packages/tauron-host/src/auto-update-client.ts');
+    const example = read('examples/minimal-app/src/main.ts');
+    const shellTest = read('packages/tauron-host/src/shell-controller.test.ts');
+
+    // ① 检查腿打真通道；桩命令名在控制器里**一次都不该出现**。
+    expect(shell, '壳层检查腿没走真通道 host_updater_check').toContain('this.client.updaterCheck(');
+    expect(shell, '壳层又回到宿主桩 marketCheck 取可用性结论').not.toContain('marketCheck');
+    // ② 判定同源：同一个用户动作的两条入口必须共用一份"怎么算答不了"。
+    expect(sdk, 'toUpdateInfo 不再是导出的共享判据').toMatch(/^export function toUpdateInfo/m);
+    expect(shell, '壳层自己造判定（双镜像点：两处会各自漂移，轮 29 修的就是这种分叉）').toMatch(
+      // 不锁单行写法：轮 33 之后这条导入是 prettier 折的多行块，锁字面量等于给格式化下赌注。
+      /import \{[^}]*\btoUpdateInfo\b[^}]*\} from '\.\/auto-update-client\.js'/,
+    );
+    // ③ 缺必填入参时必须**先返回**，不发任何命令——回落桩会拿到形似结论的 available:false。
+    expect(shell, '缺 currentVersion 的处理没有先返回').toMatch(
+      /if \(currentVersion === ''\) \{[\s\S]*?return;\n {4}\}/,
+    );
+    // ④ 示例是这条链的真生产消费者：版本有事实源、展示把"答不了"和"没有更新"分家。
+    expect(example, '示例没声明当前版本（检查腿只会恒报缺参）').toMatch(
+      /currentVersion: APP_VERSION/,
+    );
+    expect(example, '示例的版本号不是从 package.json 取的（写死字符串会随版本漂移）').toMatch(
+      /import \{ version as APP_VERSION \} from '\.\.\/package\.json'/,
+    );
+    expect(example, '示例把 degraded 与"没有更新"合并成同一句话').toMatch(
+      /if \(info\.degraded === true\) \{[\s\S]*?return info\.available/,
+    );
+    // ④′ 对话框必须**真的挂在页面上**：控制器那条腿若只有单测里没有用户，就是"接口有、
+    //     行为无"——`oc-updater-check` 在这个仓库里正因为零派发被记过一次孤儿账。
+    const page = read('examples/minimal-app/index.html');
+    expect(page, '示例页面不再挂载 <oc-updater-dialog>（壳层检查腿没有真消费者）').toMatch(
+      /<oc-updater-dialog id="updater-dialog"><\/oc-updater-dialog>/,
+    );
+    expect(page, '页面上没有打开对话框的入口（挂了元素但没人能点开）').toMatch(
+      /id="btn-updater-dialog"/,
+    );
+    expect(example, '检查结果不再写回对话框（结论只进了日志）').toMatch(
+      /updaterDialog\.message = describeUpdate\(info\)/,
+    );
+    // ⑤ 测试侧后门封掉：控制器能力表里不该再声明宿主桩命令（用例正文引用它是允许的，
+    // 能力表声明它才是要防的事——mock 会照样把桩答案返回给回归后的检查腿）。
+    const capsBlock = shellTest.match(/const CONTROLLER_CAPS = \[[\s\S]*?\];/);
+    expect(capsBlock, '测试里找不到控制器能力表').not.toBeNull();
+    expect(
+      capsBlock![0],
+      '测试能力表重新声明 host_market_check——那样即使检查腿退回桩，mock 也会照样答绿',
+    ).not.toContain("'host_market_check'");
+  });
+
+  it('轮 33：更新通道诊断只有一个出口，账本的模拟推进不得被读成真实状态', () => {
+    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    const client = read('packages/tauron-host/src/shell-client.ts');
+    const shell = read('packages/tauron-host/src/shell-controller.ts');
+    const shellTest = read('packages/tauron-host/src/shell-controller.test.ts');
+
+    // 断链形态：`host_updater_status` 是灰度百分比 / 崩溃门禁 / 进程内账本的**唯一**出口，
+    // 而它在 TS 侧零消费者——"你不在灰度批次""被崩溃门禁停发""宿主没装端点"在 UI 上
+    // 全是同一句"没有更新"。另一半：账本 `state` 的两个写入方今天都是宿主桩，
+    // `installed:2.0.0` 这个字符串自己不带出处，只看它就等于把"点了一下模拟安装"
+    // 显示成"已安装 2.0.0"。
+
+    // ① 线形：Rust 字段集与 TS 接口逐字段一致，且必须 camelCase（漏一半就是前端读 `undefined`）。
+    const rs = rustStruct('crates/tauron-adapter/src/lib.rs', 'UpdaterStatus');
+    expect(rs.camelCase, 'UpdaterStatus 必须 rename_all = "camelCase"').toBe(true);
+    expect(
+      rs.fields.has('state_simulated'),
+      '线字段 state_simulated 不见了（出处信息无从传递）',
+    ).toBe(true);
+    const tsBody = /export interface UpdaterStatus \{([\s\S]*?)\n\}/.exec(client);
+    expect(tsBody, 'TS 侧找不到 UpdaterStatus 接口').not.toBeNull();
+    const tsFields = new Set(
+      [...tsBody![1]!.matchAll(/^\s{2}(\w+)\??:/gm)]
+        .map((m) => m[1]!)
+        .filter((k) => k !== 'readonly'),
+    );
+    expect(
+      [...rs.fields].map(snakeToCamel).sort(),
+      'Rust ↔ TS 的 UpdaterStatus 字段集漂移（两侧各写一份就会漂，轮 32 的三面镜像同理）',
+    ).toEqual([...tsFields].sort());
+
+    // ② 读侧成对，且**成对到签名上**：账本与其出处只能由命令层从 `shell_ext` 一次性
+    //    交给 sink，sink 依据"有没有账本"推导出处。这里不加一条 `state_simulated: false`
+    //    字面量的容错——`check-simulated-never-commits.mjs` 的 cross-check 就是禁止被网关源
+    //    出现 `simulated: false` 断言（无中生有地说"这条状态是真的"）。本轮的修法是让这种
+    //    断言**写不出来**（sink 必须收到账本对），不是把门禁的needle放宽。
+    expect(
+      adapter,
+      'cmd_updater_status 不再把账本与出处成对交给 sink（分开传就能只传 state）',
+    ).toMatch(/status\(\s*ext\.update_state\.clone\(\),\s*ext\.update_state_simulated\s*\)/);
+    expect(
+      adapter,
+      'UpdaterSink::status 的账本对参数消失了：sink 又能只报 state、或自己断言出处',
+    ).toMatch(/fn status\(&self, ledger_state: Option<String>, ledger_simulated: bool\)/);
+    expect(
+      adapter,
+      'state_simulated 必须由"账本有无"推导（`state: None` 时不得报"这是模拟来的"，也不得报"这是真的"）',
+    ).toMatch(/state_simulated = ledger_state\.is_some\(\) && ledger_simulated;/);
+    expect(
+      adapter,
+      '出现硬写的 `state_simulated: false`：无账本时的"真实"断言又回来了',
+    ).not.toMatch(/state_simulated: false/);
+
+    // ③ 写侧逐条登记：每一个推进账本的写入方都必须同时写下它的出处标注。
+    //    轮 40 起标注有两种：模拟腿 `= true`（本次没有真实效果），装配腿 `= false`
+    //    （真实效果已发生——`check-simulated-never-commits.mjs` 的 A2b 段把这两条
+    //    `= false` 钉在 wired 双胞胎内、且必须排在 seam 调用之后，这里只核**每一处
+    //    写入都紧跟一条标注**：4 处写入 == 2×true + 2×false）。
+    for (const phase of ['downloaded', 'installed'] as const) {
+      for (const marker of ['true', 'false'] as const) {
+        expect(
+          adapter,
+          `${phase} 账本写入方没有紧跟 \`update_state_simulated = ${marker};\`——新增写入方漏标这条必红`,
+        ).toMatch(
+          new RegExp(
+            `ext\\.update_state = Some\\(format!\\("${phase}:[\\s\\S]{0,80}?ext\\.update_state_simulated = ${marker};`,
+          ),
+        );
+      }
+    }
+    expect(
+      [...adapter.matchAll(/ext\.update_state = Some\(/g)].length,
+      '账本写入方数量变了：门禁要求每条写入都带出处登记（true / false 各算一种），请同步本轮',
+    ).toBe([...adapter.matchAll(/ext\.update_state_simulated = (?:true|false);/g)].length);
+
+    // ④ 诊断有人消费，且**两条入口同一口径**：SDK 的 `checkUpdate()` 与对话框的检查按钮
+    //    必须共用一份 `enrichUpdaterInfoWithChannel`。轮 29 修的是判定分叉、轮 31 修的是
+    // 检查腿分叉，展示口径若再各写一份，同一个用户动作就会给出两种"为什么没更新"。
+    const sdk = read('packages/tauron-host/src/auto-update-client.ts');
+    expect(
+      sdk,
+      'host_updater_status 回到零消费者：灰度 / 崩溃门禁 / 宿主账本再次是 UI 上的隐形事实',
+    ).toMatch(/enrichUpdaterInfoWithChannel\(/);
+    expect(sdk, 'SDK 补诊断时读的不是 host_updater_status').toMatch(
+      /invoke<UpdaterChannelStatus>\('host_updater_status'\)/,
+    );
+    expect(shell, '对话框检查腿没走同一份诊断口径（两条入口各拼一句 = 第三面镜像）').toMatch(
+      /enrichUpdaterInfoWithChannel\(info, \(\) => this\.client\.updaterStatus\(\)\)/,
+    );
+    expect(shell, '控制器自己又拼了一份诊断文案').not.toMatch(/grayscalePercent/);
+    expect(
+      [...sdk.matchAll(/function describeUpdaterChannel/g)].length,
+      '诊断文案必须只有一份定义',
+    ).toBe(1);
+    expect(sdk, '成对读 state / stateSimulated 的那句被拆开了（模拟推进又能冒充真实）').toMatch(
+      /status\.state[\s\S]{0,220}status\.stateSimulated/,
+    );
+    // 失败边界：命令缺席 / 报错 / 答空都不得改结论。
+    expect(sdk, '诊断失败会把「检查更新」整条腿带崩').toMatch(
+      /await readChannel\(\)\.catch\(\(\) => null\)/,
+    );
+    expect(sdk, '空结果被当成有效诊断（undefined 会渲染成"通道已装配、灰度 NaN%"）').toMatch(
+      /if \(!channel\) return info;/,
+    );
+    expect(sdk, '有更新时也去问通道状态（一次点击为附加读数多付一条 IPC）').toMatch(
+      /if \(info\.degraded !== true && info\.available !== false\) return info;/,
+    );
+    // ④′ 补进来的话必须真上屏：示例把 reason 吞掉，这轮就只是"接口有、行为无"。
+    const example = read('examples/minimal-app/src/main.ts');
+    expect(
+      example,
+      '示例在"没有更新"分支把宿主给的依据吞了（那句"已是最新版本"没有依据支撑就说出口）',
+    ).toMatch(/if \(!info\.available && info\.reason != null\) \{[\s\S]{0,200}依据/);
+
+    // ⑤ 测试侧不留后门：诊断命令必须在诊断后端的能力表里——只写 `[...CONTROLLER_CAPS]`
+    //    的话它永远走 command-not-found 分支，上面那几条"消费者"断言就是空转。
+    //    反向也要钉住：默认后端**不**声明它，缺席路径（宿主没这条命令）才有用例覆盖。
+    const caps = /const CONTROLLER_CAPS = \[[\s\S]*?\];/.exec(shellTest);
+    expect(caps, '测试里找不到控制器能力表').not.toBeNull();
+    expect(
+      caps![0],
+      '默认能力表声明了 host_updater_status——诊断命令缺席这条真实路径就没有用例了',
+    ).not.toContain("'host_updater_status'");
+    const diagCaps = /const diagnosisBackend[\s\S]*?capabilities: \[[\s\S]*?\]/.exec(shellTest);
+    expect(diagCaps, '测试里找不到诊断腿的后端工厂').not.toBeNull();
+    expect(
+      diagCaps![0],
+      '诊断后端没声明 host_updater_status：轮 33 那条腿在测试里根本跑不到',
+    ).toContain("'host_updater_status'");
+    expect(
+      diagCaps![0],
+      '诊断后端没声明 host_updater_check：检查腿与诊断腿必须同处装配才测得出先后顺序',
+    ).toContain("'host_updater_check'");
+    expect(shellTest, '没有用例把"模拟推进"的读数钉死').toContain('模拟推进，未真的装上');
+
+    // ⑥ 文档同步：这一轮的口径必须成文，否则下一个人又会只读 `state`。
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案未成文轮 33').toMatch(/轮 33/);
+    const api = read('docs/api/command-surface.md');
+    expect(api, '命令面文档未同步 stateSimulated：接口文档与线形相反就是宣称漂移').toMatch(
+      /stateSimulated|state_simulated/,
+    );
+  });
+
+  it('轮 34：施工单不得再把已删除、且被门禁反向钉住的形状写成待办', () => {
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    const roadmap = read('docs/architecture/multi-plugin-substrate-roadmap.md');
+    const ledger = read('contracts/orphan-public-api.json');
+
+    // 断链形态：方案文档是**给下一个人看的施工单**。它指路的形状若已被删掉并被门禁反向钉住，
+    // 照着做的人一定撞红——这不是"文档旧了"，是文档与代码互相矛盾，本仓口径里那本身就是一条断链。
+    // A75 是本轮抓到的一条：轮 11 删了拓扑序的两个字段并立了「服务拓扑图不得再抄两份无人执行的
+    // 序」，Batch 2' 那条却仍叫人来一份新方案，且没说明为什么不能照字面做。
+
+    // ① A75：旧处方不得留在待办里，且必须写明"已删除 + 反向门禁 + 诚实前置"。
+    expect(plan, 'A75 又写成"装配走那两个字段"：那是轮 11 删除并被门禁钉死的形状').not.toMatch(
+      /让拓扑序\*\*真的执行\*\*——装配走/,
+    );
+    expect(plan, 'A75 未说明两个字段已在轮 11 删除').toMatch(/这两个字段已在轮 11 删除/);
+    expect(plan, 'A75 未点名反向门禁：下一个人不会知道它会撞红').toMatch(
+      /服务拓扑图不得再抄两份无人执行的序/,
+    );
+    // 复核命令必须自带期望值——零命中的命令不写"期望零命中"，跑的人读不出成败。
+    expect(plan, 'A75 的 rg 复核命令没写期望零命中（命不命中都判不出结论）').toMatch(
+      /期望零命中[\s\S]{0,160}rg -n 'service_startup_order/,
+    );
+
+    // ② A67/A68：新增根命令与 85 条冻结门禁冲突，必须先给"加字段"这条路，再谈显式解冻。
+    const a67 = /^- A67\/A68：([\s\S]*?)(?=\r?\n- )/m.exec(plan);
+    expect(a67, '方案里找不到 A67/A68 那条待办').not.toBeNull();
+    expect(a67![1]!, 'A67/A68 仍把新增 host_* 命令当成无门槛动作').toContain('host_protocol_info');
+    expect(a67![1]!, 'A67/A68 未点名命令面冻结门禁').toMatch(/§46\.3 冻结[\s\S]{0,80}85/);
+    expect(a67![1]!, 'A67/A68 没给出"并入既有命令返回字段"这条不破冻结的路').toMatch(
+      /返回字段[\s\S]{0,120}轮 33/,
+    );
+
+    // ③ 台账与文档必须同批移动：新写进文档的"零消费者"宣称要能在孤儿账里找到条目，
+    //    否则那句话只是另一条无人复核的文字。
+    expect(ledger, 'PluginRegistry 的零消费者宣称未进台账').toMatch(/"symbol": "PluginRegistry"/);
+    expect(ledger, 'ConfigManager 的零消费者宣称未进台账').toMatch(/"symbol": "ConfigManager"/);
+
+    // ④ 历史方案的过期行必须**改判并注明依据**，不能留成"待办的活线"。
+    expect(roadmap, 'M-9 仍把两份注册表当成活的冲突：矛盾载体 bootstrap.ts 已删除').toMatch(
+      /M-9 \| ~~[\s\S]{0,80}已消除（轮 34 复核）/,
+    );
+    expect(
+      roadmap,
+      'roadmap M-9 未点名 bootstrap.ts 已随 W1-b 删除（读者会把死线当活线去"解 P1-1"）',
+    ).toMatch(/bootstrap\.ts[\s\S]{0,140}已随 W1-b 删除/);
+
+    // ⑤ 现状表与待办必须同向：Batch 2 的 A75 行此前把轮 11 删掉的两个字段**当成今天的缺口**
+    //    描述（待办那条教人去做，现状表教人相信它还活着）——同一矛盾的两侧，只钉一侧下一轮
+    //    就会只改一侧。
+    expect(plan, 'A75 现状行又写回"两个序只存字段"：那个载体轮 11 已删').not.toMatch(
+      /两个序只存字段（/,
+    );
+    expect(plan, 'A75 现状行未标轮 11 删除，读者会以为字段仍在').toMatch(
+      /A75 ServiceGraph[\s\S]{0,80}轮 11 删[\s\S]{0,40}轮 34 复核/,
+    );
+    expect(
+      plan,
+      'A75 现状行没写真实缺口（服务级回收动作），只剩一句无对象的"拓扑序不执行"',
+    ).toMatch(/A75 ServiceGraph[\s\S]{0,700}服务级回收动作/);
+  });
+
+  it('轮 35：iframe 桥两侧都必须把错误码带过去，不得塌成通用码', () => {
+    // 断链形态：轮 30 把投递写侧的失败按事实分成四个码，代价只在**调用方能按码分支**
+    // 时才回本。跨 iframe 桥是这条链的最后一跳，此前两半各丢一次——写侧把 handler
+    // 抛出的码硬换成 `SC-9001`，读侧声明了 `error.code` 却只取 `message` 造裸 Error。
+    const bridge = read('packages/tauron-plugin-sdk/src/bridge.ts');
+    const ctx = read('packages/tauron-plugin-sdk/src/plugin-context.ts');
+    const sdkErrors = read('packages/tauron-plugin-sdk/src/errors.ts');
+    const typesErrors = read('packages/types/src/errors.ts');
+    const hostErrors = read('packages/tauron-host/src/errors.ts');
+    const guide = read('docs/api/plugin-development-guide.md');
+    const wire = read('docs/architecture/app-layer-wire.md');
+    const sdkPkg = JSON.parse(read('packages/tauron-plugin-sdk/package.json')) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+
+    // ① 写半：先取错误自带码，再退消息里的码形态，两处都没有才落通用码。
+    expect(bridge, '桥的失败分支又写回通用码字面量').not.toMatch(/code:\s*'SC-9001'/);
+    expect(bridge, '桥不再从抛出的值取码（handler 的码会被抹掉）').toMatch(
+      /const preserved = codeFromThrown\(err\)/,
+    );
+    expect(bridge, '取不到码时必须有显式兜底，而不是 undefined').toMatch(
+      /preserved \?\? PluginErrorCode\.INTERNAL/,
+    );
+    expect(bridge, 'retryable 又变成硬编码常量（与已发布码表冲突）').toMatch(
+      /retryable: isAppRetryable\(code\)/,
+    );
+
+    // ② 读半：桥送回来的码必须交到插件作者手上，不能只留一句消息。
+    expect(ctx, '插件侧又用裸 Error 丢掉 code（声明了字段却没人读）').not.toMatch(
+      /pending\.reject\(\s*new Error\(result\.error\?\.message/,
+    );
+    expect(ctx, '插件侧不再校验码形态就接受任意 code 字段').toMatch(/isCodeLike\(raw\)/);
+    expect(ctx, '拒绝值不带 PluginBridgeError（调用方拿不到 code/fallbackApplied）').toMatch(
+      /new PluginBridgeError\(/,
+    );
+
+    // ③ 形态判据只有一份：定义在 `@tauron/types`，宿主侧只做再导出。
+    //    第二份 `/^SC-\d{4}$/` 会随时间漂移（一侧放宽一侧没放宽），那才是真断链。
+    expect(typesErrors, 'SC-#### 形态定义不在 @tauron/types').toMatch(
+      /export const APP_LAYER_ERROR_CODE_PATTERN = \/\^SC-\\d\{4\}\$\/;/,
+    );
+    expect(hostErrors, '宿主侧又自己定义了一份形态（两份判据必然漂移）').not.toMatch(
+      /const APP_LAYER_ERROR_CODE_PATTERN\s*=/,
+    );
+    expect(hostErrors, '宿主侧没有再导出 @tauron/types 的那份判据').toMatch(
+      /export \{ APP_LAYER_ERROR_CODE_PATTERN, isAppLayerErrorCode, isCodeLike \};/,
+    );
+    expect(sdkErrors, 'SDK 侧出现第二份 SC 形态正则').not.toMatch(/SC-\\d\{4\}/);
+    expect(sdkErrors, 'SDK 没有复用形态判据').toMatch(/isCodeLike/);
+
+    // ④ 为什么判据放 types 而不是 host：依赖方向没变，这条必须一直为真，
+    //    否则"插件包依赖宿主客户端"会把整层宿主实现打进 iframe 产物。
+    for (const field of ['dependencies', 'devDependencies'] as const) {
+      expect(
+        sdkPkg[field]?.['@tauron/host'],
+        `插件 SDK 的 ${field} 出现 @tauron/host：整座宿主客户端会进插件包`,
+      ).toBeUndefined();
+    }
+    for (const f of ['bridge.ts', 'plugin-context.ts', 'errors.ts', 'contract-context.ts']) {
+      expect(
+        read(`packages/tauron-plugin-sdk/src/${f}`),
+        `插件 SDK 的 ${f} 直接 import 了 @tauron/host`,
+      ).not.toMatch(/from '@tauron\/host'/);
+    }
+
+    // ⑤ 重试语义仍各归各表：SDK 只判框架层码（查 `RETRYABLE_ERROR_CODES`），
+    //    宿主 `E_*` 一律不猜——把那份表复制过来就是第三个事实源。
+    expect(sdkErrors, '框架层重试判断没有走词表').toMatch(/isRetryable\(code/);
+    expect(sdkErrors, '宿主 E_* 的重试语义被 SDK 复制了一份（应交给调用方按码决定）').not.toMatch(
+      /E_[A-Z_]+':\s*true|startsWith\('E_'\)\s*\?\s*true/,
+    );
+
+    // ⑥ 层归属用词必须与文档口径同向（`SC-####` 属框架层、`E_*` 属应用层宿主底座）：
+    //    同一个词在两层上反着用，下一个人一定会把码表接错。
+    for (const [name, src] of [
+      ['types/errors.ts', typesErrors],
+      ['tauron-host/errors.ts', hostErrors],
+      ['tauron-plugin-sdk/errors.ts', sdkErrors],
+      ['app-layer-wire.md', wire],
+      ['plugin-development-guide.md', guide],
+    ] as const) {
+      expect(src, `${name} 把 SC-#### 称作应用层（与 overview.md 口径相反）`).not.toMatch(
+        /应用层(错误码|词表|形态|码| `?SC-)/,
+      );
+      expect(src, `${name} 把宿主 E_* 称作框架层（E_* 属应用层宿主底座）`).not.toMatch(
+        /框架层? [`']*E_\*/,
+      );
+    }
+
+    // ⑦ 两半各有一条真实测试：只测写侧等于没测（轮 30 的教训就是"送出桥没人接"）。
+    expect(read('packages/tauron-plugin-sdk/src/bridge.test.ts')).toMatch(
+      /轮 35：handler 抛出的宿主码原样过桥/,
+    );
+    expect(read('packages/tauron-plugin-sdk/src/plugin-context.test.ts')).toMatch(
+      /宿主 24 码原样保留在 reject 上/,
+    );
+
+    // ⑧ 面向插件作者的使用文档必须写明这份形状（码原样、兜底标记、重试判定边界）。
+    expect(guide, '插件开发指南没有记录桥的保码行为（轮 35）').toMatch(
+      /PluginBridgeError[\s\S]{0,700}fallbackApplied/,
+    );
+    expect(wire, '线协议文档未记录 bridge.ts 的保码收口').toMatch(/bridge\.ts[\s\S]{0,200}轮 35/);
+  });
+
+  it('轮 30：投递写侧按事实分码，不得塌成"非法状态迁移"', () => {
+    const leg = read('crates/tauron-adapter/src/process_delivery.rs');
+
+    // 写失败必须交回 `stdin_write_failure` 分流，而不是在 `deliver()` 里就地造一个码——
+    // 就地 map_err 正是上一版把四种事实压成一种的写法。
+    expect(leg, 'deliver() 的写失败又被就地塌成一个码').toMatch(
+      /Err\(e\) => Err\(stdin_write_failure\(pid, &e\)\)/,
+    );
+    expect(leg, '写队列满不再冒充状态错误').toMatch(
+      /ErrorKind::WouldBlock => \(\s*ErrorCode::E_CALL_PENDING_FULL/,
+    );
+    // 通路没了（pid 不在了 / 管道断了）= 租约没了：`E_LEASE_EXPIRED` 的
+    // `AfterReconnect` 是这条事实唯一的机器可读处置，丢掉它调用方只会瞎重试或放弃。
+    expect(leg, 'stdin 通路消失不再报告为状态迁移问题').toMatch(
+      /ErrorKind::NotFound \| std::io::ErrorKind::BrokenPipe => \(\s*ErrorCode::E_LEASE_EXPIRED/,
+    );
+    expect(leg, '帧超协议上界不再冒充状态迁移').toMatch(/_ => \(\s*ErrorCode::E_INVALID_MANIFEST/);
+    // 「这个启动器不能写 sidecar stdin」不是失败，是没有通路：必须落 delivered:false，
+    // 让上层转成 `Unsupported`，与"没有 runtime 不投递"同一个形状。
+    expect(leg, '没有写通路又变成错误码（调用方看不见"这条链路压根没接"）').toMatch(
+      /ErrorKind::Unsupported => Ok\(DeliveryReceipt \{\s*delivered: false/,
+    );
+
+    // deliver() 这一段里不得再出现 `E_STATE_INVALID_TRANSITION`：走到这里状态机**已经
+    // 放行**（调用已进 pending 表），报"非法状态迁移"是对系统的假陈述。
+    const from = leg.indexOf('fn deliver(');
+    expect(from, '找不到 deliver()（门禁定位失败）').toBeGreaterThanOrEqual(0);
+    const body = leg.slice(from, leg.indexOf('fn settle(', from));
+    expect(body.length, 'deliver() 与 settle() 之间没有内容（定位失败）').toBeGreaterThan(0);
+    expect(body, 'deliver() 仍把写侧事实报成非法状态迁移').not.toContain(
+      'ErrorCode::E_STATE_INVALID_TRANSITION',
+    );
   });
 
   it('R2-c：每个 HostBoundary 值要么有生产使用点，要么在诚实清单里（无孤儿值）', () => {
@@ -3651,7 +5384,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     for (const b of listed) {
       expect(prose, `文档未说明 ${b} 为何未接线`).toContain(b);
     }
-    expect(prose, '未记录 bridge.ts 的 SC-9001 硬换码缺口').toMatch(/bridge\.ts/);
+    expect(prose, '未记录 bridge.ts 的保码收口（轮 35）与它为何仍算未接线').toMatch(
+      /bridge\.ts[\s\S]{0,260}轮 35[\s\S]{0,300}依赖方向/,
+    );
     expect(prose, '未说明依赖方向这一未接线原因').toMatch(/依赖方向/);
   });
 
@@ -3931,7 +5666,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(selfScope, '自身范围判定未比较自称 id 与自己').toMatch(/id\s*==\s*me/);
     expect(selfScope, '缺少 None（宿主级/应用级）拒绝分支').toMatch(/None\s*=>/);
 
-    // 第二批的四条主窗专属命令（试启别人的插件、宿主级更新操作）。
+    // 第二批的四条主窗专属命令（试启别人的插件、宿主级更新操作）。判定可以是裸
+    // `require_main_window`，也可以是它的**审计版** `admin_gate`（轮 40 起
+    // download/install 走后者：判定 + 结构化审计留痕，内部仍调 require_main_window）。
     for (const [cmd, core] of [
       ['host_recover_trial_enable', 'cmd_recover_trial_enable_as'],
       ['host_market_check', 'cmd_market_check_as'],
@@ -3941,7 +5678,7 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       expect(fnBody(tauri, cmd), `${cmd} 未从受信传输上下文取得主体`).toMatch(
         /(?:window\.caller\(\)|Caller::from_label\(window\.label\(\)\))/,
       );
-      expect(fnBody(lib, core), `${core} 未做主窗判定`).toMatch(/require_main_window/);
+      expect(fnBody(lib, core), `${core} 未做主窗判定`).toMatch(/require_main_window|admin_gate\(/);
     }
 
     // 设置族不是"整条命令主窗专属"（插件本来就需要读自己的设置），而是**按键**判定。
@@ -4720,5 +6457,936 @@ describe('门禁：设置变更镜像 topic 线值（Rust HOST_SETTINGS_CHANGED_
     );
     const index = read('packages/tauron-app-plugin-sdk/src/index.ts');
     expect(/HOST_SETTINGS_CHANGED_TOPIC/.test(index), 'topic 常量未从公共入口导出').toBe(true);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// 轮 36：通知**推送腿**（Rust `emit` → TS 订阅 → 拉取 → 上屏 → 文档）
+//
+// 这一条的断链形态和轮 31 一模一样：**发出端一路绿灯**。`TauriDispatchSink::send`
+// 每次都把通知 `emit` 到 `NOTIFICATION_TOPIC` 并返回 `Ok`，而轮 36 之前全仓没有任何
+// 代码监听那个 topic，`ShellClient.notificationsList()` 也只有自己的单测在调——
+// 于是"通知已投递"是真的，"用户看得到"是假的，而且不报错。
+// 门禁因此逐段钉住：线值不漂移（①）、订阅方吃的是信号不是正文（②③）、
+// 生命周期收得住（④）、生产消费者还在（⑤⑥）、文档说的是同一件事（⑦）、
+// 没有为这条腿偷偷加命令（⑧，85 条冻结）。
+// ──────────────────────────────────────────────────────────────────────────
+describe('门禁：轮 36 通知推送腿（信号 → 拉取 → 上屏，逐段可核对）', () => {
+  const RUST = 'crates/tauron-adapter/src/tauri.rs';
+  const TOPICS = 'packages/tauron-host/src/host-topics.ts';
+  const CONTROLLER = 'packages/tauron-host/src/shell-controller.ts';
+  const EXAMPLE = 'examples/minimal-app/src/main.ts';
+
+  const rust = read(RUST);
+  const controller = read(CONTROLLER);
+  const example = read(EXAMPLE);
+
+  /** TS 侧源码清单（排除测试：测试里写线值做断言是允许的）。 */
+  function notifSrcFiles(): string[] {
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith('.ts') && !e.name.includes('.test.')) files.push(p);
+      }
+    };
+    for (const base of ['packages', 'examples']) {
+      for (const pkg of readdirSync(join(workspaceRoot, base), { withFileTypes: true })) {
+        if (!pkg.isDirectory()) continue;
+        const src = join(workspaceRoot, base, pkg.name, 'src');
+        if (existsSync(src)) walk(src);
+      }
+    }
+    expect(files.length, '通知腿扫描解析到 0 个 TS 源文件（门禁定位失败）').toBeGreaterThan(10);
+    return files;
+  }
+
+  const rel = (abs: string): string => abs.slice(workspaceRoot.length + 1).replace(/\\/g, '/');
+
+  /** `docs/` 下全部 Markdown（旧事实可能长在任何一个文件里）。 */
+  function docFiles(): string[] {
+    const out: string[] = [];
+    const walk = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith('.md')) out.push(p);
+      }
+    };
+    walk(join(workspaceRoot, 'docs'));
+    expect(out.length, '未解析出 docs 下的 Markdown（门禁定位失败）').toBeGreaterThan(0);
+    return out;
+  }
+
+  it('① topic 线值：Rust 是唯一事实源，TS 侧只有 host-topics.ts 写它', () => {
+    const rustValue = /pub const NOTIFICATION_TOPIC: &str = "([^"]+)"/.exec(rust)?.[1] ?? '';
+    expect(rustValue, '未解析出 Rust 侧 NOTIFICATION_TOPIC（正则失配）').not.toBe('');
+    const tsValue = /export const NOTIFICATION_TOPIC = '([^']+)'/.exec(read(TOPICS))?.[1] ?? '';
+    expect(tsValue, '未解析出 TS 侧 NOTIFICATION_TOPIC（正则失配）').not.toBe('');
+    expect(tsValue, 'TS 镜像与 Rust 线值漂移：监听会静默零命中而发出端仍一路 Ok').toBe(rustValue);
+
+    // 第二份字面量就是下一次漂移的起点，所以这里数的是**出现位置**而不是取值。
+    const literals = notifSrcFiles()
+      .filter((p) => readFileSync(p, 'utf8').includes('tauron://notification'))
+      .map(rel)
+      .sort();
+    expect(literals, 'tauron://notification 的字面量只许写在 host-topics.ts').toEqual([TOPICS]);
+
+    const index = read('packages/tauron-host/src/index.ts');
+    expect(
+      /export \{ NOTIFICATION_TOPIC \} from '\.\/host-topics\.js'/.test(index),
+      '线值常量未从 @tauron/host 公共入口导出（接入方只能硬编码）',
+    ).toBe(true);
+  });
+
+  it('② 订阅的是常量、回调只吃信号、正文一律来自拉取', () => {
+    expect(
+      /import \{ NOTIFICATION_TOPIC \} from '\.\/host-topics\.js'/.test(controller),
+      '控制器没有从 host-topics 取线值',
+    ).toBe(true);
+    expect(
+      /\.listen\(\s*NOTIFICATION_TOPIC\s*,\s*\(\)\s*=>/.test(controller),
+      '通知腿没有订阅 NOTIFICATION_TOPIC，或回调又开始接收载荷',
+    ).toBe(true);
+    expect(
+      /onNotification\?: \(snapshot: NotificationsListResult\) => void \| Promise<void>/.test(
+        controller,
+      ),
+      'onNotification 的入参不再是拉取快照：正文可能又从事件载荷里取',
+    ).toBe(true);
+    expect(
+      /this\.client\.notificationsList\(this\._notificationLimit\)/.test(controller),
+      '收到信号后没有拉 host_notifications_list（或没有按 notificationLimit 拉）',
+    ).toBe(true);
+    // 反向：这条腿不许从事件载荷读任何内容字段。
+    expect(
+      /payload[^\n]{0,24}(title|body|message)/.test(controller),
+      '通知腿开始从事件载荷渲染正文 = 跨插件泄露的老路（轮 11）',
+    ).toBe(false);
+    expect(
+      /listen\(\s*NOTIFICATION_TOPIC\s*,\s*\(\w/.test(controller),
+      'NOTIFICATION_TOPIC 的回调开始接收参数：载荷里没有正文，参数就是误用的入口',
+    ).toBe(false);
+  });
+
+  it('③ Rust 广播载荷的字段集合封闭（正文不可能混进来）', () => {
+    const body =
+      /fn notification_payload[\s\S]*?serde_json::json!\(\{([\s\S]*?)\n\s*\}\)/.exec(rust)?.[1] ??
+      '';
+    const keys = [...body.matchAll(/"([A-Za-z]+)":/g)].map((m) => m[1]!).sort();
+    expect(keys.length, '未解析出 notification_payload 字段（正则失配）').toBeGreaterThan(0);
+    expect(keys, '通知信号载荷多了字段：广播给所有 webview 的只能是信号与归属').toEqual([
+      'id',
+      'kind',
+      'pluginId',
+      'ts',
+    ]);
+  });
+
+  it('④ 生命周期与突发合并：退订、代际令牌、补拉都在', () => {
+    expect(
+      /if \(this\._notifGeneration !== generation\) \{\s*unlisten\(\);/.test(controller),
+      '订阅回帧晚于 stop() 时没有就地退订（悬挂监听）',
+    ).toBe(true);
+    expect(/this\._notifGeneration\+\+/.test(controller), 'stop() 没有推进代际令牌').toBe(true);
+    expect(/_notifDirty = true/.test(controller), '并发信号没有合并标记').toBe(true);
+    expect(
+      /if \(this\._notifDirty\) \{/.test(controller),
+      '合并标记设了却从不补拉：突发窗口的最后一条通知会丢',
+    ).toBe(true);
+    for (const exit of ['notification.subscribe', 'notification.pull', 'notification.render']) {
+      expect(controller, `失败出口缺少 ${exit}：这一段的错会被并进别处或直接静默`).toContain(exit);
+    }
+    // 「渲染抛错」与「拉取失败」必须是两个出口（轮 36 被测试逼出来的那条区分）。
+    expect(
+      /catch \(err\) \{\s*this\._onError\(err, 'notification\.render'\)/.test(controller),
+      '接入方回调的同步抛错没有被单独归到 notification.render',
+    ).toBe(true);
+  });
+
+  it('⑤ 生产消费者：示例接的是控制器那条腿，不是自己监听 topic', () => {
+    expect(
+      /onNotification: \(snapshot\) => \{/.test(example),
+      '示例没有将 onNotification 接上',
+    ).toBe(true);
+    expect(
+      /item\.read \|\| surfacedNotifications\.has\(item\.id\)/.test(example),
+      '示例不再去重',
+    ).toBe(true);
+    expect(/SURFACED_NOTIFICATION_CAP = \d+/.test(example), '去重集合没有上界').toBe(true);
+    expect(
+      /toast\.push\?\.\(\{ title: item\.title, message: item\.message/.test(example),
+      '示例没有把快照正文上屏',
+    ).toBe(true);
+    expect(
+      /tauron:\/\/notification/.test(example),
+      '示例自己订阅 topic = 绕过控制器的合并与退订腿',
+    ).toBe(false);
+  });
+
+  it('⑥ 读端 API 不再是孤儿（只有自己的单测在调）', () => {
+    const pullers = notifSrcFiles()
+      .filter((p) => /\.notificationsList\(/.test(readFileSync(p, 'utf8')))
+      .map(rel)
+      .sort();
+    expect(pullers, 'notificationsList() 又回到零生产消费者').toEqual([CONTROLLER]);
+
+    const rendered = notifSrcFiles()
+      .filter((p) => /(^|[^_A-Za-z])onNotification: \(/.test(readFileSync(p, 'utf8')))
+      .map(rel)
+      .sort();
+    expect(rendered, 'onNotification 没有真实渲染方（轮 36 的断链形态）').toEqual([EXAMPLE]);
+
+    const tests = read('packages/tauron-host/src/shell-controller.test.ts');
+    expect(tests).toContain("it('start() 订阅 NOTIFICATION_TOPIC");
+    expect(tests).toContain('连发 5 条信号合并');
+  });
+
+  it('⑦ 文档与 Rust 注释说的是同一件事（旧事实不许回归）', () => {
+    const readme = read('packages/tauron-host/README.md');
+    expect(readme).toContain('NOTIFICATION_TOPIC');
+    expect(readme).toContain('onNotification');
+    expect(readme).toContain('notification.render');
+
+    const v4 = read(
+      'docs/Tauron-Universal-Industrial-Application-Substrate-Final-Architecture-V4.md',
+    );
+    const w11 = /^\| W11 Message Plane push .*$/m.exec(v4)?.[0] ?? '';
+    expect(w11, '未解析出 V4 的 W11 行（正则失配）').not.toBe('');
+    expect(w11, 'W11 行没有逐条区分有监听方 / 零监听方').toContain('零监听方');
+    expect(w11).toContain('tauron://dialog-degraded');
+    expect(w11).toContain('tauron://deep-link-registration');
+
+    // Rust 侧的逐 topic 监听方清单与文档同口径（两处各写一份就会分叉）。
+    const invStart = rust.indexOf('哪些 `emit` 真的有人在听');
+    const invEnd = rust.indexOf('本模块要求 `tauri` 依赖启用');
+    expect(invStart, 'Rust 侧的逐 topic 监听方清单丢失').toBeGreaterThan(-1);
+    expect(invEnd, 'Rust 侧监听方清单的结束锚点丢失').toBeGreaterThan(invStart);
+    const inventory = rust.slice(invStart, invEnd);
+    for (const topic of ['NOTIFICATION_TOPIC', 'DIALOG_DEGRADED_TOPIC', 'DEEP_LINK_NATIVE_TOPIC']) {
+      expect(inventory, `监听方清单没有覆盖 ${topic}`).toContain(topic);
+    }
+    expect(inventory).toContain('零监听方');
+
+    // 「DispatchSink 未接线」是旧事实：任何文档行把它和「未接线」写在一起都是回归。
+    const stale = docFiles()
+      .map(rel)
+      .filter((f) =>
+        readFileSync(resolve(workspaceRoot, f), 'utf8')
+          .split('\n')
+          .some((line) => /DispatchSink/.test(line) && /未接线/.test(line)),
+      );
+    expect(
+      stale,
+      `这些文档仍宣称 DispatchSink 未接线（与 tauri.rs 的实现矛盾）: ${stale.join(', ')}`,
+    ).toEqual([] as string[]);
+    expect(
+      /notify_sink\.set\(std::sync::Arc::new\(TauriDispatchSink::new\(app\.clone\(\)\)\)\)/.test(
+        rust,
+      ),
+      '真实装配不再注入 TauriDispatchSink（那句「已接线」就成了空话）',
+    ).toBe(true);
+  });
+
+  it('⑧ 这条腿没有新增命令：host 侧 host_* 字面量全在命令面文档里', () => {
+    const surface = read('docs/api/command-surface.md');
+    const names = new Set<string>();
+    for (const p of notifSrcFiles()) {
+      if (!rel(p).startsWith('packages/tauron-host/src/')) continue;
+      for (const m of readFileSync(p, 'utf8').matchAll(/'(host_[a-z0-9_]+)'/g)) {
+        // 前缀形态（`startsWith('host_stream_')`）不是命令名。
+        if (!m[1]!.endsWith('_')) names.add(m[1]!);
+      }
+    }
+    expect(names.size, '未解析出 host 侧命令字面量（门禁定位失败）').toBeGreaterThan(50);
+    const missing = [...names].filter((c) => !surface.includes(c)).sort();
+    expect(missing, `命令面文档缺这些命令: ${missing.join(', ')}`).toEqual([] as string[]);
+    expect(surface, '通知腿的权威出口未登记').toContain('host_notifications_list');
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// 轮 37：菜单 / 托盘**点击腿**（Rust 共享路由表 → `AppHandle::emit` → TS `listen` → 文档）
+//
+// 断链形态比轮 36 更坏：轮 36 是「真发了但没人听」，轮 37 是「文档指着一条根本不通
+// 的路」。四处叙述（`lib.rs` 的字段注释、`tauri.rs` 的命令注释、`shell-client.ts`、
+// 由它们生成的 `docs/api/command-surface.md`）都写着点击「经 `host_events_*` 总线
+// 回传、用 `host_events_drain` 取件」，而实现一直是 `AppHandle::emit`——照文档接线
+// 的人会守着一条永远不会有菜单帧的队列，且不报错。同轮还查出两条更隐蔽的：托盘那条
+// lane **从未登记**路由（`TauriTraySink` 只把菜单挂上托盘，监听查不到 id），托盘点击
+// 被静默丢弃；`ShellClient` 六条菜单/托盘方法零生产消费者、零测试。
+// 门禁逐段钉住：线值与 lane 词表不漂移（①）、共享路由表只剩唯一一处查询且两条
+// lane 各自整体替换（②）、旧口径与「宿主会补默认 topic」不许回归（③）、回传帧字段
+// 两侧同集合（④）、生产消费者还在且只有一处（⑤）、Rust/TS 两侧都有测试（⑥）、
+// 文档镜像同一件事（⑦）、这条腿没新增命令（⑧，85 条冻结）。
+// ──────────────────────────────────────────────────────────────────────────
+describe('门禁：轮 37 菜单/托盘点击腿（路由 → emit → listen，逐段可核对）', () => {
+  const ROUTES = 'crates/tauron-adapter/src/menu_routes.rs';
+  const RUST = 'crates/tauron-adapter/src/tauri.rs';
+  const TOPICS = 'packages/tauron-host/src/host-topics.ts';
+  const CLIENT = 'packages/tauron-host/src/shell-client.ts';
+  const INDEX = 'packages/tauron-host/src/index.ts';
+  const EXAMPLE = 'examples/minimal-app/src/main.ts';
+  const SURFACE = 'docs/api/command-surface.md';
+
+  const routes = read(ROUTES);
+  const rust = read(RUST);
+  const client = read(CLIENT);
+  const example = read(EXAMPLE);
+
+  const rel = (abs: string): string => abs.slice(workspaceRoot.length + 1).replace(/\\/g, '/');
+
+  /** 折叠空白：Rust 的 `///` 会把一句话拆到多行，禁止的口径必须跨行也能抓到。 */
+  const flat = (s: string): string => s.replace(/\s+/g, '');
+
+  /** 扫一遍目录里符合后缀的文件（排除测试：测试里写线值做断言是允许的）。 */
+  function walk(dir: string, out: string[], accept: (name: string) => boolean): void {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p, out, accept);
+      else if (accept(e.name)) out.push(p);
+    }
+  }
+
+  /** `packages/<pkg>/src` 与 `examples/<pkg>/src` 下的 TS 源文件。 */
+  function menuSrcFiles(): string[] {
+    const files: string[] = [];
+    for (const base of ['packages', 'examples']) {
+      for (const pkg of readdirSync(join(workspaceRoot, base), { withFileTypes: true })) {
+        if (!pkg.isDirectory()) continue;
+        const src = join(workspaceRoot, base, pkg.name, 'src');
+        if (existsSync(src)) walk(src, files, (n) => n.endsWith('.ts') && !n.includes('.test.'));
+      }
+    }
+    expect(files.length, '点击腿扫描解析到 0 个 TS 源文件（门禁定位失败）').toBeGreaterThan(10);
+    return files;
+  }
+
+  /** `crates/<pkg>/src` 下的 Rust 源文件（`target/` 里的旧发布副本不在扫描范围）。 */
+  function rustSrcFiles(): string[] {
+    const files: string[] = [];
+    for (const pkg of readdirSync(join(workspaceRoot, 'crates'), { withFileTypes: true })) {
+      if (!pkg.isDirectory()) continue;
+      const src = join(workspaceRoot, 'crates', pkg.name, 'src');
+      if (existsSync(src)) walk(src, files, (n) => n.endsWith('.rs'));
+    }
+    expect(files.length, '点击腿扫描解析到 0 个 Rust 源文件（门禁定位失败）').toBeGreaterThan(5);
+    return files;
+  }
+
+  /** `docs/` 下全部 Markdown（旧事实可能长在任何一个文件里）。 */
+  function docFiles(): string[] {
+    const out: string[] = [];
+    walk(join(workspaceRoot, 'docs'), out, (n) => n.endsWith('.md'));
+    expect(out.length, '未解析出 docs 下的 Markdown（门禁定位失败）').toBeGreaterThan(0);
+    return out;
+  }
+
+  /** 全体扫描面：TS 源 + Rust 源 + docs Markdown。 */
+  function clickLegScanTargets(): string[] {
+    return [...menuSrcFiles(), ...rustSrcFiles(), ...docFiles()];
+  }
+
+  it('① topic 线值与 lane 词表：Rust 是唯一事实源，TS 侧只有 host-topics.ts 写字面量', () => {
+    const rustValue = /pub const MENU_CLICK_TOPIC: &str = "([^"]+)"/.exec(routes)?.[1] ?? '';
+    expect(rustValue, '未解析出 Rust 侧 MENU_CLICK_TOPIC（正则失配）').not.toBe('');
+    const tsValue = /export const MENU_CLICK_TOPIC = '([^']+)'/.exec(read(TOPICS))?.[1] ?? '';
+    expect(tsValue, '未解析出 TS 侧 MENU_CLICK_TOPIC（正则失配）').not.toBe('');
+    expect(tsValue, 'TS 镜像与 Rust 线值漂移：前端监听会静默零命中，而 emit 端一路返回 Ok').toBe(
+      rustValue,
+    );
+
+    // 第二份字面量就是下一次漂移的起点，所以这里数的是**出现位置**。
+    const tsLiterals = menuSrcFiles()
+      .filter((p) => readFileSync(p, 'utf8').includes('tauron://menu-click'))
+      .map(rel)
+      .sort();
+    expect(tsLiterals, 'tauron://menu-click 的字面量只许写在 host-topics.ts').toEqual([TOPICS]);
+    const rustLiterals = rustSrcFiles()
+      .filter((p) => readFileSync(p, 'utf8').includes('tauron://menu-click'))
+      .map(rel)
+      .sort();
+    expect(rustLiterals, 'Rust 侧的字面量只许写在 menu_routes.rs').toEqual([ROUTES]);
+
+    const index = read(INDEX);
+    expect(
+      /export \{ MENU_CLICK_TOPIC \} from '\.\/host-topics\.js'/.test(index),
+      '线值常量未从 @tauron/host 公共入口导出（接入方只能硬编码）',
+    ).toBe(true);
+
+    // lane 词表：`MenuLane::as_str()` 的取值就是 `source` 的取值，两侧各写一份必漂移。
+    const laneBody =
+      /pub fn as_str\(self\) -> &'static str \{\s*match self \{([\s\S]*?)\n\s*\}/.exec(
+        routes,
+      )?.[1] ?? '';
+    const rustSources = [...laneBody.matchAll(/=> "([a-z]+)"/g)].map((m) => m[1]!).sort();
+    expect(rustSources.length, '未解析出 MenuLane::as_str 的取值（正则失配）').toBeGreaterThan(1);
+    const union = /export type MenuClickSource = ([^;]+);/.exec(client)?.[1] ?? '';
+    const tsSources = [...union.matchAll(/'([a-z]+)'/g)].map((m) => m[1]!).sort();
+    expect(tsSources, 'TS MenuClickSource 与 Rust MenuLane::as_str() 词表漂移').toEqual(
+      rustSources,
+    );
+  });
+
+  it('② 只剩一张共享路由表：一次点击一个出口，两条 lane 各自整体替换', () => {
+    // 监听只注册一次（Tauri 只有一张全局菜单监听表），且查询点唯一。
+    expect(
+      [...rust.matchAll(/\.on_menu_event\(/g)].length,
+      '全局菜单监听注册了不止一次：同一次点击会被 emit 两遍',
+    ).toBe(1);
+    expect(
+      [...rust.matchAll(/menu_routes\(\)\.lookup\(&id\)/g)].length,
+      '路由表查询点必须唯一：两处查询就会有两套 lane 语义',
+    ).toBe(1);
+    expect(/crate::menu_routes\(\)\.lookup\(&id\)/.test(rust), '监听没有查共享路由表').toBe(true);
+    expect(/"source": lane\.as_str\(\)/.test(rust), 'source 不再来自命中 lane').toBe(true);
+
+    // 应用菜单 lane：建成才登记（失败不登记），reset 只失效这一条。
+    expect(
+      /crate::menu_routes\(\)\.replace\(lane, crate::menu_routes_of\(spec\)\)/.test(rust),
+      '菜单没有按 lane 整体替换路由（累加会让旧 id 一直可点）',
+    ).toBe(true);
+    expect(
+      /crate::menu_routes\(\)\.replace\(crate::MenuLane::AppMenu, HashMap::new\(\)\)/.test(rust),
+      'menu_reset 没有清空应用菜单那条 lane',
+    ).toBe(true);
+
+    // 托盘 lane：轮 37 之前**这一整段都不存在**，托盘点击因此被静默丢弃。
+    // create 的 needle 必须盯住它自己那一行：`set_menu` 也往同一条 lane 替换，
+    // 只写 `replace(\s*crate::MenuLane::TrayMenu,` 会被它顶包（变异验证时抓到过）。
+    expect(
+      /crate::menu_routes\(\)\.replace\(\s*crate::MenuLane::TrayMenu,\s*spec\.menu\.as_ref\(\)\.map\(crate::menu_routes_of\)\.unwrap_or_default\(\),/.test(
+        rust,
+      ),
+      'tray_create 没有登记托盘 lane（轮 37 的断链：托盘点了没反应；无菜单时登记空表，旧路由一起失效）',
+    ).toBe(true);
+    expect(
+      // 钉形状不钉同一行：rustfmt 会在 `.replace` 前折行（`cargo fmt` 复跑时抓到过，
+      // 与轮 37 记的"变异锚点会腐坏"同型——门禁 needle 自己也会被格式化腐坏）。
+      /crate::menu_routes\(\)\s*\.replace\(\s*crate::MenuLane::TrayMenu,\s*crate::menu_routes_of\(spec\)\)/.test(
+        rust,
+      ),
+      'tray_set_menu 没有登记托盘 lane',
+    ).toBe(true);
+    expect(
+      /crate::menu_routes\(\)\.replace\(crate::MenuLane::TrayMenu, HashMap::new\(\)\)/.test(rust),
+      'tray_remove 没有清空托盘 lane（托盘没了还留着路由）',
+    ).toBe(true);
+    // 反向：sink 结构体不许再各存一份私有路由表（那正是旧实现漏掉托盘监听的那一类分叉）。
+    expect(/self\.routes\.lock\(\)/.test(rust), 'sink 又回到了私有路由表').toBe(false);
+    expect(/routes_for_handler/.test(rust), '又出现了私有路由表的读取口').toBe(false);
+
+    // 装配：两个 sink 都必须注入——注册全局监听的只有 TauriMenuSink::new，
+    // 漏掉托盘 sink 则托盘不存在，漏掉菜单 sink 则两条 lane 都没有出口。
+    for (const needle of [
+      'substrate.menu_sink = std::sync::Arc::new(TauriMenuSink::new(app.clone()));',
+      'substrate.tray_sink = std::sync::Arc::new(TauriTraySink::new(app.clone()));',
+    ]) {
+      expect(rust, `装配少了这一句: ${needle}`).toContain(needle);
+    }
+  });
+
+  it('③ 旧口径不许回归（transport 与「宿主会补默认 topic」都不行）', () => {
+    const bans: Array<[string, RegExp]> = [
+      ['「菜单点击经事件总线回传」', /事件总线回传/],
+      ['「用既有事件总线」', /用既有事件总线/],
+      ['「与其余事件帧走同一条通路」', /与其余事件帧走同一条通路/],
+      [
+        '「MENU_CLICK_TOPIC 是宿主补的缺省 topic」（实现只对显式填了 event 的项发帧）',
+        /缺省topic|缺省值.{0,20}MENU_CLICK_TOPIC/,
+      ],
+    ];
+    for (const [label, re] of bans) {
+      const offenders = clickLegScanTargets()
+        .filter((p) => re.test(flat(readFileSync(p, 'utf8'))))
+        .map(rel)
+        .sort();
+      expect(
+        offenders,
+        `这些位置又写下了旧事实「${label}」（与 menu_routes.rs / tauri.rs 的实现矛盾）: ${offenders.join(', ')}`,
+      ).toEqual([] as string[]);
+    }
+    // 正向：唯一事实源里必须留着可核对的真口径。
+    expect(rust, 'host_menu_set 的命令注释丢了「只有显式填了 event」').toContain('只有显式填了');
+    expect(read(SURFACE), '命令面文档丢了「不经 host_events_* 总线」这条区分').toContain(
+      '取不到菜单点击',
+    );
+  });
+
+  it('④ 回传帧字段：Rust emit 与 TS MenuClickFrame 同集合', () => {
+    const emitBody =
+      /app\.emit\(\s*&topic,\s*serde_json::json!\(\{([\s\S]*?)\n\s*\}\)/.exec(rust)?.[1] ?? '';
+    const rustFields = [...emitBody.matchAll(/"([A-Za-z]+)":/g)].map((m) => m[1]!).sort();
+    expect(rustFields.length, '未解析出 emit 载荷字段（正则失配）').toBeGreaterThan(0);
+
+    const frameBody = /export interface MenuClickFrame \{([\s\S]*?)\n\}/.exec(client)?.[1] ?? '';
+    const tsFields = [...frameBody.matchAll(/^ {2}(\w+):/gm)].map((m) => m[1]!).sort();
+    expect(tsFields.length, '未解析出 MenuClickFrame 字段（正则失配）').toBeGreaterThan(0);
+    expect(tsFields, 'TS MenuClickFrame 与宿主 emit 载荷字段漂移').toEqual(rustFields);
+    expect(rustFields, '回传帧多了正文字段：点击回传只含 id / 来源 / native 标记').toEqual([
+      'id',
+      'native',
+      'source',
+    ]);
+    expect(/"native": true/.test(rust), 'native 标记不再恒为 true').toBe(true);
+  });
+
+  /** 去掉注释，只留代码：文档里的示例调用形状不能算生产消费者。 */
+  const stripComments = (s: string): string =>
+    s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
+
+  /** 挂过监听的文件（只看代码，注释里的 `backend.listen(…)` 示例不计）。 */
+  function clickListeners(): string[] {
+    return menuSrcFiles()
+      .filter((p) => /\.listen\(\s*MENU_CLICK_TOPIC/.test(stripComments(readFileSync(p, 'utf8'))))
+      .map(rel)
+      .sort();
+  }
+
+  it('⑤ 生产消费者：示例挂了接收方，也真的调了六条命令', () => {
+    expect(clickListeners(), '监听方又回到零（轮 37 的断链形态：emit 一路 Ok，没人收）').toEqual([
+      EXAMPLE,
+    ]);
+    expect(
+      [...stripComments(example).matchAll(/\.listen\(\s*MENU_CLICK_TOPIC/g)].length,
+      '示例的监听不止挂一次：重复订阅会让一次点击渲染两遍',
+    ).toBe(1);
+    expect(/const frame = payload as MenuClickFrame/.test(example), '示例没按帧类型解码').toBe(
+      true,
+    );
+    // 订阅失败必须有出口：`TauriBackend.listen()` 原样返回 Tauri 的 `listen()` Promise，
+    // 事件系统不可用时会被拒绝；裸 `void` 只会留下 unhandled rejection，于是「前端接上了
+    // 点击回传」这句又变成核对不了的承诺。钉的是 catch 体内那句上屏文案——把 catch 删掉、
+    // 或把它移出 `menu-out`（只丢 console）都会变红。
+    expect(
+      flat(stripComments(example)).includes(
+        "}).catch((err:Error)=>{log('menu-out',`点击回传腿未挂上",
+      ),
+      '点击腿的订阅失败没有上屏出口（unhandled rejection 等于没人知道腿没挂上）',
+    ).toBe(true);
+    for (const id of ['menu-about', 'menu-minimize', 'tray-minimize']) {
+      expect(example, `示例没接住 ${id} 这次点击`).toContain(`'${id}'`);
+    }
+
+    const refs = menuSrcFiles()
+      .filter((p) => /MENU_CLICK_TOPIC/.test(readFileSync(p, 'utf8')))
+      .map(rel)
+      .sort();
+    expect(refs, 'MENU_CLICK_TOPIC 的引用面变了（新增引用点要一并进消费者冻结）').toEqual(
+      [TOPICS, INDEX, CLIENT, EXAMPLE].sort(),
+    );
+
+    for (const method of [
+      'menuSet',
+      'menuPopup',
+      'menuReset',
+      'trayCreate',
+      'traySetMenu',
+      'trayRemove',
+    ]) {
+      const callers = menuSrcFiles()
+        .filter((p) => new RegExp(`\\.${method}\\(`).test(stripComments(readFileSync(p, 'utf8'))))
+        .map(rel)
+        .sort();
+      expect(callers, `ShellClient.${method}() 又没有生产消费者了（只剩单测在调）`).toEqual([
+        EXAMPLE,
+      ]);
+    }
+  });
+
+  it('⑥ 两侧都有测试：Rust 路由表与 TS 客户端不是单边绿', () => {
+    const testNames = [...routes.matchAll(/#\[test\]\s*\n\s*fn ([^\s(]+)/g)].map((m) => m[1]!);
+    expect(
+      [...routes.matchAll(/#\[test\]/g)].length,
+      'menu_routes.rs 的 #[test] 少于 6 个（路由表行为无人核对）',
+    ).toBeGreaterThanOrEqual(6);
+    expect(testNames.length, '#[test] 与 fn 名没解析全（正则失配）').toBeGreaterThanOrEqual(6);
+    for (const name of [
+      'lane_两道互不干扰',
+      'replace_旧_id_随之失效',
+      'menu_routes_of_只登记带_event_的项',
+      'lane_as_str_与_ts_词表一致',
+    ]) {
+      expect(testNames, `路由表缺这个用例: ${name}`).toContain(name);
+    }
+
+    const tests = read('packages/tauron-host/src/shell-client.test.ts');
+    for (const name of [
+      '六条命令打到对应命令名，spec 原样透传',
+      '缺省装配的 Unsupported 原样交给调用方（不造成功）',
+      '点击回传经事件 topic 送达，退订后不再收帧',
+    ]) {
+      expect(tests, `@tauron/host 缺这个用例: ${name}`).toContain(name);
+    }
+  });
+
+  it('⑦ 文档镜像同一件事（README / roadmap / 接入指南 / 命令面）', () => {
+    const readme = read('packages/tauron-host/README.md');
+    for (const needle of ['MENU_CLICK_TOPIC', 'MenuClickFrame', 'traySetMenu', '不替你猜']) {
+      expect(readme, `README 丢了点击腿的口径: ${needle}`).toContain(needle);
+    }
+    // 光有类型名不够：README 必须给出**解码形状**，否则接入方抄不出可运行的接收方。
+    expect(readme, 'README 的示例没把载荷解码成 MenuClickFrame').toContain(
+      'payload as MenuClickFrame',
+    );
+
+    const surface = read(SURFACE);
+    const row = (cmd: string): string =>
+      surface.split('\n').find((l) => l.startsWith(`| \`${cmd}\` `)) ?? '';
+    const setRow = row('host_menu_set');
+    expect(setRow, '未解析出 host_menu_set 行（正则失配）').not.toBe('');
+    for (const needle of ['MenuClickFrame', 'AppHandle::emit', '只有显式填了']) {
+      expect(setRow, `host_menu_set 行丢了点击腿口径: ${needle}`).toContain(needle);
+    }
+    const trayRow = row('host_tray_create');
+    expect(trayRow, '未解析出 host_tray_create 行（正则失配）').not.toBe('');
+    expect(trayRow, 'host_tray_create 行没说明托盘共用那一个全局监听').toContain('source: "tray"');
+    const resetRow = row('host_menu_reset');
+    expect(resetRow, '未解析出 host_menu_reset 行（正则失配）').not.toBe('');
+    expect(resetRow, 'host_menu_reset 行没说明只失效 AppMenu lane').toContain('MenuLane::AppMenu');
+
+    const roadmap = read('docs/architecture/multi-plugin-substrate-roadmap.md');
+    expect(roadmap, 'roadmap 没指向真实实现（MenuRouteTable）').toContain('MenuRouteTable');
+    expect(
+      /回调链.{0,20}仍是缺口/.test(flat(roadmap)),
+      'roadmap 又把已存在的点击回传写成缺口',
+    ).toBe(false);
+
+    const adoption = read('docs/integration/incremental-adoption.md');
+    expect(adoption, '接入指南没说明点击走 MenuRouteTable 而不是总线').toContain(
+      'crate::MenuRouteTable',
+    );
+  });
+
+  it('⑧ 这条腿没有新增命令：提案名 host_menu_on_select 仍然不存在', () => {
+    for (const p of rustSrcFiles()) {
+      expect(
+        readFileSync(p, 'utf8'),
+        `${rel(p)} 出现了 host_menu_on_select：85 条命令面是冻结的，点击腿靠的是路由表`,
+      ).not.toMatch(/fn host_menu_on_select|host_menu_on_select\s*\(/);
+    }
+    expect(read(SURFACE), '命令面文档登记了一条不存在的命令').not.toContain('host_menu_on_select');
+    const surface = read(SURFACE);
+    for (const cmd of [
+      'host_menu_set',
+      'host_menu_popup',
+      'host_menu_reset',
+      'host_tray_create',
+      'host_tray_set_menu',
+      'host_tray_remove',
+    ]) {
+      expect(surface, `命令面文档缺 ${cmd}`).toContain(cmd);
+    }
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// 轮 38：宿主 `emit` 的 topic **词表**两侧同源（把轮 36/37 的逐条规矩推广到全量）
+//
+// 轮 36 为 `tauron://notification` 立过"线值只许写在一个文件"，轮 37 又为
+// `tauron://menu-click` 立了一次——两条都是出事之后**逐条**补的。本轮把整张表摊开查，
+// 同一形状还在：深链接投递腿在 TS 侧压根没有常量，监听点写着裸字面量，宿主改一个字
+// 就静默零命中而 `emit` 照旧成功；两条诊断帧则连镜像都没有，接入方只能手打字符串。
+// 所以规则改成覆盖全量：Rust 侧每一个 `pub const *TOPIC*` 必须归入下面三层之一，
+// 成员集合逐字冻结——新增一条 topic 而不进表，①直接红。
+// ──────────────────────────────────────────────────────────────────────────
+describe('门禁：轮 38 topic 词表两侧同源（Rust 每个 *_TOPIC 都要归层，线值只许一份镜像）', () => {
+  const TOPICS = 'packages/tauron-host/src/host-topics.ts';
+  const HOST_INDEX = 'packages/tauron-host/src/index.ts';
+  const SDK_CREATE = 'packages/tauron-app-plugin-sdk/src/createPlugin.ts';
+  const SDK_INDEX = 'packages/tauron-app-plugin-sdk/src/index.ts';
+  const DL_CLIENT = 'packages/tauron-host/src/deep-link-client.ts';
+  const SHELL_CTRL = 'packages/tauron-host/src/shell-controller.ts';
+  const EXAMPLE = 'examples/minimal-app/src/main.ts';
+  const TAURI = 'crates/tauron-adapter/src/tauri.rs';
+
+  /** A 层：宿主跨进程 `emit` → webview `listen` 的事件，TS 镜像必须在 host-topics.ts。 */
+  const TIER_A = [
+    'NOTIFICATION_TOPIC',
+    'MENU_CLICK_TOPIC',
+    'DEEP_LINK_TOPIC',
+    'DIALOG_DEGRADED_TOPIC',
+    'DEEP_LINK_NATIVE_TOPIC',
+  ];
+  /** B 层：`host_events_*` 拉模型总线里的宿主所有 topic，TS 镜像在 app-plugin-sdk。 */
+  const TIER_B = ['HOST_SETTINGS_CHANGED_TOPIC'];
+  /** C 层：拼 topic 用的前/后缀片段，不是完整 topic（线值单点由 Rust 侧自己保证）。 */
+  const TIER_C = ['CALL_TOPIC_PREFIX', 'CALL_TOPIC_SUFFIX', 'EVENT_TOPIC_PREFIX'];
+
+  const relOf = (p: string): string => p.slice(workspaceRoot.length + 1).replace(/\\/g, '/');
+  const flat = (s: string): string => s.replace(/\s+/g, '');
+  const stripComments = (s: string): string =>
+    s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
+
+  function tsSrcFiles(): string[] {
+    const out: string[] = [];
+    const walk = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith('.ts') && !e.name.includes('.test.')) out.push(p);
+      }
+    };
+    for (const base of ['packages', 'examples']) {
+      for (const pkg of readdirSync(join(workspaceRoot, base), { withFileTypes: true })) {
+        if (!pkg.isDirectory()) continue;
+        const src = join(workspaceRoot, base, pkg.name, 'src');
+        if (existsSync(src)) walk(src);
+      }
+    }
+    expect(out.length, '轮 38 解析到 0 个 TS 源文件（门禁定位失败）').toBeGreaterThan(10);
+    return out;
+  }
+
+  function rustSrcFiles(): string[] {
+    const out: string[] = [];
+    const walk = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith('.rs')) out.push(p);
+      }
+    };
+    for (const pkg of readdirSync(join(workspaceRoot, 'crates'), { withFileTypes: true })) {
+      if (!pkg.isDirectory()) continue;
+      const src = join(workspaceRoot, 'crates', pkg.name, 'src');
+      if (existsSync(src)) walk(src);
+    }
+    expect(out.length, '轮 38 解析到 0 个 Rust 源文件（门禁定位失败）').toBeGreaterThan(5);
+    return out;
+  }
+
+  /** Rust 侧 `pub const *_TOPIC*` 全集：名字 → 线值 + 声明文件（解析，不硬写）。 */
+  function rustTopicConsts(): Map<string, { value: string; file: string }> {
+    const m = new Map<string, { value: string; file: string }>();
+    for (const p of rustSrcFiles()) {
+      const s = readFileSync(p, 'utf8');
+      for (const x of s.matchAll(/pub const ([A-Z_]*TOPIC[A-Z_]*)\s*:\s*&\s*str\s*=\s*"([^"]+)"/g))
+        m.set(x[1]!, { value: x[2]!, file: relOf(p) });
+    }
+    return m;
+  }
+
+  /** TS 侧某个 `export const` 的值；文件里没有该声明时返回空串。 */
+  function tsConstValue(name: string, file: string): string {
+    const x = new RegExp(`export const ${name} = '([^']+)'`).exec(read(file));
+    return x?.[1] ?? '';
+  }
+
+  it('① Rust 的 *_TOPIC 全集必须逐字落进三层表（新增一条不登记即红）', () => {
+    const rust = rustTopicConsts();
+    expect(
+      [...rust.keys()].sort(),
+      'Rust 侧 topic 常量集合与三层表不符（新增/删除都要同轮改表并补镜像）',
+    ).toEqual([...TIER_A, ...TIER_B, ...TIER_C].sort());
+    // C 层只能是片段：真出现完整 topic，说明有人把该进 A/B 层的通道塞进了豁免层。
+    for (const name of TIER_C) {
+      expect(rust.get(name)!.value, `${name} 看起来是一条完整 topic，不该待在片段层`).not.toMatch(
+        /:\/\//,
+      );
+    }
+  });
+
+  it('② A 层五条：线值两侧逐字相等，且全部从 @tauron/host 入口导出', () => {
+    const rust = rustTopicConsts();
+    const index = flat(read(HOST_INDEX));
+    // TS 镜像侧也必须是同一集合：只在一边加常量，等于把词表拆成两份各自演化。
+    const tsMirrorNames = [...read(TOPICS).matchAll(/export const ([A-Z_]*TOPIC[A-Z_]*) = '/g)]
+      .map((x) => x[1]!)
+      .sort();
+    expect(
+      tsMirrorNames,
+      'host-topics.ts 的镜像集合与 A 层表不符（两边各演化一份词表就是下一次漂移）',
+    ).toEqual([...TIER_A].sort());
+    for (const name of TIER_A) {
+      const rv = rust.get(name)?.value ?? '';
+      expect(rv, `Rust 侧解析不到 ${name}（正则失配）`).not.toBe('');
+      const tv = tsConstValue(name, TOPICS);
+      expect(tv, `host-topics.ts 没有镜像 ${name}`).not.toBe('');
+      expect(tv, `${name} 的 TS 镜像与 Rust 线值漂移：监听会静默零命中而发出端仍一路 Ok`).toBe(rv);
+      expect(
+        new RegExp(`export\\{[^}]*\\b${name}\\b[^}]*\\}from'\\./host-topics\\.js'`).test(index),
+        `${name} 没有从 @tauron/host 入口导出（接入方只能手打线值）`,
+      ).toBe(true);
+    }
+  });
+
+  it('③ 每条线值在 TS 非测试源里只许出现一次，且就落在它的声明文件', () => {
+    const rust = rustTopicConsts();
+    const files = tsSrcFiles();
+    const all = files.map((p) => readFileSync(p, 'utf8')).join('\n');
+    for (const [name, owner] of [
+      ...TIER_A.map((n) => [n, TOPICS] as const),
+      ...TIER_B.map((n) => [n, SDK_CREATE] as const),
+    ]) {
+      const wire = rust.get(name)!.value;
+      const hits = files
+        .filter((p) => readFileSync(p, 'utf8').includes(`'${wire}'`))
+        .map(relOf)
+        .sort();
+      expect(hits, `${wire} 的字面量又有了第二份（下一次改名就是静默断链）`).toEqual([owner]);
+      // 光数文件不够：同一个文件里再开一个别名常量，漂移面照样翻倍。
+      const occurrences = all.split(`'${wire}'`).length - 1;
+      expect(occurrences, `${wire} 在 TS 侧出现了 ${occurrences} 次：只许声明它那一次`).toBe(1);
+    }
+    expect(
+      read(SDK_INDEX),
+      'HOST_SETTINGS_CHANGED_TOPIC 不再从 @tauron/app-plugin-sdk 导出',
+    ).toContain('HOST_SETTINGS_CHANGED_TOPIC');
+  });
+
+  it('④ 投递腿按词表常量监听：客户端里不许再有裸字面量', () => {
+    const dl = read(DL_CLIENT);
+    expect(dl, '深链接投递腿又回到裸字面量监听（宿主改名即静默零命中）').not.toContain(
+      `'${tsConstValue('DEEP_LINK_TOPIC', TOPICS)}'`,
+    );
+    expect(dl, '投递腿没按 host-topics 的常量监听').toContain('listen(DEEP_LINK_TOPIC,');
+    expect(
+      /import \{ DEEP_LINK_TOPIC \} from '\.\/host-topics\.js'/.test(dl),
+      '投递腿没从 host-topics.js 导入常量',
+    ).toBe(true);
+  });
+
+  it('⑤ 监听方事实逐条冻结：三条真有接收方，两条诊断帧确实零监听', () => {
+    // 零监听方是轮 36 写进文档的**事实**，不是缺陷遮掩：诊断帧的权威结论在命令返回值里。
+    // 把它钉成断言，是为了"以后有人补了监听却忘了改口径"时这条会红，而不是口径悄悄过期。
+    const expected: Record<string, string[]> = {
+      NOTIFICATION_TOPIC: [SHELL_CTRL],
+      MENU_CLICK_TOPIC: [EXAMPLE],
+      DEEP_LINK_TOPIC: [DL_CLIENT],
+      DIALOG_DEGRADED_TOPIC: [],
+      DEEP_LINK_NATIVE_TOPIC: [],
+    };
+    const files = tsSrcFiles();
+    for (const [name, want] of Object.entries(expected)) {
+      const owners = files
+        .filter((p) =>
+          new RegExp(`\\.listen\\(\\s*${name}\\b`).test(stripComments(readFileSync(p, 'utf8'))),
+        )
+        .map(relOf)
+        .sort();
+      expect(owners, `${name} 的监听方集合变了（文档口径要同轮跟上）`).toEqual(want);
+    }
+  });
+
+  it('⑥ 两侧口径同步：宿主清单与**每条镜像各自的文档块**都写明诊断帧零监听', () => {
+    expect(read(TAURI), '宿主侧的逐 topic 监听方清单丢了"零监听方"这条事实').toContain(
+      '仓库内零监听方',
+    );
+    // 盯各自的文档块：整文件级 needle 会被另一条常量的注释顶包（轮 38 第一次变异就栽在这）。
+    // 也不能用 `/** … */ export const X` 的正则——非贪婪会从**上一条**常量的文档块起锚，
+    // 把邻居的内容也算进来，照样顶包；这里按声明位置反向找最近的那个块。
+    for (const name of ['DIALOG_DEGRADED_TOPIC', 'DEEP_LINK_NATIVE_TOPIC']) {
+      const topics = read(TOPICS);
+      const decl = topics.indexOf(`export const ${name} = '`);
+      expect(decl, `host-topics.ts 里没有 ${name}`).toBeGreaterThan(-1);
+      const doc = topics.slice(topics.lastIndexOf('/**', decl), decl);
+      expect(doc, `${name} 自己的文档块没写明零监听`).toContain('零监听方');
+      expect(doc, `${name} 的文档块没说清权威结论落在哪里`).toContain('返回值');
+    }
+  });
+});
+
+// 轮 39：能力可见性——「主窗特权命令对插件 webview 不可见」此前只在注释里成立。
+//
+// `isAvailable` 声称插件侧 `available('host_registry_admin')` 为 false，实现却只看
+// `backend.capabilities()` 注册集；而 `host_capabilities`（Rust `cmd_host_capabilities`）
+// 没有调用方参数、返回**构建级**命令集——插件 webview 也会拿到主窗命令的名字，矩阵
+// 于是把 10 条主窗命令报成可见。原有"插件视图"测试又是 TS 表按 consumer 预筛的夹具，
+// 断言是同义反复（过滤是测试做的，不是被测代码做的）。本段把两件事一起钉住：
+// 实现按 `Backend.principal()` 过滤主体；测试用全量注册集走真实过滤路径。
+// ──────────────────────────────────────────────────────────────────────────
+describe('门禁：轮 39 能力可见性（主窗特权命令对插件主体不可见）', () => {
+  const CAPS = 'packages/tauron-host/src/capabilities.ts';
+  const CAPS_TEST = 'packages/tauron-host/src/capabilities.test.ts';
+  const SHELL_CLIENT = 'packages/tauron-host/src/shell-client.ts';
+  const HOST_README = 'packages/tauron-host/README.md';
+
+  const relOf = (p: string): string => p.slice(workspaceRoot.length + 1).replace(/\\/g, '/');
+
+  /** packages 与 examples 两棵树 src/ 下的非测试 TS 源。 */
+  function appSrcFiles(): string[] {
+    const out: string[] = [];
+    const walk = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith('.ts') && !e.name.includes('.test.')) out.push(p);
+      }
+    };
+    for (const base of ['packages', 'examples']) {
+      for (const pkg of readdirSync(join(workspaceRoot, base), { withFileTypes: true })) {
+        if (!pkg.isDirectory()) continue;
+        const src = join(workspaceRoot, base, pkg.name, 'src');
+        if (existsSync(src)) walk(src);
+      }
+    }
+    expect(out.length, '轮 39 解析到 0 个 TS 源文件（门禁定位失败）').toBeGreaterThan(10);
+    return out;
+  }
+
+  it('① isAvailable 双判据：注册 ∩ 主体可见性，且主窗判定是白名单', () => {
+    const caps = read(CAPS);
+    expect(
+      /backend\.capabilities\(\)\.has\(command\)/.test(caps),
+      'isAvailable 不再查宿主注册（协商真相），fail-closed 名存实亡',
+    ).toBe(true);
+    expect(
+      /cap\.consumer !== 'main-window' \|\| backend\.principal\(\)\.kind === 'main-window'/.test(
+        caps,
+      ),
+      'isAvailable 缺主体过滤（插件 webview 把主窗特权命令读成可用）；或白名单被改成黑名单（invalid 主体也放行）',
+    ).toBe(true);
+  });
+
+  it('② 可见性只有一处：矩阵逐条走 isAvailable，非测试源没有第二份主体过滤', () => {
+    const caps = read(CAPS);
+    expect(
+      /out\[cap\.command\] = isAvailable\(backend, cap\.command\)/.test(caps),
+      'capabilityMatrix 不再复用 isAvailable（两处可见性判定会各自演化）',
+    ).toBe(true);
+    let inCaps = 0;
+    const offenders: string[] = [];
+    for (const p of appSrcFiles()) {
+      const n = [...readFileSync(p, 'utf8').matchAll(/\.kind === 'main-window'/g)].length;
+      const rel = relOf(p);
+      if (rel === CAPS) inCaps = n;
+      else if (n > 0) offenders.push(rel);
+    }
+    expect(inCaps, 'isAvailable 的主体判定不见了').toBe(1);
+    expect(offenders, '第二处主体过滤：同一口径两个实现，下一次改动必分叉').toEqual([]);
+  });
+
+  it('③ 可见性测试不再循环取材：全量注册夹具 + 插件/畸形双主体 + 主窗对照', () => {
+    const t = read(CAPS_TEST);
+    // 插件用例的夹具必须是**构建级全量**（与 pluginId 同一个构造）：可见性必须由
+    // 被测代码过滤；测试自己按 consumer 预筛 = 断言同义反复。
+    expect(
+      /capabilities: CAPABILITIES\.map\(\(c\) => c\.command\),\s*pluginId: 'com\.example\.x',/.test(
+        t,
+      ),
+      '插件可见性用例的注册夹具不再是全量（循环取材会让过滤变成测试自己做的）',
+    ).toBe(true);
+    expect(
+      /CAPABILITIES\.filter\(\(c\) => c\.consumer === 'plugin'\)\.map\(\(c\) => c\.command\)/.test(
+        t,
+      ),
+      '旧循环夹具回来了：用 TS 表按 consumer 预筛的集合喂断言，测试与实现同错也绿',
+    ).toBe(false);
+    expect(t, '缺主窗对照（同一夹具 30 条全可见）：过滤可能把主窗主体一起误伤').toContain(
+      '.every(Boolean)',
+    );
+    expect(t, '缺畸形主体用例：invalid 不得按主窗放行').toContain("kind: 'invalid'");
+  });
+
+  it('④ 两侧文档同口径：能力表注释写明构建级真相与过滤层，README 说清两个探测入口', () => {
+    const caps = read(CAPS);
+    expect(caps, 'isAvailable 注释丢了 host_capabilities 的构建级真相').toContain('构建级');
+    expect(caps, 'isAvailable 注释没说清过滤发生在 SDK 层').toContain('可见性快照');
+    expect(read(SHELL_CLIENT), 'supports() 注释没和 isAvailable 划清口径').toContain('注册与否');
+    const readme = read(HOST_README);
+    expect(readme, 'README 没有说明 supports 与 isAvailable 的口径差异').toContain('注册与否');
+    expect(readme, 'README 没有给出插件主体下主窗命令报 false 的事实').toContain('一律报');
   });
 });

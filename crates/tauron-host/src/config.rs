@@ -58,32 +58,125 @@ pub struct ClientConfig {
 
     /// 是否启用插件自动更新检查。
     /// `None` = `true`。
+    ///
+    /// ⚠️ **当前无宿主落点**（[`ClientConfig::unwired_fields`]）：更新检查/下载由
+    /// 前端 `@tauron/host` 的 `AutoUpdateClient` 自己决定，本键不影响它。
     pub auto_update: Option<bool>,
 
     /// 更新检查间隔（秒）。
     /// `None` = `86400`（24 小时）。
+    ///
+    /// ⚠️ **当前无宿主落点**：同上，检查周期没有从本键映射到前端。
     pub update_check_interval_secs: Option<u64>,
 
     /// 是否启用崩溃报告。
     /// `None` = `false`（隐私优先）。
+    ///
+    /// ⚠️ **当前无宿主落点**：工作区只有崩溃**窗口计数**（`tauron-proc::CrashTracker`），
+    /// 没有任何报告导出器，因此本键既不开启也不关闭什么。
     pub crash_report_enabled: Option<bool>,
 
     /// 自定义品牌标识（覆盖内置品牌）。
     /// `None` = 使用内置品牌。
+    ///
+    /// ⚠️ **当前无宿主落点**：运行时品牌是 `TAURON_BRAND_CONFIG[_JSON]` 提供的**单个**
+    /// `BrandConfig`，工作区没有"按 id 选品牌"的品牌目录。
     pub brand_id: Option<String>,
 
     /// 额外的环境变量注入（在启动插件进程前设置）。
     /// `None` = 空。
+    ///
+    /// ✅ **有落点**：装配层把它带到 `tauron-proc::SpawnConfig::env`，每次
+    /// `host_runtime_spawn` 注入进 sidecar 进程。同名的调用方 `profile.env` 条目
+    /// 会被本字段**覆盖**——运维配置优先于调用方自报（见 `crates/tauron-adapter`
+    /// 的 `apply_host_env_overrides`）。
     pub env_overrides: Option<std::collections::HashMap<String, String>>,
 
     /// 插件发现路径列表（相对于 `data_dir` 或绝对路径）。
     /// `None` = 仅加载内置插件。
+    ///
+    /// ⚠️ **当前无宿主落点**：插件经调用方提交的 manifest 进入注册表，安装侧只有
+    /// 一个 `plugin_install_dir` 根；工作区**没有**"扫描这些目录注册插件"的入口，
+    /// 所以写在这里的路径不会被加载。
     pub plugin_paths: Option<Vec<String>>,
 
     /// 是否启用性能监控（CPU/内存/事件总线统计）。
     /// `None` = `false`（生产环境关闭，开发环境可开启）。
+    ///
+    /// ⚠️ **当前无宿主落点**：`EventBus` 的 `BusStats`/`QueueStats` 没有任何命令
+    /// 读取，工作区也没有 CPU/内存采样器；开启它不会多出任何观测面。
     pub performance_monitoring: Option<bool>,
 }
+
+/// 一个 `ClientConfig` 字段的**落点事实**（唯一权威来源是 [`CLIENT_CONFIG_LANDING`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientConfigLanding {
+    /// 已有真实消费者；载荷是消费者位置（`类型::成员` 或宿主装配点）。
+    Consumed(&'static str),
+    /// 没有落点；载荷是**原因**——为什么今天写了也不生效。
+    Deferred(&'static str),
+}
+
+/// `ClientConfig` 的键 → 落点表。
+///
+/// 为什么要有这张表：`ClientConfig` 是文档承诺的"第三方集成唯一入口"，
+/// 而**"能写进 JSON"和"写了会生效"是两件事**。在轮 2 复查之前，有七个字段被解析、
+/// 被 `validate()` 校验、还被 `tauron-app-cli` 写进生成的配置文件，却在生产代码里
+/// **零读取**——用户按文档写下 `auto_update: false`，更新行为照旧，且没有任何地方
+/// 报告这件事。静默接受一个不起作用的键，等于把配置面包装成接口。
+///
+/// 规则：
+/// - [`ClientConfigLanding::Consumed`] 必须写出**真实消费者**；只有先落地那条映射，
+///   键才允许从 `Deferred` 挪进来；
+/// - [`ClientConfigLanding::Deferred`] 记录缺落点的原因；键仍被解析和校验，但
+///   [`ClientConfig::unwired_fields`] 会把它连同原因如实列出，宿主据此声明
+///   "这一项当前不生效"（参考宿主 `load_adapter_config` 就是这么打印的）；
+/// - 表本身的完备性由测试 `landing_table_covers_every_serde_field` 用 serde 反推：
+///   新增字段忘了分类，测试直接红，不需要有人记得来改注释。
+pub const CLIENT_CONFIG_LANDING: &[(&str, ClientConfigLanding)] = &[
+    ("registry", ClientConfigLanding::Consumed("AdapterConfig::registry（`from_client_config`）")),
+    ("log_level", ClientConfigLanding::Consumed("参考宿主 `load_adapter_config` → `RUST_LOG`")),
+    (
+        "data_dir",
+        ClientConfigLanding::Consumed("AdapterConfig::recovery_data_dir（`from_client_config`）"),
+    ),
+    (
+        "env_overrides",
+        ClientConfigLanding::Consumed("AdapterConfig::plugin_env_overrides → SpawnConfig::env"),
+    ),
+    (
+        "auto_update",
+        ClientConfigLanding::Deferred(
+            "更新开关在前端 `AutoUpdateClient` 的 `endpoints`/`autoDownload`，本键没有映射过去",
+        ),
+    ),
+    (
+        "update_check_interval_secs",
+        ClientConfigLanding::Deferred(
+            "检查周期同上：`AutoUpdateConfig::checkIntervalSecs` 不从本键派生",
+        ),
+    ),
+    (
+        "crash_report_enabled",
+        ClientConfigLanding::Deferred("没有崩溃报告导出器；`CrashTracker` 只做窗口计数"),
+    ),
+    (
+        "brand_id",
+        ClientConfigLanding::Deferred(
+            "品牌是 env 提供的单个 `BrandConfig`，不存在按 id 选择的品牌目录",
+        ),
+    ),
+    (
+        "plugin_paths",
+        ClientConfigLanding::Deferred(
+            "没有目录扫描注册入口；安装侧只有单个 `plugin_install_dir` 根",
+        ),
+    ),
+    (
+        "performance_monitoring",
+        ClientConfigLanding::Deferred("`BusStats`/`QueueStats` 未接命令，也没有 CPU/内存采样器"),
+    ),
+];
 
 /// `RegistryConfig` 的配置覆盖结构。
 ///
@@ -207,6 +300,54 @@ impl ClientConfig {
     /// 获取插件过滤器引用（如有）。
     pub fn plugin_filter(&self) -> Option<&PluginFilter> {
         self.registry.as_ref().and_then(|r| r.plugin_filter.as_ref())
+    }
+
+    /// 某个键的落点事实（见 [`CLIENT_CONFIG_LANDING`]）。
+    ///
+    /// 表外的键返回 `None`——`ClientConfig` 是 `deny_unknown_fields`，因此这只可能
+    /// 发生在调用方拿了一个拼错的字符串时。
+    pub fn landing_of(key: &str) -> Option<ClientConfigLanding> {
+        CLIENT_CONFIG_LANDING.iter().find(|(name, _)| *name == key).map(|(_, landing)| *landing)
+    }
+
+    /// 本配置里**用户实际写了、但没有宿主落点**的键（键名 + 原因）。
+    ///
+    /// 只列实际出现的键：默认值不算"用户被无声忽略"。返回顺序 = 表顺序，
+    /// 便于宿主打印时稳定可比。
+    ///
+    /// 消费点：参考宿主 `examples/minimal-app` 的 `load_adapter_config`（启动横幅），
+    /// 以及装配层 `AdapterConfig::from_client_config` 的注释。前端有一份镜像
+    /// （`@tauron/host` 的 `clientConfigUnwiredKeys`），两侧一致性由
+    /// `packages/tauron-host/src/gates.test.ts` 机器校验。
+    pub fn unwired_fields(&self) -> Vec<(&'static str, &'static str)> {
+        CLIENT_CONFIG_LANDING
+            .iter()
+            .filter(|(key, landing)| {
+                matches!(landing, ClientConfigLanding::Deferred(_)) && self.field_present(key)
+            })
+            .map(|(key, landing)| match landing {
+                ClientConfigLanding::Deferred(reason) => (*key, *reason),
+                // filter 已排除 Consumed；走到这里说明表被并发改动。
+                ClientConfigLanding::Consumed(_) => unreachable!("filter 已排除 Consumed"),
+            })
+            .collect()
+    }
+
+    /// 键是否在本配置里出现（`Some` = 用户写了，或显式写了 `null`）。
+    fn field_present(&self, key: &str) -> bool {
+        match key {
+            "registry" => self.registry.is_some(),
+            "log_level" => self.log_level.is_some(),
+            "data_dir" => self.data_dir.is_some(),
+            "auto_update" => self.auto_update.is_some(),
+            "update_check_interval_secs" => self.update_check_interval_secs.is_some(),
+            "crash_report_enabled" => self.crash_report_enabled.is_some(),
+            "brand_id" => self.brand_id.is_some(),
+            "env_overrides" => self.env_overrides.is_some(),
+            "plugin_paths" => self.plugin_paths.is_some(),
+            "performance_monitoring" => self.performance_monitoring.is_some(),
+            _ => false,
+        }
     }
 }
 
@@ -372,6 +513,108 @@ mod tests {
     fn from_json_template() {
         let config = ClientConfig::from_json(template_json()).unwrap();
         assert!(config.validate().is_ok());
+    }
+
+    /// 造一份**每个键都写了**的配置（落点表完备性的输入）。
+    fn fully_populated() -> ClientConfig {
+        let mut env = std::collections::HashMap::new();
+        env.insert("OC_PROFILE".to_string(), "prod".to_string());
+        ClientConfig {
+            registry: Some(RegistryConfigOverride::default()),
+            log_level: Some("info".to_string()),
+            data_dir: Some("data".to_string()),
+            auto_update: Some(true),
+            update_check_interval_secs: Some(60),
+            crash_report_enabled: Some(true),
+            brand_id: Some("acme".to_string()),
+            env_overrides: Some(env),
+            plugin_paths: Some(vec!["plugins".to_string()]),
+            performance_monitoring: Some(true),
+        }
+    }
+
+    /// 落点表的**完备性**（轮 2 / F-1）。
+    ///
+    /// 为什么用 serde 反推而不是手写一份清单：手写清单会在下一次加字段时悄悄失真，
+    /// 而"字段加了、没人分类"正是这个缺陷的原始形态——七个键被解析、被校验、被
+    /// CLI 写进生成的配置文件，却在生产代码里零读取。基准取 serde 自己吐出的键集合，
+    /// 于是「加字段忘了进表」和「表里留了已删字段」都会让测试变红。
+    #[test]
+    fn landing_table_covers_every_serde_field() {
+        let full = fully_populated();
+        let json: serde_json::Value = serde_json::from_str(&full.to_json().unwrap()).unwrap();
+        let mut serde_keys: Vec<&str> =
+            json.as_object().unwrap().keys().map(String::as_str).collect();
+        serde_keys.sort_unstable();
+        let mut table_keys: Vec<&str> = CLIENT_CONFIG_LANDING.iter().map(|(k, _)| *k).collect();
+        table_keys.sort_unstable();
+        assert_eq!(
+            serde_keys, table_keys,
+            "落点表与 `ClientConfig` 的 serde 键集合不一致：新增字段必须当场分类（Consumed 要写出真实消费者）"
+        );
+
+        // 键名与 `field_present` 的分支必须一一对上：全量配置下，每个 Deferred 键
+        // 都要被如实报出。漏一个分支 ⇒ 那个键"写了不生效"又会重新变成静默。
+        let unwired: Vec<&str> = full.unwired_fields().iter().map(|(k, _)| *k).collect();
+        let deferred: Vec<&str> = CLIENT_CONFIG_LANDING
+            .iter()
+            .filter(|(_, landing)| matches!(landing, ClientConfigLanding::Deferred(_)))
+            .map(|(k, _)| *k)
+            .collect();
+        assert_eq!(
+            unwired, deferred,
+            "写了却没生效的键必须逐个报出（缺原因 = field_present 认不出这个键）"
+        );
+        for (key, reason) in &full.unwired_fields() {
+            assert!(!reason.trim().is_empty(), "键 `{key}` 的 Deferred 原因不得为空");
+        }
+        // Consumed 键不得混进报告里——否则"已接线"的键会被误报成假接口。
+        for (key, _) in CLIENT_CONFIG_LANDING
+            .iter()
+            .filter(|(_, l)| matches!(l, ClientConfigLanding::Consumed(_)))
+        {
+            assert!(!unwired.contains(key), "已接线的键 `{key}` 不该出现在未接线报告里");
+        }
+    }
+
+    /// 「没写 = 不报」：默认配置不产生任何未接线告警，部分配置只报实际写出的键。
+    #[test]
+    fn unwired_fields_only_report_present_keys() {
+        assert!(ClientConfig::default().unwired_fields().is_empty(), "没人写的键谈不上不生效");
+        let only_wired = ClientConfig {
+            data_dir: Some("data".to_string()),
+            env_overrides: Some(std::collections::HashMap::new()),
+            ..Default::default()
+        };
+        assert!(only_wired.unwired_fields().is_empty(), "全接到落点的配置不该报未接线");
+        let partial = ClientConfig {
+            brand_id: Some("acme".to_string()),
+            plugin_paths: Some(vec!["plugins".to_string()]),
+            ..Default::default()
+        };
+        let keys: Vec<&str> = partial.unwired_fields().iter().map(|(k, _)| *k).collect();
+        assert_eq!(
+            keys,
+            vec!["brand_id", "plugin_paths"],
+            "报告要精确到用户实际写过的那几个键，顺序随表"
+        );
+    }
+
+    /// 表外键（拼错的字符串）如实查不到，而不是兜底成"已消费"。
+    #[test]
+    fn landing_of_unknown_key_is_none() {
+        assert!(ClientConfig::landing_of("autoUpdate").is_none());
+        assert!(ClientConfig::landing_of("").is_none());
+    }
+
+    /// 已接线的 `env_overrides` 必须留在 Consumed 侧，并且写出消费者位置。
+    #[test]
+    fn env_overrides_is_consumed_with_a_named_landing() {
+        let Some(ClientConfigLanding::Consumed(target)) = ClientConfig::landing_of("env_overrides")
+        else {
+            panic!("env_overrides 必须有真实落点（它接的是 SpawnConfig::env）");
+        };
+        assert!(target.contains("SpawnConfig::env"), "落点要指到真读它的类型：{target}");
     }
 
     #[test]

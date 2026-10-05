@@ -1,6 +1,6 @@
 [package]
 name = "tauron-shell"
-description = "tauron Rust 壳层（设计文档 §1.1/§2/§3/§4/§8）：plugin_invoke handler、注册表、ACL 检查、Extism WASM、进程插件、tracing"
+description = "tauron Rust 壳层（设计文档 §1.1/§2/§3/§4/§8）：plugin_invoke handler、注册表、ACL 检查、进程插件、tracing"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,10 @@ default = []
 # 启用 Tauri v2 命令注册层（`plugin_invoke` / `plugin_cancel` / `plugin_emit`）。
 # 核心逻辑（dispatch/registry/eventbus/acl）不依赖此 feature，默认构建完全离线可测。
 tauri = ["dep:tauri"]
-extism = []
+# 轮 2 删掉了 `extism = []`：它不 gate 任何代码（本 crate 里没有 Extism/WASM 引擎，
+# `PluginType::Wasm` 只是个枚举变体），开着它也不会多出任何能力——一个空的、
+# 名字却承诺"接了 Extism 宿主"的 feature，是把路线图写成产品开关。
+# 真接引擎时再按实际 gate 的代码命名加回来。
 
 [dependencies]
 serde.workspace = true

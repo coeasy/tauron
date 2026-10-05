@@ -6,16 +6,22 @@
 // 一份明显非法的 WASM 配置（空 module_path、非法内存配额…）在调用时不会有任何
 // 提示，直到真接了 runtime 才炸。
 //
-// **本轮的诚实边界（一个字不美化）**：`tauron-wasm` 是**自包含模拟引擎**——它
-// 没有 wasmtime / wasmer / extism 依赖，"执行"是模拟的。因此本投递器**只接状态层**：
+// **本轮的诚实边界（一个字不美化）**：`tauron-wasm` 自 V7 轮 22 起**内置真引擎**
+// （`wasmi` provider：字节解析、ABI 指纹、实例化、fuel 计量都是真的），但**宿主投递
+// 路径仍未接上它**，原因不是"没引擎"，而是两条缺一不可的前置没落地：
+//   1. 本仓 provider 只支持整数 host_fn ABI（`(i64,i64)->i64`），经 linear memory
+//      传字符串/JSON 的完整 ABI 未实现——`Call` 的 JSON 参数无法直接喂给它；
+//   2. ADR-10 要求的独立 supervisor 子进程承载未实现，在宿主进程内直接跑第三方
+//      插件字节不是本仓愿意承诺的生产形态。
+// 因此本投递器**只接状态层**：
 //   1. 从注册表取目标插件的 manifest，构造 `WasmPluginConfig`；
 //   2. 真的跑 `tauron_wasm::validate_plugin_config`（配置层校验，真实）；
 //   3. 真的查 `tauron_wasm::WasmCrashTracker` 的崩溃预算（状态层，真实）；
-//   4. **执行层保持诚实失败**：返回 `delivered: false`，原因写明"无 WASM 运行时"，
+//   4. **执行层保持诚实失败**：返回 `delivered: false`，原因写明"没有可执行通路"，
 //      上层据此转 `E_PLUGIN_TYPE_NO_RUNTIME`——**不假装**调用被投递。
 //
 // 也就是说：`PluginType::Wasm` 的处理路径现在**真的经过** `tauron-wasm` 的校验层，
-// 而不是像以前那样完全绕开；但"执行一个 wasm 模块"依然不可用，且如实报出。
+// 而不是像以前那样完全绕开；但"通过宿主调用一个 wasm 插件"依然不可用，且如实报出。
 
 use std::sync::Arc;
 
@@ -27,8 +33,8 @@ use tauron_host::{
     ErrorCode, HostError, HostResult, PendingCall,
 };
 use tauron_wasm::{
-    validate_plugin_config, CrashLimitConfig, HostFnWhitelist, InstancePoolConfig, MemoryConfig,
-    ModuleCacheConfig, WasmAbiFingerprint, WasmCrashTracker, WasmPluginConfig,
+    validate_plugin_config, CrashLimitConfig, ExecutionConfig, HostFnWhitelist, InstancePoolConfig,
+    MemoryConfig, ModuleCacheConfig, WasmAbiFingerprint, WasmCrashTracker, WasmPluginConfig,
 };
 
 /// 从 manifest 构造 WASM 插件配置（`tauron-wasm` 的输入）。
@@ -56,6 +62,7 @@ pub fn wasm_config_from_manifest(manifest: &PluginManifest) -> WasmPluginConfig 
         instance_pool: InstancePoolConfig::default(),
         module_cache: ModuleCacheConfig::default(),
         crash_limit: CrashLimitConfig::default(),
+        execution: ExecutionConfig::default(),
     }
 }
 
@@ -134,19 +141,23 @@ impl CallDelivery for WasmCallDelivery {
             });
         }
 
-        // 3. 执行层：本仓无 WASM 运行时，**诚实失败**（不假装投递成功）。
+        // 3. 执行层：宿主投递路径没有可执行通路，**诚实失败**（不假装投递成功）。
         Ok(DeliveryReceipt {
             delivered: false,
             reason: Some(
-                "WASM 配置校验通过，但本仓未装配 WASM 运行时（tauron-wasm 为自包含状态层，\
-                 无 wasmtime/wasmer/extism）：该插件类型没有可执行通路"
+                "WASM 配置校验通过，但宿主投递侧没有可执行通路：tauron-wasm 的 wasmi provider \
+                 只支持整数 host_fn ABI（JSON 参数需经 linear memory 的完整 ABI 未实现），\
+                 且 ADR-10 要求的 supervisor 子进程承载未落地"
                     .into(),
             ),
         })
     }
 
     fn settle(&self, _call_id: &str, _outcome: CallOutcome) -> HostResult<PendingCall> {
-        Err(HostError::new(ErrorCode::E_CALL_NOT_FOUND, "WASM 投递实现无法结算调用（无运行时）"))
+        Err(HostError::new(
+            ErrorCode::E_CALL_NOT_FOUND,
+            "WASM 投递实现无法结算调用（投递侧无可执行通路）",
+        ))
     }
 }
 
@@ -211,8 +222,8 @@ mod tests {
         )
     }
 
-    /// **接通证据**：合法 WASM 配置 → 校验通过 → 仍按"无运行时"诚实失败
-    /// （`delivered: false` 且原因写明运行时缺失，**不是**假成功）。
+    /// **接通证据**：合法 WASM 配置 → 校验通过 → 仍按"无可执行通路"诚实失败
+    /// （`delivered: false` 且原因写明缺口在哪，**不是**假成功）。
     #[test]
     fn valid_wasm_config_passes_validation_then_fails_honestly_on_runtime() {
         let registry = Arc::new(Registry::default());
@@ -227,9 +238,10 @@ mod tests {
         let delivery = WasmCallDelivery::new(registry);
         assert_eq!(delivery.target_kind(), DeliveryKind::Wasm);
         let receipt = delivery.deliver(&pending("com.example.w")).unwrap();
-        assert!(!receipt.delivered, "无运行时不得假装投递成功");
+        assert!(!receipt.delivered, "无可执行通路不得假装投递成功");
         let reason = receipt.reason.expect("未投递时 reason 必非空");
-        assert!(reason.contains("未装配 WASM 运行时"), "原因应写明运行时缺失：{reason}");
+        assert!(reason.contains("没有可执行通路"), "原因应写明缺口：{reason}");
+        assert!(reason.contains("整数 host_fn ABI"), "缺口要具体到 ABI：{reason}");
         assert!(!reason.contains("配置校验未通过"), "合法配置不应被校验拦下：{reason}");
     }
 
@@ -273,7 +285,7 @@ mod tests {
         assert!(receipt.reason.unwrap().contains("崩溃预算"));
     }
 
-    /// `settle` 显式拒绝（无运行时不得结算成"成功"）。
+    /// `settle` 显式拒绝（投递侧无可执行通路时不得结算成"成功"）。
     #[test]
     fn settle_is_refused() {
         let registry = Arc::new(Registry::default());

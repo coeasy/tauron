@@ -1,0 +1,32 @@
+[package]
+name = "tauron-test-sidecar"
+description = "CI 真 sidecar 夹具：可执行 stdio JSON-RPC 帧回路端，供 tauron-proc 的端到端进程测试起真进程"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+# **永不上架**：这是测试夹具，不是产品能力。发到 crates.io 会让人以为
+# 存在一个官方 sidecar 实现（V7-P1-05 的边界如实标注）。
+publish = false
+
+[dependencies]
+serde_json = { workspace = true }
+
+[[bin]]
+# 下划线命名而不是连字符：`env!("CARGO_BIN_EXE_<name>")` 里不能含 `-`，
+# 测试必须用这个宏拿到真实二进制路径。
+name = "tauron_test_sidecar"
+path = "src/bin/tauron_test_sidecar.rs"
+
+[dev-dependencies]
+# 端到端测试要驱动**生产实现**：`CommandSpawner`（真起进程）+ 适配层的
+# `ProcessFrameSinkImpl`（真结算）+ host 的 `Registry`/`RuntimeTable`（真代次/租约）。
+tauron-proc = { path = "../tauron-proc", version = "1.1.0" }
+tauron-host = { path = "../tauron-host", version = "1.1.0" }
+tauron-adapter = { path = "../tauron-adapter", version = "1.1.0" }
+parking_lot = { workspace = true }
+semver = { workspace = true }
+tempfile = { workspace = true }
+uuid = { workspace = true }

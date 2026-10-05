@@ -507,6 +507,25 @@ impl EventBus {
         Self { capacity, ..Default::default() }
     }
 
+    /// 会话态重置（V4 A91 轮 47）：清空订阅 / 审批 / 队列 / 排序 / 状态修订 /
+    /// 统计，**保留** topic 声明与容量。
+    ///
+    /// 故障边界做确定性修复时用。为什么保留声明：`topics` 是**装配期结构事实**
+    /// （`declare_topics` 只在宿主装配、深链注册、安装路径写入），而订阅/审批/队列
+    /// 是会话瞬态。发布端对未声明 topic 只**静默丢弃并计数**、不返回错误（防存在性
+    /// 探测），所以把声明一起清掉等于让修复动作把可工作的消息面悄悄打哑——比故障
+    /// 本身更安静。清会话态是「完整一致」（订阅可重建），清声明不是修复。
+    pub fn reset_session_state(&self) {
+        *self.subs.lock() = HashMap::new();
+        *self.topic_subscribers.lock() = HashMap::new();
+        *self.approvals.lock() = HashMap::new();
+        *self.policy.lock() = PolicyAuthority::new();
+        *self.ordering.lock() = OrderingTracker::default();
+        *self.state_revisions.lock() = HashMap::new();
+        *self.queues.lock() = HashMap::new();
+        *self.stats.lock() = BusStats::default();
+    }
+
     // ── 安装期声明 ────────────────────────────────────────────────
 
     /// 声明插件发布的 topic（安装期调用一次）。
@@ -1196,6 +1215,39 @@ mod tests {
 
     fn declare(b: &EventBus, pub_id: &str, topic: &str, is_public: bool) {
         b.declare_topics(pub_id, &[EventDecl { topic: topic.into(), public: is_public }]).unwrap();
+    }
+
+    // ── 会话态重置（V4 A91 轮 47）────────────────────────────────
+
+    #[test]
+    fn session_reset_clears_subscriptions_but_keeps_topic_declarations() {
+        let b = bus(8);
+        declare(&b, "com.a", "plugin:com.a:x", false);
+        declare(&b, "com.b", "plugin:com.b:y", true);
+        b.subscribe("com.b", "w1", "plugin:com.b:y").unwrap();
+        b.approve("com.b", "plugin:com.a:x").unwrap();
+        b.publish("com.b", "plugin:com.b:y", Value::from(1), ChannelKind::Event);
+        assert_eq!(b.drain("com.b", ChannelKind::Event).unwrap().len(), 1);
+        assert!(b.is_approved("com.b", "plugin:com.a:x"));
+
+        b.reset_session_state();
+
+        // 会话瞬态清零：订阅 / 审批 / 队列 / 统计。
+        assert!(b.subscribed_topics_of("com.b", "w1").is_empty());
+        assert!(!b.is_approved("com.b", "plugin:com.a:x"));
+        assert!(b.drain("com.b", ChannelKind::Event).unwrap().is_empty());
+        assert_eq!(b.stats().publishes, 0, "统计是会话量，随重置归零");
+
+        // 结构声明保留：清掉的话发布端对未声明 topic 只静默丢弃——修复会把
+        // 可工作的消息面悄悄打哑（消费端连错误都看不到）。
+        assert!(b.topic_meta("plugin:com.a:x").is_some());
+        assert!(b.topic_meta("plugin:com.b:y").is_some());
+
+        // 重建会话即恢复：批准 + 订阅 + 发布照常投递。
+        b.approve("com.b", "plugin:com.a:x").unwrap();
+        b.subscribe("com.b", "w1", "plugin:com.b:y").unwrap();
+        b.publish("com.b", "plugin:com.b:y", Value::from(2), ChannelKind::Event);
+        assert_eq!(b.drain("com.b", ChannelKind::Event).unwrap().len(), 1);
     }
 
     // ── 发布授权 ──────────────────────────────────────────────────

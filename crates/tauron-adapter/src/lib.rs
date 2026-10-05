@@ -33,8 +33,13 @@ mod recovery;
 
 pub use recovery::{BootRecord, LoadSource, RecoveryStore};
 
+/// 菜单点击回传的路由表（`host_menu_*` / `host_tray_*` 共用的唯一事实源）。
+mod menu_routes;
+
+pub use menu_routes::{menu_routes, menu_routes_of, MenuLane, MenuRouteTable, MENU_CLICK_TOPIC};
+
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -326,7 +331,16 @@ impl AdapterConfig {
     /// 映射关系（只映射**有落点**的字段，其余见 `config.rs` 的诚实边界说明）：
     /// - `registry` → [`AdapterConfig::registry`]（含 `plugin_filter` 容量与过滤）；
     /// - `data_dir` → [`AdapterConfig::recovery_data_dir`]（相对路径按当前目录解析；
-    ///   解析不出来时回落到调用方给的 `fallback_data_dir`）。
+    ///   解析不出来时回落到调用方给的 `fallback_data_dir`）；
+    /// - `env_overrides` → [`AdapterConfig::plugin_env_overrides`]，最终落到
+    ///   `tauron_proc::SpawnConfig::env`（每次 spawn 注入子进程）。
+    ///
+    /// **写了不生效的键不会在这里被静默丢掉**：`auto_update` /
+    /// `update_check_interval_secs` / `crash_report_enabled` / `brand_id` /
+    /// `plugin_paths` / `performance_monitoring` 至今没有宿主落点（原因逐条写在
+    /// `tauron_host::config::CLIENT_CONFIG_LANDING`），由
+    /// [`tauron_host::config::ClientConfig::unwired_fields`] 如实报出，宿主在启动
+    /// 横幅里打印。装配层**不**为它们造布尔位——那会把"没实现"重新包装成"已生效"。
     ///
     /// `log_level` 不由本函数消费：日志初始化属于宿主进程的事（`tracing` 订阅者
     /// 在宿主侧装配），调用方可自行 `cfg.log_level()` 取用。
@@ -354,6 +368,8 @@ impl AdapterConfig {
             // [`AdapterConfig::with_fs_roots`] 显式配置；缺省 = 该域不可用（如实）。
             fs_allowed_roots: Vec::new(),
             http_policy: tauron_host::NetworkPolicy::default(),
+            http_sink: None,
+            plugin_env_overrides: cfg.env_overrides.clone().unwrap_or_default(),
             #[cfg(feature = "plugin-install")]
             plugin_install_dir: None,
             #[cfg(feature = "plugin-install")]
@@ -401,6 +417,12 @@ impl AdapterConfig {
     /// Configure the V4 HTTP/network scope. Default is deny-all.
     pub fn with_http_policy(mut self, policy: tauron_host::NetworkPolicy) -> Self {
         self.http_policy = policy;
+        self
+    }
+
+    /// 注入 HTTP provider（轮 48 / A96）：生产宿主装配期调用一次。
+    pub fn with_http_sink(mut self, sink: Arc<dyn HttpSink>) -> Self {
+        self.http_sink = Some(sink);
         self
     }
 }
@@ -470,6 +492,18 @@ pub struct AdapterConfig {
     pub fs_allowed_roots: Vec<PathBuf>,
     /// V4 A96 network scope. Empty/default is fail-closed even when a custom HTTP sink exists.
     pub http_policy: tauron_host::NetworkPolicy,
+    /// **HTTP provider 注入点（轮 48 / A96）**：接入方把自己的 [`HttpSink`] 实现
+    /// 放进来即启用该域；`None` = 缺省 [`UnavailableHttpSink`]（如实 Unsupported）。
+    pub http_sink: Option<Arc<dyn HttpSink>>,
+    /// **运维注入的 sidecar 环境变量**（`ClientConfig.env_overrides` 的落点）。
+    ///
+    /// 每次 `host_runtime_spawn` 都会把这些键合进 [`tauron_proc::SpawnConfig::env`]，
+    /// 因此它们真的到达子进程（`CommandSpawner` 的 `.envs()`）。同名键上**本字段优先**：
+    /// 运维配置不能被调用方 `profile.env` 悄悄撤掉（见 [`apply_host_env_overrides`]）。
+    ///
+    /// 空 = 不注入（既有行为）。这是 `ClientConfig` 里少数**有落点**的非注册表键之一，
+    /// 其余键的落点见 `tauron_host::config::CLIENT_CONFIG_LANDING`。
+    pub plugin_env_overrides: std::collections::HashMap<String, String>,
     /// Package installation root. Installation remains unavailable when unset.
     #[cfg(feature = "plugin-install")]
     pub plugin_install_dir: Option<PathBuf>,
@@ -575,7 +609,15 @@ fn collect_plugin_activation_records(
 
     let mut records = Vec::with_capacity(files.len());
     for (relative, path) in files {
-        let bytes = std::fs::read(&path).map_err(|error| {
+        // 轮 44（A94）：摘要在流上算——激活腿此前把每个文件整读进内存，
+        // 安装流内存会随包内最大文件线性增长（RSS/堆门禁正是抓这个）。
+        let file = std::fs::File::open(&path).map_err(|error| {
+            HostError::new(
+                ErrorCode::E_INSTALL_FAILED,
+                format!("读取插件激活内容失败 {}: {error}", path.display()),
+            )
+        })?;
+        let content = tauron_host::ContentIdentity::from_reader(file).map_err(|error| {
             HostError::new(
                 ErrorCode::E_INSTALL_FAILED,
                 format!("读取插件激活内容失败 {}: {error}", path.display()),
@@ -584,7 +626,7 @@ fn collect_plugin_activation_records(
         records.push(tauron_host::ActivationRecord {
             resource: plugin_asset_activation_resource(manifest, &relative),
             generation: tauron_host::Generation::INITIAL,
-            content: tauron_host::ContentIdentity::from_bytes(&bytes),
+            content,
         });
     }
     Ok(records)
@@ -1013,20 +1055,26 @@ fn permission_digest(manifest: &PluginManifest) -> String {
 }
 
 #[cfg(feature = "plugin-install")]
-fn mint_install_review(verified: &VerifiedPluginPackage) -> InstallReviewToken {
-    let issued_at = unix_time_seconds();
-    InstallReviewToken {
-        package_digest: verified.package_digest.clone(),
-        manifest_digest: verified.manifest_digest.clone(),
-        permission_digest: verified.permission_digest.clone(),
-        key_id: verified.key_id.clone(),
-        publisher_id: verified.publisher_id.clone(),
-        plugin_id: verified.manifest.id.to_string(),
-        version: verified.manifest.version.to_string(),
-        issued_at,
-        expires_at: issued_at.saturating_add(INSTALL_REVIEW_TTL_SECS),
-        nonce: uuid::Uuid::new_v4().to_string(),
-    }
+fn mint_install_review(
+    state: &PluginRuntimeState,
+    verified: &VerifiedPluginPackage,
+) -> HostResult<InstallReviewToken> {
+    run_review_boundary(state, "install_review_mint", || {
+        // 轮 43：TTL 的锚点从墙钟改为 A100 可信时间（`review_now` 生产档失败关闭）。
+        let issued_at = review_now(state)?;
+        Ok(InstallReviewToken {
+            package_digest: verified.package_digest.clone(),
+            manifest_digest: verified.manifest_digest.clone(),
+            permission_digest: verified.permission_digest.clone(),
+            key_id: verified.key_id.clone(),
+            publisher_id: verified.publisher_id.clone(),
+            plugin_id: verified.manifest.id.to_string(),
+            version: verified.manifest.version.to_string(),
+            issued_at,
+            expires_at: issued_at.saturating_add(INSTALL_REVIEW_TTL_SECS),
+            nonce: uuid::Uuid::new_v4().to_string(),
+        })
+    })
 }
 
 #[cfg(feature = "plugin-install")]
@@ -1038,6 +1086,228 @@ fn review_matches_verified(token: &InstallReviewToken, verified: &VerifiedPlugin
         && token.publisher_id == verified.publisher_id
         && token.plugin_id == verified.manifest.id.as_str()
         && token.version == verified.manifest.version.to_string()
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// A83（轮 43）：破坏性管理操作（uninstall/purge）的审批令牌
+//
+// 与安装域 [`InstallReviewToken`] **同构**的第二个消费者：预览铸发一次性令牌、
+// commit 消费并重核事实、TTL 与容量都有界。差别只在绑定对象——安装域绑包摘要，
+// 这里绑「注册表条目事实」（id + 安装版本 + 被审阅的操作）。update 域没有独立
+// 执行路径（`E_PLUGIN_EXISTS` 拒绝覆盖安装，插件级更新按 V4 方案 §9 推迟 1.3），
+// 因此「更新」= uninstall + install 两条组合腿，两端都已被令牌覆盖。
+//
+// 令牌机制**不挂** `plugin-install` 特性（uninstall/purge 的命令面在底座-only
+// 构建里也存在）；但「生产档必须带令牌」的强制条件与安装域同域：
+// `cfg!(feature = "plugin-install") && Production`——底座-only 构建没有安装目录
+// 与 ACL 这两个真正的破坏面，注册表状态翻转保持既有语义。
+// ──────────────────────────────────────────────────────────────────────────
+
+/// uninstall/purge 的审批令牌（线形与 [`InstallReviewToken`] 同径：camelCase、
+/// `deny_unknown_fields`）。
+///
+/// 绑定事实：目标插件 id、被审阅的破坏性操作、预览时刻的安装版本。commit 时三项
+/// 全部重核——预览之后插件换版本或换了操作，令牌作废，必须重新预览。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AdminReviewToken {
+    pub plugin_id: String,
+    /// 被审阅的破坏性操作（`uninstall` / `purge`）。
+    pub op: RegistryAdminOp,
+    /// 预览时插件的安装版本（取自注册表条目的 manifest）。
+    pub version: String,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub nonce: String,
+}
+
+const ADMIN_REVIEW_TTL_SECS: u64 = 10 * 60;
+const MAX_ADMIN_REVIEWS: usize = 64;
+
+/// `host_registry_admin` 的线返回（轮 43）。
+///
+/// `Executed` 变体采用 internally-tagged 平铺：既有 `TransitionOutcome` 的
+/// `event`/`from`/`to`/`depth`/`illegal`/`actions` 字段**仍在顶层**，只多一个
+/// `kind` 判别字段——老调用方（含外部集成）读法不变。`Review` 是预览路径的返回，
+/// 描述「将发生什么」并携带一次性令牌，不产生任何注册表副作用。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RegistryAdminResponse {
+    Executed(TransitionOutcome),
+    Review(RegistryAdminReview),
+}
+
+/// `RegistryAdminResponse::Review` 的载荷（轮 43）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryAdminReview {
+    /// 被审阅的破坏性操作。
+    pub op: RegistryAdminOp,
+    pub plugin_id: String,
+    /// 预览时刻的安装版本（与令牌绑定值同源）。
+    pub version: String,
+    /// 预览时刻的生命周期状态（SCREAMING_SNAKE_CASE，与 `PluginSummary.state` 同源）。
+    pub state: LifecycleStateName,
+    /// 一次性审批令牌；commit 时必须原样带回。
+    pub review_token: AdminReviewToken,
+}
+
+#[cfg(feature = "plugin-install")]
+fn trusted_time_provider(
+    state: &PluginRuntimeState,
+) -> Option<&Arc<dyn tauron_host::TrustedTimeProvider>> {
+    state.install_config.as_ref().and_then(|config| config.trusted_time_provider.as_ref())
+}
+
+fn system_time_to_unix_secs(time: std::time::SystemTime) -> u64 {
+    time.duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_secs()).unwrap_or(0)
+}
+
+/// 审批令牌的「现在」（轮 43 的 A100 收口点）。
+///
+/// 装配了可信时间源（`with_trusted_time_provider`）时以它为准，且**时钟不可信
+/// 即失败关闭**（Suspicious/Unknown 不铸发令牌——TTL 建立在不可信时钟上等于没有
+/// TTL）；生产档没有时间源同样失败关闭；只有开发/测试档无源时回落墙钟（既有的
+/// 本地兼容姿态，与生产就绪校验的口径一致：`TRUSTED_TIME_REQUIRED` 只在生产档
+/// 且安装特性开启时成立）。
+fn review_now(state: &PluginRuntimeState) -> HostResult<u64> {
+    #[cfg(feature = "plugin-install")]
+    if let Some(provider) = trusted_time_provider(state) {
+        let trusted = tauron_host::TrustedTimeProvider::trusted_time(provider.as_ref());
+        if trusted.state != tauron_host::TimeTrustState::Trusted {
+            return Err(HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                format!("审批令牌时钟不可信（{:?}）：拒绝铸发/校验破坏性操作令牌", trusted.state),
+            ));
+        }
+        return Ok(system_time_to_unix_secs(trusted.now));
+    }
+    if state.deployment_mode == tauron_host::DeploymentMode::Production {
+        return Err(HostError::new(
+            ErrorCode::E_AUTH_DENIED,
+            "生产档缺少可信时间源（A100）：无法为破坏性操作铸发/校验审批令牌",
+        ));
+    }
+    Ok(system_time_to_unix_secs(std::time::SystemTime::now()))
+}
+
+/// 令牌 TTL 检查（A100 收口：与 `package_signature` 走**同一个**
+/// `require_unexpired` 判定，而不是各自比墙钟）。
+///
+/// 失败关闭语义与 `time_trust.rs` 一致：时钟不可信 → 拒；过期 → 拒。开发/测试档
+/// 无时间源时回落墙钟比较（`now > expires_at` 与 `require_unexpired` 同口径）。
+fn review_unexpired(state: &PluginRuntimeState, expires_at: u64) -> HostResult<()> {
+    #[cfg(feature = "plugin-install")]
+    if let Some(provider) = trusted_time_provider(state) {
+        let expires = std::time::UNIX_EPOCH + std::time::Duration::from_secs(expires_at);
+        return tauron_host::require_unexpired(provider.as_ref(), expires).map_err(|error| {
+            HostError::new(ErrorCode::E_AUTH_DENIED, format!("审批令牌已失效：{error}"))
+        });
+    }
+    if state.deployment_mode == tauron_host::DeploymentMode::Production {
+        return Err(HostError::new(
+            ErrorCode::E_AUTH_DENIED,
+            "生产档缺少可信时间源（A100）：无法校验破坏性操作审批令牌的有效期",
+        ));
+    }
+    if system_time_to_unix_secs(std::time::SystemTime::now()) > expires_at {
+        return Err(HostError::new(ErrorCode::E_AUTH_DENIED, "审批令牌已过期（墙钟）"));
+    }
+    Ok(())
+}
+
+/// 生产档破坏性操作的令牌强制条件（与安装域的 `trusted_time_available`
+/// 生产条件同域：安装特性开启的构建里才存在安装目录/ACL 这两个真正破坏面）。
+pub fn admin_review_required(state: &PluginRuntimeState) -> bool {
+    cfg!(feature = "plugin-install")
+        && state.deployment_mode == tauron_host::DeploymentMode::Production
+}
+
+fn is_destructive_admin_op(op: RegistryAdminOp) -> bool {
+    matches!(op, RegistryAdminOp::Uninstall | RegistryAdminOp::Purge)
+}
+
+/// 预览铸发：绑定当前注册表条目事实。铸发前**不**做任何注册表改动。
+fn mint_admin_review(
+    state: &PluginRuntimeState,
+    plugin_id: &str,
+    op: RegistryAdminOp,
+    version: &str,
+) -> HostResult<AdminReviewToken> {
+    run_review_boundary(state, "admin_review_mint", || {
+        let issued_at = review_now(state)?;
+        let token = AdminReviewToken {
+            plugin_id: plugin_id.to_string(),
+            op,
+            version: version.to_string(),
+            issued_at,
+            expires_at: issued_at.saturating_add(ADMIN_REVIEW_TTL_SECS),
+            nonce: uuid::Uuid::new_v4().to_string(),
+        };
+        let mut reviews = state.admin_reviews.lock();
+        reviews.retain(|_, stored| stored.expires_at > issued_at);
+        if reviews.len() >= MAX_ADMIN_REVIEWS {
+            if let Some(oldest) = reviews
+                .values()
+                .min_by_key(|stored| stored.issued_at)
+                .map(|stored| stored.nonce.clone())
+            {
+                reviews.remove(&oldest);
+            }
+        }
+        reviews.insert(token.nonce.clone(), token.clone());
+        Ok(token)
+    })
+}
+
+/// commit 校验：一次性消费 + 事实重核，全部发生在核心迁移（副作用）之前。
+///
+/// 消费顺序与安装域一致：**先按 nonce 摘除**再比对——伪造/重放的令牌不可能留下
+/// 可用条目；真实令牌一旦被提交过（或提交失败）nonce 即失效，必须重新预览。
+fn validate_admin_review(
+    state: &PluginRuntimeState,
+    plugin_id: &str,
+    op: RegistryAdminOp,
+    token: &AdminReviewToken,
+) -> HostResult<()> {
+    run_review_boundary(state, "admin_review_consume", || {
+        let stored = state.admin_reviews.lock().remove(&token.nonce).ok_or_else(|| {
+            HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                "admin review token is unknown, expired, or already consumed",
+            )
+        })?;
+        if stored != *token {
+            return Err(HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                "admin review token is stale or has been tampered with; preview again",
+            ));
+        }
+        review_unexpired(state, token.expires_at)?;
+        if token.op != op || token.plugin_id != plugin_id {
+            return Err(HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                "admin review token 与本次操作不匹配：令牌只能用于被审阅的同一操作与同一插件",
+            ));
+        }
+        let id = PluginId::new(plugin_id)?;
+        let entry = state.registry.find(&id).ok_or_else(|| {
+            HostError::new(
+                ErrorCode::E_UNKNOWN_PLUGIN,
+                format!("admin review token 指向的插件 `{plugin_id}` 已不存在；preview again"),
+            )
+        })?;
+        if entry.manifest.version.to_string() != token.version {
+            return Err(HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                format!(
+                    "插件 `{plugin_id}` 在预览后已变更（审阅版本 {}，当前版本 {}）；破坏性操作必须重新预览",
+                    token.version, entry.manifest.version
+                ),
+            ));
+        }
+        Ok(())
+    })
 }
 
 /// 可选能力未装配时的明确说明。
@@ -1201,7 +1471,9 @@ pub fn cmd_host_capabilities(state: &SubstrateState) -> HostResult<CapabilitiesB
             ("clipboard", "无 OS 级剪贴板：当前为进程内缓冲区（真实但非系统剪贴板）"),
             (
                 "market-update",
-                "未接入更新源：host_market_* 返回 simulated 结果，不做真实可用性探测",
+                "缺省装配无更新通道：host_market_check 是桩（不做探测）；host_market_download \
+                 / host_market_install 在宿主装配 UpgradeInstaller 后为真（缺省如实模拟，\
+                 不落任何字节）。可用性检查请走 updater 域（host_updater_check，注入端点即为真）",
             ),
         ] {
             unsupported
@@ -1735,7 +2007,10 @@ pub struct MenuItemSpec {
     pub id: String,
     /// 显示文本。
     pub label: String,
-    /// 点击时要发布到事件总线的 topic；`None` = 只记录不发布。
+    /// 点击时由宿主 `emit` 到该 topic 的帧即为一次真实点击；`None` = 只记录不发布。
+    ///
+    /// 走的是 Tauri 的**事件通道**（`AppHandle::emit`，前端 `listen`），不是
+    /// `host_events_*` 那套底座总线——见 [`crate::MenuRouteTable`]。
     #[serde(default)]
     pub event: Option<String>,
     /// 是否可点（缺省 true）。
@@ -1770,9 +2045,10 @@ pub struct MenuOutcome {
 
 /// **菜单能力**（平台部分）。
 ///
-/// 菜单点击的回传**不新造传输**：`TauriMenuSink` 用既有事件总线
-/// （`SubstrateState::bus`）发布 `MenuItemSpec::event` 指定的 topic，
-/// 与其余事件帧走同一条通路（`EventBus` → `host_events_drain`）。
+/// 菜单点击的回传**不新造传输**，但也不是 `host_events_*` 总线：`TauriMenuSink` 注册
+/// 一个 Tauri 全局菜单监听，命中 [`crate::MenuRouteTable`] 后直接用
+/// `AppHandle::emit` 把 `{ id, source, native: true }` 发到 `MenuItemSpec::event`
+/// 指定的 topic，前端用 `listen` 收。`host_events_drain` 取不到这类帧。
 pub trait MenuSink: Send + Sync {
     /// 菜单能力是否真实可用；默认缺省实现不支持。
     fn native_supported(&self) -> bool {
@@ -2199,13 +2475,17 @@ pub struct HttpResponseSpec {
     pub body: String,
     /// 是否因超过上限而被截断。
     pub truncated: bool,
+    /// 本跳实际拨号的解析地址（provider 契约，轮 48 / A96）：宿主用它复检
+    /// 私网/字面 IP 规则（DNS rebinding 面）。空 = provider 未回报。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_addrs: Vec<String>,
 }
 
 /// **HTTP 能力**（平台/网络部分）。
 ///
 /// 本仓**没有装配真实 HTTP 提供者**：如实降级（见下方 `UnavailableHttpSink` 与
-/// 本域块的说明）。接入方注入自己的实现即可启用。
-pub trait HttpSink: Send + Sync {
+/// 本域块的说明）。接入方经 [`AdapterConfig::with_http_sink`] 注入自己的实现即可启用。
+pub trait HttpSink: Send + Sync + std::fmt::Debug {
     /// HTTP 能力是否真实可用；默认缺省实现不支持。
     fn native_supported(&self) -> bool {
         false
@@ -2216,7 +2496,15 @@ pub trait HttpSink: Send + Sync {
         tauron_host::NetworkEnforcement::UrlOnly
     }
 
-    /// 发起一次请求。实现必须把同一个 policy 应用于每一跳 redirect 与 DNS 结果。
+    /// 发起**单跳**请求。
+    ///
+    /// **单跳契约（轮 48 / A96）**：实现**不得**自行跟随 redirect——3xx 必须原样
+    /// 返回（含 `location` 头），由宿主的 [`cmd_http_request`] 逐跳授权后再发下一跳；
+    /// 实现**必须**在响应里回报本跳解析地址（`resolved_addrs`），宿主用
+    /// [`tauron_host::NetworkPolicy::authorize_resolution`] 复检私网/字面 IP。
+    /// 此前这两项只是文档里的"信任我"承诺（`authorize_redirect` /
+    /// `authorize_resolution` 除模块自测外零调用者）；现在宿主在生产命令路径上
+    /// 逐跳执行这两条规则。
     fn request(
         &self,
         spec: &HttpRequestSpec,
@@ -2271,6 +2559,19 @@ pub struct UpdaterStatus {
     pub available: bool,
     /// 进程内更新状态机（来自 [`ShellExtState::update_state`]）。
     pub state: Option<String>,
+    /// `state` 是否来自**模拟**推进（见 [`cmd_market_download`] / [`cmd_market_install`]）。
+    ///
+    /// 这条线字段存在的唯一理由：`state` 的两个写入方（两条命令各自的分派腿）推进
+    /// `update_state` 是**如实**的进程内账本行为（写侧的 `reason` 说清楚了），但
+    /// `state` 字符串本身不带这个信息——读侧若直接上屏，"模拟点了一下安装"就会显示成
+    /// "已安装 2.0.0"。缺省装配（[`NoUpgradeInstaller`]）下本值恒为 `true`（有 state
+    /// 时）；轮 40 装配腿（[`DistributeUpgradeInstaller`]）注入后，**真实效果已发生**
+    /// 的推进由写入方置 `false`——由写入方的 provenance 位决定，不由此处推断。
+    ///
+    /// 本值由 [`UpdaterSink::status`] 从调用方（[`cmd_updater_status`]）传入的
+    /// 账本对**推导**（`state.is_some() && 写入方标记`），仓库里不存在把它硬写成
+    /// `false` 的地方——那等于无中生有地断言"这条状态是真的"。
+    pub state_simulated: bool,
     /// 当前灰度批次百分比。
     pub grayscale_percent: u32,
     /// 崩溃门禁是否已停发。
@@ -2291,8 +2592,15 @@ pub trait UpdaterSink: Send + Sync {
     }
     /// 检查更新。
     fn check(&self, current_version: &str) -> HostResult<ProviderResult<UpdaterCheckOutcome>>;
-    /// 当前更新通道状态（灰度批次 / 崩溃门禁 / 提供者可用性）。
-    fn status(&self) -> UpdaterStatus;
+    /// 当前更新通道状态（灰度批次 / 崩溃门禁 / 提供者可用性）+ 进程内更新账本。
+    ///
+    /// **账本与 provenance 必须由调用方成对传入**（轮 33）：sink 只拥有通道，
+    /// `update_state` 的写入方是 `shell_ext`（`cmd_market_download` / `cmd_market_install`
+    /// 的分派腿——缺省模拟，装配腿注入后为真）。sink 自己填这两个字段就等于替写入方
+    /// 回答"这条状态是模拟来的还是真的"——那是断言，不是推导，
+    /// `check-simulated-never-commits.mjs` 只允许 `simulated: false` 出现在装配腿真路径
+    /// （`_wired` 腿）里。
+    fn status(&self, ledger_state: Option<String>, ledger_simulated: bool) -> UpdaterStatus;
 }
 
 /// 未配置端点时的 `EndpointClient`：如实报"未配置"，**不假装**"已是最新"。
@@ -2485,10 +2793,13 @@ impl UpdaterSink for DistributeUpdaterSink {
         Ok(ProviderResult::Value(outcome))
     }
 
-    fn status(&self) -> UpdaterStatus {
+    fn status(&self, ledger_state: Option<String>, ledger_simulated: bool) -> UpdaterStatus {
+        // provenance 只能从"有没有账本"推导：无账本时无从谈起，有账本时听写入方的。
+        let state_simulated = ledger_state.is_some() && ledger_simulated;
         UpdaterStatus {
             available: self.configured,
-            state: None,
+            state: ledger_state,
+            state_simulated,
             grayscale_percent: self.grayscale.lock().current_percentage(),
             crash_gate_stopped: self.crash_gate.lock().is_stopped(),
             reason: if self.configured {
@@ -2498,6 +2809,353 @@ impl UpdaterSink for DistributeUpdaterSink {
             },
         }
     }
+}
+
+/// `host_market_download` / `host_market_install` 的**装配腿注入面**（轮 40）。
+///
+/// 这是 `tauron_distribute::UpgradeRunner` 执行侧的**仓内生产消费者**：装配方
+/// （宿主）注入真实组件后，两条商城命令从模拟桩变为真下载 / 真安装；缺省
+/// [`NoUpgradeInstaller`] 保持如实模拟（`simulated: true`）。
+///
+/// **为什么拆两条而非一条 `run()`**：命令面就是两条（下载 / 安装），账本也分两格
+/// （`downloaded:<v>` / `installed:<v>`）；合成一条会把两段的失败语义糊在一起。
+///
+/// **为什么不收调用方版本号**：URL / 版本 / 摘要的权威来源是宿主装配的清单——与
+/// `host_market_check` 不读调用方 `endpoints` / `pubkey` 同一条口径。让 webview
+/// 指定"装哪个版本"等于让调用方指定供应链输入。
+///
+/// **实现方必须承担的语义**（命令层按此推进账本）：
+/// - [`UpgradeInstaller::download`]：只在「字节落盘 + SHA-256 核对 + 验签」全部
+///   通过后返回 staged 事实；失败必须零 staged 残留（清理失败上浮）；
+/// - [`UpgradeInstaller::install`]：只在「备份 → 解压 → 原子交换 → 健康检查 →
+///   提交日志（+ 重启）」全部成功后返回；失败路径的回滚由 runner 自带，命令层
+///   账本只在成功后推进。
+pub trait UpgradeInstaller: Send + Sync {
+    /// 是否已装配真实现。缺省 `false` → 两条命令走模拟路径（如实 `simulated: true`）。
+    fn native_supported(&self) -> bool {
+        false
+    }
+    /// 下载 + 校验更新包（staged）。返回宿主侧清单的**真实**版本。
+    fn download(&self) -> HostResult<StagedUpgrade>;
+    /// 安装已 staged 的更新包（无 staged 时报错，必须零账本）。
+    fn install(&self) -> HostResult<InstalledUpgrade>;
+}
+
+/// [`UpgradeInstaller::download`] 成功的事实（staged 包已校验落盘）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedUpgrade {
+    /// 真实版本（来自宿主侧清单，**不是**调用方入参）。
+    pub version: String,
+    /// 已校验的包 SHA-256（hex 小写）。
+    pub sha256: String,
+    /// staged 包路径（宿主发侧事实）。
+    pub path: PathBuf,
+}
+
+/// [`UpgradeInstaller::install`] 成功的事实。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledUpgrade {
+    /// 真实版本（来自宿主侧清单）。
+    pub version: String,
+    /// 是否已向宿主请求重启（runner `RestartProvider` 的结果；未注入/未开启为 false）。
+    pub restarted: bool,
+}
+
+/// 缺省装配腿：未接入（两条命令因此走模拟路径）。方法被直接调用时给类型化硬失败，
+/// 绝不返回 success-shaped 结果。
+pub struct NoUpgradeInstaller;
+
+impl UpgradeInstaller for NoUpgradeInstaller {
+    fn download(&self) -> HostResult<StagedUpgrade> {
+        Err(HostError::new(
+            ErrorCode::E_STATE_INVALID_TRANSITION,
+            "未装配升级执行器（UpgradeInstaller 未注入）：下载腿不可用",
+        ))
+    }
+    fn install(&self) -> HostResult<InstalledUpgrade> {
+        Err(HostError::new(
+            ErrorCode::E_STATE_INVALID_TRANSITION,
+            "未装配升级执行器（UpgradeInstaller 未注入）：安装腿不可用",
+        ))
+    }
+}
+
+/// staged 槽位文件名（`download` 写、`install` 读）。
+///
+/// **固定名，不掺调用方输入**：版本号来自宿主清单、不进路径，槽位语义是"一份
+/// staged 更新"（新的下载替换旧的）。
+pub const STAGED_PACKAGE_FILE: &str = "staged-update.zip";
+
+/// 一个按目标平台细分的更新产物（A71）：目标规格 + 该平台专属清单。
+///
+/// `download()` / `install()` 在**任何下载、解压或 OS 加载动作之前**先做变体解析
+/// （[`tauron_host::ArtifactVariantResolver`]）；选不出兼容本机目标的一支就硬拒，
+/// 不静默回退到 [`tauron_distribute::UpgradeOptions`] 里的单包默认值。
+#[derive(Debug, Clone)]
+pub struct UpdateArtifactVariant {
+    pub target: tauron_host::TargetSpec,
+    pub manifest: tauron_distribute::UpdateManifest,
+}
+
+impl AsRef<tauron_host::TargetSpec> for UpdateArtifactVariant {
+    fn as_ref(&self) -> &tauron_host::TargetSpec {
+        &self.target
+    }
+}
+
+/// `tauron-distribute` 支撑的**真实**升级装配腿（轮 40）。
+///
+/// 持宿主装配的清单与目录（[`tauron_distribute::UpgradeOptions`]）＋五个注入组件：
+/// - `download`：`download_bounded`（deadline + 协作取消）→ `verify_package`
+///   （SHA-256 + 验签），失败清理 staged、清理失败上浮；
+/// - `install`：把 staged 包经 [`StagedPackageDownloader`] 喂给完整
+///   [`tauron_distribute::UpgradeRunner`]——备份 / 解压 / 原子交换 / 健康检查 /
+///   提交 / 重启与自动回滚全部真实执行，journal 落盘。
+/// - 变体过滤（A71）：注入 [`UpdateArtifactVariant`] 列表后，`download` / `install`
+///   先在**任何下载、解压或 OS 加载动作之前**解析出本机兼容变体；无兼容硬拒，
+///   不静默回退单包。
+///
+/// **边界（不夸大）**：生产 HTTP `Downloader` 与 ed25519 `SignatureVerifier` 仍由
+/// 装配方注入（仓内没有联网实现）；`download` / `install` 由内部锁串行化（staged
+/// 槽位单份，并发调用不得互踩）。
+pub struct DistributeUpgradeInstaller {
+    options: tauron_distribute::UpgradeOptions,
+    variants: Vec<UpdateArtifactVariant>,
+    downloader: Arc<dyn tauron_distribute::Downloader>,
+    verifier: Arc<dyn tauron_distribute::SignatureVerifier>,
+    extractor: Arc<dyn tauron_distribute::ArchiveExtractor>,
+    health_check: Arc<dyn tauron_distribute::UpgradeHealthCheck>,
+    restart_provider: Option<Arc<dyn tauron_distribute::RestartProvider>>,
+    staged_lock: Mutex<()>,
+}
+
+impl DistributeUpgradeInstaller {
+    /// 注入清单/目录与全部组件。
+    ///
+    /// `restart_provider` 为 `None` 时 `options.auto_restart` 必须为 `false`——
+    /// 否则 `install` 的前置校验会以 `UpgradeComponentMissing` 硬拒（不静默跳过）。
+    pub fn new(
+        options: tauron_distribute::UpgradeOptions,
+        downloader: Arc<dyn tauron_distribute::Downloader>,
+        verifier: Arc<dyn tauron_distribute::SignatureVerifier>,
+        extractor: Arc<dyn tauron_distribute::ArchiveExtractor>,
+        health_check: Arc<dyn tauron_distribute::UpgradeHealthCheck>,
+        restart_provider: Option<Arc<dyn tauron_distribute::RestartProvider>>,
+    ) -> Self {
+        Self {
+            options,
+            variants: Vec::new(),
+            downloader,
+            verifier,
+            extractor,
+            health_check,
+            restart_provider,
+            staged_lock: Mutex::new(()),
+        }
+    }
+
+    /// staged 槽位路径（`download` 的落点 / `install` 的读点）。
+    pub fn staged_path(&self) -> PathBuf {
+        self.options.download_dir.join(STAGED_PACKAGE_FILE)
+    }
+
+    /// 注入按目标细分的更新变体（A71）。非空时下载/安装都只走变体解析；
+    /// 空列表保持单清单语义（既有装配不变）。
+    pub fn with_variants(mut self, variants: Vec<UpdateArtifactVariant>) -> Self {
+        self.variants = variants;
+        self
+    }
+
+    /// 选出本次动作使用的清单：变体列表非空 → 按**本机编译目标**解析（无兼容即硬拒）；
+    /// 空 → 单清单默认。判定发生在下载/解压/OS 加载之前，失败关闭。
+    fn select_manifest(&self) -> HostResult<&tauron_distribute::UpdateManifest> {
+        if self.variants.is_empty() {
+            return Ok(&self.options.manifest);
+        }
+        let host = tauron_host::current_target_spec();
+        match tauron_host::ArtifactVariantResolver::resolve(&self.variants, &host) {
+            Some(variant) => Ok(&variant.manifest),
+            None => Err(HostError::new(
+                ErrorCode::E_INVALID_MANIFEST,
+                format!(
+                    "更新清单提供 {} 个变体，无一兼容本机目标（os={:?} arch={:?}）：拒绝下载，不静默回退单包",
+                    self.variants.len(),
+                    host.os,
+                    host.arch
+                ),
+            )),
+        }
+    }
+
+    /// 下载 + 校验，返回（路径，实际 SHA-256）。下载腿的纯逻辑（失败清理在调用方）。
+    fn download_and_verify(
+        &self,
+        manifest: &tauron_distribute::UpdateManifest,
+    ) -> Result<(PathBuf, String), tauron_distribute::DistributeError> {
+        let mut progress = |_downloaded: u64, _total: u64| {};
+        let path = tauron_distribute::download_bounded(
+            self.downloader.clone(),
+            manifest.url.clone(),
+            self.staged_path(),
+            self.options.download_timeout_secs,
+            &mut progress,
+        )?;
+        let sha256 = tauron_distribute::verify_package(manifest, &path, self.verifier.as_ref())?;
+        Ok((path, sha256))
+    }
+}
+
+impl UpgradeInstaller for DistributeUpgradeInstaller {
+    fn native_supported(&self) -> bool {
+        true
+    }
+
+    fn download(&self) -> HostResult<StagedUpgrade> {
+        let _slot = self.staged_lock.lock();
+        let manifest = self.select_manifest()?;
+        if manifest.url.is_empty() {
+            return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "更新清单缺少下载 URL"));
+        }
+        if manifest.version.is_empty() {
+            return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "更新清单缺少版本号"));
+        }
+        if manifest.signature.is_empty() {
+            return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "更新清单缺少签名"));
+        }
+        if manifest.sha256.as_deref().unwrap_or("").trim().is_empty() {
+            return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "更新清单缺少 sha256"));
+        }
+        if self.options.download_timeout_secs == 0 {
+            return Err(HostError::new(ErrorCode::E_INVALID_MANIFEST, "下载超时必须 > 0"));
+        }
+        let staged = self.staged_path();
+        if let Some(parent) = staged.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("创建 staged 目录 `{}` 失败：{e}", parent.display()),
+                )
+            })?;
+        }
+        // 单槽语义：旧 staged 先清。留着旧包会让"本次失败"还残留一个可被 install
+        // 读到的候选——失败路径不得留下会被误当成本次结果的文件。
+        match std::fs::remove_file(&staged) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    format!("清理旧 staged `{}` 失败：{e}", staged.display()),
+                ));
+            }
+        }
+        match self.download_and_verify(manifest) {
+            Ok((path, sha256)) => {
+                Ok(StagedUpgrade { version: manifest.version.clone(), sha256, path })
+            }
+            Err(error) => {
+                let mapped = map_distribute_error(error);
+                // 失败路径清 staged；清理失败必须上浮（不静默留脏）。
+                if let Err(cleanup) = std::fs::remove_file(&staged) {
+                    if cleanup.kind() != std::io::ErrorKind::NotFound {
+                        return Err(HostError::new(
+                            ErrorCode::E_INSTALL_FAILED,
+                            format!(
+                                "{}；且清理 staged `{}` 失败：{cleanup}",
+                                mapped.message,
+                                staged.display()
+                            ),
+                        ));
+                    }
+                }
+                Err(mapped)
+            }
+        }
+    }
+
+    fn install(&self) -> HostResult<InstalledUpgrade> {
+        let _slot = self.staged_lock.lock();
+        // 与 download 同一解析口径：runner 会用**被选中的**清单重验 staged 包的
+        // sha256/签名；这里回退单清单会让变体下载的包在重验时被判不一致。
+        let manifest = self.select_manifest()?.clone();
+        let staged = self.staged_path();
+        if !staged.is_file() {
+            return Err(HostError::new(
+                ErrorCode::E_STATE_INVALID_TRANSITION,
+                "没有已 staged 的更新包：先执行 host_market_download",
+            ));
+        }
+        let mut options = self.options.clone();
+        options.manifest = manifest;
+        let mut runner = tauron_distribute::create_upgrade_runner(options.clone())
+            .with_downloader_arc(Arc::new(StagedPackageDownloader { staged }))
+            .with_verifier_arc(self.verifier.clone())
+            .with_extractor_arc(self.extractor.clone())
+            .with_health_check_arc(self.health_check.clone());
+        if let Some(provider) = &self.restart_provider {
+            runner = runner.with_restart_provider_arc(provider.clone());
+        }
+        let result = runner.run().map_err(map_distribute_error)?;
+        Ok(InstalledUpgrade {
+            version: options.manifest.version.clone(),
+            restarted: result.restarted,
+        })
+    }
+}
+
+/// 把「已 staged 且已校验」的包当作下载结果的 [`tauron_distribute::Downloader`]：
+/// `run_phases` 的下载阶段要求真实产出文件，这里从 staged 复制到本次操作的下载
+/// 目录；stage 自身已过摘要 + 验签，runner 拿到后会**再验一次**（同一条
+/// `verify_package`），两层都真跑。
+struct StagedPackageDownloader {
+    staged: PathBuf,
+}
+
+impl tauron_distribute::Downloader for StagedPackageDownloader {
+    fn download(
+        &self,
+        _url: &str,
+        dest_path: &Path,
+        control: &tauron_distribute::PhaseControl,
+        progress_callback: &mut dyn FnMut(u64, u64),
+    ) -> tauron_distribute::DistributeResult<PathBuf> {
+        use tauron_distribute::DistributeError as D;
+        if control.is_cancelled() {
+            return Err(D::PhaseTimeout { phase: "Download", timeout_secs: 0 });
+        }
+        if !self.staged.is_file() {
+            return Err(D::UpgradeComponentMissing {
+                component: "StagedPackage（先执行 host_market_download）",
+            });
+        }
+        let copied = std::fs::copy(&self.staged, dest_path)
+            .map_err(|e| D::FileOperationFailed(format!("staged 复制到下载目录失败：{e}")))?;
+        progress_callback(copied, copied);
+        Ok(dest_path.to_path_buf())
+    }
+}
+
+/// `tauron_distribute::DistributeError` → 冻结错误面（24 码）的映射（轮 40）。
+///
+/// 不新增错误码：包摘要/签名/归档/清单类 → `E_INVALID_MANIFEST`（清单或产物不
+/// 合格）；阶段超时 → `E_CALL_TIMEOUT`；组件缺失/安装根缺失/日志损坏 →
+/// `E_STATE_INVALID_TRANSITION`（装配或状态前提不成立）；其余（文件/交换/备份/
+/// 回滚/重启失败）→ `E_INSTALL_FAILED`。
+fn map_distribute_error(error: tauron_distribute::DistributeError) -> HostError {
+    use tauron_distribute::DistributeError as D;
+    let code = match &error {
+        D::PackageHashMismatch { .. }
+        | D::SignatureInvalid
+        | D::ArchiveRejected(_)
+        | D::InvalidBody(_)
+        | D::ManifestParse(_) => ErrorCode::E_INVALID_MANIFEST,
+        D::PhaseTimeout { .. } => ErrorCode::E_CALL_TIMEOUT,
+        D::UpgradeComponentMissing { .. } | D::InstallRootMissing { .. } | D::Journal(_) => {
+            ErrorCode::E_STATE_INVALID_TRANSITION
+        }
+        _ => ErrorCode::E_INSTALL_FAILED,
+    };
+    HostError::new(code, format!("升级装配腿失败：{error}"))
 }
 
 /// `host_window_create` 的**核心规格**（平台无关；由核心按注册表解析后交给 sink）。
@@ -2646,6 +3304,18 @@ pub struct SubstrateState {
     /// V4 A91: settings-engine panic containment. Once faulted, ordinary settings work is
     /// rejected until the main-window migration/reconcile path proves a durable rebuild.
     settings_fault: Arc<Mutex<tauron_host::FaultBoundary>>,
+    /// V4 A91（轮 47）: event-bus panic containment. 故障后所有事件命令拒绝服务，
+    /// 直到 [`reconcile_events_boundary`] 做确定性修复（`host_recover_boot` 触发）：
+    /// 会话态清零 = 完整一致（订阅可重建）；topic 声明属装配期事实，重置保留。
+    events_fault: Arc<Mutex<tauron_host::FaultBoundary>>,
+    /// V4 A91（轮 47）: approval-token panic containment（安装/管理两域一次性令牌）。
+    /// 故障后令牌操作拒绝服务；修复入口是两条 preview 命令（重新预览 = 清空旧令牌、
+    /// 重新铸发）——令牌本就是一次性的，清空是完整语义，不是折衷。
+    review_fault: Arc<Mutex<tauron_host::FaultBoundary>>,
+    /// V4 A91（轮 47）: registry panic containment（管理面：list/admin/安装提交）。
+    /// 注册表条目没有持久镜像、会话内无法证明重建一致 → 修复尝试只做**如实隔离**
+    /// （Quarantined），修复路径是重启重新装配（装配重装 + 轮 41 启动孤儿清扫）。
+    registry_fault: Arc<Mutex<tauron_host::FaultBoundary>>,
     /// **只写不读**的兼容通知日志（R8 之前的 `host_notify` 产物）。
     ///
     /// ⚠️ **接入状态：没有任何命令返回它**——`host_notify` 返回 `void`，
@@ -2691,6 +3361,14 @@ pub struct SubstrateState {
     /// Bottom-only hosts keep this unset; multi-plugin hosts inject it from the same ProcSpawner
     /// that performs spawn, so capability reporting cannot drift from the execution path.
     pub process_sandbox: Arc<std::sync::OnceLock<tauron_proc::ProcessSandboxDescriptor>>,
+    /// 插件运行时**单例装配凭证**（V7-P1-01）。
+    ///
+    /// 归属**底座**：不变量是「一份底座只装配一份插件运行时」，所以门禁必须长在
+    /// 底座上，而不是长在某个 `PluginRuntimeState` 实例上。
+    /// [`PluginRuntimeState::with_substrate_and_spawner`] 用 `set` 的返回值领取凭证，
+    /// 领取失败即 `AlreadyAssembled` **且不返回 Runtime**——此前只打印冲突日志，
+    /// 调用方照样拿到第二个注册表，而恢复对账仍写向第一个（日志替代不了状态不变量）。
+    pub plugin_runtime_assembly: Arc<std::sync::OnceLock<AssemblyToken>>,
     /// **窗口能力**（R8 §1）：平台部分的可替换实现。
     ///
     /// 与 [`Self::plugin_flags`] 的 `OnceLock` **不同**，这里是普通 `pub` 字段：
@@ -2718,6 +3396,10 @@ pub struct SubstrateState {
     pub http_policy: Arc<tauron_host::NetworkPolicy>,
     /// **更新通道能力**（R9）：缺省 = [`DistributeUpdaterSink::unconfigured`]。
     pub updater_sink: Arc<dyn UpdaterSink>,
+    /// **升级装配腿能力**（轮 40）：缺省 = [`NoUpgradeInstaller`]（两条商城命令
+    /// 如实走模拟路径）。装配方在 Arc 化**之前**替换为
+    /// [`DistributeUpgradeInstaller`]（注入清单/目录与五组件），下载/安装腿即真。
+    pub upgrade_installer: Arc<dyn UpgradeInstaller>,
     /// **主题注册表**（任务二：接通孤儿 crate `tauron-theme`）。
     ///
     /// 与既有 settings 的 `theme` 键**不是同一事实源**：`settings` 存的是"用户选了
@@ -2731,8 +3413,9 @@ pub struct SubstrateState {
 //
 // 分工：
 // - **启动面**（`ProcSpawner`）是可注入 trait：生产 = `std::process::Command`
-//   （`tauron_proc::CommandSpawner`），测试 = fake。测试里**绝不真起 sidecar**
-//   （CI 上没有 sidecar 二进制，真起进程还会带进时序与残留进程的 flaky）。
+//   （`tauron_proc::CommandSpawner`），单测 = fake。真起进程的执行器语义由
+//   `crates/tauron-test-sidecar/tests/sidecar_e2e.rs` 承担（轮 22 / V7-P1-05：仓内
+//   有自己的 sidecar 夹具二进制），单元层因此不必与真实进程时序共舞。
 // - **租约**（`plugin_id ↔ lease ↔ pid`）在 `tauron_host::registry::Registry`
 //   的 `runtime` 表里（同域锁，见该文件锁序文档）——它是**插件身份**的句柄。
 // - **崩溃窗口计数**用 `tauron_proc::CrashTracker`（缺省 3 次 / 5min），不新造计数。
@@ -2763,6 +3446,24 @@ pub struct RuntimeSpawnProfile {
     pub binary_hash: String,
     /// ABI 指纹。
     pub abi: RuntimeAbiFingerprint,
+}
+
+/// 把**运维**注入的环境变量合进待启动 sidecar 的 env。
+///
+/// 优先级是本函数的全部难点，规则只有一条：**运维 > 调用方**。
+/// `profile.env` 由发起 spawn 的调用方（前端 / 插件装配方）自报，若同名的
+/// `ClientConfig.env_overrides` 能被它覆盖，运维就失去了唯一一根确定的杠杆
+/// （想给全部 sidecar 强制 `TAURON_PROFILE=prod`，结果任何一个调用方都能改）。
+/// 反过来，调用方独有的键照原样保留——本字段只做注入，不做白名单。
+///
+/// 空 `overrides` = 原样不动（默认装配零影响）。
+fn apply_host_env_overrides(
+    env: &mut std::collections::HashMap<String, String>,
+    overrides: &std::collections::HashMap<String, String>,
+) {
+    for (key, value) in overrides {
+        env.insert(key.clone(), value.clone());
+    }
 }
 
 /// 线形签名（与 `tauron_proc::BinarySignature` 同构，但走 camelCase）。
@@ -2933,11 +3634,90 @@ impl LeaseReaper for SpawnerReaper {
     }
 }
 
+/// 插件运行时单例装配凭证（V7-P1-01）。
+///
+/// **不可伪造**：`assembly_id` 来自进程内单调递增计数器，唯一领取点是
+/// [`PluginRuntimeState::with_substrate_and_spawner`]；`AssemblyToken::next` 只在
+/// 领取凭证时调用一次。字段是公开的、类型本身不含任何能改回「未装配」状态的操作
+/// ——底座上的凭证一旦落下，只能被读到，不能被替换或清除。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssemblyToken {
+    pub assembly_id: u64,
+}
+
+/// 凭证 id 计数器：从 1 起，只在领取凭证时自增（见 [`AssemblyToken::next`]）。
+static NEXT_ASSEMBLY_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+impl std::fmt::Display for AssemblyToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.assembly_id)
+    }
+}
+
+impl AssemblyToken {
+    fn next() -> Self {
+        Self { assembly_id: NEXT_ASSEMBLY_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst) }
+    }
+}
+
+/// 装配失败原因（V7-P1-01 单例不变量的结构化错误面）。
+///
+/// 实现 [`std::error::Error`] 是为了让 Tauri `setup` 闭包能把它作为
+/// `Box<dyn Error>` 原样交回框架：**装配冲突必须在 setup 阶段结构化失败**，
+/// 而不是继续 `manage` 到 managed state 的运行时 panic。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssemblyError {
+    /// 同一底座已经装配过插件运行时。`existing` 是持有凭证的那次装配，
+    /// `attempted` 是被拒的这次——两个 id 不同就能证明「第二次 Runtime 从未存在」。
+    AlreadyAssembled { existing: AssemblyToken, attempted: AssemblyToken },
+    /// 宿主把同一份 managed state 注册了两次（`init()` 与 `state_init()` 同时使用）。
+    /// 与 [`Self::AlreadyAssembled`] 不同：这一份冲突发生在 Tauri 的 state 表上，
+    /// 底座凭证还没被领取就已经注定要冲突。
+    AlreadyManaged { state: &'static str },
+    /// 进程运行时配置在装配前被拒（`AdapterConfig::validate_process_runtime_for_start`）。
+    /// 保留 [`HostError`] 而不是只留消息：错误码是宿主语义的一部分，装配失败也要能
+    /// 被原样读出（`E_CONFIG_*` / `E_SANDBOX_*` 之类）。
+    ProcessRuntimeRejected(tauron_host::HostError),
+    /// 跨重启回收台账被拒（IO / 完整性）：`Registry::open_reap_ledger` 的失败原文。
+    /// 这份台账是"上一轮宿主是否有杀不掉的进程"的唯一跨重启来源，读不开就不启动
+    /// ——静默重置成空账等于把孤儿洗白。
+    ReapLedgerRejected(String),
+}
+
+impl std::fmt::Display for AssemblyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyAssembled { existing, attempted } => write!(
+                f,
+                "同一底座已装配过插件运行时（既有凭证 #{existing}，本次尝试 #{attempted}）。\
+                 一份底座只允许一份插件运行时：第二次装配不会返回 Runtime，\
+                 否则恢复对账仍写向第一个注册表，而调用方手里拿的是第二个。"
+            ),
+            Self::AlreadyManaged { state } => write!(
+                f,
+                "managed state `{state}` 已注册：`tauron_adapter::tauri::init()` 与 \
+                 `state_init()` 只能二选一，同时使用会重复注册同一份状态。"
+            ),
+            Self::ProcessRuntimeRejected(reason) => {
+                write!(f, "进程运行时配置在装配前被拒：{reason}")
+            }
+            Self::ReapLedgerRejected(reason) => {
+                write!(f, "跨重启回收台账被拒（不静默重置成空账）：{reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AssemblyError {}
+
 /// **插件运行时状态**：多插件宿主才装配的部分（注册表 + 贡献登记）。
 ///
 /// 持 [`SubstrateState`] 的**同一份** Arc（不是拷贝）：插件命令既要注册表，也要底座
 /// 能力（通知 / i18n / 恢复），因此这里显式给出唯一底座入口。装配时两个 managed 值
 /// 共享同一份底座——不存在「第二份状态」这类「改了没生效」的温床。
+///
+/// 装配入口是 [`Self::with_substrate`] / [`Self::with_substrate_and_spawner`]，
+/// 两者返回 `Result<Self, AssemblyError>`：**同一底座上的第二次装配拿不到 Runtime**。
 #[derive(Clone)]
 pub struct PluginRuntimeState {
     pub substrate: Arc<SubstrateState>,
@@ -2954,11 +3734,20 @@ pub struct PluginRuntimeState {
     /// [`select_delivery`] 的 `UnwiredDelivery`，返回有类型的 `Unsupported`
     /// 而非假装成功——这是「未装配 delivery」负向测试的落地点。
     pub deliveries: Arc<HashMap<DeliveryKind, Box<dyn CallDelivery>>>,
+    /// 运维注入的 sidecar 环境变量（[`AdapterConfig::plugin_env_overrides`] 的运行时副本）。
+    ///
+    /// 放在运行时状态而不是底座：只有 `host_runtime_spawn` 读它，底座-only 宿主没有
+    /// 子进程可注入。装配时从 config 拷一次，之后只读——避免每个 spawn 再走一遍
+    /// `AdapterConfig`。
+    plugin_env_overrides: Arc<HashMap<String, String>>,
     #[cfg(feature = "plugin-install")]
     install_config: Option<InstallRuntimeConfig>,
     /// One-time bounded install-review tokens. Preview mints; commit consumes.
     #[cfg(feature = "plugin-install")]
     install_reviews: Arc<Mutex<HashMap<String, InstallReviewToken>>>,
+    /// A83（轮 43）：uninstall/purge 的一次性审批令牌（预览铸发、commit 消费）。
+    /// 不挂特性开关：破坏性管理操作在底座-only 构建里也存在（见本文件 A83 段注释）。
+    admin_reviews: Arc<Mutex<HashMap<String, AdminReviewToken>>>,
 }
 
 #[cfg(feature = "plugin-install")]
@@ -3268,6 +4057,9 @@ impl SubstrateState {
             settings_path,
             settings_generation: Arc::new(Mutex::new(settings_generation)),
             settings_fault: Arc::new(Mutex::new(tauron_host::FaultBoundary::new("settings"))),
+            events_fault: Arc::new(Mutex::new(tauron_host::FaultBoundary::new("events"))),
+            review_fault: Arc::new(Mutex::new(tauron_host::FaultBoundary::new("approval"))),
+            registry_fault: Arc::new(Mutex::new(tauron_host::FaultBoundary::new("registry"))),
             notifications: Arc::new(Mutex::new(Vec::new())),
             notify_store: Arc::new(Mutex::new(notify_store)),
             notify_sink: Arc::new(std::sync::OnceLock::new()),
@@ -3283,6 +4075,7 @@ impl SubstrateState {
             subscription_groups: Arc::new(Mutex::new(std::collections::HashMap::new())),
             plugin_flags: Arc::new(std::sync::OnceLock::new()),
             process_sandbox: Arc::new(std::sync::OnceLock::new()),
+            plugin_runtime_assembly: Arc::new(std::sync::OnceLock::new()),
             // R8：三类平台能力的**降级缺省**。宿主（`tauri.rs`）在装配时替换为
             // Tauri 实现；不替换 = 进程内留痕 / 取消 / 无 OS 注册（如实降级）。
             window_sink: Arc::new(MemoryWindowSink::new()),
@@ -3297,11 +4090,15 @@ impl SubstrateState {
             fs_allowed_roots: Arc::new(
                 cfg.fs_allowed_roots.iter().filter_map(|p| p.canonicalize().ok()).collect(),
             ),
-            http_sink: Arc::new(UnavailableHttpSink),
+            // 轮 48 / A96：注入式 provider（`with_http_sink`）缺省 = 诚实降级。
+            http_sink: cfg.http_sink.clone().unwrap_or_else(|| Arc::new(UnavailableHttpSink)),
             http_policy: Arc::new(cfg.http_policy.clone()),
             updater_sink: Arc::new(DistributeUpdaterSink::unconfigured_with_identity(
                 installation_identity,
             )),
+            // 轮 40：升级装配腿缺省不接入（与 updater_sink 同一装配姿态：宿主
+            // 注入才为真；`with_adapter_config` 不替装配方虚构组件）。
+            upgrade_installer: Arc::new(NoUpgradeInstaller),
             themes: Arc::new(Mutex::new(tauron_theme::ThemeRegistry::default())),
         }
     }
@@ -3325,9 +4122,12 @@ impl PluginRuntimeState {
     }
 
     /// 自建底座并装配插件运行时（测试 + 「自己全都要」的宿主）。
+    ///
+    /// 底座是本次调用新建的，因此单例凭证必然由这次装配领取，`Err` 分支不可达。
     pub fn with_adapter_config(cfg: AdapterConfig) -> Self {
         let substrate = Arc::new(SubstrateState::with_adapter_config(&cfg));
         Self::with_substrate(substrate, cfg)
+            .unwrap_or_else(|error| panic!("[tauron] 自建底座装配失败：{error}"))
     }
 
     /// 在**既有**底座状态上装配插件运行时。
@@ -3336,9 +4136,17 @@ impl PluginRuntimeState {
     /// 并同时 `manage`，插件运行时复用**同一份**——两个 managed 值不可能指向两份
     /// 底座状态。
     ///
+    /// **单例语义（V7-P1-01）**：返回 `Result`，同一份底座的第二次装配得到
+    /// [`AssemblyError::AlreadyAssembled`]，**不会**拿到第二个 Runtime。此前这里只
+    /// 打印冲突日志就照样返回新注册表，于是「调用方手里的注册表」与「恢复对账写入
+    /// 的注册表」分成两份——日志替代不了状态不变量。
+    ///
     /// 进程执行器用生产启动面（`std::process::Command`）。**测试请用**
     /// [`Self::with_spawner`]，否则会在 CI 上真起进程。
-    pub fn with_substrate(substrate: Arc<SubstrateState>, cfg: AdapterConfig) -> Self {
+    pub fn with_substrate(
+        substrate: Arc<SubstrateState>,
+        cfg: AdapterConfig,
+    ) -> Result<Self, AssemblyError> {
         Self::with_substrate_and_spawner(
             substrate,
             cfg,
@@ -3355,10 +4163,23 @@ impl PluginRuntimeState {
         substrate: Arc<SubstrateState>,
         cfg: AdapterConfig,
         spawner: Arc<dyn ProcSpawner>,
-    ) -> Self {
+    ) -> Result<Self, AssemblyError> {
         let sandbox_descriptor = spawner.sandbox_descriptor();
-        if let Err(error) = cfg.validate_process_runtime_for_start(&sandbox_descriptor) {
-            panic!("[tauron] {error}");
+        cfg.validate_process_runtime_for_start(&sandbox_descriptor)
+            .map_err(AssemblyError::ProcessRuntimeRejected)?;
+
+        // **领取单例凭证**：`OnceLock::set` 只接受第一次写入，所以这一步就是
+        // 「同一底座只有一份插件运行时」的不变量本身。领取必须在建注册表**之前**，
+        // 否则并发第二次装配会先建出一个没人认领的 Registry（真进程启动面还会长出
+        // 一个 reaper），然后把冲突写成一条日志。
+        let attempted = AssemblyToken::next();
+        if substrate.plugin_runtime_assembly.set(attempted).is_err() {
+            // `set` 失败 ⇒ 凭证已被别人领取，`get()` 必返回 `Some`。
+            let existing = *substrate
+                .plugin_runtime_assembly
+                .get()
+                .expect("凭证领取失败说明底座上已有装配记录");
+            return Err(AssemblyError::AlreadyAssembled { existing, attempted });
         }
 
         let registry = Arc::new(Registry::new(cfg.registry.unwrap_or_default()));
@@ -3366,36 +4187,44 @@ impl PluginRuntimeState {
         // 终止 sidecar，否则留下没人认领的孤儿进程。未注入时核心仍会摘表项，
         // 但每次终止都按失败留痕（`Registry::runtime_reap_stats`），不会静默。
         registry.set_lease_reaper(Arc::new(SpawnerReaper(spawner.clone())));
-        // 注入恢复对账的插件侧写回口。`OnceLock::set` 只接受第一次注入：重复装配
-        // 不会换掉已注入的写回口（否则两套插件运行时会让对账写到错误的注册表）。
+        // 跨重启孤儿扫描（V7 §7「startup orphan sweep」）：平台存活探测固定注入，
+        // 回收台账落在宿主的恢复数据目录。上一轮宿主"杀不掉"的 pid 在启动时逐条
+        // 定性——**只探测不杀**（跨重启无法验明进程身份，盲杀可能命中复用同号的
+        // 新进程，见 `RuntimeTable::sweep_restart_reaps` 的安全封口）。
+        // 台账撕裂/篡改/IO 失败 = 拒绝启动：它是"上一轮是否有孤儿"的唯一跨重启
+        // 事实来源，静默重置成空账等于把孤儿洗白。
+        registry.set_system_pid_probe();
+        if let Some(dir) = cfg.recovery_data_dir.as_ref() {
+            registry
+                .open_reap_ledger(dir)
+                .map_err(|e| AssemblyError::ReapLedgerRejected(e.to_string()))?;
+        }
+        // 注入恢复对账的插件侧写回口 + 进程沙箱事实。两者都长在这份新注册表 /
+        // 这次领取的凭证上，所以写入必须成功——凭证已独占，同一底座不可能有第二次
+        // 装配走到这里（见 [`AssemblyError::AlreadyAssembled`]）。
         //
-        // **冲突必须留痕，不能静默丢弃**：若底座已经注入过写回口，本次新建的
-        // `RegistryFlagSink` 会被 `OnceLock` 丢掉——对账仍写向**旧**注册表，而
-        // 调用方手里的却是新注册表。这几乎必然是「同一底座装配了两个插件运行时」
-        // 的误用，静默吞掉会让故障表现为「对账写到了看不见的地方」。
+        // 用 `is_err()` + `panic!` 而不是 `expect`：`OnceLock::set` 的错误类型
+        // `SetError<T>` 要 `T: Debug` 才可实现，而这里的 T 是
+        // `Arc<dyn PluginFlagSink>`（trait object 没有 Debug）。
         if substrate
             .plugin_flags
             .set(Arc::new(RegistryFlagSink { registry: registry.clone() }))
             .is_err()
         {
-            eprintln!(
-                "[tauron] 底座已注入插件侧写回口：本次装配的注册表不参与恢复对账。\
-                 同一底座不应装配两个插件运行时。"
-            );
+            panic!("[tauron] 单例凭证已领取，插件侧写回口不可能被他人注入");
+        }
+        if substrate.process_sandbox.set(sandbox_descriptor).is_err() {
+            panic!("[tauron] 单例凭证已领取，process sandbox descriptor 不可能被他人注入");
         }
         let proc_runtime = Arc::new(ProcRuntime::new(spawner));
-        if substrate.process_sandbox.set(sandbox_descriptor).is_err() {
-            eprintln!(
-                "[tauron] 底座已注入 process sandbox descriptor；本次插件运行时不会覆盖既有事实"
-            );
-        }
         let deliveries = Self::default_deliveries(&substrate, &registry, &proc_runtime);
-        Self {
+        Ok(Self {
             substrate,
             registry,
             contributes: Arc::new(Mutex::new(ContributesRegistry::default())),
             proc_runtime,
             deliveries: Arc::new(deliveries),
+            plugin_env_overrides: Arc::new(cfg.plugin_env_overrides.clone()),
             #[cfg(feature = "plugin-install")]
             install_config: match cfg.plugin_install_dir {
                 // 轮 16：装成 **canonical 权威副本**（与 `fs_allowed_roots` 同一
@@ -3423,7 +4252,8 @@ impl PluginRuntimeState {
             },
             #[cfg(feature = "plugin-install")]
             install_reviews: Arc::new(Mutex::new(HashMap::new())),
-        }
+            admin_reviews: Arc::new(Mutex::new(HashMap::new())),
+        })
     }
 
     /// 构建默认投递实现表（0.4-A1）。
@@ -3432,7 +4262,9 @@ impl PluginRuntimeState {
     /// - `Process`：经 sidecar stdin/stdout 帧回路（`ProcessCallDelivery`）；sidecar
     ///   必须在 `cmd_runtime_spawn` 后处于运行中，`live_pid_of` 才能解析出 pid。
     /// - `Wasm`：`WasmCallDelivery`——投递路径**真的经过** `tauron-wasm` 的配置 /
-    ///   ABI / 崩溃预算校验层（任务二接线），但执行层无运行时，仍诚实返回
+    ///   ABI / 崩溃预算校验层（任务二接线），但**执行层没有可执行通路**：仓内的
+    ///   wasmi provider 已落地却没接到投递侧，且它只支持整数 host_fn ABI
+    ///   （JSON 参数走 linear memory 的完整 ABI 未实现）。因此仍诚实返回
     ///   `delivered: false`（上层转 `E_PLUGIN_TYPE_NO_RUNTIME`）。
     /// - `Rust`（Native）：A4 之前无执行器，保持 unwired（落 `UnwiredDelivery`，
     ///   诚实返回 `Unsupported`，不假装能调起）。
@@ -3515,12 +4347,15 @@ impl PluginRuntimeState {
     }
 
     /// 自建底座 + 注入进程启动面（测试用；恢复持久化关闭）。
+    ///
+    /// 与 [`Self::with_adapter_config`] 同理：底座是新建的，单例凭证必然由这次领取。
     pub fn with_spawner(spawner: Arc<dyn ProcSpawner>) -> Self {
         Self::with_substrate_and_spawner(
             Arc::new(SubstrateState::with_adapter_config(&AdapterConfig::default())),
             AdapterConfig::default(),
             spawner,
         )
+        .unwrap_or_else(|error| panic!("[tauron] 自建底座装配失败：{error}"))
     }
 }
 
@@ -3920,12 +4755,14 @@ pub fn cmd_registry_list(
     subscribed_topics: &[String],
 ) -> HostResult<Vec<PluginSummary>> {
     let caller_id = caller.map(PluginId::new).transpose()?;
-    guard("registry_list", || state.registry.list_visible(caller_id.as_ref(), subscribed_topics))
+    run_registry_boundary(state, "registry_list", || {
+        Ok(state.registry.list_visible(caller_id.as_ref(), subscribed_topics))
+    })
 }
 
 /// `host_registry_list_all`：全量列表（privileged 档 / 主窗 UI）。
 pub fn cmd_registry_list_all(state: &PluginRuntimeState) -> HostResult<Vec<PluginSummary>> {
-    guard("registry_list_all", || state.registry.list_all())
+    run_registry_boundary(state, "registry_list_all", || Ok(state.registry.list_all()))
 }
 
 /// `host_registry_list_all` 的**带身份判定**版本（wire 层转调的就是它）。
@@ -4019,9 +4856,9 @@ pub fn cmd_registry_install_as(
             "production install requires InstallReviewToken from host_registry_install_preview",
         ));
     }
-    guard("registry_install_legacy", || {
+    run_registry_boundary(state, "registry_install_legacy", || {
         registry_install_inner(state, package_path, approved_permissions, None)
-    })?
+    })
 }
 
 /// V4 reviewed install path. This is the only path wired to production Tauri IPC.
@@ -4034,9 +4871,9 @@ pub fn cmd_registry_install_reviewed_as(
     review_token: &InstallReviewToken,
 ) -> HostResult<PluginInstallResult> {
     admin_gate(&state.substrate, caller, "host_registry_install")?;
-    guard("registry_install_reviewed", || {
+    run_registry_boundary(state, "registry_install_reviewed", || {
         registry_install_inner(state, package_path, approved_permissions, Some(review_token))
-    })?
+    })
 }
 
 #[cfg(feature = "plugin-install")]
@@ -4049,6 +4886,9 @@ pub fn cmd_registry_install_preview_as(
     if package_path.trim().is_empty() {
         return Err(HostError::new(ErrorCode::E_INSTALL_FAILED, "安装包路径不能为空"));
     }
+    // A91（轮 47）：预览是审批域的**修复入口**——审批闸门故障时，重新预览先做
+    // 确定性清空（旧令牌全失效）再铸发新令牌；闸门正常时这一步是幂等空操作。
+    reconcile_review_boundary(state)?;
     guard("registry_install_preview", || registry_install_preview_inner(state, package_path))?
 }
 
@@ -4075,9 +4915,10 @@ fn registry_install_preview_inner(
         unix_time_seconds(),
         1,
     )?;
-    let review_token = mint_install_review(&verified);
+    let review_token = mint_install_review(state, &verified)?;
     {
-        let now = unix_time_seconds();
+        // 清理读数取令牌自身的 issued_at（同一次 `review_now` 判定，不二次取样时钟）。
+        let now = review_token.issued_at;
         let mut reviews = state.install_reviews.lock();
         reviews.retain(|_, token| token.expires_at > now);
         if reviews.len() >= MAX_INSTALL_REVIEWS {
@@ -4134,25 +4975,31 @@ fn registry_install_inner(
     }
     let verified = read_verified_package(state, package_path)?;
     if let Some(review_token) = review_token {
-        let now = unix_time_seconds();
-        let stored = state.install_reviews.lock().remove(&review_token.nonce).ok_or_else(|| {
-            HostError::new(
-                ErrorCode::E_INSTALL_FAILED,
-                "install review token is unknown, expired, or already consumed",
-            )
+        run_review_boundary(state, "install_review_consume", || {
+            let stored =
+                state.install_reviews.lock().remove(&review_token.nonce).ok_or_else(|| {
+                    HostError::new(
+                        ErrorCode::E_INSTALL_FAILED,
+                        "install review token is unknown, expired, or already consumed",
+                    )
+                })?;
+            if stored != *review_token {
+                return Err(HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    "install review token is stale or has been tampered with; preview again",
+                ));
+            }
+            // 轮 43：TTL 判定走 A100（provider 可信 → `require_unexpired` 失败关闭；
+            // 开发/测试档无源回落墙钟，与既有行为一致）。
+            review_unexpired(state, review_token.expires_at)?;
+            if !review_matches_verified(review_token, &verified) {
+                return Err(HostError::new(
+                    ErrorCode::E_INSTALL_FAILED,
+                    "package changed after approval; preview and approval must be repeated",
+                ));
+            }
+            Ok(())
         })?;
-        if stored != *review_token || review_token.expires_at <= now {
-            return Err(HostError::new(
-                ErrorCode::E_INSTALL_FAILED,
-                "install review token is stale or has been tampered with; preview again",
-            ));
-        }
-        if !review_matches_verified(review_token, &verified) {
-            return Err(HostError::new(
-                ErrorCode::E_INSTALL_FAILED,
-                "package changed after approval; preview and approval must be repeated",
-            ));
-        }
     } else if state.deployment_mode == tauron_host::DeploymentMode::Production {
         return Err(HostError::new(
             ErrorCode::E_INSTALL_FAILED,
@@ -4220,8 +5067,8 @@ fn registry_install_inner(
         let mut zip = zip::ZipArchive::new(archive)
             .map_err(|e| HostError::new(ErrorCode::E_INSTALL_FAILED, format!("打开包失败：{e}")))?;
         // 解包常量（条目数 / 单文件 / 解压总量 / 压缩比）与路径清洗**不在这里**
-        // 重复实现：它们在 `read_verified_package` → `verify_tpkg` →
-        // `package_signature::verify_package_against_zip` 里已经强制过一遍，
+        // 重复实现：它们在 `read_verified_package` →
+        // `package_signature::verify_tpkg_reader[_with_time]` 里已经强制过一遍，
         // 而且那边还额外做了「每个条目必须被签名」与逐文件哈希比对。这里再写一份
         // 只会变成两处各自演化的策略副本（本仓已经因为这种副本吃过亏）。
         for i in 0..zip.len() {
@@ -4404,106 +5251,112 @@ pub fn cmd_registry_admin(
     op: RegistryAdminOp,
 ) -> HostResult<TransitionOutcome> {
     let id = PluginId::new(plugin_id)?;
-    #[cfg(feature = "plugin-install")]
-    let staged_cleanup = stage_install_cleanup(state, id.as_str(), op)?;
-    // `guard` 只负责把 panic 转成 `E_HOST_PANIC`，返回 `HostResult<T>`；
-    // 这里 T 是注册表操作自身的 `HostResult<TransitionOutcome>`，故需双重 `?`：
-    // 外层解 guard（panic 层），内层解操作结果。
-    let out = match guard("registry_admin", || state.registry.admin_op(&id, op))? {
-        Ok(out) => out,
-        Err(error) => {
-            #[cfg(feature = "plugin-install")]
-            if let Some(stage) = staged_cleanup {
-                stage.restore()?;
+    // A91（轮 47）：注册表闸门包住**整段**（含特性门后的落盘预备）。判定必须发生在
+    // 一切副作用之前——若先 stage 再拒绝，staged backup 会留在盘上；且 admin_op 的
+    // panic 现在会如实登记到注册表边界（而不是只被 guard 吞成一条 E_HOST_PANIC）。
+    run_registry_boundary(state, "registry_admin", || {
+        #[cfg(feature = "plugin-install")]
+        let staged_cleanup = stage_install_cleanup(state, id.as_str(), op)?;
+        let out = match state.registry.admin_op(&id, op) {
+            Ok(out) => out,
+            Err(error) => {
+                #[cfg(feature = "plugin-install")]
+                if let Some(stage) = staged_cleanup {
+                    stage.restore()?;
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
-    };
+        };
 
-    #[cfg(feature = "plugin-install")]
-    let cleanup_commit = if let Some(stage) = staged_cleanup {
-        if out.illegal || out.from == out.to {
-            stage.restore()?;
-            None
+        #[cfg(feature = "plugin-install")]
+        let cleanup_commit = if let Some(stage) = staged_cleanup {
+            if out.illegal || out.from == out.to {
+                stage.restore()?;
+                None
+            } else {
+                Some(stage)
+            }
         } else {
-            Some(stage)
-        }
-    } else {
-        None
-    };
+            None
+        };
 
-    // 卸载/清除成功后，**所有按插件 id 为键的旁路状态**必须一起回收——它们不随
-    // 注册表条目一起消失，不回收就是缓慢泄漏（卸载→重装循环会持续累积）：
-    // - 事件总线的发布/订阅（§8-3 零悬挂订阅），反向索引与队列以插件 id 为键；
-    // - 多选择器订阅的分组登记（`subscription_groups`，以订阅者为键——不回收
-    //   就是指向已消亡 token 的死条目）；
-    // - 贡献注册表（菜单/命令/面板入口，残留会让卸载的插件入口还显示）；
-    // - i18n 文案（`plugin:<id>.oc.*`，跨所有语言包）；
-    // - 恢复引擎的插件登记（状态表是**持久化**的，残留会让已卸载插件永远
-    //   出现在 `host_recover_boot` 的 `disabledPlugins` 里）。
-    // 仅在迁移真的发生（非非法且状态确实改变）时回收——非法迁移的条目仍在
-    // 注册表，回收它的旁路状态反而会造成不一致。
-    if !out.illegal
-        && out.from != out.to
-        && matches!(op, RegistryAdminOp::Uninstall | RegistryAdminOp::Purge)
-    {
-        // 锁纪律：bus 锁**只**覆盖两个 dispose 调用，随后立即释放——不持着
-        // bus 锁去取 subscription_groups / contributes / i18n / notify / recovery
-        // 五把锁（此前整块共享一个 bus guard，形成一组未声明的嵌套序；虽然
-        // 全仓没有反向获取路径、不构成死锁环，但任何一方未来持这些锁取 bus
-        // 即成 ABBA）。各旁路状态的回收彼此独立，无需同持。
+        // 卸载/清除成功后，**所有按插件 id 为键的旁路状态**必须一起回收——它们不随
+        // 注册表条目一起消失，不回收就是缓慢泄漏（卸载→重装循环会持续累积）：
+        // - 事件总线的发布/订阅（§8-3 零悬挂订阅），反向索引与队列以插件 id 为键；
+        // - 多选择器订阅的分组登记（`subscription_groups`，以订阅者为键——不回收
+        //   就是指向已消亡 token 的死条目）；
+        // - 贡献注册表（菜单/命令/面板入口，残留会让卸载的插件入口还显示）；
+        // - i18n 文案（`plugin:<id>.oc.*`，跨所有语言包）；
+        // - 恢复引擎的插件登记（状态表是**持久化**的，残留会让已卸载插件永远
+        //   出现在 `host_recover_boot` 的 `disabledPlugins` 里）。
+        // 仅在迁移真的发生（非非法且状态确实改变）时回收——非法迁移的条目仍在
+        // 注册表，回收它的旁路状态反而会造成不一致。
+        if !out.illegal
+            && out.from != out.to
+            && matches!(op, RegistryAdminOp::Uninstall | RegistryAdminOp::Purge)
         {
-            let bus = state.bus.lock();
-            bus.dispose_publisher(plugin_id);
-            bus.dispose_subscriber(plugin_id);
+            // 锁纪律：bus 锁**只**覆盖两个 dispose 调用，随后立即释放——不持着
+            // bus 锁去取 subscription_groups / contributes / i18n / notify / recovery
+            // 五把锁（此前整块共享一个 bus guard，形成一组未声明的嵌套序；虽然
+            // 全仓没有反向获取路径、不构成死锁环，但任何一方未来持这些锁取 bus
+            // 即成 ABBA）。各旁路状态的回收彼此独立，无需同持。
+            {
+                let bus = state.bus.lock();
+                bus.dispose_publisher(plugin_id);
+                bus.dispose_subscriber(plugin_id);
+            }
+            prune_subscription_groups(state, plugin_id);
+            state.contributes.lock().clear_plugin(plugin_id);
+            state.i18n.lock().cleanup_plugin(plugin_id);
+            // - 通知存储（`host_notify` 落进环形缓冲的通知，残留会让已卸载插件的
+            //   未读计数永远膨胀、通知中心显示死条目）；
+            state.notify_store.lock().cleanup_plugin(plugin_id);
+            state.recovery.lock().remove_plugin(plugin_id);
+            // - 进程侧崩溃窗口（`ProcRuntime` 的 `CrashTracker`，同样**以插件 id 为键**）。
+            //   注册表条目在上一步已被删掉，重装同名插件是被允许的——残留会让"修好的
+            //   新版本"一上来就撞上旧版本的崩溃预算（5 分钟窗口内直接拒绝
+            //   `host_runtime_spawn`），表现为"刚装的插件永远起不来"。
+            //   `Enable`（人工确认路径）会清它，但卸载是**另一条出口**，两条都要清。
+            state.proc_runtime.reset_crashes(plugin_id);
         }
-        prune_subscription_groups(state, plugin_id);
-        state.contributes.lock().clear_plugin(plugin_id);
-        state.i18n.lock().cleanup_plugin(plugin_id);
-        // - 通知存储（`host_notify` 落进环形缓冲的通知，残留会让已卸载插件的
-        //   未读计数永远膨胀、通知中心显示死条目）；
-        state.notify_store.lock().cleanup_plugin(plugin_id);
-        state.recovery.lock().remove_plugin(plugin_id);
-        // - 进程侧崩溃窗口（`ProcRuntime` 的 `CrashTracker`，同样**以插件 id 为键**）。
-        //   注册表条目在上一步已被删掉，重装同名插件是被允许的——残留会让"修好的
-        //   新版本"一上来就撞上旧版本的崩溃预算（5 分钟窗口内直接拒绝
-        //   `host_runtime_spawn`），表现为"刚装的插件永远起不来"。
-        //   `Enable`（人工确认路径）会清它，但卸载是**另一条出口**，两条都要清。
-        state.proc_runtime.reset_crashes(plugin_id);
-    }
 
-    // **人工确认的唯一出口**（P0-2 崩溃预算）：Enable 是宿主 UI 的显式动作，
-    // 因此它必须同时清零**两道**预算——状态机侧的 `ResetCounters`（迁移表里
-    // `ERRORED_USER_CONFIRM + ENABLE → ENABLED` 已带）与进程侧的崩溃窗口
-    // （`ProcRuntime::reset_crashes`）。只清前者会出现死结：用户已确认、状态机说
-    // ENABLED、`host_runtime_spawn` 仍被崩溃窗口拒绝，而窗口是 5 分钟——
-    // 表现为"点了启用但插件永远起不来"。
-    //
-    // 条件只排除**非法迁移**（状态机明确拒绝了这个事件，说明用户想做的事与当前
-    // 状态无关）；`from == to`（本来就 ENABLED）也算用户确认，一并清零。
-    if !out.illegal && matches!(op, RegistryAdminOp::Enable) {
-        state.proc_runtime.reset_crashes(plugin_id);
-    }
+        // **人工确认的唯一出口**（P0-2 崩溃预算）：Enable 是宿主 UI 的显式动作，
+        // 因此它必须同时清零**两道**预算——状态机侧的 `ResetCounters`（迁移表里
+        // `ERRORED_USER_CONFIRM + ENABLE → ENABLED` 已带）与进程侧的崩溃窗口
+        // （`ProcRuntime::reset_crashes`）。只清前者会出现死结：用户已确认、状态机说
+        // ENABLED、`host_runtime_spawn` 仍被崩溃窗口拒绝，而窗口是 5 分钟——
+        // 表现为"点了启用但插件永远起不来"。
+        //
+        // 条件只排除**非法迁移**（状态机明确拒绝了这个事件，说明用户想做的事与当前
+        // 状态无关）；`from == to`（本来就 ENABLED）也算用户确认，一并清零。
+        if !out.illegal && matches!(op, RegistryAdminOp::Enable) {
+            state.proc_runtime.reset_crashes(plugin_id);
+        }
 
-    // 管理操作会改变插件状态，对账一次保持恢复判定与注册表一致。
-    // 注意：在安全模式下手动 Enable 一个非必需插件会被 `SafemodeEnter` 重新
-    // 禁用——返回的 `TransitionOutcome` 描述的是本次迁移，不是最终状态，
-    // 最终状态以 `host_registry_list` 为准。这是刻意设计：允许手动绕过会
-    // 让安全模式失去意义。
-    reconcile_recovery_phase(state);
+        // 管理操作会改变插件状态，对账一次保持恢复判定与注册表一致。
+        // 注意：在安全模式下手动 Enable 一个非必需插件会被 `SafemodeEnter` 重新
+        // 禁用——返回的 `TransitionOutcome` 描述的是本次迁移，不是最终状态，
+        // 最终状态以 `host_registry_list` 为准。这是刻意设计：允许手动绕过会
+        // 让安全模式失去意义。
+        reconcile_recovery_phase(state);
 
-    #[cfg(feature = "plugin-install")]
-    if let Some(stage) = cleanup_commit {
-        stage.commit()?;
-    }
+        #[cfg(feature = "plugin-install")]
+        if let Some(stage) = cleanup_commit {
+            stage.commit()?;
+        }
 
-    Ok(out)
+        Ok(out)
+    })
 }
 
-/// `host_registry_admin` 的**带身份判定**版本（wire 层转调的就是它）。
+/// `host_registry_admin` 的**带身份判定**版本（非 wire 的兼容入口）。
 ///
 /// 判定必须在所有副作用之前：本命令会改注册表状态、回收旁路状态、清崩溃预算。
 /// 拒绝路径**一个副作用都不产生**（有测试断言拒绝后注册表与插件状态不变）。
+///
+/// 轮 43：与安装域的 `cmd_registry_admin` 旧入口同构——生产档的破坏性操作
+/// （uninstall/purge）必须走 [`cmd_registry_admin_reviewed_as`] 的审批令牌，
+/// 本入口在生产档直接拒绝，防止绕过令牌强制。
 pub fn cmd_registry_admin_as(
     caller: &Caller,
     state: &PluginRuntimeState,
@@ -4511,7 +5364,81 @@ pub fn cmd_registry_admin_as(
     op: RegistryAdminOp,
 ) -> HostResult<TransitionOutcome> {
     admin_gate(&state.substrate, caller, "host_registry_admin")?;
+    if admin_review_required(state) && is_destructive_admin_op(op) {
+        return Err(HostError::new(
+            ErrorCode::E_AUTH_DENIED,
+            "production uninstall/purge requires an AdminReviewToken from the preview path (*_reviewed_as)",
+        ));
+    }
     cmd_registry_admin(state, plugin_id, op)
+}
+
+/// `host_registry_admin` 的**审批令牌**入口（wire 层转调的就是它，轮 43）。
+///
+/// 形态与安装域完全同构：
+/// - `preview = true`：只铸发令牌并返回将被破坏的事实（不产生任何副作用）；
+///   仅对 uninstall/purge 有效；
+/// - `review_token = Some`：一次性消费 + 事实重核（操作/插件/版本），失败不产生副作用；
+/// - 两者都缺：生产档（且装插件特性开启）的 uninstall/purge 被拒；其余照旧执行。
+pub fn cmd_registry_admin_reviewed_as(
+    caller: &Caller,
+    state: &PluginRuntimeState,
+    plugin_id: &str,
+    op: RegistryAdminOp,
+    preview: bool,
+    review_token: Option<&AdminReviewToken>,
+) -> HostResult<RegistryAdminResponse> {
+    admin_gate(&state.substrate, caller, "host_registry_admin")?;
+    let destructive = is_destructive_admin_op(op);
+    if preview {
+        if !destructive {
+            return Err(HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                "仅 uninstall/purge 支持审批预览（disable/enable 可逆且无破坏面）",
+            ));
+        }
+        if review_token.is_some() {
+            return Err(HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                "审批预览与令牌提交不能在同一次调用里发生：preview 只铸发令牌",
+            ));
+        }
+        // A91（轮 47）：与安装域 preview 同构——预览是审批域的修复入口，闸门故障时
+        // 先做确定性清空再铸发；正常时幂等空操作。
+        reconcile_review_boundary(state)?;
+        let id = PluginId::new(plugin_id)?;
+        let entry = state.registry.find(&id).ok_or_else(|| {
+            HostError::new(
+                ErrorCode::E_UNKNOWN_PLUGIN,
+                format!("插件 `{plugin_id}` 不存在，无法预览破坏性操作"),
+            )
+        })?;
+        let version = entry.manifest.version.to_string();
+        let token = mint_admin_review(state, plugin_id, op, &version)?;
+        return Ok(RegistryAdminResponse::Review(RegistryAdminReview {
+            op,
+            plugin_id: plugin_id.to_string(),
+            version,
+            state: entry.state.state,
+            review_token: token,
+        }));
+    }
+    if let Some(token) = review_token {
+        if !destructive {
+            return Err(HostError::new(
+                ErrorCode::E_AUTH_DENIED,
+                "该操作不接受审批令牌（仅 uninstall/purge 的破坏性路径消费令牌）",
+            ));
+        }
+        validate_admin_review(state, plugin_id, op, token)?;
+    } else if destructive && admin_review_required(state) {
+        return Err(HostError::new(
+            ErrorCode::E_AUTH_DENIED,
+            "生产档的 uninstall/purge 要求先经 preview 取得一次性审批令牌（A83）",
+        ));
+    }
+    let outcome = cmd_registry_admin(state, plugin_id, op)?;
+    Ok(RegistryAdminResponse::Executed(outcome))
 }
 
 #[cfg(feature = "plugin-install")]
@@ -5173,7 +6100,11 @@ pub fn cmd_runtime_spawn(
                 )
             })?;
 
-        let cfg = profile.to_spawn_config(&binary_path);
+        let mut cfg = profile.to_spawn_config(&binary_path);
+        // 运维注入的环境变量在**这里**落地（`ClientConfig.env_overrides` 的落点）：
+        // 放在 `to_spawn_config` 之后、校验与启动之前，因此它既参与 §4.7 的启动前
+        // 校验，也确实到达子进程（`CommandSpawner` 的 `.envs()`）。
+        apply_host_env_overrides(&mut cfg.env, &state.plugin_env_overrides);
         // spawn 前校验：签名 / sha256 / ABI。校验放在判定租约**之前**——
         // 不合格的载荷连"是否已有租约"都不该被它探测到（也就不会伪造出幂等假象）。
         validate_spawn_config(&cfg).map_err(proc_error_to_host)?;
@@ -5433,11 +6364,20 @@ pub fn cmd_resource_stats(state: &PluginRuntimeState) -> HostResult<serde_json::
         // 触顶（begin_call）时被顺带回收；主窗若不轮询诊断，N 笔未结束的调用
         // 会占用内存直到重启。这里随读回收一次，快照也因此与回收事实一致。
         state.registry.gc_expired();
+        // V7 §7/§9 的驱动腿：终止失败的 pid 在这里被再试一轮（有界，见
+        // `RuntimeTable::retry_pending_reaps`）。刻意与 `gc_expired` 同址——
+        // 主窗轮询诊断本来就是这个宿主的"心跳"，重试没有驱动方等于没有重试。
+        state.registry.runtime_retry_pending_reaps();
         let plugins = state.registry.list_all();
         let plugin_ids: Vec<String> = plugins.iter().map(|plugin| plugin.id.to_string()).collect();
         let pending_used = state.registry.pending_len();
         let pending_limit = state.registry.config().max_pending_calls;
         let streams_used = state.registry.stream_active_total();
+        // V7 §9 leak gate：代际台账读数（有界性必须能被宿主 UI 查到，不能只活在 Rust 测试里）。
+        let generations = state.registry.runtime_generation_stats();
+        // V7 §9 leak gate：回收留痕（含重试队列与终态证据）同样上线。
+        let reap = state.registry.runtime_reap_stats();
+
         let subscriptions = state.bus.lock();
         let subscriptions_used = subscriptions.subscription_total();
         let subscription_usage: std::collections::BTreeMap<String, usize> = plugin_ids
@@ -5488,7 +6428,9 @@ pub fn cmd_resource_stats(state: &PluginRuntimeState) -> HostResult<serde_json::
                     "limit": notification_capacity,
                     "perPluginLimit": notification_plugin_capacity,
                     "evictedTotal": notification_evictions_total
-                }
+                },
+                "generations": generations,
+                "reap": reap
             },
             "perPlugin": {
                 "pendingCallsLimit": tauron_host::registry::MAX_PENDING_PER_PLUGIN,
@@ -5501,6 +6443,23 @@ pub fn cmd_resource_stats(state: &PluginRuntimeState) -> HostResult<serde_json::
                     "state": state.settings_fault.lock().state(),
                     "generation": state.settings_fault.lock().generation(),
                     "lastFault": state.settings_fault.lock().last_fault().cloned()
+                },
+                // A91（轮 47）：三个子系统边界的可观测面。主窗据此判「有没有子域
+                // 在拒绝服务、修复尝试得出了什么结论」，而不是等下一次命令报错。
+                "events": {
+                    "state": state.events_fault.lock().state(),
+                    "generation": state.events_fault.lock().generation(),
+                    "lastFault": state.events_fault.lock().last_fault().cloned()
+                },
+                "approval": {
+                    "state": state.review_fault.lock().state(),
+                    "generation": state.review_fault.lock().generation(),
+                    "lastFault": state.review_fault.lock().last_fault().cloned()
+                },
+                "registry": {
+                    "state": state.registry_fault.lock().state(),
+                    "generation": state.registry_fault.lock().generation(),
+                    "lastFault": state.registry_fault.lock().last_fault().cloned()
                 }
             }
         }))
@@ -5596,10 +6555,10 @@ pub fn cmd_events_publish_with_causation(
     payload: serde_json::Value,
     causation: Option<&tauron_host::EventCausation>,
 ) -> HostResult<PublishResult> {
-    guard("events_publish", || {
+    run_events_boundary(state, "events_publish", || {
         let bus = state.bus.lock();
         bus.publish_request_with_causation(publisher, topic, payload, causation)
-    })?
+    })
 }
 
 /// `host_events_subscribe`：订阅事件（self 档）。
@@ -5609,18 +6568,18 @@ pub fn cmd_events_subscribe(
     window: &str,
     topic: &str,
 ) -> HostResult<SubscribeOutcome> {
-    guard("events_subscribe", || {
+    run_events_boundary(state, "events_subscribe", || {
         let bus = state.bus.lock();
         bus.subscribe(subscriber, window, topic)
-    })?
+    })
 }
 
 /// `host_events_unsubscribe`：退订事件（self 档）。
 pub fn cmd_events_unsubscribe(state: &SubstrateState, token: &str) -> HostResult<()> {
-    guard("events_unsubscribe", || {
+    run_events_boundary(state, "events_unsubscribe", || {
         let bus = state.bus.lock();
         bus.unsubscribe(token)
-    })?
+    })
 }
 
 /// 一条 EventBus 私有 topic 审批事实。
@@ -5642,9 +6601,9 @@ pub fn cmd_events_approve_as(
     if subscriber.trim().is_empty() || topic.trim().is_empty() {
         return Err(HostError::new(ErrorCode::E_AUTH_DENIED, "subscriber 与 topic 均不可为空"));
     }
-    // 内层 `?`：`approve` 自身的拒绝（未声明 topic / 审批表满）必须原样上线，
-    // 不能被当作 panic 捕获后丢掉。
-    guard("events_approve", || state.bus.lock().approve(subscriber, topic))?
+    // `approve` 自身的拒绝（未声明 topic / 审批表满）原样上线——闸门只把 panic
+    // 转成 `E_HOST_PANIC`，不吞业务错误。
+    run_events_boundary(state, "events_approve", || state.bus.lock().approve(subscriber, topic))
 }
 
 /// 主窗撤销插件私有 topic 审批。幂等；返回是否真实删除。
@@ -5658,7 +6617,7 @@ pub fn cmd_events_revoke_as(
     topic: &str,
 ) -> HostResult<bool> {
     admin_gate(state, caller, "host_events_revoke")?;
-    guard("events_revoke", || state.bus.lock().revoke(subscriber, topic))
+    run_events_boundary(state, "events_revoke", || Ok(state.bus.lock().revoke(subscriber, topic)))
 }
 
 /// 主窗读取全部 EventBus 审批事实。
@@ -5667,14 +6626,14 @@ pub fn cmd_events_approvals_as(
     state: &SubstrateState,
 ) -> HostResult<Vec<EventApproval>> {
     require_main_window(caller, "host_events_approvals")?;
-    guard("events_approvals", || {
-        state
+    run_events_boundary(state, "events_approvals", || {
+        Ok(state
             .bus
             .lock()
             .approvals()
             .into_iter()
             .map(|(subscriber, topic)| EventApproval { subscriber, topic })
-            .collect()
+            .collect())
     })
 }
 
@@ -5739,10 +6698,10 @@ pub fn cmd_events_drain(
             format!("未知通道类型 `{kind}`（expected: event | request | state）"),
         )
     })?;
-    guard("events_drain", || {
+    run_events_boundary(state, "events_drain", || {
         let bus = state.bus.lock();
         bus.drain(subscriber, parsed_kind)
-    })?
+    })
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -6287,6 +7246,173 @@ fn reconcile_settings_boundary(state: &SubstrateState) -> HostResult<()> {
             ))
         }
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// A91（轮 47）：事件 / 审批 / 注册表三个子系统的故障边界
+// ──────────────────────────────────────────────────────────────────────────
+
+/// 子系统边界的拒绝文案。修复路径必须**具名**——只报"拒绝服务"而不给出确定性
+/// 修复出口，等于把故障变成不可恢复的全宿主静默降级。
+fn subsystem_fault_to_host_error(
+    subsystem: &str,
+    error: tauron_host::FaultError,
+    repair: &str,
+) -> HostError {
+    HostError::new(
+        ErrorCode::E_HOST_PANIC,
+        format!("{subsystem} fault boundary rejected work: {error}; {repair}"),
+    )
+}
+
+/// 三段式闸门（与 [`run_settings_boundary`] 同构）：只判就绪 + 事后登记 panic。
+///
+/// **不**用 `FaultBoundary::run`——它要求整段闭包持有边界锁，闸门会变成串行化点；
+/// 且该 API 按「未接线公开 API 台账」登记为 embedder 面（`FaultBoundary::run` 的
+/// 唯一消费者是 fault.rs 自己的单测，本文件不得把它接成生产消费者）。
+fn run_subsystem_boundary<T>(
+    boundary: &Arc<Mutex<tauron_host::FaultBoundary>>,
+    subsystem: &str,
+    repair: &str,
+    operation: &str,
+    f: impl FnOnce() -> HostResult<T>,
+) -> HostResult<T> {
+    boundary
+        .lock()
+        .ensure_ready()
+        .map_err(|error| subsystem_fault_to_host_error(subsystem, error, repair))?;
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(payload) => {
+            let error = boundary.lock().record_panic(operation, payload);
+            Err(subsystem_fault_to_host_error(subsystem, error, repair))
+        }
+    }
+}
+
+/// 事件总线闸门：故障修复路径 = `host_recover_boot`（确定性重置为空）。
+fn run_events_boundary<T>(
+    state: &SubstrateState,
+    operation: &str,
+    f: impl FnOnce() -> HostResult<T>,
+) -> HostResult<T> {
+    run_subsystem_boundary(
+        &state.events_fault,
+        "events",
+        "run host_recover_boot to reconcile (it clears the bus session state: \
+         subscriptions/approvals/queues; topic declarations are kept)",
+        operation,
+        f,
+    )
+}
+
+/// 审批令牌闸门：修复路径 = 重新走 preview（清空旧令牌、重新铸发）。
+fn run_review_boundary<T>(
+    state: &SubstrateState,
+    operation: &str,
+    f: impl FnOnce() -> HostResult<T>,
+) -> HostResult<T> {
+    run_subsystem_boundary(
+        &state.review_fault,
+        "approval",
+        "re-run the preview path to reconcile (it clears pending approval tokens)",
+        operation,
+        f,
+    )
+}
+
+/// 注册表闸门：会话内没有确定性重建，修复路径 = 重启重新装配。
+fn run_registry_boundary<T>(
+    state: &SubstrateState,
+    operation: &str,
+    f: impl FnOnce() -> HostResult<T>,
+) -> HostResult<T> {
+    run_subsystem_boundary(
+        &state.registry_fault,
+        "registry",
+        "restart the host to re-assemble the registry (no in-session rebuild exists)",
+        operation,
+        f,
+    )
+}
+
+/// 修复的第一段：判定当前态并把边界推进到 `Reconciling`。
+///
+/// 返回 `Ok(true)` = 本次真的需要修复（`Faulted` / `Quarantined` / 悬空
+/// `Reconciling`——上次修复中途夭折，修复动作是确定性的，重做安全）；
+/// `Ok(false)` = 本来就 `Ready`（幂等无操作）。
+fn begin_subsystem_reconcile(
+    boundary: &Arc<Mutex<tauron_host::FaultBoundary>>,
+    subsystem: &str,
+    repair: &str,
+) -> HostResult<bool> {
+    let mut guard = boundary.lock();
+    match guard.state() {
+        tauron_host::FaultState::Ready => Ok(false),
+        tauron_host::FaultState::Reconciling => Ok(true),
+        _ => {
+            guard
+                .begin_reconcile()
+                .map_err(|error| subsystem_fault_to_host_error(subsystem, error, repair))?;
+            Ok(true)
+        }
+    }
+}
+
+/// 事件总线（A91 轮 47）：确定性修复 = **会话态清零**（[`EventBus::reset_session_state`]）。
+///
+/// 总线没有需要重建的持久真相：订阅 / 审批 / 队列 / 排序都是可重建的会话瞬态，
+/// 清零是**完整**的一致状态而非猜测——留下的半状态才是不可修复的。**结构声明
+/// （topic）保留**：那是装配期事实，发布端对未声明 topic 只静默丢弃不报错
+/// （防存在性探测），连声明一起清等于让修复动作把可工作的消息面悄悄打哑。
+/// 触发点：[`cmd_recover_boot`]（启动恢复读取 = 确定性修复时刻）。
+fn reconcile_events_boundary(state: &SubstrateState) -> HostResult<bool> {
+    if !begin_subsystem_reconcile(
+        &state.events_fault,
+        "events",
+        "host_recover_boot resets the bus session state",
+    )? {
+        return Ok(false);
+    }
+    state.bus.lock().reset_session_state();
+    state.events_fault.lock().reconcile_succeeded();
+    Ok(true)
+}
+
+/// 审批令牌（A91 轮 47）：确定性修复 = **清空两域令牌表**。
+///
+/// 令牌本就是一次性、短 TTL 的瞬态物；清空让任何"消费了一半"的令牌彻底失效——
+/// 比留下更安全（留下的令牌不可能再被合法消费，却可能被误判为可用）。触发点：
+/// 两条 preview 命令（重新预览 = 操作者对审批域的显式恢复动作）。
+fn reconcile_review_boundary(state: &PluginRuntimeState) -> HostResult<bool> {
+    if !begin_subsystem_reconcile(&state.review_fault, "approval", "re-run the preview path")? {
+        return Ok(false);
+    }
+    state.admin_reviews.lock().clear();
+    #[cfg(feature = "plugin-install")]
+    state.install_reviews.lock().clear();
+    state.review_fault.lock().reconcile_succeeded();
+    Ok(true)
+}
+
+/// 注册表（A91 轮 47）：**没有会话内确定性修复**。
+///
+/// 条目没有持久镜像；重新装配是进程启动期的接入方动作（`install_plugin_from_json`
+/// 与轮 41 的启动孤儿清扫）。与其造一个"看起来修好了"的重建，不如如实隔离：
+/// 修复尝试把边界推成 `Quarantined`（继续拒绝），修复路径写进返回错误——重启重装。
+/// 触发点：[`cmd_recover_boot`]（主窗尝试修复时会得到明确结论，而不是无限"故障中"）。
+fn reconcile_registry_boundary(state: &SubstrateState) -> HostResult<bool> {
+    if !begin_subsystem_reconcile(&state.registry_fault, "registry", "the host will be restarted")?
+    {
+        return Ok(false);
+    }
+    state.registry_fault.lock().reconcile_failed();
+    Err(HostError::new(
+        ErrorCode::E_HOST_PANIC,
+        "registry fault cannot be reconciled in session (no durable rebuild exists); \
+         restart the host to re-assemble the registry"
+            .to_string(),
+    ))
 }
 
 /// **接手一份旧版（v1）宿主设置文档**（R7-2：settings 可迁移）。
@@ -7178,7 +8304,7 @@ fn boot_context_entry_wire(c: &BootContextEntry) -> serde_json::Value {
 
 /// `host_recover_boot`：查询启动恢复状态（§4.14）。
 ///
-/// 这是**只读**命令。恢复引擎由三处驱动，均在本文件中：
+/// 恢复引擎由三处驱动，均在本文件中：
 /// - [`CommandState::with_adapter_config`]：启动时载入持久化标记并做崩溃检测；
 /// - [`cmd_recover_report`]：应用上报启动结果（驱动信号）；
 /// - [`cmd_recover_trial_enable`]：安全模式内逐个试验性启用插件。
@@ -7186,8 +8312,17 @@ fn boot_context_entry_wire(c: &BootContextEntry) -> serde_json::Value {
 /// 阶段判定落到插件侧的唯一途径是 [`reconcile_recovery_phase`]：它把引擎的判定
 /// 补发成 `SafemodeEnter` / `SafemodeExit`，由注册表状态机写入
 /// `disabled_by_safemode`——那才是 `<oc-plugin-manager>` 角标读取的值。
+///
+/// A91（轮 47）：本命令同时是故障子系统的**确定性修复时刻**（主窗在恢复流里调用
+/// 它即触发）——事件总线会话态清零（订阅/审批/队列；topic 声明保留）、注册表修不了
+/// 则如实隔离。修复成败不改变本命令的读取语义；结果落在各自边界状态里
+/// （`host_resource_stats` 的 `faults` 块与后续被拒命令的错误文案都看得到）。
 pub fn cmd_recover_boot(state: &SubstrateState) -> HostResult<serde_json::Value> {
-    guard("recover_boot", || Ok(recovery_boot_payload(state)))?
+    guard("recover_boot", || {
+        let _ = reconcile_events_boundary(state);
+        let _ = reconcile_registry_boundary(state);
+        Ok(recovery_boot_payload(state))
+    })?
 }
 
 /// `host_recover_boot` 的**带身份判定**版本（轮 12）。
@@ -8117,40 +9252,51 @@ fn validated_http_method(method: &str) -> HostResult<String> {
     }
 }
 
+/// `NetworkPolicy` 拒绝 → `HostError` 的统一映射（轮 48 / A96：URL 授权、逐跳
+/// `authorize_redirect` 与 `authorize_resolution` 复检共用同一条判定）。
+fn http_policy_denied(error: &tauron_host::NetworkPolicyError) -> HostError {
+    let code = match error {
+        tauron_host::NetworkPolicyError::EmptyUrl
+        | tauron_host::NetworkPolicyError::InvalidUrl(_)
+        | tauron_host::NetworkPolicyError::SchemeDenied(_)
+        | tauron_host::NetworkPolicyError::HttpDenied
+        | tauron_host::NetworkPolicyError::EmbeddedCredentialsDenied
+        | tauron_host::NetworkPolicyError::HostMissing
+        | tauron_host::NetworkPolicyError::PortMissing(_)
+        | tauron_host::NetworkPolicyError::InvalidDomainRule(_)
+        | tauron_host::NetworkPolicyError::InvalidRedirectLimit => ErrorCode::E_INVALID_MANIFEST,
+        _ => ErrorCode::E_AUTH_DENIED,
+    };
+    HostError::new(code, format!("HTTP network policy denied request: {error}"))
+}
+
 fn authorize_http_url(
     policy: &tauron_host::NetworkPolicy,
     url: &str,
 ) -> HostResult<tauron_host::AuthorizedUrl> {
-    policy.authorize_url(url).map_err(|error| {
-        let code = match error {
-            tauron_host::NetworkPolicyError::EmptyUrl
-            | tauron_host::NetworkPolicyError::InvalidUrl(_)
-            | tauron_host::NetworkPolicyError::SchemeDenied(_)
-            | tauron_host::NetworkPolicyError::HttpDenied
-            | tauron_host::NetworkPolicyError::EmbeddedCredentialsDenied
-            | tauron_host::NetworkPolicyError::HostMissing
-            | tauron_host::NetworkPolicyError::PortMissing(_)
-            | tauron_host::NetworkPolicyError::InvalidDomainRule(_)
-            | tauron_host::NetworkPolicyError::InvalidRedirectLimit => {
-                ErrorCode::E_INVALID_MANIFEST
-            }
-            _ => ErrorCode::E_AUTH_DENIED,
-        };
-        HostError::new(code, format!("HTTP network policy denied request: {error}"))
-    })
+    policy.authorize_url(url).map_err(|error| http_policy_denied(&error))
 }
 
 /// `host_http_request`：发起一次 HTTP 请求（主窗专属）。
 ///
-/// 命令层只做**参数校验**，能力可用性由 sink 决定：缺省
+/// 命令层做**参数校验 + 逐跳授权流**；能力可用性由 sink 决定：缺省
 /// [`UnavailableHttpSink`] 恒返回 `UnsupportedBody`（诚实降级，见其文档）。
+///
+/// **单跳契约（轮 48 / A96）**：redirect 跟随与解析复检由**宿主**逐跳执行——
+/// sink 只发单跳；3xx 的每一跳先经 `authorize_redirect`（含跨源凭据剥离、
+/// `max_redirects` 上界）与 `resolve_redirect_location`（相对 Location 归一），
+/// 每个响应里 provider 回报的解析地址经 `authorize_resolution` 复检私网/字面 IP。
+/// 由此 `authorize_redirect` / `authorize_resolution` 从"只有模块自测"变为
+/// 这条生产命令路径上的真实闸门。
 pub fn cmd_http_request(
     state: &SubstrateState,
     spec: &HttpRequestSpec,
 ) -> HostResult<ProviderResult<HttpResponseSpec>> {
     guard("http_request", || {
         validated_http_method(&spec.method)?;
-        authorize_http_url(&state.http_policy, &spec.url)?;
+        let mut hop_spec = spec.clone();
+        let mut current = authorize_http_url(&state.http_policy, &hop_spec.url)?;
+        let mut current_url = hop_spec.url.clone();
         if state.http_sink.native_supported()
             && state.http_sink.network_enforcement()
                 != tauron_host::NetworkEnforcement::RedirectAndDns
@@ -8160,7 +9306,63 @@ pub fn cmd_http_request(
                 Some("use a provider with NetworkEnforcement::RedirectAndDns"),
             )));
         }
-        state.http_sink.request(spec, &state.http_policy)
+        let mut hop: u8 = 0;
+        loop {
+            let response = match state.http_sink.request(&hop_spec, &state.http_policy)? {
+                ProviderResult::Value(response) => response,
+                other => return Ok(other),
+            };
+            if !response.resolved_addrs.is_empty() {
+                let mut resolved = Vec::with_capacity(response.resolved_addrs.len());
+                for raw in &response.resolved_addrs {
+                    let address = raw.parse::<std::net::IpAddr>().map_err(|_| {
+                        HostError::new(
+                            ErrorCode::E_AUTH_DENIED,
+                            format!(
+                                "HTTP network policy denied request: provider reported an \
+                                 unparseable resolved address `{raw}`"
+                            ),
+                        )
+                    })?;
+                    resolved.push(address);
+                }
+                state
+                    .http_policy
+                    .authorize_resolution(&current, &resolved)
+                    .map_err(|error| http_policy_denied(&error))?;
+            }
+            if !(300..=399).contains(&response.status) {
+                return Ok(ProviderResult::Value(response));
+            }
+            let Some(location) = response.headers.get("location") else {
+                // 3xx 而无 `location`：没有可授权的下一跳，按最终响应交还调用方。
+                return Ok(ProviderResult::Value(response));
+            };
+            hop = hop.saturating_add(1);
+            let has_credentials = hop_spec.headers.keys().any(|key| {
+                matches!(
+                    key.to_ascii_lowercase().as_str(),
+                    "authorization" | "cookie" | "proxy-authorization"
+                )
+            });
+            let next_url = tauron_host::resolve_redirect_location(&current_url, location)
+                .map_err(|error| http_policy_denied(&error))?;
+            let authorization = state
+                .http_policy
+                .authorize_redirect(&current, &next_url, hop, has_credentials)
+                .map_err(|error| http_policy_denied(&error))?;
+            if !authorization.forward_credentials {
+                hop_spec.headers.retain(|key, _| {
+                    !matches!(
+                        key.to_ascii_lowercase().as_str(),
+                        "authorization" | "cookie" | "proxy-authorization"
+                    )
+                });
+            }
+            current = authorization.target;
+            current_url = next_url;
+            hop_spec.url = current_url.clone();
+        }
     })?
 }
 
@@ -8215,11 +9417,27 @@ pub fn cmd_updater_check_as(
 /// 这是 [`ShellExtState::update_state`] 的**真实生产读取方**：把进程内更新状态机
 /// （`None → downloaded → installed`）并入返回的 `state` 字段。此前该字段无读取方
 /// （见其接入状态注释），本轮补上这条链路。
+///
+/// **`state` 与 `state_simulated` 必须成对读出**（轮 33）：`update_state` 的写入方
+/// 是 `cmd_market_download` / `cmd_market_install` 的分派腿（缺省模拟，轮 40 起装配腿
+/// 注入后为真），它们推进账本是如实的，但字符串本身分不出"模拟推进"与"真实推进"。
+/// 把 `state` 单独上屏就会把"点了一下模拟安装"说成"已安装"，因此本命令同时带出
+/// provenance 位。
+///
+/// **成对读出落在装配上**（轮 33）：本命令把 `(update_state, update_state_simulated)`
+/// 一次性交给 [`UpdaterSink::status`]，由 sink 推导 provenance；sink 的签名里这两个
+/// 参数是**必传**的，所以通道实现无法再只报 `state` 而不报它是哪来的，也无法自己
+/// 断言"这条状态是真的"。
+///
+/// **线形**：入参无，返回
+/// `{ available: bool, state: string | null, stateSimulated: bool, grayscalePercent: u32, crashGateStopped: bool, reason: string | null }`。
+/// `stateSimulated` 在 `state === null` 时恒为 `false`；缺省装配有 `state` 时恒为 `true`，
+/// 轮 40 起装配腿（[`DistributeUpgradeInstaller`]）真路径的推进由写入方的 provenance
+/// 标记决定（真实效果成功后为 `false`）。
 pub fn cmd_updater_status(state: &SubstrateState) -> HostResult<UpdaterStatus> {
     guard("updater_status", || {
-        let mut status = state.updater_sink.status();
-        status.state = state.shell_ext.lock().update_state.clone();
-        Ok(status)
+        let ext = state.shell_ext.lock();
+        Ok(state.updater_sink.status(ext.update_state.clone(), ext.update_state_simulated))
     })?
 }
 
@@ -8786,8 +10004,9 @@ fn validate_plugin_ui_entry(raw: &str) -> HostResult<()> {
 /// 壳扩展进程内状态。
 ///
 /// 说明：窗口几何与剪贴板是**真实进程内行为**（可被读取验证）；
-/// 对话框在无 Tauri 对话框插件的环境下返回"取消"（None/false），
-/// 更新命令为模拟结果（诚实标注 `simulated: true`）。
+/// 对话框在无 Tauri 对话框插件的环境下返回"取消"（None/false）；
+/// 更新命令缺省为模拟结果（诚实标注 `simulated: true`），轮 40 起装配
+/// [`DistributeUpgradeInstaller`] 后 download/install 为真实效果（`simulated: false`）。
 #[derive(Debug, Clone, Default)]
 pub struct ShellExtState {
     /// 窗口几何 (x, y, width, height)：由 set_position/set_size 更新。
@@ -8804,11 +10023,24 @@ pub struct ShellExtState {
     pub deep_link_protocol: Option<String>,
     /// 更新状态机：None → downloaded → installed。
     ///
-    /// **接入状态（R9 更正）**：已有生产读取方——`host_updater_status` 把本字段
-    /// 并入返回的 `state` 字段（见 [`cmd_updater_status`]）。写入方仍是
-    /// `cmd_market_download` / `cmd_market_install`。前端的 `auto-update-client.ts`
+    /// **接入状态（R9 更正；轮 40 更新）**：已有生产读取方——`host_updater_status`
+    /// 把本字段并入返回的 `state` 字段（见 [`cmd_updater_status`]）。写入方是
+    /// `cmd_market_download` / `cmd_market_install` 的**分派腿**：缺省装配
+    /// （[`NoUpgradeInstaller`]）是模拟桩，轮 40 起装配 [`DistributeUpgradeInstaller`]
+    /// 后是真效果。所以本字段的每一个非 `None` 值都必须连同
+    /// [`Self::update_state_simulated`] 一起读。
+    /// 前端的 `auto-update-client.ts`
     /// 自持 `UpdateStatus`，与本字段并存；本字段是**宿主侧**的进程内账本。
     pub update_state: Option<String>,
+    /// `update_state` 现值是否来自**模拟**推进（轮 33）。
+    ///
+    /// 与 `update_state` **同处更新、同处读取**（见 [`cmd_updater_status`]）：把它做成
+    /// 独立字段而不是往字符串里塞前缀，是为了让读侧不必解析字符串——解析一次就会
+    /// 漂一次（轮 32 的状态词表就是那样的三面镜像）。模拟腿
+    /// （[`cmd_market_download`] / [`cmd_market_install`] 缺省路径）置 `true`；
+    /// 轮 40 起装配腿真路径（`_wired` 腿，[`DistributeUpgradeInstaller`]）在真实效果
+    /// 成功后置 `false`。
+    pub update_state_simulated: bool,
     /// **origin 允许清单（R4-D2）**：由 [`AdapterConfig::origin_allowlist`] 装配，
     /// 由 `tauri::origin_gate` 在命令分发入口读取。空 = 不启用（Development/Test）；
     /// Production 下空清单被 `tauron_host::authz::production_caller_allowed` 直接拒绝。
@@ -9080,20 +10312,33 @@ pub struct MarketCheckResult {
 pub struct MarketUpdateResult {
     /// 本次命令是否执行成功（**不是**"更新是否真的落地"——那看 `simulated`）。
     pub ok: bool,
-    /// **是否模拟结果**：当前恒 `true`——没有下载任何字节、没有验签、没有替换文件。
+    /// **是否模拟结果**：缺省装配恒 `true`——没有下载任何字节、没有验签、没有
+    /// 替换文件；升级装配腿（[`DistributeUpgradeInstaller`]）注入后为 `false`
+    /// （真实效果已发生并落账）。
     pub simulated: bool,
-    /// 目标版本号；缺省入参时为 `null`。
+    /// 目标版本号。模拟路径缺省入参时为 `null`；真路径恒为**宿主清单**版本。
     pub version: Option<String>,
-    /// 为什么是模拟结果；真实连线后为 `null`。
+    /// 为什么是模拟结果；真实效果成功后为 `null`。
     pub reason: Option<String>,
 }
 
 /// `host_market_check`：检查更新。
 ///
 /// ⚠️ **这是桩，而且现在会如实说出来**：返回值里 `simulated: true` +
-/// `reason` 写明"未接入更新源"。委托目标（`tauron-distribute` / `tauron-market`）
-/// 尚未接线（见组件表的接线状态披露）；接入时只需替换本函数体，线形不变
-/// （`simulated` 改为 `false`、`reason` 置 `null`）。
+/// `reason` 写明"未接入更新源"，并且**指到真通道去**。
+///
+/// 说清楚一件事（轮 28 复核、轮 29 收口、轮 40 更新）：本仓的更新能力**不是**没有
+/// 真实现——真的检查是 [`cmd_updater_check`]（宿主注入 `EndpointClient` 后直接跑
+/// `tauron_distribute::check_for_update`：清单校验 + 灰度 + 签名）；真的下载/安装是
+/// [`cmd_market_download`] / [`cmd_market_install`]（宿主装配
+/// [`DistributeUpgradeInstaller`] 后为真，缺省如实模拟）。**唯独本命令**（check）刻意
+/// 是桩：它**不**去读调用方下发的 `endpoints` / `pubkey`——那两个参数今天
+/// 一个都不用，将来也不用——让 webview 指定宿主去哪取更新清单，等于把宿主的更新通道
+/// 交给调用方（供应链投毒的第一步，见 [`cmd_market_check_as`] 的危害原文）。
+/// 端点的权威来源只能是宿主装配。
+///
+/// 对外 SDK 的 `AutoUpdateClient.checkUpdate()` 自轮 29 起读的是真通道，不再把本桩
+/// 当可用性结论。
 ///
 /// **主窗专属（轮 11 第二批）**：商城命令操作的是**宿主级产物**（更新源 / 安装
 /// 包），插件不得触发；wire 层转调 [`cmd_market_check_as`] 判定，本函数是
@@ -9105,64 +10350,135 @@ pub fn cmd_market_check(_state: &SubstrateState) -> HostResult<MarketCheckResult
             simulated: true,
             version: None,
             reason: Some(
-                "未接入更新源：`tauri-plugin-updater` 不在依赖闭包内，本命令不做任何真实\
-                 可用性探测（没有请求任何 endpoint）；这是本地桩结果，不是网络结论"
+                "未接入更新源：本命令是宿主本地桩，不做任何真实可用性探测（没有请求任何 \
+                 endpoint，调用方下发的 endpoints/pubkey 一律不用）；真检查在 \
+                 host_updater_check（宿主注入端点即为真），真下载/替换在 \
+                 host_market_download / host_market_install（宿主装配 UpgradeInstaller \
+                 后为真，缺省如实模拟）"
                     .to_string(),
             ),
         })
     })?
 }
 
-/// `host_market_download`：**模拟**下载更新。
+/// `host_market_download`：下载并校验更新包（真实路径在装配腿注入后成立）。
 ///
-/// 真实行为只有一件：把进程内 `update_state` 推到 `downloaded:<version>`。
-/// `ok: true` 的语义是"命令成功执行"，**不是**"更新已下载"——判断后者必须看
-/// `simulated`。返回里有 `reason` 写明这一点，所以前端不必靠猜。
+/// **两条路，线形同形，`simulated` 如实区分**：
+/// - 缺省（[`NoUpgradeInstaller`]）：模拟——只把进程内 `update_state` 推到
+///   `downloaded:<version>`（版本取调用方入参），`simulated: true` + `reason`；
+/// - 装配腿注入（[`DistributeUpgradeInstaller`]）：真下载——字节落盘 + SHA-256 +
+///   验签通过后才推账本（版本取宿主清单，**不读**调用方入参），`simulated: false`。
 ///
-/// **主窗专属（轮 11 第二批）**：wire 层转调 [`cmd_market_download_as`]；本函数是
-/// **不过身份**的核心。
+/// 两条路的失败语义一致：**零账本**——失败时 `update_state` /
+/// `update_state_simulated` 原样不动（下载失败不得表现为"已下载"）。
+///
+/// **主窗专属（轮 11 第二批；轮 40 起带审计）**：wire 层转调
+/// [`cmd_market_download_as`]——判定 + 结构化审计留痕（供应链入口级特权）；
+/// 本函数是**不过身份**的核心。
 pub fn cmd_market_download(
     state: &SubstrateState,
     version: Option<&str>,
 ) -> HostResult<MarketUpdateResult> {
     guard("market_download", || {
-        let mut ext = state.shell_ext.lock();
-        ext.update_state = Some(format!("downloaded:{}", version.unwrap_or("unknown")));
-        Ok(MarketUpdateResult {
-            ok: true,
-            simulated: true,
-            version: version.map(str::to_string),
-            reason: Some(
-                "模拟下载：**没有**下载任何字节、没有写入任何文件、没有校验签名；\
-                 只是把进程内 updateState 推进到 downloaded"
-                    .to_string(),
-            ),
-        })
+        if state.upgrade_installer.native_supported() {
+            return cmd_market_download_wired(state);
+        }
+        cmd_market_download_simulated(state, version)
     })?
 }
 
-/// `host_market_install`：**模拟**安装更新（同 [`cmd_market_download`] 的诚实口径）。
+/// 模拟下载腿（缺省装配；原桩实现原样保留，账本如实标注 simulated）。
+fn cmd_market_download_simulated(
+    state: &SubstrateState,
+    version: Option<&str>,
+) -> HostResult<MarketUpdateResult> {
+    let mut ext = state.shell_ext.lock();
+    ext.update_state = Some(format!("downloaded:{}", version.unwrap_or("unknown")));
+    ext.update_state_simulated = true;
+    Ok(MarketUpdateResult {
+        ok: true,
+        simulated: true,
+        version: version.map(str::to_string),
+        reason: Some(
+            "模拟下载：**没有**下载任何字节、没有写入任何文件、没有校验签名；\
+             只是把进程内 updateState 推进到 downloaded"
+                .to_string(),
+        ),
+    })
+}
+
+/// 真下载腿（装配腿已注入）：seam 成功后账本推进为**真实**（`simulated: false`）。
 ///
-/// **主窗专属（轮 11 第二批）**：wire 层转调 [`cmd_market_install_as`]；本函数是
-/// **不过身份**的核心。
+/// 失败路径零账本：seam 返回 `Err` 时账本两个字段原样不动。
+fn cmd_market_download_wired(state: &SubstrateState) -> HostResult<MarketUpdateResult> {
+    let staged = state.upgrade_installer.download()?;
+    let mut ext = state.shell_ext.lock();
+    ext.update_state = Some(format!("downloaded:{}", staged.version));
+    ext.update_state_simulated = false;
+    Ok(MarketUpdateResult {
+        ok: true,
+        simulated: false,
+        version: Some(staged.version),
+        reason: None,
+    })
+}
+
+/// `host_market_install`：安装已 staged 的更新包（真实路径在装配腿注入后成立）。
+///
+/// 与 [`cmd_market_download`] 同构的两条路：缺省模拟（推 `installed:<version>`，
+/// `simulated: true`）；装配腿注入后经完整 `UpgradeRunner`（备份 → 解压 → 原子
+/// 交换 → 健康检查 → 提交日志 → 重启/自动回滚），`simulated: false`。
+///
+/// 失败路径同样**零账本**：含健康检查失败后的自动回滚——回滚不改账本，账本仍
+/// 停在 `downloaded:<v>`（与磁盘真相同步），runner 的错误上浮为类型化拒绝。
+///
+/// **主窗专属（轮 11 第二批；轮 40 起带审计）**：wire 层转调
+/// [`cmd_market_install_as`]（同 [`cmd_market_download`] 的判定与审计口径）；
+/// 本函数是**不过身份**的核心。
 pub fn cmd_market_install(
     state: &SubstrateState,
     version: Option<&str>,
 ) -> HostResult<MarketUpdateResult> {
     guard("market_install", || {
-        let mut ext = state.shell_ext.lock();
-        ext.update_state = Some(format!("installed:{}", version.unwrap_or("unknown")));
-        Ok(MarketUpdateResult {
-            ok: true,
-            simulated: true,
-            version: version.map(str::to_string),
-            reason: Some(
-                "模拟安装：**没有**替换任何二进制/文件、没有触发任何重启流程；\
-                 只是把进程内 updateState 推进到 installed"
-                    .to_string(),
-            ),
-        })
+        if state.upgrade_installer.native_supported() {
+            return cmd_market_install_wired(state);
+        }
+        cmd_market_install_simulated(state, version)
     })?
+}
+
+/// 模拟安装腿（缺省装配；原桩实现原样保留）。
+fn cmd_market_install_simulated(
+    state: &SubstrateState,
+    version: Option<&str>,
+) -> HostResult<MarketUpdateResult> {
+    let mut ext = state.shell_ext.lock();
+    ext.update_state = Some(format!("installed:{}", version.unwrap_or("unknown")));
+    ext.update_state_simulated = true;
+    Ok(MarketUpdateResult {
+        ok: true,
+        simulated: true,
+        version: version.map(str::to_string),
+        reason: Some(
+            "模拟安装：**没有**替换任何二进制/文件、没有触发任何重启流程；\
+             只是把进程内 updateState 推进到 installed"
+                .to_string(),
+        ),
+    })
+}
+
+/// 真安装腿（装配腿已注入）：runner 提交成功后才推账本（`simulated: false`）。
+fn cmd_market_install_wired(state: &SubstrateState) -> HostResult<MarketUpdateResult> {
+    let installed = state.upgrade_installer.install()?;
+    let mut ext = state.shell_ext.lock();
+    ext.update_state = Some(format!("installed:{}", installed.version));
+    ext.update_state_simulated = false;
+    Ok(MarketUpdateResult {
+        ok: true,
+        simulated: false,
+        version: Some(installed.version),
+        reason: None,
+    })
 }
 
 /// `host_market_check` 的**带身份判定**版本（wire 层转调的就是它，轮 11 第二批）。
@@ -9173,15 +10489,16 @@ pub fn cmd_market_install(
 ///
 /// - `check` 会拿调用方下发的**更新源 endpoint / 公钥**去探更新（接入后）：插件能
 ///   借此把宿主指向自己的更新源（供应链投毒的第一步），或当成内网探测跳板；
-/// - `download` / `install` 会推进宿主的 `updateState`（接入后就是**替换应用自身的
-///   二进制**）——没有任何"某个插件"能成为这类操作的主体，让插件 webview 调它等于
-///   把宿主自身的更新通道交给插件；
-/// - 三条都不收身份参数，所以判定只能落在**整条命令**上（与
-///   `host_runtime_spawn` 同一条 [`require_main_window`]，同码 `E_AUTH_DENIED`）。
+/// - `download` / `install` 自轮 40 起是**真供应链操作**（装配腿注入后）：写宿主
+///   磁盘、替换应用自身二进制——没有任何"某个插件"能成为这类操作的主体，让插件
+///   webview 调它等于把宿主自身的更新通道交给插件；
+/// - 三条都不收身份参数，所以判定只能落在**整条命令**上（同码 `E_AUTH_DENIED`）。
 ///
-/// 现状是桩（`simulated: true`、不请求网络、不写文件），但**不因此放松判定**：
-/// 桩的线形与真实实现同形，接线时若判定缺席，越权面会在没人注意时从"无害桩"
-/// 变成"供应链入口"。拒绝路径**零副作用**：`updateState` 不被写（有测试断言）。
+/// **判定与审计（轮 40 起）**：`check` 仍是桩（不请求网络、不写文件），走
+/// [`require_main_window`] 且不进审计表；`download` / `install` 已接线，按
+/// `tauron_host::admin_audit` 的口径说明**连同 `authz` 档位登记**一起走
+/// [`admin_gate`]（判定 + 结构化审计留痕——被拒的提权尝试同样留痕）。拒绝路径
+/// **零副作用**：`updateState` 不被写（有测试断言）。
 ///
 /// 命令**线形不变**（`window` 由 Tauri 注入，前端参数一个字节没改）。
 pub fn cmd_market_check_as(
@@ -9192,23 +10509,25 @@ pub fn cmd_market_check_as(
     cmd_market_check(state)
 }
 
-/// `host_market_download` 的**带身份判定**版本（见 [`cmd_market_check_as`] 的危害说明）。
+/// `host_market_download` 的**带身份判定 + 审计**版本（见 [`cmd_market_check_as`] 的
+/// 危害说明；轮 40 接线后与注册表安装同级，判定与审计同源）。
 pub fn cmd_market_download_as(
     caller: &Caller,
     state: &SubstrateState,
     version: Option<&str>,
 ) -> HostResult<MarketUpdateResult> {
-    require_main_window(caller, "host_market_download")?;
+    admin_gate(state, caller, "host_market_download")?;
     cmd_market_download(state, version)
 }
 
-/// `host_market_install` 的**带身份判定**版本（见 [`cmd_market_check_as`] 的危害说明）。
+/// `host_market_install` 的**带身份判定 + 审计**版本（见 [`cmd_market_check_as`] 的
+/// 危害说明；轮 40 接线后与注册表安装同级，判定与审计同源）。
 pub fn cmd_market_install_as(
     caller: &Caller,
     state: &SubstrateState,
     version: Option<&str>,
 ) -> HostResult<MarketUpdateResult> {
-    require_main_window(caller, "host_market_install")?;
+    admin_gate(state, caller, "host_market_install")?;
     cmd_market_install(state, version)
 }
 
@@ -9702,9 +11021,18 @@ mod tests {
                 entry.command
             );
         }
-        // 桩命令不审计（见 `tauron_host::admin_audit` 的口径说明）。
-        for stub in ["host_market_download", "host_market_install"] {
-            assert!(!tauron_host::admin_audit_required(stub), "{stub} 仍是模拟桩");
+        // 轮 40：download/install 装配腿落地 → 已是特权写命令（真效果可能发生），
+        // 必须进审计表；check 仍是桩、无副作用，不得进（见 `tauron_host::admin_audit`
+        // 的口径说明）。
+        assert!(
+            !tauron_host::admin_audit_required("host_market_check"),
+            "host_market_check 仍是模拟桩，不得进审计表"
+        );
+        for wired in ["host_market_download", "host_market_install"] {
+            assert!(
+                tauron_host::admin_audit_required(wired),
+                "{wired} 是装配腿真路径（轮 40），必须审计"
+            );
         }
     }
 
@@ -9906,8 +11234,8 @@ mod tests {
 
     /// 解包防护（端到端回归锁）：条目数超上限的包必须被拒绝。
     ///
-    /// **强制点不在适配层**——在 `read_verified_package` → `verify_tpkg` →
-    /// `package_signature::verify_package_against_zip`（`zip.len() > MAX_ENTRIES`、
+    /// **强制点不在适配层**——在 `read_verified_package` →
+    /// `package_signature::verify_tpkg_reader[_with_time]`（`zip.len() > MAX_ENTRIES`、
     /// 逐条目 `sanitize_entry_path`、单文件/解压总量上限、逐文件哈希比对）。
     /// 本测试锁的是**安装这条链路整体**的行为：拒绝、且不留任何半截产物。
     #[cfg(feature = "plugin-install")]
@@ -11664,6 +12992,522 @@ mod tests {
         assert_eq!(out.to, tauron_host::lifecycle::State::Disabled);
     }
 
+    // ══════════════════════════════════════════════════════════════════════
+    // 轮 43 / A83：破坏性管理操作的审批令牌（预览 → 确认 → 提交）
+    //
+    // 与安装域 `InstallReviewToken` 同构的第二个消费者：一次性（nonce）、
+    // 有界（TTL + 容量）、绑定注册表事实（id + 操作 + 版本）。预览零副作用；
+    // 提交前重核，任一漂移即拒绝且令牌已作废（必须重新预览）。
+    // 「更新」没有独立执行路径 = uninstall + install 两条组合腿，两端都走令牌。
+    // ══════════════════════════════════════════════════════════════════════
+
+    fn preview_admin_review(
+        state: &PluginRuntimeState,
+        plugin_id: &str,
+        op: RegistryAdminOp,
+    ) -> RegistryAdminReview {
+        match cmd_registry_admin_reviewed_as(&Caller::MainWindow, state, plugin_id, op, true, None)
+            .expect("preview 必须成功")
+        {
+            RegistryAdminResponse::Review(review) => review,
+            RegistryAdminResponse::Executed(_) => panic!("preview 不得执行操作"),
+        }
+    }
+
+    /// 预览零副作用且绑定事实；提交一次性消费，重放被拒。
+    #[test]
+    fn admin_review_preview_binds_facts_and_commits_once() {
+        let state = CommandState::new();
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
+        let id = PluginId::new("com.a").unwrap();
+
+        let review = preview_admin_review(&state, "com.a", RegistryAdminOp::Uninstall);
+        assert_eq!(review.plugin_id, "com.a");
+        assert_eq!(review.op, RegistryAdminOp::Uninstall);
+        assert_eq!(review.version, "1.0.0");
+        assert_eq!(review.state, tauron_host::lifecycle::State::Installed);
+        assert_eq!(
+            review.review_token.expires_at - review.review_token.issued_at,
+            ADMIN_REVIEW_TTL_SECS,
+        );
+        // 预览零副作用：条目仍在、状态未变。
+        assert_eq!(
+            state.registry.find(&id).unwrap().state.state,
+            tauron_host::lifecycle::State::Installed,
+        );
+
+        let executed = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Uninstall,
+            false,
+            Some(&review.review_token),
+        )
+        .unwrap();
+        let RegistryAdminResponse::Executed(outcome) = executed else {
+            panic!("提交必须执行迁移");
+        };
+        assert!(!outcome.illegal);
+        assert!(state.registry.find(&id).is_none(), "卸载后条目必须回收");
+
+        // 重放：一次性令牌已消费。
+        let replay = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Uninstall,
+            false,
+            Some(&review.review_token),
+        )
+        .unwrap_err();
+        assert_eq!(replay.code, ErrorCode::E_AUTH_DENIED);
+        assert!(replay.message.contains("already consumed"), "{}", replay.message);
+    }
+
+    /// 令牌绑定「被审阅的操作」：换操作提交拒绝；消费顺序先摘除再比对 → 必须重新预览。
+    #[test]
+    fn admin_review_rejects_op_mismatch_and_stays_consumed() {
+        let state = CommandState::new();
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
+        let review = preview_admin_review(&state, "com.a", RegistryAdminOp::Uninstall);
+
+        let err = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Purge,
+            false,
+            Some(&review.review_token),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
+        assert!(err.message.contains("不匹配"), "{}", err.message);
+        let id = PluginId::new("com.a").unwrap();
+        assert!(state.registry.find(&id).is_some(), "拒绝路径不得改注册表");
+
+        // 换回被审阅的操作也不行：失败提交已把 nonce 摘除（失败关闭）。
+        let reused = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Uninstall,
+            false,
+            Some(&review.review_token),
+        )
+        .unwrap_err();
+        assert!(reused.message.contains("already consumed"), "{}", reused.message);
+    }
+
+    /// 令牌绑定「预览时刻的版本」：预览后换版本 → 拒绝，必须重新预览。
+    #[test]
+    fn admin_review_version_drift_forces_a_fresh_preview() {
+        let state = CommandState::new();
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
+        let review = preview_admin_review(&state, "com.a", RegistryAdminOp::Uninstall);
+
+        // 漂移：卸载旧版后装上新版（同一 id、版本不同）。
+        cmd_registry_admin(&state, "com.a", RegistryAdminOp::Uninstall).unwrap();
+        let mut upgraded = test_manifest("com.a");
+        upgraded.version = semver::Version::parse("2.0.0").unwrap();
+        state.registry.install(&empty_index(), upgraded).unwrap();
+
+        let err = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Uninstall,
+            false,
+            Some(&review.review_token),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
+        assert!(err.message.contains("预览后已变更"), "{}", err.message);
+        let id = PluginId::new("com.a").unwrap();
+        assert!(state.registry.find(&id).is_some(), "拒绝路径不得改注册表");
+    }
+
+    /// 协议面收窄：预览只服务 uninstall/purge；令牌只被破坏性路径消费；
+    /// 预览与令牌不能同调混用。
+    #[test]
+    fn admin_review_protocol_rejects_non_destructive_mixing() {
+        let state = CommandState::new();
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
+
+        // disable/enable 可逆、无破坏面：不提供预览。
+        let err = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Disable,
+            true,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
+
+        // 令牌也不能被非破坏性操作借道消费。
+        let review = preview_admin_review(&state, "com.a", RegistryAdminOp::Purge);
+        let err = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Enable,
+            false,
+            Some(&review.review_token),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
+
+        // preview 只铸发、commit 只消费：同调混用拒绝。
+        let err = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Uninstall,
+            true,
+            Some(&review.review_token),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
+    }
+
+    /// 可推进的测试时间源：`now = 墙钟 + 偏移`。`advance` 模拟「可信时间前进
+    /// 而墙钟照常」，用来证明 TTL 判定读的是**时间源**而不是墙钟；`retreat` 让
+    /// 时间源**落后于墙钟**——不后退的话两钟同源，「铸发改读墙钟」的变异在这组
+    /// 测试里无感（轮 43 变异证明揪出过这一点）。
+    #[cfg(feature = "plugin-install")]
+    #[derive(Debug, Default)]
+    struct OffsetTimeProvider {
+        offset_secs: std::sync::atomic::AtomicI64,
+    }
+
+    #[cfg(feature = "plugin-install")]
+    impl OffsetTimeProvider {
+        fn advance(&self, delta: std::time::Duration) {
+            self.offset_secs.fetch_add(delta.as_secs() as i64, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn retreat(&self, delta: std::time::Duration) {
+            self.offset_secs.fetch_sub(delta.as_secs() as i64, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(feature = "plugin-install")]
+    impl tauron_host::TrustedTimeProvider for OffsetTimeProvider {
+        fn trusted_time(&self) -> tauron_host::TrustedTime {
+            let offset = self.offset_secs.load(std::sync::atomic::Ordering::SeqCst);
+            let now = std::time::SystemTime::now();
+            let now = if offset >= 0 {
+                now + std::time::Duration::from_secs(offset as u64)
+            } else {
+                now - std::time::Duration::from_secs(offset.unsigned_abs())
+            };
+            tauron_host::TrustedTime { now, state: tauron_host::TimeTrustState::Trusted }
+        }
+    }
+
+    /// 启动时 Trusted、运行期可降级为 Suspicious 的时间源——证明审批**时刻**的
+    /// 失败关闭独立于启动门（真实时间源在运行期丢失可信状态是可能的）。
+    #[cfg(feature = "plugin-install")]
+    #[derive(Debug)]
+    struct DemotableTimeProvider {
+        trustworthy: std::sync::atomic::AtomicBool,
+    }
+
+    #[cfg(feature = "plugin-install")]
+    impl Default for DemotableTimeProvider {
+        fn default() -> Self {
+            Self { trustworthy: std::sync::atomic::AtomicBool::new(true) }
+        }
+    }
+
+    #[cfg(feature = "plugin-install")]
+    impl DemotableTimeProvider {
+        fn demote(&self) {
+            self.trustworthy.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(feature = "plugin-install")]
+    impl tauron_host::TrustedTimeProvider for DemotableTimeProvider {
+        fn trusted_time(&self) -> tauron_host::TrustedTime {
+            tauron_host::TrustedTime {
+                now: std::time::SystemTime::now(),
+                state: if self.trustworthy.load(std::sync::atomic::Ordering::SeqCst) {
+                    tauron_host::TimeTrustState::Trusted
+                } else {
+                    tauron_host::TimeTrustState::Suspicious
+                },
+            }
+        }
+    }
+
+    /// 生产档插件运行时装配（测试）：生产就绪门要求**附着**的运行时报告 hard
+    /// 沙箱（`validate_process_runtime_for_start`），默认 `CommandSpawner` 不是，
+    /// 因此注入标记为 hard 的 [`FakeSpawner`]——它只通过装配门，不做任何真实隔离。
+    fn production_admin_state(cfg: AdapterConfig) -> PluginRuntimeState {
+        let substrate = Arc::new(SubstrateState::with_adapter_config(&cfg));
+        let spawner = Arc::new(FakeSpawner::default());
+        spawner.mark_hard_sandbox();
+        PluginRuntimeState::with_substrate_and_spawner(substrate, cfg, spawner)
+            .expect("生产档插件运行时装配失败（已附着 hard 描述 fake）")
+    }
+
+    /// 生产档（装插件特性开启）：破坏性操作的令牌强制——旧入口与无令牌的
+    /// reviewed 入口都拒绝；走完两步即可执行；disable/enable 不受影响。
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn production_destructive_admin_op_requires_the_review_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = production_admin_state(production_config_with_audit(&temp));
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
+
+        // 旧入口（无令牌直通）在生产档被拒——不能绕过令牌强制。
+        let err =
+            cmd_registry_admin_as(&Caller::MainWindow, &state, "com.a", RegistryAdminOp::Uninstall)
+                .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
+        assert!(err.message.contains("AdminReviewToken"), "{}", err.message);
+        let id = PluginId::new("com.a").unwrap();
+        assert!(state.registry.find(&id).is_some(), "拒绝路径不得改注册表");
+
+        // reviewed 入口不带令牌同样被拒。
+        let err = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Uninstall,
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
+        assert!(err.message.contains("preview"), "{}", err.message);
+
+        // 两步链（preview → commit）在生产档可执行。
+        let review = preview_admin_review(&state, "com.a", RegistryAdminOp::Uninstall);
+        let executed = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Uninstall,
+            false,
+            Some(&review.review_token),
+        )
+        .unwrap();
+        assert!(matches!(executed, RegistryAdminResponse::Executed(_)));
+        assert!(state.registry.find(&id).is_none());
+
+        // 可逆操作（disable）不受令牌强制影响。
+        state.registry.install(&empty_index(), test_manifest("com.b")).unwrap();
+        cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.b",
+            RegistryAdminOp::Disable,
+            false,
+            None,
+        )
+        .unwrap();
+    }
+
+    /// 生产档缺可信时间源：**启动门**先拒（生产就绪校验的 TRUSTED_TIME_REQUIRED）——
+    /// 第一道失败关闭，根本到不了审批路径。
+    ///
+    /// 审批时刻自身的 None 分支是第二道防线（防运行期配置漂移把判定架空），
+    /// 在底座-only 构建下可达，由
+    /// `production_preview_fails_closed_without_trusted_time_in_substrate_builds` 钉住。
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    #[should_panic(expected = "TRUSTED_TIME_REQUIRED")]
+    fn production_without_trusted_time_is_rejected_at_startup() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = production_config_with_audit(&temp);
+        cfg.trusted_time_provider = None;
+        let _ = SubstrateState::with_adapter_config(&cfg);
+    }
+
+    /// 时钟状态为 Suspicious 的时间源不满足生产就绪（"currently trusted"），
+    /// 启动同样被拒——Suspicious 不是在档位表里打个折，而是直接不合格。
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    #[should_panic(expected = "TRUSTED_TIME_REQUIRED")]
+    fn production_with_suspicious_clock_is_rejected_at_startup() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = production_config_with_audit(&temp);
+        cfg.trusted_time_provider = Some(Arc::new(tauron_host::SystemTimeProvider::new(
+            tauron_host::TimeTrustState::Suspicious,
+        )));
+        let _ = SubstrateState::with_adapter_config(&cfg);
+    }
+
+    /// 运行期丢失可信状态（启动时 Trusted → 之后 Suspicious）：**审批时刻**
+    /// 失败关闭——提交（TTL 走 `require_unexpired`）与重新预览（铸发）都被拒，
+    /// 不静默回落墙钟。真实时间源在运行期降级是可能的，这与启动门是两道独立判定。
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn demoted_clock_after_startup_fails_closed_for_admin_review() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider = Arc::new(DemotableTimeProvider::default());
+        let mut cfg = production_config_with_audit(&temp);
+        cfg.trusted_time_provider = Some(provider.clone());
+        let state = production_admin_state(cfg);
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
+
+        // 时钟仍可信时预览成功——证明失败来自降级，而不是链路本来就断。
+        let review = preview_admin_review(&state, "com.a", RegistryAdminOp::Uninstall);
+
+        provider.demote();
+
+        // ① 提交：TTL 校验走 require_unexpired，时钟不可信 → 拒。
+        let err = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Uninstall,
+            false,
+            Some(&review.review_token),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
+        assert!(err.message.contains("已失效"), "{}", err.message);
+
+        // ② 重新预览：铸发本身也拒绝（不把令牌建立在不可信时钟上）。
+        let err = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Uninstall,
+            true,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
+        assert!(err.message.contains("不可信"), "{}", err.message);
+
+        let id = PluginId::new("com.a").unwrap();
+        assert!(state.registry.find(&id).is_some(), "失败关闭路径不得改注册表");
+    }
+
+    /// 管理域 TTL 读可信时间源（A100），铸发与判定两侧都钉住：① 铸发——时间源
+    /// 落后墙钟 6h，若铸发改读墙钟，`issued_at` 断言直接红；② 过期判定——时间
+    /// 源前进到 TTL 之外 → 提交失败（墙钟只走了毫秒级，若判定读墙钟这里必绿）。
+    ///
+    /// 落后量取 6h 而非 24h：签名侧 `MAX_CLOCK_SKEW_SECS` 正是 24h，压边界会让
+    /// 安装域夹具在钟偏判定上抖。
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn admin_review_ttl_follows_the_trusted_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider = Arc::new(OffsetTimeProvider::default());
+        provider.retreat(std::time::Duration::from_secs(6 * 3600));
+        let mut cfg = production_config_with_audit(&temp);
+        cfg.trusted_time_provider = Some(provider.clone());
+        let state = production_admin_state(cfg);
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
+        let expected_issued =
+            system_time_to_unix_secs(std::time::SystemTime::now()).saturating_sub(6 * 3600);
+        let review = preview_admin_review(&state, "com.a", RegistryAdminOp::Uninstall);
+        assert!(
+            review.review_token.issued_at.abs_diff(expected_issued) <= 2,
+            "铸发时间必须取自可信时间源（落后墙钟 6h）：issued_at={}，期望≈{}",
+            review.review_token.issued_at,
+            expected_issued
+        );
+
+        provider.advance(std::time::Duration::from_secs(ADMIN_REVIEW_TTL_SECS + 1));
+        let err = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Uninstall,
+            false,
+            Some(&review.review_token),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
+        assert!(err.message.contains("已失效"), "{}", err.message);
+        let id = PluginId::new("com.a").unwrap();
+        assert!(state.registry.find(&id).is_some(), "过期拒绝不得改注册表");
+    }
+
+    /// 安装域同径（轮 43 retrofit）：install 预览令牌的 TTL 也走可信时间源——
+    /// 铸发时间来源与过期判定两侧都钉住（时间源落后墙钟 6h，与签名侧
+    /// `MAX_CLOCK_SKEW_SECS` 的 24h 裕量保持距离）。
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn install_review_ttl_follows_the_trusted_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let (package, verifying_key) = signed_install_fixture(dir.path(), "com.install.ttl");
+        let mut signing_keys = std::collections::BTreeMap::new();
+        signing_keys.insert("fixture-key".to_string(), verifying_key.to_bytes().to_vec());
+        let provider = Arc::new(OffsetTimeProvider::default());
+        provider.retreat(std::time::Duration::from_secs(6 * 3600));
+        let state = PluginRuntimeState::with_adapter_config(AdapterConfig {
+            plugin_install_dir: Some(dir.path().join("plugins")),
+            plugin_signing_keys: signing_keys,
+            acl_signing_key: Some(vec![0x5a; 32]),
+            trusted_time_provider: Some(provider.clone()),
+            ..AdapterConfig::default()
+        });
+
+        let expected_issued =
+            system_time_to_unix_secs(std::time::SystemTime::now()).saturating_sub(6 * 3600);
+        let preview =
+            cmd_registry_install_preview_as(&Caller::MainWindow, &state, package.to_str().unwrap())
+                .unwrap();
+        assert!(
+            preview.review_token.issued_at.abs_diff(expected_issued) <= 2,
+            "install 铸发时间必须取自可信时间源（落后墙钟 6h）：issued_at={}，期望≈{}",
+            preview.review_token.issued_at,
+            expected_issued
+        );
+        provider.advance(std::time::Duration::from_secs(INSTALL_REVIEW_TTL_SECS + 1));
+        let err = cmd_registry_install_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            package.to_str().unwrap(),
+            &["store:allow-get".into()],
+            &preview.review_token,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
+        assert!(err.message.contains("已失效"), "{}", err.message);
+        assert!(
+            !dir.path().join("plugins").join("com.install.ttl").exists(),
+            "过期拒绝不得落盘安装"
+        );
+    }
+
+    /// 底座-only（未开安装特性）的生产档没有 `TRUSTED_TIME_REQUIRED` 启动门
+    /// （安装域不存在，时间源事实缺省视为满足）——但 **preview 铸发**一旦被调用
+    /// 仍需可信时间，缺源即失败关闭。
+    ///
+    /// 这也把 `review_now` 的 None+Production 分支钉在**默认构建的可达路径**上：
+    /// 不是防御性死代码。
+    #[cfg(not(feature = "plugin-install"))]
+    #[test]
+    fn production_preview_fails_closed_without_trusted_time_in_substrate_builds() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = production_admin_state(production_config_with_audit(&temp));
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
+
+        let err = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Uninstall,
+            true,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_AUTH_DENIED);
+        assert!(err.message.contains("可信时间源"), "{}", err.message);
+        let id = PluginId::new("com.a").unwrap();
+        assert!(state.registry.find(&id).is_some(), "预览失败不得改注册表");
+    }
+
     /// `host_registry_list_all`：插件主体被拒（全量列表本身就是 scoped-read 要遮的信息）。
     #[test]
     fn plugin_caller_cannot_list_all_plugins_but_main_window_can() {
@@ -12115,6 +13959,10 @@ mod tests {
             state.shell_ext.lock().update_state.as_deref(),
             Some("sentinel"),
             "拒绝路径不得推进 updateState"
+        );
+        assert!(
+            !state.shell_ext.lock().update_state_simulated,
+            "拒绝路径不得连 provenance 一起写（哨兵是直接写的，不是桩推进的）"
         );
 
         // 对照：主窗三条全通（返回线形不变，仍是模拟结果的诚实口径）。
@@ -12870,6 +14718,165 @@ mod tests {
         let err = cmd_settings_migrate(&state).unwrap_err();
         assert_eq!(err.code, ErrorCode::E_HOST_PANIC);
         assert_eq!(state.settings_fault.lock().state(), tauron_host::FaultState::Quarantined);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // A91（轮 47）：事件 / 审批 / 注册表三个子系统的故障边界
+    // ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn events_fault_boundary_rejects_bus_work_and_recover_boot_resets_session_state() {
+        use tauron_host::eventbus::ChannelKind;
+        let state = CommandState::new();
+        state
+            .bus
+            .lock()
+            .declare_topics("p.a", &[EventDecl { topic: "plugin:p.a.tick".into(), public: true }])
+            .unwrap();
+        cmd_events_subscribe(&state, "p.a", "w1", "plugin:p.a.tick").unwrap();
+        cmd_events_publish(&state, "p.a", "plugin:p.a.tick", serde_json::json!({"n": 1})).unwrap();
+        // `host_events_publish` 走可靠发布（`publish_request`）→ 落在订阅者的
+        // Request 通道（`host_events_drain(kind = "request")`）。
+        assert_eq!(state.bus.lock().drain("p.a", ChannelKind::Request).unwrap().len(), 1);
+
+        // 走**生产闸门**注入 panic（与 settings 边界同一套三段式）。
+        let fault = run_events_boundary(&state, "forced-test-panic", || -> HostResult<()> {
+            panic!("bus boom")
+        });
+        assert_eq!(fault.unwrap_err().code, ErrorCode::E_HOST_PANIC);
+        assert_eq!(state.events_fault.lock().state(), tauron_host::FaultState::Faulted);
+
+        // 故障后事件面整体拒绝服务，错误文案必须具名修复出口。
+        let err = cmd_events_publish(&state, "p.a", "plugin:p.a.tick", serde_json::json!({"n": 2}))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_HOST_PANIC);
+        assert!(err.message.contains("events fault boundary rejected work"), "{}", err.message);
+        assert!(err.message.contains("host_recover_boot"), "{}", err.message);
+        let err = cmd_events_subscribe(&state, "p.a", "w2", "plugin:p.a.tick").unwrap_err();
+        assert!(err.message.contains("events fault boundary rejected work"), "{}", err.message);
+
+        // 修复出口 = host_recover_boot：会话态清零——边界归 Ready、订阅/队列清光。
+        cmd_recover_boot(&state).unwrap();
+        assert_eq!(state.events_fault.lock().state(), tauron_host::FaultState::Ready);
+        assert!(
+            state.bus.lock().subscribed_topics_of("p.a", "w1").is_empty(),
+            "会话态清零：故障前的订阅登记不得残留"
+        );
+        // 结构声明保留：连声明一起清掉的话，发布端对未声明 topic 只静默丢弃
+        // ——修复动作会把可工作的消息面悄悄打哑（宿主镜像/深链同属这类发布路径）。
+        assert!(state.bus.lock().topic_meta("plugin:p.a.tick").is_some());
+        assert!(
+            state.bus.lock().topic_meta(HOST_SETTINGS_CHANGED_TOPIC).is_some(),
+            "宿主镜像 topic 的装配期声明必须挺过会话重置"
+        );
+
+        // 工作恢复：不重新声明，直接重新订阅 + 发布 → 帧照常投递。
+        cmd_events_subscribe(&state, "p.a", "w1", "plugin:p.a.tick").unwrap();
+        cmd_events_publish(&state, "p.a", "plugin:p.a.tick", serde_json::json!({"n": 3})).unwrap();
+        assert_eq!(state.bus.lock().drain("p.a", ChannelKind::Request).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn approval_fault_boundary_blocks_tokens_and_preview_reconcile_clears_them() {
+        let state = CommandState::new();
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
+
+        // 基线：预览铸发成功——证明后续拒绝来自故障，而不是链路本来就断。
+        let stale = preview_admin_review(&state, "com.a", RegistryAdminOp::Uninstall);
+
+        let fault = run_review_boundary(&state, "forced-test-panic", || -> HostResult<()> {
+            panic!("approval boom")
+        });
+        assert_eq!(fault.unwrap_err().code, ErrorCode::E_HOST_PANIC);
+        assert_eq!(state.review_fault.lock().state(), tauron_host::FaultState::Faulted);
+
+        // 故障后令牌面拒绝服务：铸发与消费都在闸门处被拒，文案具名修复出口。
+        let err =
+            mint_admin_review(&state, "com.a", RegistryAdminOp::Uninstall, "1.0.0").unwrap_err();
+        assert!(err.message.contains("approval fault boundary rejected work"), "{}", err.message);
+        assert!(err.message.contains("preview"), "{}", err.message);
+        let err = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Uninstall,
+            false,
+            Some(&stale.review_token),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_HOST_PANIC);
+        assert!(err.message.contains("approval fault boundary rejected work"), "{}", err.message);
+        // 拒绝路径零副作用：注册表条目仍在。
+        let id = PluginId::new("com.a").unwrap();
+        assert!(state.registry.find(&id).is_some());
+
+        // 修复出口 = 重新预览：确定性清空旧令牌、重新铸发；正常时是幂等空操作。
+        let fresh = preview_admin_review(&state, "com.a", RegistryAdminOp::Uninstall);
+        assert_eq!(state.review_fault.lock().state(), tauron_host::FaultState::Ready);
+
+        // 旧令牌已被清空 → 不是"已消费"，是彻底不认识（两种拒绝语义要能区分）。
+        let replay = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Uninstall,
+            false,
+            Some(&stale.review_token),
+        )
+        .unwrap_err();
+        assert_eq!(replay.code, ErrorCode::E_AUTH_DENIED);
+        assert!(replay.message.contains("unknown"), "{}", replay.message);
+
+        // 新令牌照常一次性消费。
+        let executed = cmd_registry_admin_reviewed_as(
+            &Caller::MainWindow,
+            &state,
+            "com.a",
+            RegistryAdminOp::Uninstall,
+            false,
+            Some(&fresh.review_token),
+        )
+        .unwrap();
+        assert!(matches!(executed, RegistryAdminResponse::Executed(_)));
+        assert!(state.registry.find(&id).is_none());
+    }
+
+    #[test]
+    fn registry_fault_boundary_quarantines_until_reassembly_not_faked_ready() {
+        let state = CommandState::new();
+        state.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
+
+        let fault = run_registry_boundary(&state, "forced-test-panic", || -> HostResult<()> {
+            panic!("registry boom")
+        });
+        assert_eq!(fault.unwrap_err().code, ErrorCode::E_HOST_PANIC);
+        assert_eq!(state.registry_fault.lock().state(), tauron_host::FaultState::Faulted);
+
+        // 故障后注册表面拒绝服务，错误文案给出**重启重装**这条真修复路径。
+        let err = cmd_registry_list(&state, None, &[]).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_HOST_PANIC);
+        assert!(err.message.contains("registry fault boundary rejected work"), "{}", err.message);
+        assert!(err.message.contains("restart the host to re-assemble"), "{}", err.message);
+        assert!(cmd_registry_list_all(&state).is_err());
+
+        // 修复尝试：条目没有持久镜像、会话内无法重建——宁可如实隔离（Quarantined），
+        // 也不把边界推回 Ready 伪造"修好了"。
+        cmd_recover_boot(&state).unwrap();
+        assert_eq!(state.registry_fault.lock().state(), tauron_host::FaultState::Quarantined);
+        assert!(cmd_registry_list(&state, None, &[]).is_err(), "隔离后必须继续拒绝服务");
+
+        // 可观测面如实上报四个边界（不是只藏在内部状态里，主窗 UI 读得到）。
+        let stats = cmd_resource_stats(&state).unwrap();
+        assert_eq!(stats["faults"]["registry"]["state"], serde_json::json!("quarantined"));
+        assert_eq!(stats["faults"]["events"]["state"], serde_json::json!("ready"));
+        assert_eq!(
+            stats["faults"]["registry"]["lastFault"]["operation"],
+            serde_json::json!("forced-test-panic")
+        );
+
+        // 边界随 SubstrateState 隔离：新实例从 Ready 起步（不是进程级黏性开关）。
+        let fresh = CommandState::new();
+        assert_eq!(fresh.registry_fault.lock().state(), tauron_host::FaultState::Ready);
     }
 
     #[test]
@@ -13976,7 +15983,89 @@ mod tests {
         assert_eq!(snapshot["perPlugin"]["plugins"][0]["notifications"], 1);
         assert_eq!(snapshot["perPlugin"]["plugins"][0]["notificationEvictions"], 0);
 
+        // V7 §9 leak gate：代际台账必须**跨线可见**，且读的就是注册表里那一份。
+        let generations = &snapshot["global"]["generations"];
+        assert!(generations.is_object(), "缺 generations 读数");
+        assert_eq!(generations["trackedResources"], 0);
+        assert_eq!(generations["liveLeases"], 0);
+
+        // 起一条运行期租约 → 读数跟着涨；回收 → 读数必须回到零（abandoned generation 不许累积）。
+        let (handle, _started) = state.registry.runtime_ensure_lease(&id, || Ok(9100)).unwrap();
+        let issued = snapshot["global"]["generations"]["generationsIssued"].as_u64().unwrap();
+        let while_live = cmd_resource_stats(&state).unwrap();
+        assert_eq!(while_live["global"]["generations"]["trackedResources"], 1);
+        assert_eq!(while_live["global"]["generations"]["liveLeases"], 1);
+        assert_eq!(
+            while_live["global"]["generations"]["generationsIssued"],
+            issued + 1,
+            "号源只增：回收留痕与代际发号不得互相抵消"
+        );
+
+        assert!(state.registry.runtime_remove(&id).is_some());
+        let after_reclaim = cmd_resource_stats(&state).unwrap();
+        assert_eq!(after_reclaim["global"]["generations"]["trackedResources"], 0);
+        assert_eq!(after_reclaim["global"]["generations"]["liveLeases"], 0);
+        assert!(
+            state.registry.runtime_lease(&handle.lease).is_err(),
+            "回收后旧租约必须失效（跟踪摘除不得把旧句柄放回场）"
+        );
+
         let denied = cmd_resource_stats_as(&plugin_caller("p.stats"), &state).unwrap_err();
+        assert_eq!(denied.code, ErrorCode::E_AUTH_DENIED);
+    }
+
+    /// V7 §7 Process 行的 retry 腿必须**真的接在命令上**：`host_resource_stats` 一次
+    /// 读取推进一轮有界重试，并把重试留痕与终态证据带回线上（只留日志 = 查不到）。
+    #[test]
+    fn resource_stats_drives_reap_retry_and_publishes_the_evidence() {
+        /// 永远杀不掉的终止器：逼着回收走完「重试到上限 → 固化证据」这条链。
+        #[derive(Default)]
+        struct AlwaysFailing(parking_lot::Mutex<Vec<u32>>);
+        impl LeaseReaper for AlwaysFailing {
+            fn kill(&self, pid: u32) -> Result<ReapOutcome, String> {
+                self.0.lock().push(pid);
+                Err("拒绝访问".into())
+            }
+        }
+
+        let state = CommandState::new();
+        let index = empty_index();
+        let id = state.registry.install(&index, test_manifest("p.reap")).unwrap();
+        state.registry.admin_op(&id, RegistryAdminOp::Enable).unwrap();
+        let reaper = Arc::new(AlwaysFailing::default());
+        state.registry.set_lease_reaper(reaper.clone());
+        state.registry.runtime_ensure_lease(&id, || Ok(4321)).expect("租约必须挂得上");
+        assert!(state.registry.runtime_remove(&id).is_some(), "回收本身必须成功");
+
+        // 第一次读取：首试失败已记账，这一轮再试一次仍未杀掉。
+        let snapshot = cmd_resource_stats_as(&Caller::MainWindow, &state).unwrap();
+        let reap = &snapshot["global"]["reap"];
+        assert_eq!(reap["attempts"], 2, "诊断读取本身就是重试驱动");
+        assert_eq!(reap["retries"], 1);
+        assert_eq!(reap["failures"], 2);
+        assert_eq!(reap["pending"], 1, "未达上限前必须仍在队列里");
+        assert_eq!(reap["terminal"], 0);
+
+        // 第二次读取：到尝试上限 ⇒ 出队并固化成查得动的证据（pid / 插件 / 原因）。
+        let snapshot = cmd_resource_stats_as(&Caller::MainWindow, &state).unwrap();
+        let reap = &snapshot["global"]["reap"];
+        assert_eq!(reap["pending"], 0);
+        assert_eq!(reap["terminal"], 1);
+        assert_eq!(reap["terminalRecords"][0]["pid"], 4321);
+        assert_eq!(reap["terminalRecords"][0]["pluginId"], "p.reap");
+        assert_eq!(reap["terminalRecords"][0]["attempts"], 3, "含首试共三次");
+        assert!(reap["terminalRecords"][0]["reason"].as_str().unwrap_or("").contains("拒绝访问"));
+
+        // 有界性：队列已空，之后再怎么读都不该再打进程。
+        let calls = reaper.0.lock().len();
+        assert_eq!(calls, 3);
+        for _ in 0..5 {
+            cmd_resource_stats_as(&Caller::MainWindow, &state).unwrap();
+        }
+        assert_eq!(reaper.0.lock().len(), calls, "空队列不得被读命令反复驱动");
+        assert_eq!(snapshot["global"]["generations"]["trackedResources"], 0);
+
+        let denied = cmd_resource_stats_as(&plugin_caller("p.reap"), &state).unwrap_err();
         assert_eq!(denied.code, ErrorCode::E_AUTH_DENIED);
     }
 
@@ -14078,13 +16167,20 @@ mod tests {
                     "plugin_filter": { "allow": ["com.example.formatter"] },
                     "max_plugins": 3
                 },
-                "data_dir": "/tmp/tauron-data"
+                "data_dir": "/tmp/tauron-data",
+                "env_overrides": { "OC_PROFILE": "prod" }
             }"#,
         )
         .unwrap();
 
         let adapter = AdapterConfig::from_client_config(&cfg, None);
 
+        assert_eq!(
+            adapter.plugin_env_overrides.get("OC_PROFILE").map(String::as_str),
+            Some("prod"),
+            "`env_overrides` 必须映射进装配配置——它是 `SpawnConfig::env` 的唯一来源，\
+             漏在这里就等于配置无效"
+        );
         let registry = adapter.registry.expect("registry 必须被映射");
         assert_eq!(registry.max_plugins, 3, "max_plugins 覆盖必须生效");
         let filter = registry.plugin_filter.expect("过滤器必须被映射");
@@ -14555,6 +16651,166 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────
+    // V7-P1-01：插件运行时**单例装配**
+    // ────────────────────────────────────────────────────────────
+
+    /// 同一底座的第二次装配**不得返回 Runtime**，且第一次的写回口 / 注册表原样保留。
+    ///
+    /// 盯的是此前那条「打日志但仍返回第二个 Registry」的实现：调用方手里是第二份
+    /// 注册表，恢复对账却写向第一份——故障表现为「清了标志、重启后没生效」，
+    /// 而日志里那句警告没人看。现在冲突是 `Err`，第二份 Registry 根本不会被建出来。
+    #[test]
+    fn second_assembly_on_same_substrate_returns_no_runtime() {
+        let substrate = Arc::new(SubstrateState::with_adapter_config(&AdapterConfig::default()));
+        let first = PluginRuntimeState::with_substrate_and_spawner(
+            substrate.clone(),
+            AdapterConfig::default(),
+            Arc::new(FakeSpawner::default()),
+        )
+        .expect("第一次装配必须成功");
+        let claimed = *substrate.plugin_runtime_assembly.get().expect("装配成功必须落下凭证");
+
+        // 让第一份注册表带上可观察事实（一个插件），写回口据此就能被认出指向谁。
+        first.registry.install(&empty_index(), test_manifest("com.a")).unwrap();
+
+        let second = PluginRuntimeState::with_substrate_and_spawner(
+            substrate.clone(),
+            AdapterConfig::default(),
+            Arc::new(FakeSpawner::default()),
+        );
+        let error = match second {
+            Ok(_) => panic!("同一底座的第二次装配必须失败，不能返回 Runtime"),
+            Err(error) => error,
+        };
+        let AssemblyError::AlreadyAssembled { existing, attempted } = error else {
+            panic!("冲突必须是 AlreadyAssembled，实际：{error:?}");
+        };
+        assert_eq!(existing, claimed, "错误里必须指名持有凭证的那次装配");
+        assert_ne!(existing, attempted, "被拒的凭证与既有凭证必须可区分");
+        assert!(
+            substrate.plugin_runtime_assembly.get().is_some_and(|t| *t == claimed),
+            "凭证不得被替换"
+        );
+
+        // 写回口仍是**第一份**注册表：往里再装一个插件，快照必须跟着变。
+        // 若第二次的空注册表接管了 sink，这里只会看见 `com.a` 一条（或全空）。
+        let sink = substrate.plugin_flags.get().expect("装配后必须注入插件侧写回口");
+        assert_eq!(sink.flag_snapshots(), vec![("com.a".to_string(), false)]);
+        first.registry.install(&empty_index(), test_manifest("com.b")).unwrap();
+        assert_eq!(
+            sink.flag_snapshots(),
+            vec![("com.a".to_string(), false), ("com.b".to_string(), false)],
+            "恢复对账写回口必须始终读第一份注册表"
+        );
+        // 沙箱事实也仍由第一次装配持有（不得被清空或改写）。
+        assert!(substrate.process_sandbox.get().is_some());
+    }
+
+    /// 轮 41：装配即开台账——`recovery_data_dir` 存在时，装配输出一份可校验的
+    /// 启动扫描快照（首启 = 空账也落盘，"扫描过"是可查事实）。
+    #[test]
+    fn assembly_opens_the_reap_ledger_on_the_recovery_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = AdapterConfig {
+            recovery_data_dir: Some(temp.path().to_path_buf()),
+            ..AdapterConfig::default()
+        };
+        let substrate = Arc::new(SubstrateState::with_adapter_config(&cfg));
+        let runtime = PluginRuntimeState::with_substrate_and_spawner(
+            substrate,
+            cfg,
+            Arc::new(FakeSpawner::default()),
+        )
+        .expect("装配必须成功");
+
+        let path = temp.path().join(tauron_host::runtime::REAP_LEDGER_FILE);
+        let raw = std::fs::read_to_string(&path).expect("装配就该把'已扫描'快照落盘");
+        assert!(raw.contains("tauron.reap-ledger/1"), "schema 必须进文件：{raw}");
+        assert!(raw.contains("\"pending\":[]"), "首启没有上一轮条目：{raw}");
+        let stats = runtime.registry.runtime_reap_stats();
+        assert_eq!(
+            (stats.sweep_resolved, stats.sweep_survivors, stats.sweep_unknown),
+            (0, 0, 0),
+            "首启没有上一轮条目，不该凭空产出扫描结论"
+        );
+    }
+
+    /// 轮 41：台账读不开 = 拒绝装配（不静默重置成空账），错误必须带上原文。
+    #[test]
+    fn assembly_rejects_a_torn_reap_ledger() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(tauron_host::runtime::REAP_LEDGER_FILE), b"{torn").unwrap();
+        let cfg = AdapterConfig {
+            recovery_data_dir: Some(temp.path().to_path_buf()),
+            ..AdapterConfig::default()
+        };
+        let substrate = Arc::new(SubstrateState::with_adapter_config(&cfg));
+        let result = PluginRuntimeState::with_substrate_and_spawner(
+            substrate,
+            cfg,
+            Arc::new(FakeSpawner::default()),
+        );
+        // 不写 `expect_err`：Ok 侧 `PluginRuntimeState` 没有 Debug（也不该只为一条
+        // 测试给它加），换等价的 let-else 就不会把 Debug 约束带进来。
+        let Err(error) = result else {
+            panic!("撕裂台账必须拒绝装配（却拿到了 Runtime）");
+        };
+        let AssemblyError::ReapLedgerRejected(reason) = error else {
+            panic!("必须是 ReapLedgerRejected，实际：{error:?}");
+        };
+        assert!(reason.contains("integrity"), "失败原文必须可查：{reason}");
+    }
+
+    /// 并发装配：同一底座的 N 个线程里**恰好一个**拿到 Runtime，其余全部
+    /// `AlreadyAssembled`，且都指名同一个既有凭证。
+    ///
+    /// 这条用例盯的是「先判断、后写入」的实现漏洞：`get().is_none()` 再 `set()`
+    /// 之间有窗口，两个线程能同时判断通过并各建一份 Registry。领取凭证只用
+    /// `set` 的返回值，因此窗口不存在——本用例把它钉住。
+    #[test]
+    fn concurrent_assembly_on_same_substrate_yields_exactly_one_runtime() {
+        let substrate = Arc::new(SubstrateState::with_adapter_config(&AdapterConfig::default()));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let substrate = substrate.clone();
+            handles.push(std::thread::spawn(move || {
+                match PluginRuntimeState::with_substrate_and_spawner(
+                    substrate,
+                    AdapterConfig::default(),
+                    Arc::new(FakeSpawner::default()),
+                ) {
+                    Ok(_runtime) => Ok(()),
+                    Err(AssemblyError::AlreadyAssembled { existing, attempted }) => {
+                        Err((existing.assembly_id, attempted.assembly_id))
+                    }
+                    Err(other) => panic!("并发装配不该出现别的失败：{other}"),
+                }
+            }));
+        }
+        let results: Vec<Result<(), (u64, u64)>> =
+            handles.into_iter().map(|h| h.join().expect("装配线程不得 panic")).collect();
+
+        let winners = results.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(winners, 1, "同一底座只能有一份插件运行时：{results:?}");
+        let rejected: Vec<(u64, u64)> =
+            results.iter().filter_map(|r| r.as_ref().err().copied()).collect();
+        let claimed = substrate.plugin_runtime_assembly.get().expect("必须有人领到凭证");
+        assert!(
+            rejected.iter().all(|(existing, _)| *existing == claimed.assembly_id),
+            "每次拒绝都要指名同一个持有凭证的装配：{rejected:?}"
+        );
+        let attempted_ids: std::collections::BTreeSet<u64> =
+            rejected.iter().map(|(_, attempted)| *attempted).collect();
+        assert_eq!(
+            attempted_ids.len(),
+            rejected.len(),
+            "每次尝试的凭证必须互不相同（凭证计数器不得重复发放）"
+        );
+        // 唯一赢家写下的写回口也没有被并发者改写。
+        assert!(substrate.plugin_flags.get().is_some());
+    }
+
+    // ────────────────────────────────────────────────────────────
     // P0-2：进程插件运行时（tauron-proc 激活）
     //
     // 这些用例一律走 **fake 启动面**：测试里绝不真起 sidecar 进程（CI 上没有
@@ -14580,6 +16836,12 @@ mod tests {
         sinks: Mutex<HashMap<u32, Arc<dyn ProcessFrameSink>>>,
         /// pid → 写入 stdin 的帧序列（0.4-A1 帧回路）。
         written: Mutex<HashMap<u32, Vec<Vec<u8>>>>,
+        /// 下一次 `write_frame` 的失败种（轮 30：投递写侧的错误码分流）。
+        fail_write_with: Mutex<Option<std::io::ErrorKind>>,
+        /// 生产装配门（`validate_process_runtime_for_start`）要求附着的运行时
+        /// 报告 hard 沙箱；FakeSpawner 默认如实上报 unsupported，置位后上报
+        /// hard 描述（仅通过装配门，不做任何真实隔离）。
+        hard_sandbox: std::sync::atomic::AtomicBool,
     }
 
     impl FakeSpawner {
@@ -14620,9 +16882,38 @@ mod tests {
         fn sink_of(&self, pid: u32) -> Option<Arc<dyn ProcessFrameSink>> {
             self.sinks.lock().get(&pid).cloned()
         }
+
+        /// 让下一次 `write_frame` 以指定 `ErrorKind` 失败（轮 30 写侧分流用）。
+        fn fail_next_write_with(&self, kind: std::io::ErrorKind) {
+            *self.fail_write_with.lock() = Some(kind);
+        }
+
+        /// 描述为 hard 沙箱（仅供生产档装配门通过；不做任何真实隔离）。
+        fn mark_hard_sandbox(&self) {
+            self.hard_sandbox.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     impl ProcSpawner for FakeSpawner {
+        /// 默认如实上报 unsupported（与 `CommandSpawner` 缺省一致）；
+        /// [`Self::mark_hard_sandbox`] 后上报 hard 描述。
+        fn sandbox_descriptor(&self) -> tauron_proc::ProcessSandboxDescriptor {
+            if self.hard_sandbox.load(std::sync::atomic::Ordering::SeqCst) {
+                tauron_proc::ProcessSandboxDescriptor {
+                    enforcement: tauron_proc::ProcessSandboxEnforcement::Hard,
+                    process_tree_containment: true,
+                    filesystem_isolation: true,
+                    network_isolation: true,
+                    syscall_isolation: true,
+                    detail: "FakeSpawner hard 描述（测试标记，非真实隔离）".into(),
+                }
+            } else {
+                tauron_proc::ProcessSandboxDescriptor::unsupported(
+                    "FakeSpawner 未标记 hard_sandbox",
+                )
+            }
+        }
+
         fn spawn(&self, cfg: &SpawnConfig) -> ProcResult<SpawnedProc> {
             self.calls.lock().push(cfg.clone());
             if let Some(e) = self.fail_with.lock().take() {
@@ -14654,6 +16945,9 @@ mod tests {
 
         /// 记录写往 sidecar stdin 的帧（0.4-A1：帧回路投递侧）。
         fn write_frame(&self, pid: u32, frame: &[u8]) -> std::io::Result<()> {
+            if let Some(kind) = self.fail_write_with.lock().take() {
+                return Err(std::io::Error::new(kind, format!("注入的写失败（kind {kind:?}）")));
+            }
             self.written.lock().entry(pid).or_default().push(frame.to_vec());
             Ok(())
         }
@@ -14705,6 +16999,106 @@ mod tests {
         let state = CommandState::with_spawner(fake.clone());
         state.registry.install(&empty_index(), process_manifest(id, sidecar)).unwrap();
         (state, fake)
+    }
+
+    /// [`process_state`] 的带配置变体：装配配置由调用方给出，启动面仍是 fake。
+    ///
+    /// 存在的唯一理由是要验证**装配配置 → 子进程启动参数**这条链
+    /// （`ClientConfig.env_overrides` 的落点用例），默认装配的 `with_spawner` 到不了它。
+    fn process_state_with_config(
+        id: &str,
+        adapter: AdapterConfig,
+    ) -> (CommandState, Arc<FakeSpawner>) {
+        let fake = Arc::new(FakeSpawner::default());
+        let substrate = Arc::new(SubstrateState::with_adapter_config(&adapter));
+        let state = CommandState::with_substrate_and_spawner(substrate, adapter, fake.clone())
+            .expect("自建底座首次装配不可能冲突");
+        state.registry.install(&empty_index(), process_manifest(id, Some("svc"))).unwrap();
+        (state, fake)
+    }
+
+    /// `ClientConfig.env_overrides` 必须真的落到 `SpawnConfig::env`（轮 2 / F-1）。
+    ///
+    /// 三条断言各挡一种失真：
+    /// - 运维独有键出现在启动参数里 → 这条链没断，`env_overrides` 不再是
+    ///   "写了不生效"的那批键之一（只有落点、没有消费者，等于没有）；
+    /// - 同名键上运维**覆盖**调用方 → 优先级没写反：若调用方能改运维注入的键，
+    ///   运维就没有任何确定杠杆；
+    /// - 调用方独有键保留 → 注入不是白名单，不会把 `profile.env` 整体清掉。
+    #[test]
+    fn host_env_overrides_reach_spawn_config_and_win_over_caller() {
+        let mut adapter = AdapterConfig::default();
+        adapter.plugin_env_overrides.insert("TAURON_PROFILE".to_string(), "prod".to_string());
+        adapter.plugin_env_overrides.insert("OC_PROFILE".to_string(), "from-host".to_string());
+        let (state, fake) = process_state_with_config("com.env", adapter);
+        enabled_process_plugin(&state, "com.env");
+
+        let mut profile = valid_profile();
+        profile.env.insert("OC_PROFILE".to_string(), "from-caller".to_string());
+        profile.env.insert("CALLER_ONLY".to_string(), "kept".to_string());
+        cmd_runtime_spawn(&state, "com.env", &profile).unwrap();
+
+        let env = &fake.last_cfg().env;
+        assert_eq!(
+            env.get("TAURON_PROFILE").map(String::as_str),
+            Some("prod"),
+            "运维注入的键没进启动参数：`env_overrides` 又变回一条假配置"
+        );
+        assert_eq!(
+            env.get("OC_PROFILE").map(String::as_str),
+            Some("from-host"),
+            "同名键必须运维优先（调用方能覆盖运维配置 = 没有确定杠杆）"
+        );
+        assert_eq!(
+            env.get("CALLER_ONLY").map(String::as_str),
+            Some("kept"),
+            "注入只做叠加，不得顺手清空调用方自己的 env"
+        );
+    }
+
+    /// 缺省装配（没有运维注入）下 `profile.env` 原样透传，零影响。
+    #[test]
+    fn spawn_env_passes_through_without_host_overrides() {
+        let (state, fake) = process_state("com.env0", Some("svc"));
+        enabled_process_plugin(&state, "com.env0");
+        let mut profile = valid_profile();
+        profile.env.insert("CALLER_ONLY".to_string(), "kept".to_string());
+        cmd_runtime_spawn(&state, "com.env0", &profile).unwrap();
+        let cfg = fake.last_cfg();
+        assert_eq!(cfg.env.len(), 1, "默认装配不该往子进程环境里塞东西：{:?}", cfg.env);
+        assert_eq!(cfg.env.get("CALLER_ONLY").map(String::as_str), Some("kept"));
+    }
+
+    /// `runtime-wasm-broker` 这条 feature **有没有作用**（轮 2 / F-2）。
+    ///
+    /// 参考宿主默认开着它（`examples/minimal-app/src-tauri/Cargo.toml`），但
+    /// `cargo test --workspace` 跑的是 adapter 的**默认 feature 集**：`wasm_delivery`
+    /// 整个模块——连同它自己的用例——在 CI 里一次都没被编译过。于是"feature 编译不过"
+    /// 或"Wasm 投递表接错"只有 `cargo check --all-features` 挡得住，测试挡不住。
+    /// CI 现在专门跑 `cargo test -p tauron-adapter --features runtime-wasm-broker`，
+    /// 本用例是那条命令要证明的第一件事：Wasm 投递**确实登记进了投递表**。
+    #[cfg(feature = "runtime-wasm-broker")]
+    #[test]
+    fn wasm_broker_feature_registers_wasm_delivery() {
+        let state = CommandState::new();
+        assert!(
+            state.deliveries.contains_key(&DeliveryKind::Wasm),
+            "开了 runtime-wasm-broker 却没有登记 Wasm 投递：feature 是空的，\
+             而文档会据它声称 WASM 形态可装配"
+        );
+    }
+
+    /// 反向配对：不开 feature 时 Wasm 形态**必须不在表里**，从而落
+    /// `UnwiredDelivery` 的诚实 `Unsupported`。两条用例合起来才说明这条 feature
+    /// 真的改变了装配结果，而不是一个改名占位。
+    #[cfg(not(feature = "runtime-wasm-broker"))]
+    #[test]
+    fn without_wasm_broker_feature_wasm_delivery_is_absent() {
+        let state = CommandState::new();
+        assert!(
+            !state.deliveries.contains_key(&DeliveryKind::Wasm),
+            "没开 feature 却登记了 Wasm 投递：最小底座的 unwired 语义被绕过"
+        );
     }
 
     /// 0.4-A1 进程投递闭环（Rust 层，不真起 sidecar）：
@@ -14759,6 +17153,92 @@ mod tests {
         let settled = state.registry.peek_call(&call.call_id).expect("调用应仍在表里");
         assert_eq!(settled.state, tauron_host::registry::CallState::Settled);
         assert_eq!(settled.result, Some(serde_json::json!({ "done": true })));
+    }
+
+    /// 轮 30：写侧失败必须**按事实分码**，不再一律塌成"非法状态迁移"。
+    ///
+    /// 为什么这条用例在 Rust 层而不是只在 E2E：E2E 里写队列满不满**取决于本机负载**
+    /// （轮 30 就是靠它在并行门禁跑下抓到这个塌缩的），而错误码分流是可判定语义，
+    /// 必须有一种确定性注入方式。这里直接注入 `ErrorKind`。
+    #[test]
+    fn process_delivery_write_failures_map_to_their_own_codes() {
+        // (注入的 io 失败种, 期望码, 期望 retry class)
+        let cases = [
+            (
+                std::io::ErrorKind::WouldBlock,
+                ErrorCode::E_CALL_PENDING_FULL,
+                // 额度满：不自动重放（V4 幂等证明前不重试），但绝不是说"状态机非法"。
+                tauron_host::error::RetryClass::Never,
+            ),
+            (
+                std::io::ErrorKind::BrokenPipe,
+                ErrorCode::E_LEASE_EXPIRED,
+                // 通路没了：机器可读的"先重连（重新 spawn）再谈重试"。
+                tauron_host::error::RetryClass::AfterReconnect,
+            ),
+            (
+                std::io::ErrorKind::NotFound,
+                ErrorCode::E_LEASE_EXPIRED,
+                tauron_host::error::RetryClass::AfterReconnect,
+            ),
+            (
+                std::io::ErrorKind::InvalidInput,
+                ErrorCode::E_INVALID_MANIFEST,
+                tauron_host::error::RetryClass::Never,
+            ),
+        ];
+        for (kind, want_code, want_class) in cases {
+            let (state, fake) = process_state("com.example.wrfail", Some("svc"));
+            enabled_process_plugin(&state, "com.example.wrfail");
+            let handle = cmd_runtime_spawn(&state, "com.example.wrfail", &valid_profile()).unwrap();
+
+            fake.fail_next_write_with(kind);
+            let err = cmd_call_plugin(
+                &state,
+                "main",
+                "com.example.wrfail",
+                "doThing",
+                serde_json::json!({}),
+            )
+            .expect_err(&format!("{kind:?} 的写失败必须上抛错误"));
+            assert_eq!(err.code, want_code, "{kind:?} 分流错了：{}", err.message);
+            assert_eq!(err.code.retry_class(), want_class, "{kind:?} 的码必须带正确的重试语义");
+            // 零泄漏：投递失败的调用不得留在 pending 表上占额度。
+            assert_eq!(state.registry.pending_for("main"), 0, "{kind:?} 后 pending 应归零");
+            assert!(fake.written_frames(handle.pid).is_empty(), "失败的帧没有被记成已投递");
+        }
+    }
+
+    /// 轮 30：启动器没有写 stdin 这条通路 = **未装配投递**，不是错误码。
+    ///
+    /// 走 `ProviderResult::Unsupported`（与"没有 runtime 不投递"同一个形状）：调用方
+    /// 据此知道"这条链路压根没接"，而不是收到一个暗示插件状态坏了的失败。
+    #[test]
+    fn process_delivery_without_write_channel_reports_unsupported() {
+        let (state, fake) = process_state("com.example.nowrite", Some("svc"));
+        enabled_process_plugin(&state, "com.example.nowrite");
+        cmd_runtime_spawn(&state, "com.example.nowrite", &valid_profile()).unwrap();
+
+        fake.fail_next_write_with(std::io::ErrorKind::Unsupported);
+        let res = cmd_call_plugin(
+            &state,
+            "main",
+            "com.example.nowrite",
+            "doThing",
+            serde_json::json!({}),
+        )
+        .expect("没有写通路应报告 Unsupported，而不是错误");
+        match res {
+            ProviderResult::Unsupported(body) => {
+                assert!(
+                    body.reason.contains("不支持写入 sidecar stdin"),
+                    "原因要指出没接的是哪条通路：{}",
+                    body.reason
+                );
+            }
+            ProviderResult::Value(_) => panic!("没有写通路却报告投递成功"),
+        }
+        assert_eq!(state.registry.pending_for("main"), 0, "未投递的调用不得留在 pending 表");
     }
 
     #[test]
@@ -15158,11 +17638,48 @@ mod tests {
             crashes: 2,
             consecutive_failures: 1,
             reap: ReapStats {
-                attempts: 3,
-                terminated: 1,
+                // 一条 pid：首试失败 → 再试两次仍失败 → 固化为终态证据；
+                // 另一条租约回收时进程早已退出；还有一条待重试的因为 pid 被在册租约
+                // 占用而**让位**（没打第二下，所以 attempts/retries 都不因此增长）。
+                attempts: 4,
+                terminated: 0,
                 already_gone: 1,
-                failures: 1,
+                failures: 3,
                 last_error: Some("拒绝访问".to_string()),
+                pending: 0,
+                retries: 2,
+                recovered: 0,
+                terminal: 3,
+                overflow: 0,
+                skipped_live_pid: 1,
+                // 轮 41：上一轮宿主留下的台账里一条 pid 经重启扫描确认已不存在（销账），
+                // 另一条探测不可用（留证不盲杀）；台账有两次写盘失败（计数不静默）。
+                sweep_resolved: 1,
+                sweep_survivors: 0,
+                sweep_unknown: 1,
+                ledger_write_failures: 2,
+                terminal_records: vec![
+                    tauron_host::TerminalReapRecord {
+                        plugin_id: "com.crash.proc".to_string(),
+                        pid: 4242,
+                        attempts: 3,
+                        reason: "终止 pid 4242 失败：拒绝访问".to_string(),
+                    },
+                    tauron_host::TerminalReapRecord {
+                        plugin_id: "com.reused.proc".to_string(),
+                        pid: 4243,
+                        attempts: 1,
+                        reason: "pid 4243 现由在册租约 lease-9 持有：重试会误杀活进程，故让位出队（旧进程按定义已退出）"
+                            .to_string(),
+                    },
+                    tauron_host::TerminalReapRecord {
+                        plugin_id: "com.restart.proc".to_string(),
+                        pid: 4244,
+                        attempts: 2,
+                        reason: "重启扫描销账：pid 4244 经平台探测已不存在（上一轮宿主终止失败，现已无对象）"
+                            .to_string(),
+                    },
+                ],
             },
             health: tauron_host::HealthReport::dead("sidecar process has exited"),
         };
@@ -15176,11 +17693,41 @@ mod tests {
                 "crashes": 2,
                 "consecutiveFailures": 1,
                 "reap": {
-                    "attempts": 3,
-                    "terminated": 1,
+                    "attempts": 4,
+                    "terminated": 0,
                     "alreadyGone": 1,
-                    "failures": 1,
-                    "lastError": "拒绝访问"
+                    "failures": 3,
+                    "lastError": "拒绝访问",
+                    "pending": 0,
+                    "retries": 2,
+                    "recovered": 0,
+                    "terminal": 3,
+                    "overflow": 0,
+                    "skippedLivePid": 1,
+                    "sweepResolved": 1,
+                    "sweepSurvivors": 0,
+                    "sweepUnknown": 1,
+                    "ledgerWriteFailures": 2,
+                    "terminalRecords": [
+                        {
+                            "pluginId": "com.crash.proc",
+                            "pid": 4242,
+                            "attempts": 3,
+                            "reason": "终止 pid 4242 失败：拒绝访问"
+                        },
+                        {
+                            "pluginId": "com.reused.proc",
+                            "pid": 4243,
+                            "attempts": 1,
+                            "reason": "pid 4243 现由在册租约 lease-9 持有：重试会误杀活进程，故让位出队（旧进程按定义已退出）"
+                        },
+                        {
+                            "pluginId": "com.restart.proc",
+                            "pid": 4244,
+                            "attempts": 2,
+                            "reason": "重启扫描销账：pid 4244 经平台探测已不存在（上一轮宿主终止失败，现已无对象）"
+                        }
+                    ]
                 },
                 "health": {
                     "liveness": "dead",
@@ -15194,6 +17741,27 @@ mod tests {
         // 留痕又变回"只有日志"）。
         assert!(v["reap"].get("alreadyGone").is_some());
         assert!(v["reap"].get("lastError").is_some());
+        // 重试腿同样得上线：证据必须带得出 pid / 插件 / 原因。
+        assert_eq!(v["reap"]["terminalRecords"][0]["pluginId"], "com.crash.proc");
+        assert_eq!(v["reap"]["terminalRecords"][0]["pid"], 4242);
+        // 让位（同号活进程）也是必须查得到的事实，否则"没误杀"与"没重试"在读数上同形。
+        assert_eq!(v["reap"]["skippedLivePid"], 1);
+        // 轮 41：重启扫描腿同样上线——销账/存活/不可判定/写盘失败都必须读得到，
+        // 且销账证据带得出插件与原因（跨重启孤儿的事实出口）。
+        assert_eq!(v["reap"]["sweepResolved"], 1);
+        assert_eq!(v["reap"]["sweepSurvivors"], 0);
+        assert_eq!(v["reap"]["sweepUnknown"], 1);
+        assert_eq!(v["reap"]["ledgerWriteFailures"], 2);
+        assert_eq!(v["reap"]["terminalRecords"][2]["pluginId"], "com.restart.proc");
+        assert!(v["reap"]["terminalRecords"][2]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("重启扫描销账"));
+        assert_eq!(v["reap"]["terminalRecords"][1]["pluginId"], "com.reused.proc");
+        assert!(v["reap"]["terminalRecords"][1]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("误杀"));
     }
 
     // ────────────────────────────────────────────────────────────
@@ -15231,9 +17799,20 @@ mod tests {
         let handle = spawn_then_crash(state, fake, id);
         assert_eq!(handle.pid, 1000);
         state.registry.report_event(&pid, Event::RetryOk).unwrap();
-        while !state.proc_runtime.is_crash_exceeded(id) {
+        // 有界推进到窗口超限（轮 2）：谓词一旦不再被满足，必须**断言失败**而不是
+        // 空转——写 `while !is_crash_exceeded { record_crash }` 时，只要
+        // `CrashTracker` 的语义变了（上限调高 / 计数饱和），这个 helper 就把
+        // 整条 CI 挂成 100% CPU 的死循环。
+        for _ in 0..64 {
+            if state.proc_runtime.is_crash_exceeded(id) {
+                break;
+            }
             state.proc_runtime.record_crash(id);
         }
+        assert!(
+            state.proc_runtime.is_crash_exceeded(id),
+            "记了 64 次崩溃仍未超限：崩溃预算语义已变，本 helper 的假设不再成立"
+        );
         assert!(
             state.registry.find(&pid).unwrap().is_active(),
             "插件必须仍可用，否则本用例测到的是可用性门而不是预算门"
@@ -15267,9 +17846,14 @@ mod tests {
         assert_eq!(fake.call_count(), 2);
 
         // 窗口推到上限（3 = `CrashLimit::default().max_crashes`）：仍未超限。
-        while state.proc_runtime.crash_count("com.proc") < 3 {
+        // 同样**有界**推进（轮 2，见 `exhaust_crash_window` 的理由）。
+        for _ in 0..64 {
+            if state.proc_runtime.crash_count("com.proc") >= 3 {
+                break;
+            }
             state.proc_runtime.record_crash("com.proc");
         }
+        assert_eq!(state.proc_runtime.crash_count("com.proc"), 3, "64 次内没推到 3：计数语义已变");
         assert!(
             !state.proc_runtime.is_crash_exceeded("com.proc"),
             "3 次 == 上限：上限的判定是 > max_crashes，第 4 次才算超"
@@ -15799,6 +18383,7 @@ mod tests {
             substrate.dialog_sink = dialog;
             substrate.deep_link_sink = deep_link;
             PluginRuntimeState::with_substrate(Arc::new(substrate), AdapterConfig::default())
+                .unwrap()
         }
 
         fn noop_only(window: Arc<dyn WindowSink>) -> PluginRuntimeState {
@@ -16199,7 +18784,8 @@ mod tests {
             let mut substrate = SubstrateState::with_adapter_config(&AdapterConfig::default());
             substrate.menu_sink = sink.clone();
             let state =
-                PluginRuntimeState::with_substrate(Arc::new(substrate), AdapterConfig::default());
+                PluginRuntimeState::with_substrate(Arc::new(substrate), AdapterConfig::default())
+                    .unwrap();
 
             let spec = two_item_menu();
             match cmd_menu_set(&state, &spec).unwrap() {
@@ -16265,7 +18851,8 @@ mod tests {
             );
             substrate.menu_sink = Arc::new(RecordingMenuSink::default());
             let state =
-                PluginRuntimeState::with_substrate(Arc::new(substrate), AdapterConfig::default());
+                PluginRuntimeState::with_substrate(Arc::new(substrate), AdapterConfig::default())
+                    .unwrap();
 
             let after = cmd_host_capabilities(&state).unwrap();
             for domain in ["menu", "fs"] {
@@ -16371,6 +18958,209 @@ mod tests {
             );
         }
 
+        /// 单跳契约假 sink（轮 48 / A96）：按脚本逐跳回放响应，记录每次收到的 spec。
+        /// 脚本耗尽后重复最后一项（hop 超限场景要一直 302）。
+        #[derive(Debug)]
+        struct ScriptedHttpSink {
+            script: Vec<HttpResponseSpec>,
+            cursor: std::sync::Mutex<usize>,
+            hops: std::sync::Mutex<Vec<HttpRequestSpec>>,
+        }
+
+        impl ScriptedHttpSink {
+            fn new(script: Vec<HttpResponseSpec>) -> Arc<Self> {
+                Arc::new(Self {
+                    script,
+                    cursor: std::sync::Mutex::new(0),
+                    hops: std::sync::Mutex::new(Vec::new()),
+                })
+            }
+        }
+
+        impl HttpSink for ScriptedHttpSink {
+            fn native_supported(&self) -> bool {
+                true
+            }
+
+            fn network_enforcement(&self) -> tauron_host::NetworkEnforcement {
+                tauron_host::NetworkEnforcement::RedirectAndDns
+            }
+
+            fn request(
+                &self,
+                spec: &HttpRequestSpec,
+                _policy: &tauron_host::NetworkPolicy,
+            ) -> HostResult<ProviderResult<HttpResponseSpec>> {
+                self.hops.lock().unwrap().push(spec.clone());
+                let mut cursor = self.cursor.lock().unwrap();
+                let index = (*cursor).min(self.script.len() - 1);
+                *cursor += 1;
+                Ok(ProviderResult::Value(self.script[index].clone()))
+            }
+        }
+
+        fn http_response(
+            status: u16,
+            location: Option<&str>,
+            resolved: &[&str],
+        ) -> HttpResponseSpec {
+            let mut headers = std::collections::BTreeMap::new();
+            if let Some(location) = location {
+                headers.insert("location".to_string(), location.to_string());
+            }
+            HttpResponseSpec {
+                status,
+                headers,
+                body: String::new(),
+                truncated: false,
+                resolved_addrs: resolved.iter().map(|s| s.to_string()).collect(),
+            }
+        }
+
+        fn http_state(
+            sink: Arc<ScriptedHttpSink>,
+            domains: &[&str],
+            max_redirects: u8,
+        ) -> CommandState {
+            let mut policy = tauron_host::NetworkPolicy::public_https(
+                domains.iter().map(|d| tauron_host::DomainRule::exact(*d)).collect(),
+            );
+            policy.max_redirects = max_redirects;
+            let cfg = AdapterConfig::default().with_http_policy(policy).with_http_sink(sink);
+            CommandState::with_adapter_config(cfg)
+        }
+
+        fn http_spec(url: &str, headers: &[(&str, &str)]) -> HttpRequestSpec {
+            HttpRequestSpec {
+                method: "GET".into(),
+                url: url.into(),
+                headers: headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                body: None,
+                timeout_ms: None,
+                max_bytes: None,
+            }
+        }
+
+        #[test]
+        fn http_redirect_flow_follows_hops_with_rfc_3986_resolution() {
+            let sink = ScriptedHttpSink::new(vec![
+                http_response(302, Some("/next"), &["93.184.216.34"]),
+                http_response(200, None, &["93.184.216.34"]),
+            ]);
+            let state = http_state(sink.clone(), &["example.com"], 8);
+            let spec = http_spec("https://example.com/start", &[("Authorization", "Bearer t")]);
+            let ProviderResult::Value(response) = cmd_http_request(&state, &spec).unwrap() else {
+                panic!("脚本以 200 结束，必须是 Supported");
+            };
+            assert_eq!(response.status, 200);
+            let hops = sink.hops.lock().unwrap();
+            assert_eq!(hops.len(), 2, "宿主必须逐跳发请求（sink 契约：不跟 redirect）");
+            assert_eq!(
+                hops[1].url, "https://example.com/next",
+                "相对 Location 必须按 RFC 3986 解析成绝对 URL 再发"
+            );
+            assert_eq!(
+                hops[1].headers.get("Authorization").map(String::as_str),
+                Some("Bearer t"),
+                "同源 redirect 允许转凭据"
+            );
+        }
+
+        #[test]
+        fn http_redirect_cross_origin_strips_credentials_and_denied_target_never_sent() {
+            let sink = ScriptedHttpSink::new(vec![
+                http_response(302, Some("https://cdn.example.com/asset"), &["93.184.216.34"]),
+                http_response(200, None, &["93.184.216.34"]),
+            ]);
+            let state = http_state(sink.clone(), &["example.com", "cdn.example.com"], 8);
+            let spec = http_spec(
+                "https://example.com/start",
+                &[("Authorization", "Bearer t"), ("Cookie", "sid=1")],
+            );
+            let _ = cmd_http_request(&state, &spec).unwrap();
+            let hops = sink.hops.lock().unwrap();
+            assert_eq!(hops.len(), 2);
+            assert!(!hops[1].headers.contains_key("Authorization"), "跨源不得转 Authorization");
+            assert!(!hops[1].headers.contains_key("Cookie"), "跨源不得转 Cookie");
+
+            // 策略外目标 → 拒绝，且第二跳从未发出。
+            let denied_sink = ScriptedHttpSink::new(vec![http_response(
+                302,
+                Some("https://evil.example.net/"),
+                &["93.184.216.34"],
+            )]);
+            let denied_state = http_state(denied_sink.clone(), &["example.com"], 8);
+            let error = cmd_http_request(&denied_state, &spec).unwrap_err();
+            assert_eq!(error.code, ErrorCode::E_AUTH_DENIED);
+            assert!(error.message.contains("outside scope"), "{}", error.message);
+            assert_eq!(denied_sink.hops.lock().unwrap().len(), 1, "被拒的下一跳不得发出");
+        }
+
+        #[test]
+        fn http_redirect_loop_is_bounded_by_policy_max_redirects() {
+            let sink =
+                ScriptedHttpSink::new(vec![http_response(302, Some("/loop"), &["93.184.216.34"])]);
+            let state = http_state(sink.clone(), &["example.com"], 2);
+            let spec = http_spec("https://example.com/start", &[]);
+            let error = cmd_http_request(&state, &spec).unwrap_err();
+            assert_eq!(error.code, ErrorCode::E_AUTH_DENIED);
+            assert!(error.message.contains("redirect hop"), "{}", error.message);
+            assert_eq!(
+                sink.hops.lock().unwrap().len(),
+                3,
+                "初始跳 + 两次授权跳后第 3 次越限，不再发出"
+            );
+        }
+
+        #[test]
+        fn http_provider_resolution_is_rechecked_against_private_network_policy() {
+            // 域名公开、解析地址私有 → deny（DNS rebinding 面）。
+            let sink = ScriptedHttpSink::new(vec![http_response(200, None, &["10.0.0.5"])]);
+            let state = http_state(sink, &["example.com"], 8);
+            let spec = http_spec("https://example.com/start", &[]);
+            let error = cmd_http_request(&state, &spec).unwrap_err();
+            assert_eq!(error.code, ErrorCode::E_AUTH_DENIED);
+            assert!(error.message.contains("private"), "{}", error.message);
+
+            // provider 回报不可解析地址 → fail-closed。
+            let bad = ScriptedHttpSink::new(vec![http_response(200, None, &["not-an-ip"])]);
+            let bad_state = http_state(bad, &["example.com"], 8);
+            let error = cmd_http_request(&bad_state, &spec).unwrap_err();
+            assert_eq!(error.code, ErrorCode::E_AUTH_DENIED);
+            assert!(error.message.contains("unparseable"), "{}", error.message);
+        }
+
+        #[test]
+        fn http_provider_without_redirect_enforcement_is_rejected_before_any_request() {
+            // 声称 native 支持但只做 UrlOnly：逐跳/DNS 复检无从执行 → 拒发（不是裸发）。
+            #[derive(Debug)]
+            struct UrlOnlySink;
+            impl HttpSink for UrlOnlySink {
+                fn native_supported(&self) -> bool {
+                    true
+                }
+
+                fn request(
+                    &self,
+                    _spec: &HttpRequestSpec,
+                    _policy: &tauron_host::NetworkPolicy,
+                ) -> HostResult<ProviderResult<HttpResponseSpec>> {
+                    panic!("UrlOnly provider 不得收到请求");
+                }
+            }
+            let cfg = AdapterConfig::default()
+                .with_http_policy(tauron_host::NetworkPolicy::public_https(vec![
+                    tauron_host::DomainRule::exact("example.com"),
+                ]))
+                .with_http_sink(Arc::new(UrlOnlySink));
+            let state = CommandState::with_adapter_config(cfg);
+            let spec = http_spec("https://example.com/start", &[]);
+            assert!(matches!(
+                cmd_http_request(&state, &spec).unwrap(),
+                ProviderResult::Unsupported(_)
+            ));
+        }
+
         /// 假更新端点：直接返回给定清单（不起网络）。
         struct FakeEndpoint {
             manifest: Option<tauron_distribute::UpdateManifest>,
@@ -16387,6 +19177,31 @@ mod tests {
         }
 
         #[test]
+        fn updater_status_must_say_whether_the_ledger_came_from_a_stub() {
+            // 轮 33：`state` 字符串本身分不出"模拟推进"与"真实推进"。桩把 `update_state`
+            // 推到 `downloaded:<v>` / `installed:<v>` 是**如实**的进程内账本行为（写侧的
+            // `reason` 说清楚了），但读侧只看到 `state` 就会把"点了一下模拟安装"显示成
+            // "已安装 2.0.0"。所以 provenance 位必须与 `state` 成对回吐。
+            let state = CommandState::new();
+            let fresh = cmd_updater_status(&state).unwrap();
+            assert_eq!(fresh.state, None);
+            assert!(!fresh.state_simulated, "没有状态时不得凭空声称它是模拟来的");
+
+            cmd_market_download(&state, Some("2.0.0")).unwrap();
+            let after_download = cmd_updater_status(&state).unwrap();
+            assert_eq!(after_download.state.as_deref(), Some("downloaded:2.0.0"));
+            assert!(
+                after_download.state_simulated,
+                "桩推进的 state 必须带 provenance，否则读侧无从分辨"
+            );
+
+            cmd_market_install(&state, Some("2.0.0")).unwrap();
+            let after_install = cmd_updater_status(&state).unwrap();
+            assert_eq!(after_install.state.as_deref(), Some("installed:2.0.0"));
+            assert!(after_install.state_simulated);
+        }
+
+        #[test]
         fn updater_check_runs_tauron_distribute_and_status_reads_the_ledger() {
             // 未注入端点 → 如实 Unsupported；`update_state` 仍可读（真实读取方）。
             let degraded = CommandState::new();
@@ -16398,6 +19213,8 @@ mod tests {
             let s = cmd_updater_status(&degraded).unwrap();
             assert!(!s.available);
             assert_eq!(s.state.as_deref(), Some("downloaded:2.0.0"));
+            // 绕过桩、直接写账本 → provenance 保持 false（真实装配腿落地后就是这么写的）。
+            assert!(!s.state_simulated, "未经桩的账本写入不得被标成模拟");
             assert!(s.reason.is_some(), "未配置必须带原因");
             assert_eq!(
                 cmd_updater_check(&degraded, "  ").unwrap_err().code,
@@ -16421,12 +19238,21 @@ mod tests {
                         signature: "abc123def456".into(),
                         release_date: "2026-09-27T00:00:00Z".into(),
                         platform_notes: Default::default(),
+                        // 检查侧不解释这些字段（执行侧才要求 `sha256`），留空即
+                        // 「清单只声明了版本/URL/签名」这一条被测路径。
+                        sha256: None,
+                        signature_algorithm: None,
+                        public_key_id: None,
+                        min_host_version: None,
+                        abi: None,
+                        rollback_policy: None,
                     }),
                 }),
                 identity.clone(),
             ));
             let state =
-                PluginRuntimeState::with_substrate(Arc::new(substrate), AdapterConfig::default());
+                PluginRuntimeState::with_substrate(Arc::new(substrate), AdapterConfig::default())
+                    .unwrap();
             match cmd_updater_check(&state, "1.0.0").unwrap() {
                 ProviderResult::Value(o) => {
                     assert!(o.available);
@@ -16446,12 +19272,19 @@ mod tests {
                         signature: String::new(),
                         release_date: "2026-09-27T00:00:00Z".into(),
                         platform_notes: Default::default(),
+                        sha256: None,
+                        signature_algorithm: None,
+                        public_key_id: None,
+                        min_host_version: None,
+                        abi: None,
+                        rollback_policy: None,
                     }),
                 }),
                 identity,
             ));
             let state2 =
-                PluginRuntimeState::with_substrate(Arc::new(substrate2), AdapterConfig::default());
+                PluginRuntimeState::with_substrate(Arc::new(substrate2), AdapterConfig::default())
+                    .unwrap();
             match cmd_updater_check(&state2, "1.0.0").unwrap() {
                 ProviderResult::Value(o) => {
                     assert!(!o.available);
@@ -16476,6 +19309,12 @@ mod tests {
                 signature: "abc123def456".into(),
                 release_date: "2026-09-27T00:00:00Z".into(),
                 platform_notes: Default::default(),
+                sha256: None,
+                signature_algorithm: None,
+                public_key_id: None,
+                min_host_version: None,
+                abi: None,
+                rollback_policy: None,
             };
             let state_for = |id: &str| {
                 let mut substrate = SubstrateState::with_adapter_config(&AdapterConfig::default());
@@ -16492,6 +19331,7 @@ mod tests {
                         },
                     ));
                 PluginRuntimeState::with_substrate(Arc::new(substrate), AdapterConfig::default())
+                    .unwrap()
             };
 
             // Batch1 只覆盖 `user_hash % 100 == 0`：在前 200 个稳定 id 里取出桶内/桶外各一。
@@ -16540,7 +19380,8 @@ mod tests {
             ));
             substrate.updater_sink = sink.clone();
             let state =
-                PluginRuntimeState::with_substrate(Arc::new(substrate), AdapterConfig::default());
+                PluginRuntimeState::with_substrate(Arc::new(substrate), AdapterConfig::default())
+                    .unwrap();
 
             assert_eq!(cmd_updater_status(&state).unwrap().grayscale_percent, 1);
             // 停留时间未满 → 推进被拒（批次不是想推就能推）。
@@ -17183,5 +20024,674 @@ mod main_window_surface_guard_tests {
             Caller::from_label("plugin-not a valid id").expect_err("畸形 label 必须拒绝").code,
             ErrorCode::E_AUTH_DENIED
         );
+    }
+}
+
+/// 轮 49：A71 变体过滤——`resolve_best` 经 [`tauron_host::ArtifactVariantResolver`]
+/// 接进安装/更新装配腿。
+///
+/// 钉住三件事：无兼容变体在**任何下载动作之前**硬拒（失败关闭，不动网络）；
+/// 有兼容变体时按本机目标选择（不是列表首位、也不是 options 单清单默认）；
+/// `install()` 用同一份被选中的清单重验（download/install 口径一致）。
+#[cfg(test)]
+mod round49_variant_resolution_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    struct UrlRecordingDownloader {
+        bytes: Vec<u8>,
+        urls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl tauron_distribute::Downloader for UrlRecordingDownloader {
+        fn download(
+            &self,
+            url: &str,
+            dest_path: &Path,
+            _control: &tauron_distribute::PhaseControl,
+            progress_callback: &mut dyn FnMut(u64, u64),
+        ) -> tauron_distribute::DistributeResult<PathBuf> {
+            self.urls.lock().unwrap().push(url.to_string());
+            std::fs::write(dest_path, &self.bytes).map_err(|e| {
+                tauron_distribute::DistributeError::FileOperationFailed(format!(
+                    "mock 下载写盘失败：{e}"
+                ))
+            })?;
+            progress_callback(self.bytes.len() as u64, self.bytes.len() as u64);
+            Ok(dest_path.to_path_buf())
+        }
+    }
+
+    struct AcceptVerifier;
+
+    impl tauron_distribute::SignatureVerifier for AcceptVerifier {
+        fn verify(
+            &self,
+            _file_path: &Path,
+            _signature: &str,
+            _context: &tauron_distribute::VerificationContext<'_>,
+        ) -> tauron_distribute::DistributeResult<bool> {
+            Ok(true)
+        }
+    }
+
+    struct StagingExtractor {
+        contents: Vec<u8>,
+    }
+
+    impl tauron_distribute::ArchiveExtractor for StagingExtractor {
+        fn extract(
+            &self,
+            _archive_path: &Path,
+            staging_dir: &Path,
+            _limits: &tauron_distribute::ArchiveLimits,
+            _control: &tauron_distribute::PhaseControl,
+        ) -> tauron_distribute::DistributeResult<tauron_distribute::ExtractedArchive> {
+            std::fs::create_dir_all(staging_dir).map_err(|e| {
+                tauron_distribute::DistributeError::FileOperationFailed(format!(
+                    "mock 建 staging 失败：{e}"
+                ))
+            })?;
+            std::fs::write(staging_dir.join("app.txt"), &self.contents).map_err(|e| {
+                tauron_distribute::DistributeError::FileOperationFailed(format!(
+                    "mock 写 staging 失败：{e}"
+                ))
+            })?;
+            Ok(tauron_distribute::ExtractedArchive {
+                file_count: 1,
+                total_bytes: self.contents.len() as u64,
+            })
+        }
+    }
+
+    struct AlwaysHealthy;
+
+    impl tauron_distribute::UpgradeHealthCheck for AlwaysHealthy {
+        fn check(
+            &self,
+            _current_dir: &Path,
+            _control: &tauron_distribute::PhaseControl,
+        ) -> tauron_distribute::DistributeResult<bool> {
+            Ok(true)
+        }
+    }
+
+    const OPTIONS_URL: &str = "https://updates.example/options.zip";
+
+    fn manifest(version: &str, url: &str, payload: &[u8]) -> tauron_distribute::UpdateManifest {
+        tauron_distribute::UpdateManifest {
+            version: version.into(),
+            url: url.into(),
+            signature: "c0ffee".into(),
+            release_date: "2026-10-04T00:00:00Z".into(),
+            platform_notes: Default::default(),
+            sha256: Some(sha256_hex(payload)),
+            signature_algorithm: Some("ed25519".into()),
+            public_key_id: Some("variant-key".into()),
+            min_host_version: None,
+            abi: None,
+            rollback_policy: None,
+        }
+    }
+
+    /// 与任何真实主机都不同的目标（os 不同即不兼容）。
+    fn foreign_target() -> tauron_host::TargetSpec {
+        let mut target = tauron_host::current_target_spec();
+        target.os = tauron_host::TargetOs::Other;
+        target
+    }
+
+    fn installer(
+        root: &std::path::Path,
+        payload: Vec<u8>,
+        urls: Arc<Mutex<Vec<String>>>,
+    ) -> DistributeUpgradeInstaller {
+        let options = tauron_distribute::UpgradeOptions {
+            manifest: manifest("9.9.9", OPTIONS_URL, &payload),
+            download_dir: root.join("downloads"),
+            install_dir: root.join("install"),
+            backup_dir: root.join("backups"),
+            auto_restart: false,
+            download_timeout_secs: 30,
+            extract_timeout_secs: 30,
+            swap_timeout_secs: 30,
+            health_check_timeout_secs: 30,
+            archive: tauron_distribute::ArchiveLimits::default(),
+            installed_version: Some("1.0.0".into()),
+        };
+        DistributeUpgradeInstaller::new(
+            options,
+            Arc::new(UrlRecordingDownloader { bytes: payload, urls }),
+            Arc::new(AcceptVerifier),
+            Arc::new(StagingExtractor { contents: b"v3-new-bytes".to_vec() }),
+            Arc::new(AlwaysHealthy),
+            None,
+        )
+    }
+
+    #[test]
+    fn variant_list_without_compatible_target_is_rejected_before_any_download() {
+        let root = tempfile::tempdir().unwrap();
+        let urls = Arc::new(Mutex::new(Vec::new()));
+        let only_foreign = vec![UpdateArtifactVariant {
+            target: foreign_target(),
+            manifest: manifest("3.1.0", "https://updates.example/tauron-3.1.0-foreign.zip", b"x"),
+        }];
+        let installer =
+            installer(root.path(), b"payload".to_vec(), urls.clone()).with_variants(only_foreign);
+        let err = installer.download().unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST, "无兼容变体必须走清单类硬拒");
+        assert!(
+            err.message.contains("无一兼容本机目标"),
+            "拒绝理由必须点名「无一兼容」而不是别的清单错误：{}",
+            err.message
+        );
+        assert!(urls.lock().unwrap().is_empty(), "硬拒必须发生在任何下载动作之前");
+        assert!(!installer.staged_path().exists(), "硬拒不得落任何 staged 残留");
+    }
+
+    #[test]
+    fn download_and_install_both_use_the_variant_compatible_with_this_host() {
+        let root = tempfile::tempdir().unwrap();
+        let current = root.path().join("install").join("current");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(current.join("app.txt"), b"v1-old-bytes").unwrap();
+
+        let urls = Arc::new(Mutex::new(Vec::new()));
+        let payload = b"variant-payload".to_vec();
+        let variants = vec![
+            UpdateArtifactVariant {
+                target: foreign_target(),
+                manifest: manifest(
+                    "3.1.0",
+                    "https://updates.example/tauron-3.1.0-foreign.zip",
+                    &payload,
+                ),
+            },
+            UpdateArtifactVariant {
+                target: tauron_host::current_target_spec(),
+                manifest: manifest(
+                    "3.1.0",
+                    "https://updates.example/tauron-3.1.0-host.zip",
+                    &payload,
+                ),
+            },
+        ];
+        let installer =
+            installer(root.path(), payload.clone(), urls.clone()).with_variants(variants);
+
+        let staged = installer.download().unwrap();
+        assert_eq!(staged.version, "3.1.0", "版本必须来自被选中的变体清单");
+        assert_eq!(staged.sha256, sha256_hex(&payload));
+        assert_eq!(
+            urls.lock().unwrap().as_slice(),
+            &["https://updates.example/tauron-3.1.0-host.zip".to_string()],
+            "必须选兼容本机目标的变体（而非列表首位或 options 单清单默认值 {OPTIONS_URL}）"
+        );
+
+        // download 与 install 口径一致：install 以被选中清单重验并推进版本。
+        let installed = installer.install().unwrap();
+        assert_eq!(installed.version, "3.1.0", "install 不得回退到 options 单清单版本 9.9.9");
+        assert_eq!(
+            std::fs::read_to_string(current.join("app.txt")).unwrap(),
+            "v3-new-bytes",
+            "真实交换后 current 必须是新归档内容"
+        );
+    }
+}
+
+/// 轮 40：商城下载/安装的**装配腿真路径**（[`DistributeUpgradeInstaller`]）。
+///
+/// 把「装配 `UpgradeInstaller` 后 `host_market_download` / `host_market_install`
+/// 变成真效果」这条链路钉在命令层：
+/// - staged 槽位（下载写、安装读；失败清理）；
+/// - SHA-256 + 验签两层真跑（mock 只替身网络/证书，顺序与门禁不替身）；
+/// - 账本推进时机（成功才推进、失败零账本，含健康检查失败后的回滚）；
+/// - provenance 翻转（真效果后 `update_state_simulated = false`）；
+/// - 完整 runner 的交换/提交/重启/回滚都是**真实文件效果**（tempdir 上验证）。
+#[cfg(test)]
+mod round40_market_wiring_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    // ── mock 组件：只替身网络 / 证书 / 归档格式，全部计数证明真被调用 ──────
+
+    struct WireDownloader {
+        bytes: Vec<u8>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl tauron_distribute::Downloader for WireDownloader {
+        fn download(
+            &self,
+            _url: &str,
+            dest_path: &Path,
+            control: &tauron_distribute::PhaseControl,
+            progress_callback: &mut dyn FnMut(u64, u64),
+        ) -> tauron_distribute::DistributeResult<PathBuf> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if control.is_cancelled() {
+                return Err(tauron_distribute::DistributeError::PhaseTimeout {
+                    phase: "Download",
+                    timeout_secs: 0,
+                });
+            }
+            std::fs::write(dest_path, &self.bytes).map_err(|e| {
+                tauron_distribute::DistributeError::FileOperationFailed(format!(
+                    "mock 下载写盘失败：{e}"
+                ))
+            })?;
+            progress_callback(self.bytes.len() as u64, self.bytes.len() as u64);
+            Ok(dest_path.to_path_buf())
+        }
+    }
+
+    struct WireVerifier {
+        accept: bool,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl tauron_distribute::SignatureVerifier for WireVerifier {
+        fn verify(
+            &self,
+            _file_path: &Path,
+            _signature: &str,
+            _context: &tauron_distribute::VerificationContext<'_>,
+        ) -> tauron_distribute::DistributeResult<bool> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.accept)
+        }
+    }
+
+    struct WireExtractor {
+        contents: Vec<u8>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl tauron_distribute::ArchiveExtractor for WireExtractor {
+        fn extract(
+            &self,
+            _archive_path: &Path,
+            staging_dir: &Path,
+            _limits: &tauron_distribute::ArchiveLimits,
+            _control: &tauron_distribute::PhaseControl,
+        ) -> tauron_distribute::DistributeResult<tauron_distribute::ExtractedArchive> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::fs::create_dir_all(staging_dir).map_err(|e| {
+                tauron_distribute::DistributeError::FileOperationFailed(format!(
+                    "mock 建 staging 失败：{e}"
+                ))
+            })?;
+            std::fs::write(staging_dir.join("app.txt"), &self.contents).map_err(|e| {
+                tauron_distribute::DistributeError::FileOperationFailed(format!(
+                    "mock 写 staging 失败：{e}"
+                ))
+            })?;
+            Ok(tauron_distribute::ExtractedArchive {
+                file_count: 1,
+                total_bytes: self.contents.len() as u64,
+            })
+        }
+    }
+
+    struct WireHealth {
+        healthy: bool,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl tauron_distribute::UpgradeHealthCheck for WireHealth {
+        fn check(
+            &self,
+            _current_dir: &Path,
+            _control: &tauron_distribute::PhaseControl,
+        ) -> tauron_distribute::DistributeResult<bool> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.healthy)
+        }
+    }
+
+    struct WireRestart {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl tauron_distribute::RestartProvider for WireRestart {
+        fn restart(&self) -> tauron_distribute::DistributeResult<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    // ── 装配夹具 ─────────────────────────────────────────────────────────
+
+    struct Spec {
+        healthy: bool,
+        auto_restart: bool,
+        verifier_accept: bool,
+        /// 覆盖清单声明的 sha256（`None` = 与 payload 相符）。
+        declared_sha256: Option<String>,
+    }
+
+    fn spec() -> Spec {
+        Spec { healthy: true, auto_restart: false, verifier_accept: true, declared_sha256: None }
+    }
+
+    struct Fixture {
+        root: tempfile::TempDir,
+        installer: Arc<DistributeUpgradeInstaller>,
+        payload: Vec<u8>,
+        downloader_calls: Arc<AtomicUsize>,
+        verifier_calls: Arc<AtomicUsize>,
+        extractor_calls: Arc<AtomicUsize>,
+        health_calls: Arc<AtomicUsize>,
+        restart_calls: Arc<AtomicUsize>,
+    }
+
+    impl Fixture {
+        fn current_app(&self) -> String {
+            std::fs::read_to_string(
+                self.root.path().join("install").join("current").join("app.txt"),
+            )
+            .expect("current/app.txt 必须存在")
+        }
+        fn staged_path(&self) -> PathBuf {
+            self.root.path().join("downloads").join(STAGED_PACKAGE_FILE)
+        }
+    }
+
+    fn fixture(spec: Spec) -> Fixture {
+        let root = tempfile::tempdir().unwrap();
+        let install_dir = root.path().join("install");
+        let current = install_dir.join("current");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(current.join("app.txt"), b"v1-old-bytes").unwrap();
+
+        let payload = b"fake-update-archive-v2".to_vec();
+        let manifest = tauron_distribute::UpdateManifest {
+            version: "2.0.0".into(),
+            url: "https://updates.example/tauron-2.0.0.zip".into(),
+            signature: "c0ffee".into(),
+            release_date: "2026-10-04T00:00:00Z".into(),
+            platform_notes: Default::default(),
+            sha256: Some(spec.declared_sha256.unwrap_or_else(|| sha256_hex(&payload))),
+            signature_algorithm: Some("ed25519".into()),
+            public_key_id: Some("fixture-key".into()),
+            min_host_version: None,
+            abi: None,
+            rollback_policy: None,
+        };
+
+        let downloader_calls = Arc::new(AtomicUsize::new(0));
+        let verifier_calls = Arc::new(AtomicUsize::new(0));
+        let extractor_calls = Arc::new(AtomicUsize::new(0));
+        let health_calls = Arc::new(AtomicUsize::new(0));
+        let restart_calls = Arc::new(AtomicUsize::new(0));
+
+        let downloader: Arc<dyn tauron_distribute::Downloader> =
+            Arc::new(WireDownloader { bytes: payload.clone(), calls: downloader_calls.clone() });
+        let verifier: Arc<dyn tauron_distribute::SignatureVerifier> =
+            Arc::new(WireVerifier { accept: spec.verifier_accept, calls: verifier_calls.clone() });
+        let extractor: Arc<dyn tauron_distribute::ArchiveExtractor> = Arc::new(WireExtractor {
+            contents: b"v2-new-bytes".to_vec(),
+            calls: extractor_calls.clone(),
+        });
+        let health: Arc<dyn tauron_distribute::UpgradeHealthCheck> =
+            Arc::new(WireHealth { healthy: spec.healthy, calls: health_calls.clone() });
+        let restart: Option<Arc<dyn tauron_distribute::RestartProvider>> = if spec.auto_restart {
+            Some(Arc::new(WireRestart { calls: restart_calls.clone() }))
+        } else {
+            None
+        };
+
+        let options = tauron_distribute::UpgradeOptions {
+            manifest,
+            download_dir: root.path().join("downloads"),
+            install_dir,
+            backup_dir: root.path().join("backups"),
+            auto_restart: spec.auto_restart,
+            download_timeout_secs: 30,
+            extract_timeout_secs: 30,
+            swap_timeout_secs: 30,
+            health_check_timeout_secs: 30,
+            archive: tauron_distribute::ArchiveLimits::default(),
+            installed_version: Some("1.0.0".into()),
+        };
+
+        let installer = Arc::new(DistributeUpgradeInstaller::new(
+            options, downloader, verifier, extractor, health, restart,
+        ));
+
+        Fixture {
+            root,
+            installer,
+            payload,
+            downloader_calls,
+            verifier_calls,
+            extractor_calls,
+            health_calls,
+            restart_calls,
+        }
+    }
+
+    fn wired_state(fixture: &Fixture) -> SubstrateState {
+        let mut state = SubstrateState::with_adapter_config(&AdapterConfig::default());
+        state.upgrade_installer = fixture.installer.clone();
+        state
+    }
+
+    fn ledger(state: &SubstrateState) -> (Option<String>, bool) {
+        let ext = state.shell_ext.lock();
+        (ext.update_state.clone(), ext.update_state_simulated)
+    }
+
+    fn find_journal(backup_root: &Path) -> PathBuf {
+        let journals: Vec<PathBuf> = std::fs::read_dir(backup_root)
+            .expect("备份根必须存在（begin_operation 已建）")
+            .map(|entry| entry.unwrap().path().join("journal.json"))
+            .filter(|path| path.is_file())
+            .collect();
+        assert_eq!(journals.len(), 1, "本操作必须恰好一份 journal");
+        journals.into_iter().next().unwrap()
+    }
+
+    /// 装配腿下载：真落盘 + 真摘要 + 真验签；版本取宿主清单而非调用方入参；
+    /// 成功后 provenance 翻 `false`。
+    #[test]
+    fn wired_download_stages_verifies_and_flips_provenance() {
+        let fx = fixture(spec());
+        let state = wired_state(&fx);
+
+        let result = cmd_market_download(&state, Some("9.9.9")).unwrap();
+        assert!(result.ok);
+        assert!(!result.simulated, "装配腿注入后 simulated 必须为 false");
+        assert_eq!(
+            result.version.as_deref(),
+            Some("2.0.0"),
+            "版本必须取宿主清单，而不是调用方入参 9.9.9"
+        );
+        assert_eq!(result.reason, None, "真实效果成功后不得带模拟原因");
+
+        assert_eq!(fx.downloader_calls.load(Ordering::SeqCst), 1, "下载器必须真被调用");
+        assert_eq!(fx.verifier_calls.load(Ordering::SeqCst), 1, "摘要通过后必须真进验签");
+        assert_eq!(
+            std::fs::read(fx.staged_path()).unwrap(),
+            fx.payload,
+            "staged 必须是下载器写下的原始字节"
+        );
+        let (state_value, simulated) = ledger(&state);
+        assert_eq!(state_value.as_deref(), Some("downloaded:2.0.0"));
+        assert!(!simulated, "真实效果落地后 provenance 必须翻成 false");
+    }
+
+    /// 装配腿下载失败：**零账本 + 零 staged 残留**。摘要不符时不进验签；
+    /// 验签拒绝时也不落地。
+    #[test]
+    fn wired_download_verify_failure_leaves_ledger_untouched() {
+        // ① 清单声明摘要与实际字节不符 → SHA-256 门禁硬失败，验签器根本不该被调用。
+        let fx = fixture(Spec { declared_sha256: Some(sha256_hex(b"not-the-payload")), ..spec() });
+        let state = wired_state(&fx);
+        state.shell_ext.lock().update_state = Some("downloaded:1.0.0".into());
+        let err = cmd_market_download(&state, Some("2.0.0")).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST, "摘要不符必须硬失败");
+        assert_eq!(fx.verifier_calls.load(Ordering::SeqCst), 0, "摘要没过不得进入验签");
+        let (state_value, _) = ledger(&state);
+        assert_eq!(state_value.as_deref(), Some("downloaded:1.0.0"), "失败必须零账本（哨兵原样）");
+        assert!(!fx.staged_path().exists(), "失败路径必须清掉 staged");
+
+        // ② 摘要对但验签拒绝 → 同样硬失败、不落地。
+        let fx2 = fixture(Spec { verifier_accept: false, ..spec() });
+        let state2 = wired_state(&fx2);
+        let err2 = cmd_market_download(&state2, None).unwrap_err();
+        assert_eq!(err2.code, ErrorCode::E_INVALID_MANIFEST);
+        assert_eq!(fx2.verifier_calls.load(Ordering::SeqCst), 1, "摘要通过后必须真进验签");
+        let (state_value2, simulated2) = ledger(&state2);
+        assert_eq!(state_value2, None);
+        assert!(!simulated2);
+        assert!(!fx2.staged_path().exists(), "验签拒绝后不得留下 staged");
+    }
+
+    /// 装配腿安装：完整 runner 真跑（备份 → 解压 → 交换 → 健康检查 → 提交 → 重启），
+    /// journal 落盘且 commit 标记为真，provenance 翻 `false`。
+    #[test]
+    fn wired_install_swaps_commits_restarts_and_flips_provenance() {
+        let fx = fixture(Spec { auto_restart: true, ..spec() });
+        let state = wired_state(&fx);
+
+        cmd_market_download(&state, None).unwrap();
+        let installed = cmd_market_install(&state, Some("9.9.9")).unwrap();
+        assert!(installed.ok);
+        assert!(!installed.simulated);
+        assert_eq!(installed.version.as_deref(), Some("2.0.0"));
+
+        assert_eq!(fx.current_app(), "v2-new-bytes", "交换后 current 必须是新树");
+        assert_eq!(
+            std::fs::read_to_string(
+                fx.root.path().join("install").join("previous").join("app.txt")
+            )
+            .unwrap(),
+            "v1-old-bytes",
+            "previous 必须持有旧树（可回滚的现场）"
+        );
+        assert_eq!(fx.extractor_calls.load(Ordering::SeqCst), 1, "解压必须真被调用");
+        assert_eq!(fx.health_calls.load(Ordering::SeqCst), 1, "健康检查必须真被调用");
+        assert_eq!(fx.restart_calls.load(Ordering::SeqCst), 1, "重启 provider 必须真被调用");
+
+        let journal =
+            tauron_distribute::UpgradeJournal::load(&find_journal(&fx.root.path().join("backups")))
+                .unwrap();
+        assert!(journal.commit_marker, "commit 标记必须落盘");
+        assert_eq!(journal.new_version, "2.0.0");
+        assert_eq!(journal.package_sha256.as_deref(), Some(sha256_hex(&fx.payload).as_str()));
+
+        let (state_value, simulated) = ledger(&state);
+        assert_eq!(state_value.as_deref(), Some("installed:2.0.0"));
+        assert!(!simulated, "真实安装成功后的账本必须是真效果");
+    }
+
+    /// 未先下载（无 staged）就安装：类型化拒绝（不新增错误码），且**一个操作目录都不建**。
+    #[test]
+    fn wired_install_without_staged_package_is_typed_error() {
+        let fx = fixture(spec());
+        let state = wired_state(&fx);
+
+        let err = cmd_market_install(&state, Some("2.0.0")).unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_STATE_INVALID_TRANSITION);
+        assert!(
+            err.message.contains("host_market_download"),
+            "错误必须指路到下载命令：{}",
+            err.message
+        );
+        let (state_value, simulated) = ledger(&state);
+        assert_eq!(state_value, None);
+        assert!(!simulated);
+        assert!(!fx.root.path().join("backups").exists(), "前置检查必须发生在任何目录创建之前");
+    }
+
+    /// 健康检查失败 → 自动回滚恢复旧字节；账本停在 `downloaded:<v>`（不得假装已安装）；
+    /// 重启不得被触发。
+    #[test]
+    fn wired_install_health_failure_rolls_back_and_leaves_ledger_untouched() {
+        let fx = fixture(Spec { healthy: false, ..spec() });
+        let state = wired_state(&fx);
+
+        cmd_market_download(&state, None).unwrap();
+        let err = cmd_market_install(&state, None).unwrap_err();
+        assert_eq!(
+            err.code,
+            ErrorCode::E_INSTALL_FAILED,
+            "健康检查失败（已自动回滚）落在 E_INSTALL_FAILED：{}",
+            err.message
+        );
+        assert_eq!(fx.current_app(), "v1-old-bytes", "回滚必须真实恢复旧字节");
+        assert_eq!(fx.health_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fx.restart_calls.load(Ordering::SeqCst), 0, "回滚路径不得触发重启");
+
+        let (state_value, simulated) = ledger(&state);
+        assert_eq!(
+            state_value.as_deref(),
+            Some("downloaded:2.0.0"),
+            "安装失败不得把账本推进到 installed（与磁盘真相同步）"
+        );
+        assert!(!simulated);
+    }
+
+    /// 装配腿状态下判定与审计照常生效：插件主体三条全拒且**零账本**；
+    /// download/install 的被拒尝试各留一条结构化审计事实；主窗走真路径留 Allowed。
+    #[test]
+    fn wired_market_commands_gate_and_audit_hold() {
+        let fx = fixture(spec());
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = AdapterConfig::default().with_admin_audit_dir(temp.path().join("audit"));
+        let mut state = SubstrateState::with_adapter_config(&cfg);
+        state.upgrade_installer = fx.installer.clone();
+
+        let plugin = Caller::Plugin("com.a".to_string());
+        assert_eq!(
+            cmd_market_check_as(&plugin, &state).unwrap_err().code,
+            ErrorCode::E_AUTH_DENIED
+        );
+        assert_eq!(
+            cmd_market_download_as(&plugin, &state, Some("2.0.0")).unwrap_err().code,
+            ErrorCode::E_AUTH_DENIED
+        );
+        assert_eq!(
+            cmd_market_install_as(&plugin, &state, None).unwrap_err().code,
+            ErrorCode::E_AUTH_DENIED
+        );
+        let (state_value, simulated) = ledger(&state);
+        assert_eq!(state_value, None, "拒绝路径不得推进账本");
+        assert!(!simulated);
+
+        let records = state.admin_audit.as_ref().unwrap().records();
+        assert_eq!(records.len(), 2, "check 不进审计表；download/install 被拒尝试各留一条");
+        assert_eq!(records[0].command, "host_market_download");
+        assert_eq!(records[0].outcome, tauron_host::AdminAuditOutcome::Denied);
+        assert_eq!(records[0].error_code.as_deref(), Some("E_AUTH_DENIED"));
+        assert_eq!(records[1].command, "host_market_install");
+        assert_eq!(records[1].outcome, tauron_host::AdminAuditOutcome::Denied);
+
+        let ok = cmd_market_download_as(&Caller::MainWindow, &state, Some("2.0.0")).unwrap();
+        assert!(ok.ok && !ok.simulated, "主窗在装配腿状态下走真路径");
+        let records = state.admin_audit.as_ref().unwrap().records();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[2].command, "host_market_download");
+        assert_eq!(records[2].outcome, tauron_host::AdminAuditOutcome::Allowed);
+        let (state_value, simulated) = ledger(&state);
+        assert_eq!(state_value.as_deref(), Some("downloaded:2.0.0"));
+        assert!(!simulated);
     }
 }

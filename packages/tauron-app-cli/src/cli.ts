@@ -425,6 +425,13 @@ const HELP_COMMANDS: CommandDef[] = [
         return;
       }
       printSuccess(`配置已生成：${result.outputPath}`);
+      // 写了不生效的键必须点名（轮 2 / F-1）。这些键合法、会被宿主解析，但今天
+      // 没有任何落点——生成器一边写它们一边沉默，就是把假接口交给用户。
+      for (const key of result.unwired) {
+        printWarn(
+          `配置项 \`${key}\` 已写入但当前没有宿主落点（不生效）；落点表见 docs/api/client-config.md`,
+        );
+      }
     },
   },
   {

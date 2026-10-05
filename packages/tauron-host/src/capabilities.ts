@@ -30,7 +30,8 @@ export interface Capability {
  *
  * - 20 条插件命令：18 条 `self` + 2 条 `scoped-read`
  * - 主窗特权命令覆盖注册表/运行时/资源诊断/Event Approval Broker 审批
- *   （approve/revoke/approvals）与生产就绪自检（A109）——SDK 只提供命令面，
+ *   （approve/revoke/approvals）、生产就绪自检（A109）与更新通道
+ *   （market download/install，轮 40 起装配腿注入后为真）——SDK 只提供命令面，
  *   审批与诊断 UI 由宿主管理面自行实现
  * - `host_grant_request` 已按 D16 在 v1 删除
  * - `host_call_begin` 已按 D2 被 `host_plugin_call` 取代
@@ -242,6 +243,20 @@ export const CAPABILITIES: readonly Capability[] = [
     consumer: 'main-window',
     description: '读取机器可读的 production readiness 自检报告（A109）；仅主窗可调用',
   },
+  {
+    command: 'host_market_download',
+    tier: 'privileged',
+    consumer: 'main-window',
+    description:
+      '下载更新包并做 SHA-256 + 验签（staged；宿主装配 UpgradeInstaller 后为真，缺省如实模拟）',
+  },
+  {
+    command: 'host_market_install',
+    tier: 'privileged',
+    consumer: 'main-window',
+    description:
+      '安装已 staged 的更新（备份/交换/健康检查/提交/重启与自动回滚；装配后为真，缺省如实模拟）',
+  },
 ] as const;
 
 export type CapabilityCommand = (typeof CAPABILITIES)[number]['command'];
@@ -253,12 +268,21 @@ export function capabilityOf(command: string): Capability | undefined {
 /**
  * 判断某能力在当前 Backend 上是否可用。
  *
- * 判据 = 宿主是否注册了该命令。主窗特权命令对插件 webview 不可见，
- * 因此插件侧 `available('host_registry_admin')` 应为 `false`。
+ * 判据 = **宿主注册了该命令** ∩ **该命令对当前主体可见**。可见性按
+ * {@link Backend.principal} 过滤：`main-window` 主体可见全部命令；插件主体
+ * （含畸形 `plugin-` label 解析出的 `invalid`）对主窗特权命令一律 `false`，
+ * 因此插件侧 `available('host_registry_admin')` 为 `false`。
+ *
+ * 为什么不能只看注册：`host_capabilities` 返回的是**构建级**命令集、不带调用方
+ * 参数（Rust `cmd_host_capabilities`），插件 webview 也会拿到主窗命令的名字。
+ * 本函数是 SDK 侧的**可见性快照**（供 UI / 诊断拼装用）；真正的执行判定在宿主
+ * 代码层（`require_main_window` 等），调用方无法在此层伪造。
  */
 export function isAvailable(backend: Backend, command: string): boolean {
-  if (!capabilityOf(command)) return false;
-  return backend.capabilities().has(command);
+  const cap = capabilityOf(command);
+  if (!cap) return false;
+  if (!backend.capabilities().has(command)) return false;
+  return cap.consumer !== 'main-window' || backend.principal().kind === 'main-window';
 }
 
 /**
@@ -266,6 +290,7 @@ export function isAvailable(backend: Backend, command: string): boolean {
  *
  * 面向应用侧的公开工具（如自建的插件管理面板、诊断页）：一次性拿到
  * 全部核心能力的运行期可用性快照，避免逐个 `isAvailable` 拼装。
+ * 口径与 {@link isAvailable} 完全一致：按调用方主体过滤的可见性一并生效。
  */
 export function capabilityMatrix(backend: Backend): Record<string, boolean> {
   const out: Record<string, boolean> = {};

@@ -12,6 +12,7 @@ import {
   safemodeTokens,
   toCssVariables,
   toCssText,
+  type AdminConfirmRequest,
   type PluginListState,
 } from '../src/index.js';
 
@@ -273,7 +274,7 @@ describe('PluginManagerStore', () => {
     const s = new PluginManagerStore(b);
     const result = await s.enable('test.plugin0');
     expect(result.ok).toBe(false);
-    if (!result.ok) {
+    if (!result.ok && 'code' in result) {
       expect(result.code).toBe('E_AUTH_DENIED');
     }
   });
@@ -291,17 +292,157 @@ describe('PluginManagerStore', () => {
     expect(result).toEqual({ ok: true });
   });
 
-  it('uninstall 成功', async () => {
+  it('uninstall 走预览 → 确认 → 提交令牌（轮 43 / A83）', async () => {
+    const reviewToken = {
+      pluginId: 'test.plugin0',
+      op: 'uninstall',
+      version: '1.0.0',
+      issuedAt: 1,
+      expiresAt: 9999999999,
+      nonce: 'n-1',
+    };
     const b = makeBackend([
       {
         cmd: 'host_registry_admin',
-        args: { op: { op: 'uninstall', id: 'test.plugin0' } },
+        args: { op: { op: 'uninstall', id: 'test.plugin0', preview: true } },
+        result: {
+          kind: 'review',
+          op: 'uninstall',
+          pluginId: 'test.plugin0',
+          version: '1.0.0',
+          state: 'running',
+          reviewToken,
+        },
+      },
+    ]);
+    const seen: AdminConfirmRequest[] = [];
+    const s = new PluginManagerStore(b, (request) => {
+      seen.push(request);
+      return true;
+    });
+    const result = await s.uninstall('test.plugin0');
+    expect(result).toEqual({ ok: true });
+    // 第一步：预览（无副作用）。
+    expect(b.invocations[0]?.args).toEqual({
+      op: { op: 'uninstall', id: 'test.plugin0', preview: true },
+    });
+    // 确认请求携带预览事实。
+    expect(seen).toEqual([
+      { op: 'uninstall', pluginId: 'test.plugin0', version: '1.0.0', state: 'running' },
+    ]);
+    // 第二步：提交，原样带回一次性令牌。
+    expect(b.invocations[1]?.args).toEqual({
+      op: { op: 'uninstall', id: 'test.plugin0', reviewToken },
+    });
+  });
+
+  it('uninstall 用户取消 → cancelled，无提交调用（轮 43 / A83）', async () => {
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_admin',
+        args: { op: { op: 'uninstall', id: 'test.plugin0', preview: true } },
+        result: {
+          kind: 'review',
+          op: 'uninstall',
+          pluginId: 'test.plugin0',
+          version: '1.0.0',
+          state: 'running',
+          reviewToken: {
+            pluginId: 'test.plugin0',
+            op: 'uninstall',
+            version: '1.0.0',
+            issuedAt: 1,
+            expiresAt: 9999999999,
+            nonce: 'n-2',
+          },
+        },
+      },
+    ]);
+    const s = new PluginManagerStore(b, () => false);
+    const result = await s.uninstall('test.plugin0');
+    expect(result).toEqual({ ok: false, cancelled: true });
+    expect(b.invocations).toHaveLength(1);
+    expect(b.invocations[0]?.args).toEqual({
+      op: { op: 'uninstall', id: 'test.plugin0', preview: true },
+    });
+  });
+
+  it('uninstall 默认确认在无 DOM 环境失败关闭（拒绝而非静默放行）', async () => {
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_admin',
+        args: { op: { op: 'uninstall', id: 'test.plugin0', preview: true } },
+        result: {
+          kind: 'review',
+          op: 'uninstall',
+          pluginId: 'test.plugin0',
+          version: '1.0.0',
+          state: 'running',
+          reviewToken: {
+            pluginId: 'test.plugin0',
+            op: 'uninstall',
+            version: '1.0.0',
+            issuedAt: 1,
+            expiresAt: 9999999999,
+            nonce: 'n-3',
+          },
+        },
+      },
+    ]);
+    // 不注入确认钩子：Node 测试环境没有 window.confirm → 必须拒绝。
+    const s = new PluginManagerStore(b);
+    const result = await s.uninstall('test.plugin0');
+    expect(result).toEqual({ ok: false, cancelled: true });
+    expect(b.invocations).toHaveLength(1);
+  });
+
+  it('uninstall 确认钩子抛错按取消处理（失败关闭）（轮 43 / A83）', async () => {
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_admin',
+        args: { op: { op: 'uninstall', id: 'test.plugin0', preview: true } },
+        result: {
+          kind: 'review',
+          op: 'uninstall',
+          pluginId: 'test.plugin0',
+          version: '1.0.0',
+          state: 'running',
+          reviewToken: {
+            pluginId: 'test.plugin0',
+            op: 'uninstall',
+            version: '1.0.0',
+            issuedAt: 1,
+            expiresAt: 9999999999,
+            nonce: 'n-4',
+          },
+        },
+      },
+    ]);
+    const s = new PluginManagerStore(b, () => {
+      throw new Error('dialog broke');
+    });
+    const result = await s.uninstall('test.plugin0');
+    expect(result).toEqual({ ok: false, cancelled: true });
+    expect(b.invocations).toHaveLength(1);
+  });
+
+  it('uninstall 老宿主（预览即执行、无 review 判别）不重复提交', async () => {
+    const b = makeBackend([
+      {
+        cmd: 'host_registry_admin',
+        args: { op: { op: 'uninstall', id: 'test.plugin0', preview: true } },
         result: {},
       },
     ]);
-    const s = new PluginManagerStore(b);
+    let confirmCalls = 0;
+    const s = new PluginManagerStore(b, () => {
+      confirmCalls += 1;
+      return true;
+    });
     const result = await s.uninstall('test.plugin0');
     expect(result).toEqual({ ok: true });
+    expect(b.invocations).toHaveLength(1);
+    expect(confirmCalls).toBe(0);
   });
 
   it('tryEnable 成功', async () => {
@@ -317,17 +458,38 @@ describe('PluginManagerStore', () => {
     expect(result).toEqual({ ok: true });
   });
 
-  it('purge 成功', async () => {
+  it('purge 走预览 → 确认 → 提交令牌（轮 43 / A83）', async () => {
+    const reviewToken = {
+      pluginId: 'test.plugin0',
+      op: 'purge',
+      version: '1.0.0',
+      issuedAt: 1,
+      expiresAt: 9999999999,
+      nonce: 'n-5',
+    };
     const b = makeBackend([
       {
         cmd: 'host_registry_admin',
-        args: { op: { op: 'purge', id: 'test.plugin0' } },
-        result: {},
+        args: { op: { op: 'purge', id: 'test.plugin0', preview: true } },
+        result: {
+          kind: 'review',
+          op: 'purge',
+          pluginId: 'test.plugin0',
+          version: '1.0.0',
+          state: 'disabled',
+          reviewToken,
+        },
       },
     ]);
-    const s = new PluginManagerStore(b);
+    const s = new PluginManagerStore(b, () => true);
     const result = await s.purge('test.plugin0');
     expect(result).toEqual({ ok: true });
+    expect(b.invocations[0]?.args).toEqual({
+      op: { op: 'purge', id: 'test.plugin0', preview: true },
+    });
+    expect(b.invocations[1]?.args).toEqual({
+      op: { op: 'purge', id: 'test.plugin0', reviewToken },
+    });
   });
 
   it('管理操作失败时返回结构化错误', async () => {
@@ -340,7 +502,7 @@ describe('PluginManagerStore', () => {
     const s = new PluginManagerStore(b);
     const result = await s.disable('test.plugin0');
     expect(result.ok).toBe(false);
-    if (!result.ok) {
+    if (!result.ok && 'code' in result) {
       expect(result.code).toBe('E_UNKNOWN');
       expect(result.message).toContain('network error');
     }

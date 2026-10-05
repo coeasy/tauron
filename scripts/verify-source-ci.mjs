@@ -89,7 +89,14 @@ const requiredSteps = {
     'Target Matrix Drift（V4 A99）',
     'Release Evidence 输入校验（V4 A110）',
     'No-Lock-Across-Await（V4 A104）',
+    'Orphan-Public-API（V7 轮 22）',
     '跨语言契约门禁（wire-gate）',
+  ],
+  'Rust (tauri feature)': [
+    // 轮 2 / F-2：`runtime-wasm-broker` 此前只被 `cargo check --all-features` 编译，
+    // 从没被任何测试命令跑过（示例工程在 workspace 的 exclude 里、adapter default 为空）。
+    '测试 tauron-adapter（runtime-wasm-broker feature）',
+    '测试 tauron-adapter（tauri + runtime-wasm-broker feature）',
   ],
 };
 

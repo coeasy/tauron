@@ -96,9 +96,32 @@ export interface SandboxResult {
   ok: boolean;
   /** 结果数据 */
   result?: unknown;
-  /** 错误信息 */
+  /** 错误信息（`code` 取值见 {@link SANDBOX_ERROR_CODES}） */
   error?: { code: string; message: string; stack?: string };
 }
+
+/**
+ * 本包沙箱产出的错误码（与 `sandbox.ts` 的返回点同源）。
+ *
+ * ⚠️ **包内码**，不是 wire 码：不进 `contracts/error/error-codes.json`，
+ * 也不与 Rust `ErrorCode` 比对。
+ * - `MEM_LIMIT`：内存上限判定（`config.memoryLimit <= 0`）
+ * - `SANDBOX_UNAVAILABLE`：未接入 JS 运行时 → fail closed，不执行也不伪报成功
+ * - `SANDBOX_DESTROYED`：沙箱已 `destroy()` 的一次性终态；所有入口按同一码拒绝
+ *   （`execute`/`call` 返回该码的失败结果，`setState`/`getState`/`emit`/`on`/
+ *   上下文 `invoke`/`registerHostFunction` 抛 `sandbox.ts` 的
+ *   `SandboxDestroyedError`）
+ * - `CALL_ERROR`：宿主函数缺失/被拒/不在允许表内，或函数自身抛错
+ */
+export const SANDBOX_ERROR_CODES = [
+  'MEM_LIMIT',
+  'SANDBOX_UNAVAILABLE',
+  'SANDBOX_DESTROYED',
+  'CALL_ERROR',
+] as const;
+
+/** 沙箱错误码类型。 */
+export type SandboxErrorCode = (typeof SANDBOX_ERROR_CODES)[number];
 
 /** 插件生命周期钩子 */
 export interface PluginLifecycleHooks {

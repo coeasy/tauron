@@ -11,29 +11,32 @@
 | [app-layer-wire.md](./app-layer-wire.md) | 应用层 `host_*` 命令族的线格式规范（**关键命令**的参数形状 / 返回值 / 生命周期事件 / 能力档位）与限制登记；全量清单见下方生成物 | 协议契约，由 wire-gate 门禁锁定 |
 | [canonical-owners.md](./canonical-owners.md) | canonical 归属表：哪些实现是唯一事实源、哪些是已冻结的 legacy 门面 | 架构决策——改这张表等于改架构 |
 | [multi-plugin-substrate-roadmap.md](./multi-plugin-substrate-roadmap.md) | 0.3 优化改进方案：成熟度记分卡、残差清单、S/M/X 改进项、轮次编排 | 历史方案（§2 残差表已过期，见其顶部复核横幅） |
-| [capability-closure-plan.md](./capability-closure-plan.md) | 0.4 能力收口方案：A1–A8 + 轮 19–29；**仅 A1–A3 已落地** | 历史方案（A4–A8 由下方 1.0 方案接管） |
-| [full-architecture-refactor-plan.md](./full-architecture-refactor-plan.md) | 1.0 全量架构重评估与重构方案：实测缺陷清单、W1–W10 工作流、轮 30–41 编排 | 前瞻计划（V4 之前的主线） |
 | [v4-industrial-gap-closure-plan.md](./v4-industrial-gap-closure-plan.md) | V4 工业级缺口收口方案：A01–A110 与 §134/§136/§141 逐项「已落 / 部分 / 未落」台账、F1–F5 危险缺口、Batch 0–6' 编排与推迟清单 | **当前执行台账**（对外措辞与发布判据以这份为准） |
 | [../Tauron-Architecture-Competitive-Analysis-Optimization-Plan-V5.md](../Tauron-Architecture-Competitive-Analysis-Optimization-Plan-V5.md) | V5 竞分析与优化方案：七 Plane 目标架构、RuntimeDriver / HostTransport / Manifest V3 契约、Phase A–G 优先级与退出门槛、能力诚实分级 | **对照基线**（轮 13 起的新增工作对照此方案；前瞻方案，不描述现状） |
 | [../api/command-surface.md](../api/command-surface.md) | 命令面**全量**参考：85 条 `host_*` 的业务形参 / 返回 / 档位与判定 / feature 门 / 前端落点 | **生成物**（`pnpm command-surface:gen`，CI `command-surface:check` 复算，勿手改） |
 | [../integration/incremental-adoption.md](../integration/incremental-adoption.md) | 三档装配指南：只取底座 / 底座 + 插件运行时 / 完整客户端 | 集成方入口 |
 | [../api/plugin-development-guide.md](../api/plugin-development-guide.md) | 插件开发指南：类型、清单、权限词表、宿主命令面、错误码、生命周期状态机、sidecar ABI、CLI 的真实边界 | 插件作者入口 |
+| [../api/client-config.md](../api/client-config.md) | `ClientConfig` 十个键的落点表：哪些真被宿主消费、哪些写了不生效及原因（Rust ↔ TS 镜像由门禁对齐） | 接入方入口（配置侧诚实边界） |
 | [../competitive-analysis/competitive-analysis.md](../competitive-analysis/competitive-analysis.md) | 竞品全景图、功能对比矩阵、头条特性兑现度标记 | 定位参考（带快照日期） |
 
 ## 关于已清理的历史文档
 
-本目录此前还放着两份计划文档，已在 0.3 轮清理：
+本目录此前还放着几份计划文档，已在 0.3 轮与本轮（轮 50 文档清理）删除：
 
 | 已删除 | 删除原因 |
 |---|---|
 | `client-foundation-upgrade-plan.md` | 2026-01 的审计基线（TS 1122 / Rust 984），数字比现状落后两代；结论已被后续两轮重构取代 |
 | `tauron-substrate-refactor-plan.md` | 底座重构 R1–R8 **已全部完成**，但文档头仍标「设计稿（待执行）」——状态是假的，会误导读者 |
+| `capability-closure-plan.md` | 0.4 能力收口方案：横幅自陈**仅 A1–A3 落地**，A4–A8 与轮 23–29 由 1.0 接管后又随 1.0 一并失效；§2 把 `tauron-acl`/`tauron-market` 列为「迁移中/孤儿」早已过期，`plugin-install` 的默认特性口径也被 1.1 反向更正——通篇是「施工前状态」，读者据此施工必错 |
+| `full-architecture-refactor-plan.md` | 1.0 全量重构方案：状态行停在「W1-b/W10 部分实施，其余待做」，而 W4/W5/W8 相关的缺口已由 V4/V7 台账逐轮收口（含 85 条命令面冻结、`plugin-install` 回到 opt-in）；它指路的形状（如 `bootstrap.ts`）已删除并被反向门禁钉住 |
 
-**不需要读原文**：这两份文档的耐久产出都已沉淀到别处。
+**不需要读原文**：这些文档的耐久产出都已沉淀到别处。
 
 - R1–R8 的架构决策 → [overview.md](./overview.md) 的「关键设计决策」+「架构演进」
 - canonical 归属结论 → [canonical-owners.md](./canonical-owners.md)
 - 已达成、不得回退的硬不变量 → [multi-plugin-substrate-roadmap.md](./multi-plugin-substrate-roadmap.md) §0
+- 0.4/1.0 的断链收口过程 → [v4-industrial-gap-closure-plan.md](./v4-industrial-gap-closure-plan.md)（逐轮台账）+ `CHANGELOG.md`
+- 未接线 API 的现行登记 → `contracts/orphan-public-api.json`（孤儿台账）
 
 ## 核心架构原则
 

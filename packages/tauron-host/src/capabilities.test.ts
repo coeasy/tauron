@@ -4,8 +4,8 @@ import { MockBackend } from './backend.js';
 import { CAPABILITIES, capabilityMatrix, capabilityOf, isAvailable } from './capabilities.js';
 
 describe('CAPABILITIES（计划 §2.1 命令面镜像）', () => {
-  it('共 30 条：20 条插件命令 + 10 条主窗特权命令', () => {
-    expect(CAPABILITIES).toHaveLength(30);
+  it('共 32 条：20 条插件命令 + 12 条主窗特权命令', () => {
+    expect(CAPABILITIES).toHaveLength(32);
   });
 
   it('插件命令 20 条，其中 scoped-read 恰好 2 条（host_registry_list / host_contributes_list）', () => {
@@ -30,14 +30,17 @@ describe('CAPABILITIES（计划 §2.1 命令面镜像）', () => {
     );
   });
 
-  it('privileged 命令集合 = 注册表管理 + P0-2 进程运行时，消费方均为主窗', () => {
+  it('privileged 命令集合 = 注册表管理 + P0-2 进程运行时 + 更新通道，消费方均为主窗', () => {
     const priv = CAPABILITIES.filter((c) => c.tier === 'privileged');
-    // P0-2/M8 起 privileged 有管理、运行时和资源诊断命令；集合仍是**闭集**，
+    // P0-2/M8 起 privileged 有管理、运行时和资源诊断命令；轮 40 起含更新通道
+    // （market download/install 装配腿注入后为真）。集合仍是**闭集**，
     // 任何新增特权命令都必须显式改这里（增量可见）。
     expect(priv.map((c) => c.command).sort()).toEqual([
       'host_events_approvals',
       'host_events_approve',
       'host_events_revoke',
+      'host_market_download',
+      'host_market_install',
       'host_production_doctor',
       'host_registry_admin',
       'host_registry_install',
@@ -87,25 +90,41 @@ describe('isAvailable / capabilityMatrix', () => {
     expect(isAvailable(backend, 'totally-unknown')).toBe(false);
   });
 
-  it('capabilityMatrix 覆盖全部 30 条命令', () => {
+  it('capabilityMatrix 覆盖全部 32 条命令（主窗主体：全量可见）', () => {
     const backend = new MockBackend({
       capabilities: CAPABILITIES.map((c) => c.command),
     });
     const matrix = capabilityMatrix(backend);
-    expect(Object.keys(matrix)).toHaveLength(30);
+    expect(Object.keys(matrix)).toHaveLength(32);
     expect(Object.values(matrix).every(Boolean)).toBe(true);
   });
 
-  it('插件 webview 视图看不到主窗特权命令（含 P0-2 进程运行时）', () => {
-    // 模拟：插件 webview 只注册了 20 条插件命令。
-    const pluginCaps = CAPABILITIES.filter((c) => c.consumer === 'plugin').map((c) => c.command);
-    const backend = new MockBackend({ capabilities: pluginCaps, pluginId: 'com.example.x' });
+  it('插件主体：宿主全量注册（32 条）也只看到 20 条插件命令', () => {
+    // 非循环夹具：宿主 `host_capabilities` 返回的是**构建级**命令集（不带调用方
+    // 参数），插件 webview 拿到的原始注册集就是全量 32 条——可见性必须由被测代码
+    // 按主体过滤；测试自己先按 consumer 预筛会变成同义反复（过滤是测试做的）。
+    const backend = new MockBackend({
+      capabilities: CAPABILITIES.map((c) => c.command),
+      pluginId: 'com.example.x',
+    });
     const matrix = capabilityMatrix(backend);
-    expect(matrix['host_registry_admin']).toBe(false);
+    expect(isAvailable(backend, 'host_plugin_call')).toBe(true);
+    expect(isAvailable(backend, 'host_registry_admin')).toBe(false);
     // 进程执行原语：插件侧必须不可见（可见 = 任何插件都能起别人的 sidecar）。
     expect(matrix['host_runtime_spawn']).toBe(false);
     expect(matrix['host_runtime_health']).toBe(false);
+    expect(matrix['host_registry_install_preview']).toBe(false);
+    expect(matrix['host_production_doctor']).toBe(false);
     expect(Object.values(matrix).filter(Boolean)).toHaveLength(20);
+  });
+
+  it('畸形主体（invalid label）不按主窗放行：特权命令仍不可见', () => {
+    const backend = new MockBackend({
+      capabilities: CAPABILITIES.map((c) => c.command),
+      principal: { kind: 'invalid', label: 'plugin-' },
+    });
+    expect(isAvailable(backend, 'host_registry_admin')).toBe(false);
+    expect(isAvailable(backend, 'host_plugin_call')).toBe(true);
   });
 
   it('capabilityOf 查无则 undefined', () => {

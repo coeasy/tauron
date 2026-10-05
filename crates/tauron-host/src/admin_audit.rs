@@ -16,7 +16,7 @@
 //!    [`AdminAuditFacts::healthy`] 变假——production 的 `admin-audit` 检查项直接
 //!    由它推导，不再有第二个真值来源。
 
-use crate::durable::{decode_durable, encode_durable, DurableEnvelope};
+use crate::durable::{decode_durable, encode_durable, write_durable, DurableEnvelope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -26,8 +26,6 @@ use std::sync::Mutex;
 pub const ADMIN_AUDIT_SCHEMA: &str = "admin-audit/1";
 /// 审计日志的文件名（放在宿主数据目录下）。
 pub const ADMIN_AUDIT_FILE: &str = "admin-audit.json";
-/// 同目录临时文件名（原子写的中转）。
-const ADMIN_AUDIT_TMP_FILE: &str = "admin-audit.json.tmp";
 /// 保留的最近记录条数上限（含磁盘与内存两份视图）。
 pub const MAX_ADMIN_AUDIT_RECORDS: usize = 512;
 
@@ -40,9 +38,11 @@ pub const MAX_ADMIN_AUDIT_RECORDS: usize = 512;
 /// 判定与登记的对账由 `tauron-adapter` 的 `admin_gate` 单点 + wire-gate 命令名集合
 /// 比对共同守住：表里的名字必须真的走 `admin_gate`，走 `admin_gate` 的名字必须在表里。
 ///
-/// `host_market_download` / `host_market_install` **刻意不在表里**：它们是
-/// `simulated: true` 的桩（不请求网络、不写文件），而桩的审计等于给未实现的能力
-/// 造事实。真实接线时必须连同 `authz` 档位登记一起纳入本表——档位与审计同源。
+/// `host_market_download` / `host_market_install` **自轮 40 起在表里**：更新装配腿
+/// 已落地（装配方注入 `UpgradeInstaller` 即为真实现，缺省未装配时仍如实
+/// `simulated: true`）。按本表的判据（改状态 / 触达供应链），接线时已连同
+/// `authz` 档位登记一起移入（档位与审计同源，两侧漂移会被 `wire-gate` 与单测的
+/// 双向对账红掉）。`host_market_check` 仍是桩，故不在表里。
 pub const AUDITED_ADMIN_COMMANDS: &[&str] = &[
     "host_events_approve",
     "host_events_revoke",
@@ -50,6 +50,8 @@ pub const AUDITED_ADMIN_COMMANDS: &[&str] = &[
     "host_registry_install",
     "host_registry_install_preview",
     "host_runtime_spawn",
+    "host_market_download",
+    "host_market_install",
 ];
 
 /// 命令是否需要审计。
@@ -347,16 +349,6 @@ pub fn verify_file(path: &Path) -> Result<AdminAuditFacts, AdminAuditError> {
         last_command: last.map(|r| r.command.clone()),
         last_outcome: last.map(|r| r.outcome.as_str().to_string()),
     })
-}
-
-/// 原子写（临时文件 + `sync_all` + rename），与恢复/设置域同一套做法。
-fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_file_name(ADMIN_AUDIT_TMP_FILE);
-    use std::io::Write;
-    let mut file = std::fs::File::create(&tmp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    std::fs::rename(&tmp, path)
 }
 
 fn now_ms() -> u64 {

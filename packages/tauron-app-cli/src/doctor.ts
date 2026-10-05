@@ -6,6 +6,13 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import type { ClientConfig } from '@tauron/host';
+
+import {
+  unknownClientConfigKeys,
+  unwiredClientConfigKeys,
+  validateClientConfigFile,
+} from './client-config.js';
 import { pathExists, readJsonFile } from './fs-operations.js';
 
 // ── 类型 ──
@@ -116,31 +123,9 @@ function checkClientConfig(dir: string): DoctorCheck {
     };
   }
   const content = fs.readFileSync(configPath, 'utf-8');
+  let parsed: unknown;
   try {
-    const config = JSON.parse(content);
-    // 基本结构检查
-    const sections = [
-      'registry',
-      'plugins',
-      'sandbox',
-      'security',
-      'lifecycle',
-      'i18n',
-      'recovery',
-      'observability',
-      'brand',
-      'upgrade',
-    ];
-    const missingSections = sections.filter((s) => !(s in config));
-    if (missingSections.length > 0) {
-      return {
-        name: 'client-config.json',
-        status: 'warn',
-        message: `缺少配置节：${missingSections.join(', ')}`,
-        fix: '运行 tauron-app client config --preset full 重新生成',
-      };
-    }
-    return { name: 'client-config.json', status: 'pass', message: '配置结构完整' };
+    parsed = JSON.parse(content);
   } catch (err) {
     return {
       name: 'client-config.json',
@@ -148,6 +133,54 @@ function checkClientConfig(dir: string): DoctorCheck {
       message: `JSON 解析失败：${err instanceof Error ? err.message : String(err)}`,
     };
   }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return {
+      name: 'client-config.json',
+      status: 'fail',
+      message: '顶层必须是配置对象（ClientConfig），不是数组或标量',
+      fix: '运行 tauron-app client config 重新生成',
+    };
+  }
+  const config = parsed as ClientConfig;
+
+  // 值校验**复用** `validateClientConfigFile`，不在这里再写一遍规则：
+  // 此前 doctor 检查的是一份**仓库里根本不存在的**十节结构（registry/plugins/
+  // sandbox/security/lifecycle/i18n/recovery/observability/brand/upgrade），
+  // 而生成器写的是 `ClientConfig`——于是 doctor 对每个刚生成的项目都报
+  // "缺少配置节"。假接口不是诊断，是把人引去修一个没坏的东西。
+  const valueErrors = validateClientConfigFile(content);
+  if (valueErrors.length > 0) {
+    return {
+      name: 'client-config.json',
+      status: 'fail',
+      message: `配置值非法：${valueErrors.join('；')}`,
+      fix: '按报错逐项修正后重新运行 tauron-app doctor',
+    };
+  }
+
+  // 未知键 = 宿主**整份拒绝**（Rust 侧 `deny_unknown_fields`：解析失败即回落默认装配）。
+  const unknown = unknownClientConfigKeys(config);
+  if (unknown.length > 0) {
+    return {
+      name: 'client-config.json',
+      status: 'fail',
+      message: `未知配置键：${unknown.join(', ')}——宿主拒绝整份配置并回落默认装配（不是忽略这一项）`,
+      fix: '删掉这些键；合法键集合见 docs/api/client-config.md',
+    };
+  }
+
+  // 写了但当前没有落点的键：如实 warn，别让用户以为开关拨过了。
+  const unwired = unwiredClientConfigKeys(config);
+  if (unwired.length > 0) {
+    return {
+      name: 'client-config.json',
+      status: 'warn',
+      message: `配置项 ${unwired.join(', ')} 当前没有宿主落点（写了不生效）`,
+      fix: '逐条原因见 docs/api/client-config.md 的落点表（CLIENT_CONFIG_LANDING）',
+    };
+  }
+
+  return { name: 'client-config.json', status: 'pass', message: '配置键合法且全部有落点' };
 }
 
 function checkCapabilities(dir: string): DoctorCheck {

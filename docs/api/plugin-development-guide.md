@@ -53,14 +53,25 @@ tauron 插件系统在**清单层**定义了四种插件类型（`PluginType` �
    正确的口径是：
    - **JSON-RPC 帧回路已接线**（0.4-A1）：stdin/stdout 走 `Stdio::piped()`，每条
      sidecar 在 `spawn` 时单独起一个读线程排空 stdout，回帧（含 `callId`）经
-     `ProcessFrameSinkImpl` 调 `Registry::settle_call` 闭合链路。**诚实边界**：本仓
-     没有可执行的 sidecar 二进制、测试不起真进程，所以"sidecar 真收帧 / 真回帧 /
-     宿主真结算"只有契约与格式级证据，**没有运行期证据**。
+     `ProcessFrameSinkImpl` 调 `Registry::settle_call` 闭合链路。**轮 22 收口
+     （V7-P1-05）**：此前这里如实写着「只有契约与格式级证据、没有运行期证据」——现在
+     仓内有 `crates/tauron-test-sidecar`（`publish = false` 的 CI 夹具，永不上架），
+     它的 `tests/sidecar_e2e.rs` 真起操作系统进程，并走这同一条投递/结算链路，
+     "sidecar 真收帧 / 真回帧 / 宿主真结算 / 禁用时真杀进程"因此升级为运行期证据。
    - **进程树回收已接线**：Unix/macOS 用独立 POSIX process group
      （`kill(-pgid, SIGKILL)`），Windows 用带 `KILL_ON_JOB_CLOSE` 的 Job Object；
      `CommandSpawner` 被最终持有者丢弃时，仍在跟踪的每个 pid 都走同一套 tree-aware
-     `kill`。终止失败时句柄保留、正在退出的宿主没有重试方，该子进程因此**可能存活**
-     （OS 语义，不假装已解决）。
+     `kill`。终止失败**不再无人认领**：pid 进有界重试队列，宿主侧由
+     `host_resource_stats`（主窗轮询诊断）推进，到尝试上限即固化成
+     `reap.terminalRecords` 里的可核对证据（pid / 插件 / 原因）。重试**不会误杀同号的
+     活进程**：待重试的 pid 若已被某条在册租约持有（OS 重用同号 + 插件重装是真实形状），
+     本轮直接**让位**并计 `reap.skippedLivePid`——终止器按 pid 找子进程，分不出"旧进程
+     已死、号被复用"与"旧进程还在"，让位是这里唯一诚实的第三种结局。仍然保留的 OS 语义
+     限制：**宿主自身正在退出**时没有驱动方会再跑一轮；那次终止失败会落进跨重启台账
+     （轮 41 起，恢复数据目录的 `reap-ledger.json`），下次启动时平台探测逐条定性——
+     `Gone` 销账，仍在运行/无法判定的**只留证据、不盲杀**（跨重启验明不了进程身份，
+     见 `reap.sweepSurvivors` / `reap.sweepUnknown`）。因此该子进程**可能存活，但这是
+     有记录、查得到 pid 与原因的事实**（不假装已解决）。
    - **仍然成立的限制**：① 崩溃检测是**轮询式**——没有后台监控线程，宿主不调
      `host_runtime_health` 就发现不了死亡；② 两个 provider 都自报
      `ProcessSandboxEnforcement::Partial`（无文件系统/网络/系统调用隔离，Windows 还有
@@ -701,10 +712,12 @@ if (audit && audit.writeFailures > 0) {
 
 语义与边界：
 
-- 被打审计的是 `AUDITED_ADMIN_COMMANDS` 这 6 条特权命令：`host_events_approve`、
+- 被打审计的是 `AUDITED_ADMIN_COMMANDS` 这 8 条特权命令：`host_events_approve`、
   `host_events_revoke`、`host_registry_admin`、`host_registry_install`、
-  `host_registry_install_preview`、`host_runtime_spawn`（`eventsApprovals` 是只读列出，
-  **不**落审计），**允许与拒绝都留痕**（`lastOutcome` 取 `'allowed' | 'denied'`）；
+  `host_registry_install_preview`、`host_runtime_spawn`、`host_market_download`、
+  `host_market_install`（后两条为轮 40 增补：装配了真实 `UpgradeInstaller` 时带真实副作用；
+  `eventsApprovals` 是只读列出，**不**落审计），**允许与拒绝都留痕**
+  （`lastOutcome` 取 `'allowed' | 'denied'`）；
   新增特权写操作若忘记登记，wire-gate 会与判定代码对账报红；
 - 记录是**哈希链**（每条带 `prevHash`），落盘文件为 `admin-audit.json`，环形上限
   `MAX_ADMIN_AUDIT_RECORDS = 512`；`records` 是当前保留条数、`totalRecorded` 含被裁剪的；
@@ -792,29 +805,30 @@ tauron_adapter::init_with_adapter_config(cfg);
 
 ### 应用层 `E_*`（24 个，`tauron-host`）
 
-变体名即**跨 IPC 线协议名**（改名即破坏兼容）。TS 侧 `HOST_ERROR_CODES`
-按**声明顺序**比对（wire-gate 门禁）。
+变体名即**跨 IPC 线协议名**（改名即破坏兼容）。TS 侧 `HOST_ERROR_CODES` 与 Rust
+枚举、canonical 注册表按**码名集合**比对——**声明顺序不属于协议**（V4 A69，
+门禁 `线名集合与 canonical registry 一致；source declaration order 不属于协议`）。
 
 | 码 | 触发点 |
 |---|---|
 | `E_HOST_PANIC` | handler panic，经 `catch_unwind` 归一化（`retryClass: never`——panic 可能已留下部分副作用，自动重放不安全） |
 | `E_UNKNOWN_PLUGIN` | 未知 `plugin_id` |
 | `E_AUTH_DENIED` | 档位不满足，或身份被伪造 |
-| `E_INVALID_MANIFEST` | **入参/声明不合格**（宿主的通用"改载荷即可"码，见下方说明）：清单未知字段、非法 id、权限表外字符串、缺 `framework`、`abi` 字段缺失/非法；**同样用于**非清单入口——JS 插件缺 `entry.ui`、UI 路径非法、进程 spawn 配置不合、设置文档非对象或违反 schema |
-| `E_STATE_INVALID_TRANSITION` | 状态机无匹配规则（非法迁移） |
+| `E_INVALID_MANIFEST` | **入参/声明不合格**（宿主的通用"改载荷即可"码，见下方说明）：清单未知字段、非法 id、权限表外字符串、缺 `framework`、`abi` 字段缺失/非法；**同样用于**非清单入口——JS 插件缺 `entry.ui`、UI 路径非法、进程 spawn 配置不合、设置文档非对象或违反 schema；**轮 30 起**还用于进程调用**帧本身发不出去**——超过 `MAX_FRAME_BYTES` 上界或序列化失败（改载荷才有用，退避重投无用，所以不是 `E_CALL_PENDING_FULL`） |
+| `E_STATE_INVALID_TRANSITION` | 状态机无匹配规则（非法迁移）。**轮 30 起不再用于进程投递的写侧失败**——那条路径上状态机已经放行，报本码是对系统的假陈述（分流见 `E_CALL_PENDING_FULL` / `E_LEASE_EXPIRED` / `E_INVALID_MANIFEST` 三行） |
 | `E_CALL_NOT_FOUND` | pending call 不存在或已结束 |
 | `E_CALL_TIMEOUT` | pending call 超时（`retryClass: manual`——人工决定是否重发，宿主不自动重放） |
 | `E_FORBIDDEN_PERMISSION` | 申请了禁止授予清单内的权限 |
 | `E_ABI_MISMATCH` | `host_runtime_spawn` 的 ABI 契约比对失败（见下节） |
 | `E_PLUGIN_DISABLED` | 插件已禁用（含崩溃预算耗尽） |
 | `E_REGISTRY_FULL` | 注册表达到活跃身份上限（缺省 8） |
-| `E_CALL_PENDING_FULL` | pending call 表达到上限 |
+| `E_CALL_PENDING_FULL` | pending call 表达到上限；**或** sidecar 的 pid 写队列已满（32 帧未消化，轮 30）。两道界对调用方是同一处置——"额度满了，退避后重投"，所以同码；具体是哪一道由 message 点名（`pending call 容量…` / `写队列已满…`），排查方向不同：前者要取件腾位，后者要等 sidecar 追上 stdin |
 | `E_SUBSCRIPTION_FULL` | 订阅表达到上限 |
 | `E_PLUGIN_EXISTS` | 插件已存在（重复注册） |
 | `E_INSTALL_FAILED` | 安装期失败：验签 / hash / 解包 / range |
 | `E_PLUGIN_FILTERED` | 被配置过滤器排除（改配置后人工重试，`retryClass: manual`） |
 | `E_PLUGIN_TYPE_NO_RUNTIME` | 该插件类型没有运行期执行器（如对 js/wasm 插件调 `host_runtime_spawn`） |
-| `E_LEASE_EXPIRED` | 运行时租约不存在或已失效（`retryClass: after-reconnect`：先重建会话再重新 spawn） |
+| `E_LEASE_EXPIRED` | 运行时租约不存在或已失效（`retryClass: after-reconnect`：先重建会话再重新 spawn）。**轮 30 起**还包括投递时 stdin 通路已不在（`NotFound` / `BrokenPipe`：sidecar 已退出或写线程因管道断裂收摊）——与"回帧来自旧代次"是同一件事，所以同码 |
 | `E_STREAM_FULL` | 流句柄数达到上限（宿主 `MAX_STREAMS = 256`，单插件 `MAX_STREAMS_PER_PLUGIN = 32`）——先 `host_stream_close` 再开 |
 | `E_CALL_ALREADY_SETTLED` | 执行方对同一次跨主体调用重复回填（0.4-A1；重复回填显式拒绝，不覆盖） |
 | `E_CONTRIBUTES_DRIFT` | 贡献对账分叉：manifest 声明的扩展点与 activate 期实际注册的不一致（0.4-W3；报错并点名缺哪条） |
@@ -841,6 +855,36 @@ V4 刻意不把 panic / 超时标成可自动重放：`catch_unwind` 只是**遏
 声明顺序不属于协议，V4 A69），而"入参不合格"这一族失败对调用方的动作完全相同
 （**改载荷，别重试**）。因此 spawn 配置、JS entry、设置文档等非清单入口
 也复用本码；差异放在 `message` 里（面向日志，不作分支依据）。
+
+### 跨 iframe 桥的保码行为（轮 35）
+
+插件在 iframe 里 `await ctx.invoke(...)` 失败时拿到的是 **`PluginBridgeError`**
+（`@tauron/plugin-sdk` 导出），不是裸 `Error`：
+
+| 字段 | 含义 |
+|---|---|
+| `code` | **线上原样**的码：宿主能力抛的 `E_*`，或插件 handler 自己抛的 `SC-####` |
+| `message` | 桥送回来的原文（面向日志，**不得**作为分支依据） |
+| `retryable` | 只对 `SC-####` 按 `RETRYABLE_ERROR_CODES` 判定；`E_*` 一律 `false` |
+| `fallbackApplied` | `true` = 原始失败**没有任何可用码**（或码不是合法形态），本错误落到 `SC-9001` |
+
+写侧（宿主窗口里的 `PluginBridge`）取码顺序：① 错误对象自带的 `code`——**形态合法才算**，
+`code: 500` 这类业务字段不会被当成码；② 消息文本里的码形态；③ 两处都没有才落 `SC-9001`。
+本地发起的失败同样带码：超时 `SC-2001`、取消 `SC-2002`、上下文销毁 `SC-2004`、
+权限未授予 `SC-1002`。
+
+形态判据（`E_` 前缀 / `^SC-\d{4}$`）**只有一份**，定义在 `@tauron/types`
+（`isCodeLike` / `isAppLayerErrorCode` / `extractCodeLike` /
+`APP_LAYER_ERROR_CODE_PATTERN`），`@tauron/host` 侧只做再导出。第二份正则会随时间
+漂移（一侧放宽一侧没放宽），那才是真断链。符号名里的 `APP_LAYER_` 前缀是 1.0 公开面
+遗留命名：按 [架构总览](../architecture/overview.md) 的层口径，`SC-####` 属**框架层**
+（`tauron-shell` ↔ `@tauron/types`），`E_*` 才是**应用层**宿主底座（`tauron-host`）。
+
+> **为什么 `E_*` 的 `retryable` 保持 `false`**：`@tauron/plugin-sdk` **不**依赖
+> `@tauron/host`（依赖方向——否则整座宿主客户端会打进 iframe 产物），所以它拿不到
+> `HOST_RETRY_CLASS` 那份表。这里宁可返回 `false` 也不猜。要按宿主 `retryClass` 四档
+> 分流，两种做法：宿主侧判好后把结论放进返回给插件的字段，或插件自带 `@tauron/host`。
+> `retryable` 只是框架层词表的便捷位，`code` 才是分流依据。
 
 ---
 

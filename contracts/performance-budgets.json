@@ -4,7 +4,9 @@
     "iterations": 100000,
     "maxElapsedMs": 1000
   },
-  "process": {
+  "installStream": {
+    "minPayloadBytes": 67108864,
+    "maxPeakHeapKib": 16384,
     "maxPeakRssKb": 32768
   },
   "binaries": {

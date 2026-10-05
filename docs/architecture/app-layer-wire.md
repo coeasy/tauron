@@ -22,8 +22,19 @@
 > （`core:default` + `windows: ["main", "plugin-*"]`；`plugin-*` 对应 `host_window_create`
 > 铸出的 `plugin-<插件 id>` 面板窗，漏掉它插件界面一片空白）。
 
-两种形态**互斥**（重复 `manage::<CommandState>` 会 panic）；壳层 `tauron-shell`
+两种形态**互斥**：同时使用时 `init()` / `state_init()` 的 setup 在 `manage` **之前**
+返回 `AssemblyError::AlreadyManaged`（轮 22 / V7-P1-01；此前是重复
+`manage::<CommandState>` 的运行时 panic）；壳层 `tauron-shell`
 / `tauron-shell-state` 与应用层插件名不同，可叠加注册。
+
+> **单例装配不变量（轮 22 / V7-P1-01）**：`PluginRuntimeState::with_substrate` /
+> `with_substrate_and_spawner` 返回 `Result<Self, AssemblyError>`，凭证
+> （`AssemblyToken`，不可伪造、只能领取一次）落在**底座**上。同一份底座的第二次装配
+> 得到 `AlreadyAssembled` 且**不返回 Runtime**——此前它打印冲突日志后照样返回第二个
+> `Registry`，于是「调用方手里的注册表」与「恢复对账写入的注册表」分家。
+> 用例：`tests::second_assembly_on_same_substrate_returns_no_runtime`（旧 sink /
+> 注册表原样保留）与 `tests::concurrent_assembly_on_same_substrate_yields_exactly_one_runtime`
+> （8 线程并发恰好一份）。
 
 > ⚠️ **插件注册形态的部署期缺口（照实登记，未修）**：`crates/tauron-adapter` 目前
 > **没有 `permissions/` 目录**（也没有权限条目定义）。Tauri v2 在**启用能力检查**的宿主里
@@ -147,7 +158,7 @@ label 集合，留空展开为 `["main"]`，轮 10）、`registry`、`required_p
 | `host_events_unsubscribe` | `{ token }` | `token`（兼容分组 token） | `()` |
 | `host_events_drain` | `{ kind }`（`event`/`request`/`state`） | `kind` | `EventFrame[]`（`{topic,seq,payload}`） |
 | `host_registry_list` | `{ scope }`（`visible` 默认） | `scope: Option<String>` | `PluginSummary[]` |
-| `host_registry_admin` | `{ op: { op, id } }`（D15 四值） | `op: HostAdminOp` | `TransitionOutcome` |
+| `host_registry_admin` | `{ op: { op, id, preview?, reviewToken? } }`（D15 四值；轮 43 增审批令牌） | `op: HostAdminOp` | `RegistryAdminResponse`（判别形：`kind: executed` 平铺 `TransitionOutcome`；`kind: review` 携带预览事实与一次性令牌） |
 
 语义要点：
 
@@ -167,6 +178,23 @@ label 集合，留空展开为 `["main"]`，轮 10）、`registry`、`required_p
   只服务 `host_plugin_call`（自带后端）这条路径，且其身份取自 `plugin-<id>`
   label（`subscriber_of`）——**主窗开流会被 `E_AUTH_DENIED` 拒**。两侧一致，
   属「未接线」而非断链；补一侧即制造断链。
+- **`host_registry_admin` 的审批链（轮 43 / A83）**：`preview: true` 仅对
+  uninstall/purge 有效，只铸发一次性令牌（**零注册表副作用**）并返回将被破坏的事实
+  （op / pluginId / 版本 / 当前状态）；提交时把 `reviewToken` 原样带回，宿主先按 nonce
+  摘除再重核 op/插件/预览版本——预览后事实漂移即拒（须重新预览）。`executed` 分支的
+  `TransitionOutcome` 字段仍平铺在顶层、只多 `kind` 判别字段，老读法不变；生产档
+  （安装特性开启）无令牌提交 uninstall/purge 一律拒。「用户取消」在前端返回
+  `{ ok: false, cancelled: true }`，与执行失败区分。
+- **子系统故障边界与读数（轮 47 / A91）**：settings 之外的 events/approval/registry
+  三条子系统各有一条三段式闸门（就绪判定 → `catch_unwind` → 事后登记，锁**不**跨
+  闭包）。故障后该域命令确定性拒新工作（`E_HOST_PANIC`，错误文案自带修复出口）；
+  修复语义各自诚实：events = `host_recover_boot` 清零总线**会话态**（订阅/审批/队列；
+  topic 声明是装配期结构事实，**保留**——发布端对未声明 topic 只静默丢弃不报错，
+  清声明等于让修复动作把可工作的消息面悄悄打哑）、approval = 重新 preview 清空旧
+  令牌（旧令牌连"已消费"都不算，直接"不认识"）、registry = 无会话内重建，**如实
+  Quarantined 待重启**（不伪造"修好了"）。四条边界（含 settings）的
+  `state`/`generation`/`lastFault` 一并挂在 `host_resource_stats` 的 `faults` 读数上
+  （仅主窗可见，与资源占用同一读取面）。
 - **返回形状**（Rust → TS 消费，与入参同受门禁锁定）：
   - `host_events_drain` 返回**事件总线帧** `EventFrame`（`{topic,seq,payload}`），
     不是流式帧 `StreamFrame`（后者经 Channel 承载，R5 起为**唯一**帧词表：
@@ -207,9 +235,61 @@ label 集合，留空展开为 `["main"]`，轮 10）、`registry`、`required_p
     （**轮 13 更正**：本节此前写「品牌数据尚未接入」——错；`cmd_brand_info` 在 1.0
     收口就已从恒桩改为真实实现，对账见 canonical-owners.md「轮 13 复核」）；
   - `host_market_*` 返回有类型的 `simulated` 标记；AutoUpdateClient 不把模拟结果
-    显示为可用更新，也不继续下载/安装；
+    显示为可用更新，也不继续下载/安装。**但"有没有更新可用"这个问题今天的答案不来自
+    `host_market_check`**（轮 29 收口）：`AutoUpdateClient.checkUpdate()` 调的是真通道
+    `host_updater_check`（宿主注入 `EndpointClient` 后跑 `tauron-distribute` 的清单校验 +
+    灰度 + 签名），并把 `config.currentVersion` 当**必填入参**下发——缺它就直接抛错，
+    因为返回 `available: false` 会被 UI 显示成"已是最新版本"，那是拿缺参冒充结论。
+    同理 `Unsupported`（端点未注入）与 `degraded`（端点不可达 / 签名非法）落成
+    `status: 'error'` + `degraded: true`，只有"确实没有更新"才是 `'idle'`；
+    **轮 31 补同一条链的壳层腿**：`<oc-updater-dialog>` 的「检查更新」经
+    `ShellController` 也改打 `host_updater_check`，并与 SDK **共用同一份判定**
+    （`toUpdateInfo` 从此导出，两处不再各写一遍"怎么算答不了"）。控制器新增两个
+    option：`currentVersion`（必填入参由接入方声明——`host_brand_info` 的 `BrandInfo`
+    里没有版本字段）与 `onUpdaterCheck`（把结果交给接入方驱动对话框的 `version` /
+    `message`）。缺 `currentVersion` 时控制器**一个命令都不发**，直接经 `onError` 报缺参：
+    回落 `host_market_check` 会拿到恒为假的 `available: false`，那是把"答不了"演成
+    "已是最新版本"。此前这条腿既读桩、又把返回值整个丢掉，于是同一次点击在 SDK 侧与
+    壳层侧得到一个真一个假的答案；
+  - **更新状态词表只有一个事实源**（轮 32）：`UPDATER_STATUSES`（`idle` /
+    `checking` / `available` / `downloading` / `downloaded` / `installing` /
+    `ready` / `error`）与「状态 → 主按钮动作」映射 `UPDATER_PRIMARY_ACTION` 都定义在
+    `@tauron/shell-events`。写侧 `AutoUpdateClient` 的 `UpdateStatus` 是它的**类型别名**
+    （不是第二套字面量），读侧 `<oc-updater-dialog>` 的 `status` 属性是它的类型，
+    主按钮事件从映射取（`idle`/`checking`/`error` → `oc-updater-check`，
+    `available`/`downloaded`/`downloading`/`installing` → `oc-update-start`，
+    **只有 `ready`** → `oc-restart`）。此前这里有三套平行词表：客户端的安装成功终态
+    叫 `ready`，组件的重启分支却等 `done`，而全仓没有任何生产者产出 `done`——于是
+    「立即重启」在真装配里点不出来，`oc-restart` → `host_window_relaunch` 整条腿是死的，
+    `ready` 反倒落进兜底分支显示「开始更新」（点一下把下载+安装重跑一遍）。
+    词表里刻意不含从未被产出的 `done` / `updating`；第三套状态机 `UpdaterStore`
+    没有生产消费者，已登记进 `contracts/orphan-public-api.json`（它随 v1.0.0 发布过，
+    收口属破坏性变更，需单独批准）。
+  - **「没有更新」不再是一句光秃秃的结论**（轮 33）：`host_updater_status` 是灰度批次
+    百分比、崩溃门禁是否停发、宿主进程内更新账本这三件事实的**唯一**出口，而它在轮 33
+    之前于 TS 侧零消费者——于是"你不在灰度批次""被崩溃门禁停发""宿主没装端点"与
+    "确实已是最新"在 UI 上是同一句话。现在 SDK 的 `checkUpdate()` 与壳层
+    `ShellController._checkForUpdate()` 在"`available: false` 或 `degraded: true`"这条分支上
+    都调同一个 `enrichUpdaterInfoWithChannel`（读法各自给，判定与合并口径只有一份），
+    把通道事实并进 `info.reason`，示例的 `describeUpdate()` 再把它打印出来。
+    **账本的出处随线字段一起走**：`UpdaterStatus` 新增 `stateSimulated`（Rust
+    `state_simulated`），与 `state` 成对读出——成对**做到签名上**：
+    `cmd_updater_status` 把 `(update_state, update_state_simulated)` 一次性交给
+    `UpdaterSink::status(ledger_state, ledger_simulated)`，由 sink 推导
+    （`ledger_state.is_some() && ledger_simulated`）；账本对是**必传参数**，所以通道实现既不能
+    只报 `state` 不报出处，也不能自己写死一个"这是真的"。`update_state` 现有写入方是
+    `host_market_download` / `host_market_install` 两条桩，只看 `state` 就会把
+    "点了一下模拟安装"显示成"已经装好了"。桩阶段本值恒 `true`，决定它的是**账本写入方**的
+    provenance 标记（`UpgradeRunner` 装配腿落地后把 `update_state_simulated` 写 `false`，
+    见 V7 §7），本轮没有伪造真实推进（轮 40 起装配腿已落地：wired 腿写 `false`、
+    桩腿写 `true`）。诊断**不**改判定：命令缺席、
+    报错、答空三种都原样返回检查结论；有更新时不多打这条命令（附加读数不该让一次点击
+    多付一条 IPC）。加的是返回字段，不是新命令——85 条命令面冻结不破。
   - `filters`/`defaultPath`/`confirmLabel`/`cancelLabel`/`endpoints`/`pubkey`
-    属线格式一部分（Rust 侧已接受），在原生后端落地前无效果。
+    属线格式一部分（Rust 侧已接受），在原生后端落地前无效果。其中
+    `host_market_check` 的 `endpoints`/`pubkey` 是**按设计永远不用**（不是"待接入"）：
+    更新端点的权威来源只能是宿主装配，让 webview 指定宿主去哪取更新清单等于把宿主的
+    更新通道交给调用方。
   接入方式：宿主为对应领域装配 provider 后在
   适配器命令里转调；窗口命令（`host_window_*`）已是真实原生调用，可作参照。
   TS 侧 JSDoc（`packages/tauron-host/src/dialog-client.ts` 文件头）与本节同源。
@@ -373,6 +453,36 @@ label 集合，留空展开为 `["main"]`，轮 10）、`registry`、`required_p
     （租约必须消失，否则重装同名插件会撞旧租约），但一定计入 `reap`
     （`attempts` / `terminated` / `alreadyGone` / `failures` / `lastError`）；
     未注入终止器也按失败记账（漏注入表现为计数器增长，而非"看起来一切正常"）。
+  - **终止失败不止于留痕**（V7 §7 Process 行 / §9 leak gate）：失败的 pid 会进
+    `RuntimeTable` 的待重试队列，由 `host_resource_stats` 这一个驱动腿推进
+    （与 `gc_expired` 同址：**诊断读即回收点**，主窗轮询就是心跳）。三重上界：
+    队列 `MAX_PENDING_REAPS = 64`、每条 `MAX_REAP_RETRY_ATTEMPTS = 3`（含首试）、
+    证据台账 `MAX_TERMINAL_REAPS = 16`（环形覆盖最旧）。到顶即固化为
+    `TerminalReapRecord{ pluginId, pid, attempts, reason }`——拿去查得到是谁还活着，
+    而不是只剩一个计数。`reap` 的重试腿（`pending` / `retries` / `recovered` /
+    `terminal` / `overflow` / `skippedLivePid` / `terminalRecords`）与重启腿
+    （`sweepResolved` / `sweepSurvivors` / `sweepUnknown` / `ledgerWriteFailures`，
+    轮 41）连同代际读数 `generations` 一同挂在 `host_resource_stats.global` 上；
+    刻意**不**新增命令：85 条命令面由线门禁冻住，而"让插件轮询着驱动宿主杀进程"
+    本来就不该存在。
+  - **重试前先看这个 pid 还有没有主人**（轮 27 的安全封口）：待重试记录拿的是 **pid**，
+    而 `ProcSpawner` 的子进程表也按 pid 索引、同号即同键（普通 `insert` 覆盖）。若插件
+    卸载时"杀不掉"、旧进程随后自行退出、OS 把同一个号发给**重装后的新 sidecar**，
+    驱动腿那一枪打死的就是宿主自己刚起的活进程。因此 `retry_pending_reaps` 先查
+    在册租约（含已标崩溃的）：命中即**让位**——出队、计 `skippedLivePid`、固化一条
+    `TerminalReapRecord`，且**不**计入 `retries`（一枪没打）。让位是第三种结局，
+    既不是 `failures` 也不是 `recovered`；少了这个读数，"正确地没误杀"与
+    "驱动根本没跑"在 `reap` 上完全同形。
+  - **跨重启扫描只探测不杀**（轮 41，V7 §7「未落：startup orphan sweep」的收口）：
+    待重试队列随每次脏变更自动落进宿主恢复数据目录的 `reap-ledger.json`（durable
+    信封带校验和；撕裂/篡改/IO 失败在装配期**拒绝启动**——这份台账是"上一轮是否有
+    孤儿"的唯一跨重启来源，静默重置成空账等于把孤儿洗白）。下次启动时读回上一轮条目
+    并逐条定性：`Gone`（平台确认 pid 已不存在）销账、计 `sweepResolved`；
+    `Alive` 与探测不可用分别计 `sweepSurvivors` / `sweepUnknown`，两者都**只留证据、
+    绝不按 pid 开枪**——跨重启无法验明进程身份，同号可能已被无关新进程复用（正常退出
+    路径由 Job Object `KILL_ON_JOB_CLOSE` / 进程组 containment 覆盖，剩下的逃逸残骸
+    交操作者按证据处置）。重启条目走独立 `restart_reaps` 池，**永不进入**杀进程重试腿；
+    台账写盘失败计 `ledgerWriteFailures`（持久化腿不得静默）。
   - **失败码**：非 `process` 类型 → `E_PLUGIN_TYPE_NO_RUNTIME`（不伪造 pid）；
     ABI 契约不符 → `E_ABI_MISMATCH`（**不是** `E_INSTALL_FAILED`：ABI 不匹配是**版本
     兼容**问题，调用方该升级插件/宿主而不是重装；拒绝发生在**启动面之前**，不会拉起
@@ -402,8 +512,13 @@ label 集合，留空展开为 `["main"]`，轮 10）、`registry`、`required_p
       做进程树回收，`CommandSpawner` 丢弃时把遗留 pid 逐个走同一套 tree-aware `kill`。
       两者都自报 `Partial`（无 fs/net/syscall 隔离），Production 因此**拒接
       `ProcSpawner`**（`PROCESS_SANDBOX_HARD_REQUIRED`）——能力边界登记在缺口方案 A97 行。
-    - **未验证部分如实保留**：仓内无可执行 sidecar、测试不起真进程，所以真进程端到端
-      结算与 Drop 连带回收都只有契约/结构级证据，没有运行期证据（A97/A75 未验证清单）。
+    - **轮 22 收口（V7-P1-05）**：上面那句「无运行期证据」现在有了——
+      `crates/tauron-test-sidecar/tests/sidecar_e2e.rs` 真起进程跑完「宿主写帧 →
+      sidecar 回帧 → `settle_call` 结算 → 禁用时真杀进程」，另覆盖真崩溃计数、超长帧
+      的类型化结局、旧代际回帧被守卫丢弃、EOF 回收不留孤儿、pending 上限与静默不回帧。
+      仍然如实保留的只剩两条：`Drop` 自身那条兜底路径没有注入式失败测试（只有 E2E 的
+      收尾 `tracked()` 归零断言 + 源码形门禁），以及 Windows post-spawn attach race
+      未测（缺口方案 A97 未验证清单）。
 - **重启与建窗（R8，两条新命令；均**仅主窗**，代码层判定见 §5）**：
 
   | 命令 | 线参数 | 返回 |
@@ -438,6 +553,14 @@ label 集合，留空展开为 `["main"]`，轮 10）、`registry`、`required_p
   `ok: true` **只表示命令跑通**，不代表更新落地——判据是 `simulated`（当前恒 `true`：
   没请求任何 endpoint、没下载字节、没验签、没替换文件），`reason` 写明未接入更新源。
   真实连线后只需替换函数体：`simulated → false`、`reason → null`，**线形不变**。
+
+  ⚠️ **别把这三条当成"更新能力的全貌"**（轮 28 复核、轮 29 收口）：宿主另有
+  `host_updater_check` / `host_updater_status` 两条**真实现**（`DistributeUpdaterSink`
+  注入 `EndpointClient` 后即跑 `tauron_distribute::check_for_update`）。轮 29 之前
+  对外 SDK 的自动更新读的是上面这张桩表，于是"宿主接了真端点、SDK 仍永远报无更新"
+  成了静默断链；今天检查腿已改读真通道，**下载与安装的缺省装配仍走这张桩表**（轮 40 起
+  装配腿已接：注入 `DistributeUpgradeInstaller` 后两条腿为真；真执行器 `UpgradeRunner`
+  的装配位见 V7 §7 的 Upgrade 行）。
 
 ## 4. 生命周期词表（镜像）
 
@@ -519,7 +642,8 @@ capability/ACL 强制（生产客户端应采用——把 8 条特权命令只�
 就是下表里的判定**。
 三类判定 + 一类过滤，判定函数都在 `crates/tauron-adapter/src/lib.rs`，拒绝码一律是既有的
 `E_AUTH_DENIED`，不新增错误码；判定点一律在**任何副作用之前**。会改状态/授权/供应链的
-特权命令（即 `AUDITED_ADMIN_COMMANDS` 那 6 条，含 feature-gated 的安装 2 条）把判定与审计
+特权命令（即 `AUDITED_ADMIN_COMMANDS` 那 8 条，含 feature-gated 的安装 2 条与轮 40 增补的市场
+`host_market_download`/`host_market_install` 2 条）把判定与审计
 走同一个咽喉点 `admin_gate(state, caller, cmd)`（内部就是 `require_main_window` + 落一条
 `AdminAuditRecord`），所以「走没走咽喉点」是可门禁对账的事实而不是口头承诺；
 其余特权命令（`host_runtime_health` / `host_resource_stats` / `host_events_approvals` /
@@ -528,7 +652,7 @@ capability/ACL 强制（生产客户端应采用——把 8 条特权命令只�
 
 | 判定 | 函数 | 命令 |
 | --- | --- | --- |
-| 仅主窗 | `require_main_window(caller, cmd)`（改状态的 6 条特权命令经 `admin_gate`，其余只读特权直接判） | `host_registry_list_all`、`host_registry_admin`、`host_runtime_spawn`、`host_runtime_health`、`host_resource_stats`、`host_events_approve`/`revoke`/`approvals`、`host_production_doctor`、`host_settings_adopt_legacy`、`host_settings_migrate`、`host_window_relaunch`、`host_window_create`（R8）、`host_recover_trial_enable`、`host_market_check`/`download`/`install`、`host_i18n_set_locale`（切的是**全局**语言）、`host_deep_link_register`（写的是**应用级**协议）；**轮 12 补 9 条**：`host_window_quit`（`app.exit(0)`，应用级）、`host_clipboard_read`/`write`（**一个**全局槽位，跨主体读写）、`host_dialog_open`/`save`/`message`/`confirm`（现状是桩，但线形同形，接原生即成应用级模态与磁盘路径面——按 `host_market_*` 的先例判定必须在接线前就位）、`host_recover_boot`（应用级恢复态势）、`host_i18n_stats`（全局命名空间普查） |
+| 仅主窗 | `require_main_window(caller, cmd)`（改状态的 8 条特权命令经 `admin_gate`，其余只读特权直接判） | `host_registry_list_all`、`host_registry_admin`、`host_runtime_spawn`、`host_runtime_health`、`host_resource_stats`、`host_events_approve`/`revoke`/`approvals`、`host_production_doctor`、`host_settings_adopt_legacy`、`host_settings_migrate`、`host_window_relaunch`、`host_window_create`（R8）、`host_recover_trial_enable`、`host_market_check`/`download`/`install`、`host_i18n_set_locale`（切的是**全局**语言）、`host_deep_link_register`（写的是**应用级**协议）；**轮 12 补 9 条**：`host_window_quit`（`app.exit(0)`，应用级）、`host_clipboard_read`/`write`（**一个**全局槽位，跨主体读写）、`host_dialog_open`/`save`/`message`/`confirm`（现状是桩，但线形同形，接原生即成应用级模态与磁盘路径面——按 `host_market_*` 的先例判定必须在接线前就位）、`host_recover_boot`（应用级恢复态势）、`host_i18n_stats`（全局命名空间普查） |
 | 绑定到自己的键空间 | `require_settings_key_scope(caller, key)` | `host_settings_get` / `host_settings_set`（插件只能读写 `plugin:<自己>.…`；用 `strip_prefix` + 空/`.` 判据，裸前缀比较会让 `plugin:p.a` 与 `plugin:p.ab` 互相穿透） |
 | 绑定到自己的身份 | `require_self_plugin_scope(caller, cmd, claimed)` | `host_notify`（署名）、`host_i18n_load`（命名空间归属）、`host_i18n_cleanup_plugin`（销毁目标）、`host_recover_report`（失败预算 / 故障归因）、`host_notifications_read`（只能标记**自己**的通知；`None` = 全局"全部已读"与未知 id 一律拒绝——对未知 id 放行会让返回值变成存在性预言机）——插件只能以自己名义；`None`（宿主级命名空间 / 应用级上报）对插件一律拒绝，主窗任意 |
 | **按身份过滤（不是拒绝）** | `visible_notifications(...)` | `host_notifications_list`：插件只拿到署名是自己的条目，且 `total`/`unread`/分页/`dispatchLog` 与**过滤后的可见集合同源**（只裁数组、留着全局未读数仍是泄露；`limit` 必须在过滤**之后**取，否则别人的条目会占满窗口把插件自己的挤掉）。主窗数学上等于原实现 |
@@ -632,7 +756,7 @@ TS `normalizeError` 的还原优先级（任一失败即回退下一级，永不
 export type HostBoundary =
   | 'plugin-webview→host'   // invoke 拒绝：强制归一为宿主词表的 HostException
   | 'host→plugin-webview'   // 宿主码原样保留，不二次翻译
-  | 'plugin-internal';      // 插件内部：应用层 SC-#### 原样保留
+  | 'plugin-internal';      // 插件内部：框架层 SC-#### 原样保留
 
 translate_at_boundary(err, boundary): {
   error: HostException;     // 边界之后只有一种形态可用
@@ -648,7 +772,7 @@ translate_at_boundary(err, boundary): {
   那个码」与「宿主真的返回了 `E_UNKNOWN`」混成同一个值（门禁锁定）。
 - `translated: true` 表示发生了跨词表收窄：日志/遥测据此区分这两种情形。
 - **`SC-####` 现在也被识别为「像码」并保留**：此前 `normalizeError` 只认 `E_*`，
-  跨层抵达的应用层码会被整条丢弃（`rawCode: null`），是"边界隐式"的最典型症状。
+  跨层抵达的框架层码会被整条丢弃（`rawCode: null`），是"边界隐式"的最典型症状。
   识别形态 ≠ 接受语义：非宿主码仍是 `E_UNKNOWN`（判定用），只多了原始码（诊断用）。
 - 两套词表**不合并**：`HOST_ERROR_CODES` 里不得出现 `SC-####`，
   `PluginErrorCode` 里不得出现 `E_*`（门禁锁定）。
@@ -659,9 +783,14 @@ translate_at_boundary(err, boundary): {
   两处都没有即失败；接线后必须从清单删掉，否则清单自身会开始说谎）。
   两个未接线的值及原因：`host→plugin-webview` 与 `plugin-internal` 的消费方都在
   插件侧 SDK，而插件侧 SDK 不应依赖 `@tauron/host`（会把整个宿主客户端打进插件包）；
-  已定位的缺口是 `packages/tauron-plugin-sdk/src/bridge.ts` 的 handler 失败分支——
-  插件抛出的 `SC-####` 被硬写成通用 `SC-9001`（码被丢掉，与 R2-c 修的是同一类问题，
-  只是发生在插件侧、需要在保持依赖方向的前提下修）。
+  曾经登记在此的**已定位缺口**——`packages/tauron-plugin-sdk/src/bridge.ts` 的 handler
+  失败分支把插件抛出的 `SC-####` 硬写成通用 `SC-9001`——由**轮 35 收口**：桥的失败分支
+  现在先取错误自带的码、再退消息里的码形态、最后才落 `SC-9001`，读侧
+  `PluginContext.invoke` 的拒绝也带上 `code`/`retryable`/`fallbackApplied`
+  （见[插件开发指南的错误码一节](../api/plugin-development-guide.md)）。
+  这两个值**仍**留在未接线清单，因为依赖方向没变：桥的保码发生在 `@tauron/plugin-sdk`
+  本地（形态判据取自 `@tauron/types`），不是对 `translate_at_boundary` 的调用，
+  `translated`/`foreignVocabulary` 这类归一痕迹仍只在宿主侧存在。
 
 ## 8. 调用生命周期不变量（pending 表不得楔死）
 

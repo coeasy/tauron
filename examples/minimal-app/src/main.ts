@@ -1,6 +1,6 @@
 // tauron 应用层贯通示例 —— 宿主主窗入口。
 //
-// 演示八条核心链路（全部走 tauron-adapter 的 83 条默认 host_* 命令面；
+// 演示九条核心链路（全部走 tauron-adapter 的 83 条默认 host_* 命令面；
 // 本示例默认特性开 `plugin-install`，故实际注册 85 条）：
 // 1. iframe 沙箱插件：PluginBridge 握手（token 经 URL hash 注入）+ callPluginMethod
 // 2. 窗口控制：ShellClient → Tauri 真实窗口操作
@@ -10,8 +10,10 @@
 // 6. 启动恢复（§4.14）：上报启动结果（驱动信号）+ 读回阶段决策
 // 7. 跨主体调用（0.4-A1/A2）：callPlugin → 插件 webview 执行泵 → callTakeResult 取件
 // 8. 主窗管理面自检：AdminClient 生产就绪自检（A109）+ Event 审批事实
+// 9. 菜单与托盘：`host_menu_*` / `host_tray_*` 建菜单 + `listen(MENU_CLICK_TOPIC)`
+//    收原生点击回传（**两条腿**：只建不听 = 点了没反应且无处可查）
 //
-// 编号与正文各节标题一一对应（八节 = 八条），改任一侧请同步另一侧。
+// 编号与正文各节标题一一对应（九节 = 九条），改任一侧请同步另一侧。
 
 import { TauriBackend } from '@tauron/host/tauri';
 import {
@@ -21,11 +23,25 @@ import {
   AutoUpdateClient,
   ShellController,
   isUnsupportedBody,
+  MENU_CLICK_TOPIC,
 } from '@tauron/host';
-import type { PendingCallInfo } from '@tauron/host';
+import type {
+  MenuClickFrame,
+  MenuOutcome,
+  PendingCallInfo,
+  TrayOutcome,
+  TraySpec,
+  UpdateInfo,
+  UpdateStatus,
+} from '@tauron/host';
+import type { UnsupportedBody } from '@tauron/host';
 import { HOST_SETTINGS_CHANGED_TOPIC } from '@tauron/app-plugin-sdk';
 import { PluginBridge, callPluginMethod } from '@tauron/plugin-sdk';
 import '@tauron/ui/wc'; // 注册全部自定义元素（oc-toast / oc-plugin-manager / …）
+// 当前版本号的**唯一**事实源：宿主不提供版本（`host_brand_info` 的 `BrandInfo` 是白标
+// 身份，没有 version 字段；`host_updater_check` 反过来把它当**必填入参**要）。
+// 所以"我现在是几版"属接入方声明——这里向本示例的 package.json 取，而不是写死字符串。
+import { version as APP_VERSION } from '../package.json';
 
 // ── 宿主基础 ──────────────────────────────────────────────────────────────
 
@@ -62,6 +78,10 @@ const dialog = new DialogClient({ backend });
 const updater = new AutoUpdateClient({
   backend,
   config: {
+    // 轮 29 起 `currentVersion` 是检查的**必填入参**：缺它 `checkUpdate()` 直接抛错
+    // （返回"无更新"等于把缺参冒充成"已是最新版本"）。示例此前没配，于是本按钮
+    // 在轮 29 之后恒红——轮 31 补上。
+    currentVersion: APP_VERSION,
     endpoints: ['https://example.invalid/updates.json'],
     pubkey: '',
     checkIntervalSecs: 0, // 示例不启用定时轮询（手动点按钮检查）
@@ -156,22 +176,59 @@ el<HTMLButtonElement>('btn-clipboard').addEventListener('click', () => {
     .catch((err: Error) => log('host-out', err.message));
 });
 
+/**
+ * 检查结果的展示口径（SDK 按钮与更新对话框共用，轮 31）。
+ *
+ * `degraded` 与"没有更新"**必须分家**：前者是"这个问题今天答不了"（端点未注入 /
+ * 不可达 / 签名非法），后者是结论。把它们合成一句"已是最新版本"就是轮 29 立的那条
+ * 口径所禁止的事。`simulated` 在检查路径上恒不设（`UpdaterCheckOutcome` 线形里没这个
+ * 字段），所以这里不再有"模拟结果"分支。
+ *
+ * 轮 33：`available: false` 时宿主给的**依据**（灰度未覆盖 / 崩溃门禁停发 / 通道未装配
+ * 等，由 `enrichUpdaterInfoWithChannel` 从 `host_updater_status` 补进来）必须上屏。
+ * 只留一句"已是最新版本"等于把刚拿到的事实又吞回日志外——那句话只在**没有**任何
+ * 反向依据时才说得出口。
+ */
+function describeUpdate(info: UpdateInfo): string {
+  if (info.degraded === true) {
+    return `更新通道答不了：${info.reason ?? '宿主未注入更新端点'}——这不是"已是最新版本"`;
+  }
+  if (!info.available && info.reason != null) {
+    return `没有可用更新（当前 ${info.currentVersion ?? APP_VERSION}）——依据：${info.reason}`;
+  }
+  return info.available
+    ? `发现新版本 ${info.version ?? '?'}（当前 ${info.currentVersion ?? APP_VERSION}）——下载和安装能力需宿主真实接入后使用`
+    : `已是最新版本（${info.currentVersion ?? APP_VERSION}）`;
+}
+
 el<HTMLButtonElement>('btn-update').addEventListener('click', () => {
   updater
     .checkUpdate()
-    .then((info) =>
-      log(
-        'host-out',
-        info.simulated
-          ? `更新检查未实际执行：${info.reason ?? '宿主更新源尚未接入'}`
-          : info.available
-            ? // `currentVersion` 是可选字段：`host_market_check` 今天不返回它，
-              // 直接插值会打印 "undefined"。
-              `发现新版本 ${info.version ?? '?'}（当前 ${info.currentVersion ?? '未知'}）——下载和安装能力需宿主真实接入后使用`
-            : `已是最新版本（${info.currentVersion ?? '未知'}）`,
-      ),
-    )
+    .then((info) => log('host-out', describeUpdate(info)))
     .catch((err: Error) => log('host-out', err.message));
+});
+
+/**
+ * `<oc-updater-dialog>` 的更新面（哑组件：`version` / `message` / `status` 由这里喂，
+ * 主按钮按 `status` 决定动作并派发契约事件，执行在 `ShellController`）。
+ *
+ * `status` 用 `UpdateStatus` 而不是裸 `string`：它就是契约包 `@tauron/shell-events`
+ * 的 `UpdaterStatus` 别名（轮 32），组件与控制器读同一份词表。写成 `string` 时
+ * "喂进去一个没人认的状态"是运行时行为，现在它是编译错误。
+ *
+ * 结构类型而非导入 `OcUpdaterDialog`：本示例只依赖 `@tauron/ui/wc` 的运行时注册，
+ * 拉类型会把 lit 拖进示例的依赖面。
+ */
+type UpdaterDialog = HTMLElement & {
+  open: boolean;
+  version: string;
+  message: string;
+  status: UpdateStatus;
+};
+const updaterDialog = el<UpdaterDialog>('updater-dialog');
+
+el<HTMLButtonElement>('btn-updater-dialog').addEventListener('click', () => {
+  updaterDialog.open = true;
 });
 
 // ── 4. UI 组件 ───────────────────────────────────────────────────────────
@@ -234,10 +291,34 @@ function refreshPluginFace(): void {
   });
 }
 
+/**
+ * 已经上屏过的通知 id（轮 36）。
+ *
+ * 为什么需要它：宿主的投递信号只说"有新通知了"，正文要从 `host_notifications_list` 拉，
+ * 而**未读**条目在下一次信号到达时仍会出现在同一份快照里——不去重就是把同一条通知
+ * 反复弹成 toast。上界是防长会话下无界增长（与仓内对残留集合的同一口径）。
+ */
+const surfacedNotifications = new Set<string>();
+const SURFACED_NOTIFICATION_CAP = 200;
+
 const controller = new ShellController({
   backend,
+  // 「检查更新」按钮的检查腿需要它：`host_updater_check` 把当前版本当必填入参，
+  // 缺它时控制器**不**回落 `host_market_check`（那会把"答不了"显示成"已是最新"）。
+  currentVersion: APP_VERSION,
   // 标题栏/更新/插件开关都是**用户直接点的**：失败必须有用户可见的出口。
   onError: (err, context) => setStatus(`${context} 失败：${(err as Error).message}`, false),
+  // 对话框是哑组件，检查结论由这里喂（同一次动作用同一个展示口径 `describeUpdate`，
+  // 不与 SDK 按钮各写一份）。`status` 用契约词表（轮 32）：`'error'` = 这一轮答不了，
+  // 主按钮仍是「检查更新」（重试允许，它不等于"已装好"）；只有 `'available'` 推进到
+  // 「开始更新」——下载与安装两条命令宿主侧仍是 `simulated` 桩，点了会经 `onError`
+  // 如实报错，而不是假装更新完成。
+  onUpdaterCheck: (info) => {
+    updaterDialog.version = info.version ?? '';
+    updaterDialog.message = describeUpdate(info);
+    updaterDialog.status = info.degraded === true ? 'error' : info.available ? 'available' : 'idle';
+    log('host-out', describeUpdate(info));
+  },
   // 控制器改完注册表后需要重取列表与命令（否则开关拨了、列表还是旧的）。
   onRegistryChange: () => {
     void refreshPlugins().catch((error: Error) =>
@@ -246,6 +327,22 @@ const controller = new ShellController({
     void refreshCommands().catch(() => {
       /* 贡献命令拉取失败不阻断插件管理（多为宿主未实现 contributes_list） */
     });
+  },
+  // 轮 36：宿主的 `NOTIFICATION_TOPIC` **信号**（载荷不含正文）由控制器拉成快照后
+  // 交到这里。未读计数用真值 `unread`（不受 limit 影响），正文用 items 里的
+  // `title`/`message`——它们只可能来自 `host_notifications_list`（按身份过滤），
+  // 不可能来自事件载荷，那正是轮 11 把载荷降成信号的原因。
+  onNotification: (snapshot) => {
+    for (const item of snapshot.items) {
+      if (item.read || surfacedNotifications.has(item.id)) continue;
+      if (surfacedNotifications.size >= SURFACED_NOTIFICATION_CAP) surfacedNotifications.clear();
+      surfacedNotifications.add(item.id);
+      toast.push?.({ title: item.title, message: item.message, level: item.kind });
+    }
+    log(
+      'host-out',
+      `通知中心：${snapshot.unread} 条未读 / 共 ${snapshot.total} 条（容量 ${snapshot.capacity}）`,
+    );
   },
 });
 controller.start();
@@ -411,6 +508,135 @@ void admin
     ),
   )
   .catch((err: Error) => log('host-out', `读取 Event 审批事实失败：${err.message}`));
+
+// ── 9. 菜单与托盘（R9 主窗能力 + 点击回传腿）────────────────────────────
+//
+// 这一节把**两条腿**都接上：① 建菜单/托盘（`host_menu_*` / `host_tray_*`），
+// ② 收点击（`listen(MENU_CLICK_TOPIC)`）。轮 37 之前这里只有 ①：命令是真的、菜单
+// 真能建出来、宿主也真会发帧，但仓库内没有任何 `listen`；而 `lib.rs`、`tauri.rs`、
+// `shell-client.ts` 与 `docs/api/command-surface.md` 四处一致写着「经
+// `host_events_drain` 取件」——照它接线的人在一条永远不会有多余帧的队列上
+// 等一次点击。托盘那条腿更糟：`TauriTraySink` 当时根本不登记路由，托盘菜单点了
+// 直接静默消失。
+//
+// 两个 topic 常量都取自 `@tauron/host`（Rust `pub const` 的镜像），这里不写字面量。
+
+const APP_MENU_ITEMS = [
+  { id: 'menu-about', label: '关于本示例', event: MENU_CLICK_TOPIC },
+  { id: 'menu-refresh', label: '重取能力快照', event: MENU_CLICK_TOPIC },
+  { id: 'menu-minimize', label: '最小化窗口', event: MENU_CLICK_TOPIC },
+];
+
+const TRAY_MENU_ITEMS = [
+  { id: 'tray-about', label: '托盘：关于', event: MENU_CLICK_TOPIC },
+  { id: 'tray-minimize', label: '托盘：最小化', event: MENU_CLICK_TOPIC },
+];
+
+/** 一次菜单/托盘命令的结果如实写成一行（`Unsupported` 与 `applied: false` 是两回事）。 */
+function describeMenuOutcome(out: MenuOutcome | TrayOutcome | UnsupportedBody): string {
+  if (isUnsupportedBody(out)) return `宿主不支持：${out.reason}`;
+  if (!out.applied) return `未应用：${out.reason ?? '（宿主未给出原因）'}`;
+  return 'itemCount' in out ? `已应用（${out.itemCount} 项）` : '已应用';
+}
+
+function requireMenuFace(command: string): boolean {
+  if (shell.supports(command)) return true;
+  log('menu-out', `当前宿主未注册 ${command}（底座形态或缺省装配），无法操作菜单/托盘`);
+  return false;
+}
+
+// 点击腿**先于**任何建菜单动作挂上：宿主侧没有路由时就不发帧，早订阅不会收到假事件。
+// 订阅自己也可能失败——`TauriBackend.listen()` 原样返回 Tauri 的 `listen()` Promise，
+// 事件系统不可用时会被拒绝。裸 `void` 会把它变成 unhandled rejection，于是「前端
+// 已经接上点击回传」再次变成一句核对不了的承诺，所以失败要上屏。
+void backend
+  .listen(MENU_CLICK_TOPIC, (payload) => {
+    const frame = payload as MenuClickFrame;
+    const line = `点击回传：source=${frame.source} id=${frame.id} native=${frame.native}`;
+    toast.push?.({
+      title: '原生菜单点击',
+      message: `${frame.source} → ${frame.id}`,
+      level: 'info',
+    });
+    switch (frame.id) {
+      case 'menu-about':
+      case 'tray-about':
+        log('menu-out', `${line}（当前版本 ${APP_VERSION}）`);
+        break;
+      case 'menu-refresh':
+        void negotiateCapabilities();
+        log('menu-out', `${line} → 已重发能力协商`);
+        break;
+      case 'menu-minimize':
+      case 'tray-minimize':
+        // 真效果：最小化主窗。回传不是一次纯展示——点了就该看见窗口动。
+        void shell.windowMinimize().catch((err: Error) => {
+          setStatus(`最小化失败：${err.message}`, false);
+        });
+        log('menu-out', `${line} → 已发出最小化`);
+        break;
+      default:
+        log('menu-out', `${line}（本示例未定义该 id 的动作）`);
+        break;
+    }
+  })
+  .catch((err: Error) => {
+    log('menu-out', `点击回传腿未挂上：${MENU_CLICK_TOPIC} 订阅失败（${err.message}）`);
+  });
+
+el<HTMLButtonElement>('btn-menu-set').addEventListener('click', () => {
+  if (!requireMenuFace('host_menu_set') || !requireMenuFace('host_tray_create')) return;
+  void (async () => {
+    const menu = await shell.menuSet({ items: APP_MENU_ITEMS });
+    const traySpec: TraySpec = { tooltip: 'tauron 示例托盘', menu: { items: TRAY_MENU_ITEMS } };
+    const tray = await shell.trayCreate(traySpec);
+    log('menu-out', `应用菜单栏：${describeMenuOutcome(menu)}；托盘：${describeMenuOutcome(tray)}`);
+  })().catch((err: Error) => setStatus(`菜单/托盘装配失败：${err.message}`, false));
+});
+
+el<HTMLButtonElement>('btn-menu-popup').addEventListener('click', () => {
+  if (!requireMenuFace('host_menu_popup')) return;
+  void shell
+    .menuPopup({ items: APP_MENU_ITEMS })
+    .then((out) => {
+      // `applied: false` 在这里是真事实：主窗不在就无处可挂，宿主不假装弹出。
+      log('menu-out', `上下文菜单：${describeMenuOutcome(out)}`);
+    })
+    .catch((err: Error) => setStatus(`弹出上下文菜单失败：${err.message}`, false));
+});
+
+el<HTMLButtonElement>('btn-tray-menu').addEventListener('click', () => {
+  if (!requireMenuFace('host_tray_set_menu')) return;
+  void shell
+    .traySetMenu({ items: APP_MENU_ITEMS })
+    .then((out) => {
+      // 托盘不存在时宿主如实返回 `applied: false`——那不是失败，是"还没 create"。
+      const hint = !isUnsupportedBody(out) && !out.applied ? '（托盘还不存在，先点 ①）' : '';
+      log('menu-out', `托盘右键菜单换成应用菜单那三项：${describeMenuOutcome(out)}${hint}`);
+    })
+    .catch((err: Error) => setStatus(`设置托盘菜单失败：${err.message}`, false));
+});
+
+el<HTMLButtonElement>('btn-menu-reset').addEventListener('click', () => {
+  if (!requireMenuFace('host_menu_reset')) return;
+  void shell
+    .menuReset()
+    .then((out) => {
+      // 只撤应用菜单：托盘那条点击路由**不受影响**（宿主按 lane 替换，不整表清空）。
+      log('menu-out', `撤应用菜单：${describeMenuOutcome(out)}（托盘路由保持有效）`);
+    })
+    .catch((err: Error) => setStatus(`撤应用菜单失败：${err.message}`, false));
+});
+
+el<HTMLButtonElement>('btn-tray-remove').addEventListener('click', () => {
+  if (!requireMenuFace('host_tray_remove')) return;
+  void shell
+    .trayRemove()
+    .then((out) => {
+      log('menu-out', `撤托盘：${describeMenuOutcome(out)}（托盘点击路由一并失效）`);
+    })
+    .catch((err: Error) => setStatus(`撤托盘失败：${err.message}`, false));
+});
 
 // ── 启动 ─────────────────────────────────────────────────────────────────
 

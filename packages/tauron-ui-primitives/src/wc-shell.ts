@@ -7,7 +7,7 @@
 // ──────────────────────────────────────────────────────────────────────────
 
 import { LitElement, html, css, type CSSResultGroup } from 'lit';
-import { SHELL_EVENTS } from '@tauron/shell-events';
+import { SHELL_EVENTS, UPDATER_PRIMARY_ACTION } from '@tauron/shell-events';
 import type {
   TrayItemEventDetail,
   CommandSelectEventDetail,
@@ -15,6 +15,7 @@ import type {
   PluginToggleEventDetail,
   PluginUninstallEventDetail,
   PluginInstallEventDetail,
+  UpdaterStatus,
 } from '@tauron/shell-events';
 import { ShortcutRecorderStore, type ModifierKey } from './shortcut-recorder.js';
 
@@ -27,6 +28,7 @@ export type {
   PluginToggleEventDetail,
   PluginUninstallEventDetail,
   PluginInstallEventDetail,
+  UpdaterStatus,
 };
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -229,6 +231,15 @@ export class OcTrayMenu extends LitElement {
 
 // ──────────────────────────────────────────────────────────────────────────
 // <oc-updater-dialog> — 更新对话框
+//
+// 契约（哑组件，与 `<oc-command-palette>` 同形）：
+// - 供数：接入方写 `version` / `message` / `progress` / `status`。`status` 的取值
+//   **不是自由字符串**，而是 `@tauron/shell-events` 的 `UPDATER_STATUSES`——写侧
+//   （`@tauron/host` 的 `AutoUpdateClient` 状态）与读侧（这里的主按钮）共用一份词表，
+//   映射表是 `UPDATER_PRIMARY_ACTION`。轮 32 之前两侧各用一套：组件只认 `'done'`
+//   才给「立即重启」，客户端的已装好终态却叫 `'ready'`，那条腿在真装配里点不出来。
+// - 消费：主按钮按当前状态派发 `oc-updater-check` / `oc-update-start` / `oc-restart`
+//   （由 `ShellController` 接），「稍后」派发 `oc-updater-dismiss` 并收起自己。
 // ──────────────────────────────────────────────────────────────────────────
 
 export class OcUpdaterDialog extends LitElement {
@@ -304,7 +315,7 @@ export class OcUpdaterDialog extends LitElement {
   private _version: string = '';
   private _message: string = '';
   private _progress: number = 0;
-  private _status: string = 'idle';
+  private _status: UpdaterStatus = 'idle';
 
   get open(): boolean {
     return this._open;
@@ -342,10 +353,16 @@ export class OcUpdaterDialog extends LitElement {
     this.requestUpdate();
   }
 
-  get status(): string {
+  /**
+   * 更新流程状态（词表事实源：`@tauron/shell-events` 的 {@link UpdaterStatus}）。
+   *
+   * 本属性过去是裸 `string`：写错一个取值不会报错，只会让主按钮悄悄停在错误的动作上
+   * （轮 32 的「立即重启」不可达就是这件事）。
+   */
+  get status(): UpdaterStatus {
     return this._status;
   }
-  set status(v: string) {
+  set status(v: UpdaterStatus) {
     this._status = v;
     this.requestUpdate();
   }
@@ -363,37 +380,39 @@ export class OcUpdaterDialog extends LitElement {
     );
   }
 
+  /**
+   * 主按钮的动作：派发**当前状态映射到的那个**契约事件。
+   *
+   * 事件名不写在模板里，而是从 `UPDATER_PRIMARY_ACTION[this._status]` 取——状态词表
+   * 与映射都在 `@tauron/shell-events`，写侧（`@tauron/host` 的 `AutoUpdateClient`）
+   * 与读侧（本组件）同源。过去这里是三段 `if/else` 各写一个字面量状态
+   * （`'done'` / `'idle'` / 兜底），组件的 `status` 又是裸 `string`，于是"客户端报
+   * `'ready'`、重启分支等 `'done'`"这种漂移无处显形（轮 32）。
+   */
+  private _firePrimary(): void {
+    this.dispatchEvent(
+      new CustomEvent(UPDATER_PRIMARY_ACTION[this._status], { bubbles: true, composed: true }),
+    );
+  }
+
   protected override render() {
+    const action = UPDATER_PRIMARY_ACTION[this._status];
+    const inFlight = this._status === 'downloading' || this._status === 'installing';
+    const label =
+      action === SHELL_EVENTS.restart
+        ? '立即重启'
+        : action === SHELL_EVENTS.updaterCheck
+          ? '检查更新'
+          : '开始更新';
     return html`
       <div class="dialog">
         <h2 class="dialog-title">软件更新</h2>
         ${this._version ? html`<div class="dialog-content">新版本 ${this._version} 可用</div>` : ''}
         ${this._message ? html`<div class="dialog-content">${this._message}</div>` : ''}
-        ${this._status === 'downloading' || this._status === 'updating' ? html`<div class="progress-bar"><div class="progress-fill" style="width: ${this._progress}%"></div></div>` : ''}
+        ${inFlight ? html`<div class="progress-bar"><div class="progress-fill" style="width: ${this._progress}%"></div></div>` : ''}
         <div class="dialog-actions">
           <button class="btn" @click=${() => this._dismiss()}>稍后</button>
-          ${
-            this._status === 'done'
-              ? html`<button
-                  class="btn btn-primary"
-                  @click=${() => this.dispatchEvent(new CustomEvent(SHELL_EVENTS.restart, { bubbles: true, composed: true }))}
-                >
-                  立即重启
-                </button>`
-              : this._status === 'idle'
-                ? html`<button
-                    class="btn btn-primary"
-                    @click=${() => this.dispatchEvent(new CustomEvent(SHELL_EVENTS.updaterCheck, { bubbles: true, composed: true }))}
-                  >
-                    检查更新
-                  </button>`
-                : html`<button
-                    class="btn btn-primary"
-                    @click=${() => this.dispatchEvent(new CustomEvent(SHELL_EVENTS.updateStart, { bubbles: true, composed: true }))}
-                  >
-                    开始更新
-                  </button>`
-          }
+          <button class="btn btn-primary" @click=${() => this._firePrimary()}>${label}</button>
         </div>
       </div>
     `;

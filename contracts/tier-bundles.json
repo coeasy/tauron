@@ -1,0 +1,166 @@
+{
+  "schemaVersion": 1,
+  "tiers": {
+    "S": {
+      "description": "Substrate 基础能力档：core 必备；Window/Menu/Tray/Dialog 均为可选形态捆绑",
+      "requires": ["core"]
+    },
+    "E": {
+      "description": "Extension 扩展平台档：在 S 之上要求插件运行时",
+      "requires": ["core", "plugin-runtime"]
+    },
+    "P": {
+      "description": "Platform 平台档：在 E 之上要求分发/更新通道",
+      "requires": ["core", "plugin-runtime", "marketplace"]
+    }
+  },
+  "surfaceBundles": ["desktop-ui", "mobile-ui", "headless", "service", "remote-client"],
+  "bundles": {
+    "core": {
+      "kind": "capability",
+      "status": "已落",
+      "description": "底座原语：能力协商、事件代理、作用域文件系统、HTTP、设置、i18n、恢复报告、品牌",
+      "commands": [
+        "host_brand_info",
+        "host_capabilities",
+        "host_events_approvals",
+        "host_events_approve",
+        "host_events_drain",
+        "host_events_publish",
+        "host_events_revoke",
+        "host_events_subscribe",
+        "host_events_unsubscribe",
+        "host_fs_list",
+        "host_fs_mkdir",
+        "host_fs_read",
+        "host_fs_remove",
+        "host_fs_stat",
+        "host_fs_write",
+        "host_http_request",
+        "host_i18n_cleanup_plugin",
+        "host_i18n_load",
+        "host_i18n_set_locale",
+        "host_i18n_stats",
+        "host_i18n_t",
+        "host_i18n_t_params",
+        "host_recover_boot",
+        "host_recover_report",
+        "host_settings_adopt_legacy",
+        "host_settings_get",
+        "host_settings_migrate",
+        "host_settings_set"
+      ]
+    },
+    "desktop-ui": {
+      "kind": "surface",
+      "status": "已落",
+      "description": "桌面形态：窗口/菜单/托盘/对话框/剪贴板/主题/通知/深链",
+      "commands": [
+        "host_clipboard_read",
+        "host_clipboard_write",
+        "host_deep_link_register",
+        "host_dialog_confirm",
+        "host_dialog_message",
+        "host_dialog_open",
+        "host_dialog_save",
+        "host_menu_popup",
+        "host_menu_reset",
+        "host_menu_set",
+        "host_notifications_list",
+        "host_notifications_read",
+        "host_notify",
+        "host_theme_get",
+        "host_theme_list",
+        "host_theme_set",
+        "host_tray_create",
+        "host_tray_remove",
+        "host_tray_set_menu",
+        "host_window_close",
+        "host_window_maximize",
+        "host_window_minimize",
+        "host_window_quit",
+        "host_window_relaunch",
+        "host_window_restore",
+        "host_window_set_position",
+        "host_window_set_size"
+      ]
+    },
+    "mobile-ui": {
+      "kind": "surface",
+      "status": "roadmap",
+      "description": "移动形态：命令面未落地（不得白挂命令）",
+      "commands": []
+    },
+    "headless": {
+      "kind": "surface",
+      "status": "roadmap",
+      "description": "无头形态：零 Surface 就绪（A66 未落，无独立命令面）",
+      "commands": []
+    },
+    "service": {
+      "kind": "surface",
+      "status": "roadmap",
+      "description": "服务形态：进程服务化未落（无独立命令面）",
+      "commands": []
+    },
+    "remote-client": {
+      "kind": "surface",
+      "status": "roadmap",
+      "description": "远端客户端形态未落（无独立命令面）",
+      "commands": []
+    },
+    "plugin-runtime": {
+      "kind": "capability",
+      "status": "已落",
+      "description": "插件运行时：调用/流/贡献点/注册表/生命周期",
+      "commands": [
+        "host_call_end",
+        "host_call_plugin",
+        "host_call_result",
+        "host_call_take",
+        "host_cancel",
+        "host_contributes_list",
+        "host_contributes_reconcile",
+        "host_contributes_register",
+        "host_lifecycle_report",
+        "host_plugin_call",
+        "host_recover_trial_enable",
+        "host_registry_admin",
+        "host_registry_list",
+        "host_registry_list_all",
+        "host_runtime_spawn",
+        "host_stream_close",
+        "host_stream_grant",
+        "host_stream_open",
+        "host_stream_write",
+        "host_window_create"
+      ]
+    },
+    "marketplace": {
+      "kind": "capability",
+      "status": "已落",
+      "description": "分发与更新：市场下载安装、自更新、包安装（plugin-install）",
+      "commands": [
+        "host_market_check",
+        "host_market_download",
+        "host_market_install",
+        "host_registry_install",
+        "host_registry_install_preview",
+        "host_updater_check",
+        "host_updater_status"
+      ]
+    },
+    "observability": {
+      "kind": "capability",
+      "status": "已落",
+      "description": "可观测：生产自检、资源统计、运行时健康",
+      "commands": ["host_production_doctor", "host_resource_stats", "host_runtime_health"]
+    },
+    "enterprise-policy": {
+      "kind": "capability",
+      "status": "roadmap",
+      "description": "企业策略未落（无独立命令面）",
+      "commands": []
+    }
+  }
+}

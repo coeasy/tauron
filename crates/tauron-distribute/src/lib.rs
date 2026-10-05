@@ -23,12 +23,21 @@ pub mod upgrade;
 pub use error::{DistributeError, DistributeResult};
 pub use installation::InstallationIdentity;
 pub use upgrade::{
-    create_default_upgrade_runner, create_upgrade_runner, Downloader, MockDownloader, MockVerifier,
-    SignatureVerifier, UpgradeOptions, UpgradeProgress, UpgradeResult, UpgradeRunner, UpgradeState,
+    create_default_upgrade_runner, create_upgrade_runner, download_bounded, verify_package,
+    ArchiveExtractor, ArchiveLimits, Downloader, ExtractedArchive, PhaseControl, RestartProvider,
+    SignatureVerifier, UpgradeHealthCheck, UpgradeJournal, UpgradeOptions, UpgradeProgress,
+    UpgradeResult, UpgradeRunner, UpgradeState, VerificationContext, ZipCrateExtractor,
 };
 
 /// 更新清单（latest.json 格式）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// 完整清单（含 `sha256` 与签名）是执行侧的硬前提：升级执行器（`upgrade`
+/// 模块）拒绝在下载 URL/版本/签名/包摘要缺失或组件未注入时产生任何文件效果。
+/// `sha256` 之外的扩展字段（`signature_algorithm` / `public_key_id` /
+/// `min_host_version` / `abi` / `rollback_policy`）会被如实传给注入的
+/// `SignatureVerifier` 并记入状态日志；执行器本身不解释宿主版本/ABI（仓内
+/// 没有判定源，装配方负责）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateManifest {
     /// 版本号。
     pub version: String,
@@ -41,6 +50,24 @@ pub struct UpdateManifest {
     /// 平台 → 平台特定信息。
     #[serde(default)]
     pub platform_notes: BTreeMap<String, String>,
+    /// 更新包 SHA-256（hex，小写；执行侧必需；接受 `packageHash` 别名）。
+    #[serde(default, alias = "packageHash")]
+    pub sha256: Option<String>,
+    /// 签名算法声明（如 `ed25519`；由注入的验证器解释）。
+    #[serde(default, alias = "signatureAlgorithm")]
+    pub signature_algorithm: Option<String>,
+    /// 验签公钥 id（由注入的验证器解释）。
+    #[serde(default, alias = "publicKeyId")]
+    pub public_key_id: Option<String>,
+    /// 最低宿主版本（记入日志供装配方核对；执行器不解释）。
+    #[serde(default, alias = "minHostVersion")]
+    pub min_host_version: Option<String>,
+    /// ABI 标识（记入日志供装配方核对；执行器不解释）。
+    #[serde(default)]
+    pub abi: Option<String>,
+    /// 回滚策略声明（记入日志；执行侧固定为「健康检查失败自动回滚」）。
+    #[serde(default, alias = "rollbackPolicy")]
+    pub rollback_policy: Option<String>,
 }
 
 /// 灰度批次。
@@ -217,6 +244,11 @@ impl CrashGate {
 }
 
 /// 更新检查响应。
+///
+/// `UpdateAvailable` 携带完整清单（含包摘要与验签/回滚元数据），因此该枚举
+/// 体积偏大——这是「检查侧」的结果枚举，调用方按变体解构消费，装箱会让公共
+/// API 模式匹配更别扭，故显式允许大变体。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateCheckResult {
     /// 有新版本。
@@ -284,7 +316,7 @@ mod tests {
             url: format!("https://example.com/{version}.zip"),
             signature: "abc123def456".into(),
             release_date: "2026-09-21T00:00:00Z".into(),
-            platform_notes: BTreeMap::new(),
+            ..UpdateManifest::default()
         }
     }
 

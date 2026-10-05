@@ -17,6 +17,7 @@ import type {
   PendingCallInfo,
   PluginDescriptor,
   RegistryAdminOp,
+  RegistryAdminOutcome,
   Subscription,
   TopicDescriptor,
 } from './events.js';
@@ -588,11 +589,23 @@ export class AdminClient {
     this.backend = options.backend;
   }
 
-  async registryAdmin(op: RegistryAdminOp): Promise<void> {
-    await this.backend.invoke('host_registry_admin', { op }).catch((err: unknown) => {
-      // R2-c：管理面同属插件 webview → 宿主的边界，走同一条显式翻译。
-      throw translate_at_boundary(err, 'plugin-webview→host').error;
-    });
+  /**
+   * 执行注册表管理操作（D15 四值）。
+   *
+   * 轮 43（A83）：返回判别形 {@link RegistryAdminOutcome}——
+   * - `kind: 'executed'`：迁移已发生（字段与既有 `TransitionOutcome` 同形，平铺在顶层）；
+   * - `kind: 'review'`：仅 `preview: true` 时出现——宿主铸发了一次性审批令牌并给出
+   *   将被破坏的事实（id/版本/状态），**未改任何状态**；经用户确认后须以
+   *   `reviewToken` 原样提交。生产档（装插件特性开启）的 uninstall/purge 强制要求
+   *   这条预览→提交链路。
+   */
+  async registryAdmin(op: RegistryAdminOp): Promise<RegistryAdminOutcome> {
+    return this.backend
+      .invoke<RegistryAdminOutcome>('host_registry_admin', { op })
+      .catch((err: unknown) => {
+        // R2-c：管理面同属插件 webview → 宿主的边界，走同一条显式翻译。
+        throw translate_at_boundary(err, 'plugin-webview→host').error;
+      });
   }
 
   /** Approve a plugin subscriber for one private EventBus topic. */

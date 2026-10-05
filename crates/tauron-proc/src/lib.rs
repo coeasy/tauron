@@ -12,8 +12,10 @@
 // 却返回 `Running`、RPC 回显模拟、全局心跳单例）全仓**零生产调用方**——真实链路
 // 走 `CommandSpawner` + `tauron-host` 的 `RuntimeTable`。孤儿模拟器已整体删除
 // （含 RpcConfig / HeartbeatTracker / ConcurrencyTracker 等仅被它使用的类型）；
-// 真实链路的**心跳监控尚未实现**（登记为 0.4-A3 的诚实边界，见
-// capability-closure-plan.md），不是"已实现但在别处"。
+// 真实链路的**周期心跳定时器不在本 crate**：`tauron-proc` 内没有任何 heartbeat 符号，
+// 续租与过期回收由 `tauron-host` 的 lease 层承担（`generation.rs` 的 `heartbeat()` +
+// 过期租约回收），重启时的存活扫描见执行台账
+// docs/architecture/v4-industrial-gap-closure-plan.md。
 //
 // 本 crate 不依赖 `tauri`：进程管理是抽象的，单元测试用 Mock。
 

@@ -69,7 +69,11 @@
 | **合计** | **61** | |
 
 > **每域的真实性口径（不美化）**：`menu` / `tray` 在 `tauri` feature 下由
-> `TauriMenuSink` / `TauriTraySink` 做**真实现**；`fs` 是 `std::fs` 真实现，但
+> `TauriMenuSink` / `TauriTraySink` 做**真实现**；点击回传走 Tauri 事件通道
+> （`AppHandle::emit` + 前端 `listen(MENU_CLICK_TOPIC)`，路由表是
+> `crate::MenuRouteTable`），**不是** `host_events_*` 总线；两条 lane 各存一份路由，
+> `host_menu_reset` 不会清掉托盘的路由（轮 37）。仓库内的接收方是
+> `examples/minimal-app` 第 9 节；`fs` 是 `std::fs` 真实现，但
 > **必须以 `AdapterConfig::with_fs_roots` 配好允许根**（空 = 该域返回
 > `UnsupportedBody`）；`updater` 接 `tauron-distribute`，需 `EndpointClient` 注入，
 > 缺省无端点故如实降级；`http` **是诚实降级**——`reqwest` 的 TLS 后端不在离线依赖
@@ -292,9 +296,13 @@ await shell.notificationsRead('notif-id');        // 缺省 = 全部已读
 > `host_notify` 写入 `tauron_notify::NotifyStore`（环形缓冲），
 > `host_notifications_list` 是它的读端——两者必须成对使用，只写不读会让未读计数只增不减
 > （`crates/tauron-adapter/src/lib.rs` 的 `cmd_notify` / `cmd_notifications_list`）。
-> **系统通知派发（`DispatchSink`）仍未接线**：`cmd_notify` 已按注入的 `notify_sink`
-> 分支调 `tauron_notify::dispatch`，但仓库内**没有任何 `DispatchSink` 实现**、也无人注入
-> → 实际仍不推 OS（R7 进行中，见 §5）。
+> **系统通知派发（`DispatchSink`）已接线到事件与 OS 两层**：`cmd_notify` 按注入的
+> `notify_sink` 分支调 `tauron_notify::dispatch`，真实装配在
+> `command_state_with_dir_and_config` 里 `notify_sink.set(TauriDispatchSink::new(app))`。
+> `send` 将通知作为 **不含正文**的信号 `emit` 到 `NOTIFICATION_TOPIC`（正文只从
+> `host_notifications_list` 按调用方身份过滤后提供），轮 36 起 `ShellController` 就是那条
+> 信号的接收方；系统通知气泡仍**降级**（`tauri-plugin-notification` 不在依赖闭包，
+> `send` 返回 `Ok(false)`）。展开说明见 §5 表格「系统通知派发」同名行。
 
 ### 2.3 会失去什么能力
 
@@ -372,10 +380,11 @@ tauri::Builder::default()
 | `tauron_adapter::tauron_generate_handler![]` / `tauron_plugin_handler![]` | `crates/tauron-adapter/src/tauri.rs`（后者为 83/85 条真身，前者是别名） |
 | `tauron_adapter::CommandState` | `crates/tauron-adapter/src/lib.rs` 的类型别名（= `PluginRuntimeState`，含注册表） |
 | `tauron_adapter::tauri::cleanup_closed_window(&state, label)` | `examples/minimal-app/src-tauri/src/main.rs` 使用 |
-| `PluginRuntimeState::with_substrate(Arc<SubstrateState>, AdapterConfig)` | `crates/tauron-adapter/src/lib.rs`（手动装配时用；测试须用 `with_spawner`） |
+| `PluginRuntimeState::with_substrate(Arc<SubstrateState>, AdapterConfig) -> Result<Self, AssemblyError>` | `crates/tauron-adapter/src/lib.rs`（手动装配时用；测试须用 `with_spawner`。**同一底座的第二次装配返回 `Err(AlreadyAssembled)`，拿不到第二个 Runtime**——轮 22 / V7-P1-01） |
 
-> **两种形态互斥**：同时用会重复 `manage::<PluginRuntimeState>` 而 panic
-> （[app-layer-wire.md §1](../architecture/app-layer-wire.md)）。
+> **两种形态互斥**：同时用会在 setup 阶段以 `AssemblyError::AlreadyManaged` 结构化失败
+> （[app-layer-wire.md §1](../architecture/app-layer-wire.md)；此前是重复
+> `manage::<PluginRuntimeState>` 的运行时 panic）。
 > `AdapterConfig` 是唯一能配 `origin_allowlist` / `main_window_labels` / `registry` /
 > `required_plugins` / `recovery_data_dir` 的入口；缺省入口等价于 `AdapterConfig::default()`。
 > ⚠️ **Production 下 `origin_allowlist` 不得为空**：空清单=origin 门未装弹，
@@ -405,6 +414,16 @@ const registry = await host.registryList();   // scoped-read：只列可见插�
 const admin = new AdminClient({ backend });   // privileged：仅主窗可用
 await admin.registryAdmin({ op: 'enable', id: 'com.example.plugin' });
 
+// 轮 43（A83）：uninstall/purge 在服务端要求「预览→确认→带令牌提交」。
+// 预览（preview: true）无副作用，返回 kind: 'review' 与一次性令牌；提交时宿主重核
+// 插件/操作/预览版本——预览后版本漂移即拒（须重新预览）。UI 层 PluginManagerStore
+// 与 ShellController 已内置这条链（含无 DOM 失败关闭）；直连 AdminClient 的接入方
+// 需自行实现：不提交令牌即自然作废，取消与失败请按接入方语义区分。
+const review = await admin.registryAdmin({ op: 'uninstall', id: 'com.example.plugin', preview: true });
+if (review.kind === 'review' && (await confirmUninstall(review))) {  // confirmUninstall：接入方自己的确认面
+  await admin.registryAdmin({ op: 'uninstall', id: 'com.example.plugin', reviewToken: review.reviewToken });
+}
+
 const shell = new ShellClient({ backend });
 // profile 是 RuntimeSpawnProfile：signature / binaryHash / abi 是**必填**验签材料
 // （宿主不会替调用方造 hash——那等于把未验证的二进制伪装成已验证）。
@@ -413,7 +432,8 @@ const health = await shell.runtimeHealth(handle.lease);                 // → {
 ```
 
 核对的 TS API（以符号名为准，行号会漂移）：`HostClient#registryList(scope?)`；
-`AdminClient({ backend })#registryAdmin(op)`（`op: RegistryAdminOp`，见
+`AdminClient({ backend })#registryAdmin(op) -> RegistryAdminOutcome`（判别联合
+`kind: 'executed' | 'review'`；破坏性操作须先后带 `preview` 与 `reviewToken`，见
 `packages/tauron-host/src/events.ts`）；
 `ShellClient#runtimeSpawn(pluginId, profile) -> RuntimeHandle{pid, lease}` /
 `#runtimeHealth(lease) -> RuntimeHealth{alive, status, pid, crashes, consecutiveFailures, reap, health}`
@@ -468,16 +488,17 @@ const health = await shell.runtimeHealth(handle.lease);                 // → {
 
 | 能力 | 现状 | 证据 |
 |---|---|---|
-| sidecar 的 stdin/stdout JSON-RPC 帧回路 | **已接线**（`Stdio::piped()` + 每条进程一个 stdout 读线程 + `ProcessFrameSinkImpl` → `Registry::settle_call`）；**但无运行期证据**：仓内无可执行 sidecar、测试不起真进程 | `crates/tauron-proc/src/spawner.rs` 的 `CommandSpawner`、`crates/tauron-adapter/src/process_delivery.rs` |
+| sidecar 的 stdin/stdout JSON-RPC 帧回路 | **已接线，轮 22 起有运行期证据**（V7-P1-05）：`Stdio::piped()` + 每条进程一个 stdout 读线程 + `ProcessFrameSinkImpl` → `Registry::settle_call`；真 sidecar 夹具 `crates/tauron-test-sidecar`（`publish = false`，永不上架）的 E2E 真起进程验证收帧 / 回帧 / 结算 / 禁用时真杀进程 | `crates/tauron-proc/src/spawner.rs` 的 `CommandSpawner`、`crates/tauron-adapter/src/process_delivery.rs`、`crates/tauron-test-sidecar/tests/sidecar_e2e.rs` |
 | 进程组 / 作业对象 / kill 树、空闲超时 kill | 前三者**已实现**（Unix/macOS 独立 process group、Windows `KILL_ON_JOB_CLOSE` Job Object、`CommandSpawner` 丢弃时逐个 tree-aware `kill`；两 provider 自报 `Partial`，无 fs/net/syscall 隔离，Production 因此拒接 `ProcSpawner`）；**空闲超时 kill 仍未实现** | `crates/tauron-proc/src/spawner.rs` 的 `UnixProcessGroupSandboxProvider` / `WindowsJobObjectSandboxProvider` / `impl Drop for CommandSpawner` |
 | 进程崩溃检测 | **轮询式**（无后台监控线程；不被调用的 `host_runtime_health` 不会发现死亡） | `crates/tauron-adapter/src/lib.rs` 的 `cmd_runtime_health` 文档注释 |
-| wasm 运行时 | **执行层未实现**；口径轮 13 更正：opt-in `runtime-wasm-broker` 已把 `tauron-wasm` 的**配置校验与崩溃预算**接进投递路径（`wasm_delivery.rs` 真跑，执行回执恒 `delivered:false` 如实标注），调用只回 `E_PLUGIN_TYPE_NO_RUNTIME`，无 extism/引擎依赖 | `crates/tauron-adapter/src/wasm_delivery.rs`；`crates/tauron-wasm/Cargo.toml` |
-| 市场监管 / 更新链 | 商城是**桩**：`host_market_check` 恒 `{available:false}`，download/install 恒 `{simulated:true}`；**更新通道已接线**（轮 13 更正）：`host_updater_check` / `host_updater_status` 真跑 `tauron_distribute::check_for_update`（灰度 4 阶段 + 签名 + 崩溃门禁），`InstallationIdentity::load_or_create` 落盘；未注入 `EndpointClient` 时 fail-closed | `crates/tauron-adapter/src/lib.rs` 的 `cmd_market_check` / `DistributeUpdaterSink` |
+| wasm 运行时 | **执行层已落地（轮 22 / V7-P0-01）**：`tauron-wasm` 依赖真引擎 `wasmi = "2.0.0"`（`src/provider.rs`），`WasmEngine::execute` 必须走「活跃代际模块 → 导出检查 → 代次键实例池 → `provider.invoke` 真执行」，模块未加载即 `ModuleNotLoaded` 硬失败，绝不伪造 `success`；**但适配层投递仍未接它**——opt-in `runtime-wasm-broker` 下的 `wasm_delivery.rs` 只做配置校验与崩溃预算，执行回执恒 `delivered:false` 如实标注，命令面对 wasm 仍回 `E_PLUGIN_TYPE_NO_RUNTIME`；host_fn ABI 目前只支持整数参数（无字符串/线性内存传递） | `crates/tauron-wasm/src/provider.rs`、`crates/tauron-adapter/src/wasm_delivery.rs`；`crates/tauron-wasm/Cargo.toml` |
+| 市场监管 / 更新链 | 商城是**桩**：`host_market_check` 恒 `{available:false}`，download/install 恒 `{simulated:true}`；**更新通道已接线**（轮 13 更正）：`host_updater_check` / `host_updater_status` 真跑 `tauron_distribute::check_for_update`（灰度 4 阶段 + 签名 + 崩溃门禁），`InstallationIdentity::load_or_create` 落盘；未注入 `EndpointClient` 时 fail-closed。**轮 29 补上缺的最后一公里**：对外 SDK 的 `AutoUpdateClient.checkUpdate()` 过去读的是那张桩表（宿主接了真端点也报"无更新"），现在改读 `host_updater_check`，`currentVersion` 由接入方在配置里声明。**轮 31 补上壳层那条腿**：`<oc-updater-dialog>` 的「检查更新」经 `ShellController` 同样读桩、且把返回值整个丢掉，现在它也打 `host_updater_check`，判定与 SDK 共用导出的 `toUpdateInfo`，结果经新 option `onUpdaterCheck` 交回接入方（`currentVersion` 同样必给，缺则一个命令都不发）。**轮 32 收口这条链的状态词表**：对话框主按钮派发什么不再由组件里的 `if/else` 字面量决定，而由 `@tauron/shell-events` 的 `UPDATER_STATUSES` + `UPDATER_PRIMARY_ACTION` 推导——`ready` 是**唯一**点亮「立即重启」（`oc-restart` → `host_window_relaunch`）的状态；此前组件的重启分支等 `'done'` 而客户端的终态叫 `'ready'`，那条腿在真装配里点不出来。**轮 33 补这条链的读侧**：`host_updater_status`（灰度百分比 / 崩溃门禁 / 宿主进程内账本）此前在 TS 侧零消费者，`available: false` 的四件事实在 UI 上都是同一句"没有更新"。现在 SDK 的 `checkUpdate()` 与壳层的检查按钮共用同一个 `enrichUpdaterInfoWithChannel`，把通道事实并进 `info.reason`，示例 `describeUpdate()` 在"没有更新"分支把它打印出来。账本另加线字段 `stateSimulated`（Rust `state_simulated`）与 `state` **成对读**：`update_state` 现有写入方是 `host_market_download` / `host_market_install` 两条桩，只看 `state` 就会把"点了一下模拟安装"说成"已安装 2.0.0"。诊断是附加读数——不改 `available`/`degraded` 判定，命令缺席 / 报错 / 答空都原样返回结论，有更新时不多打这条命令；加的是返回字段不是新命令，85 条命令面不变。 | `crates/tauron-adapter/src/lib.rs` 的 `cmd_market_check` / `cmd_updater_check` / `DistributeUpdaterSink` |
 | 品牌运行期信息 | **已接线**（轮 13 更正：此前写「恒 `{}`」——判定与形状都错）：配置 env 来源后 `cmd_brand_info` 走 `tauron-brand` 校验链返回 `BrandInfo`；未配置如实返回 `UnsupportedBody{supported:false}`；构建期品牌 CI 矩阵是另一条真实链路 | `crates/tauron-adapter/src/lib.rs` 的 `cmd_brand_info` / `load_brand_config_from_env` |
 | 权限授予 / 审批（安装路径） | **已接线**：`tauron-acl` 是 `plugin-install` 的可选依赖，`draft_grant_set` / `validate_grants` / `AclStore` 与 HMAC 封存都在真实安装链路里被调用 | `crates/tauron-adapter/Cargo.toml` 的 `plugin-install`；`crates/tauron-adapter/src/lib.rs` 的 `registry_install_preview_inner` / `registry_install_inner` |
 | 审批结果**物化为 Tauri Capability** | **未接线**：`AclStore::to_capability` 只有库内 API 与形态单测，宿主从不调 `add_capability`——运行时权限边界实际由代码层身份判定 + Tauri capability 清单（构建期静态）承担 | `crates/tauron-acl/src/grant.rs` 的 `to_capability` |
-| 双世界沙箱（QuickJS-WASM）、Shell 矩阵 | **参考实现**（模拟返回） | `packages/tauron-dual-world/src/sandbox.ts:134`、`packages/tauron-shell-matrix/src/manager.ts:71-88` |
-| 系统通知派发（`DispatchSink`） | **半接线，仍不推 OS**：`cmd_notify` 已按注入的 `notify_sink` 分支调 `tauron_notify::dispatch`，但仓库内**没有任何 `DispatchSink` 实现**、`notify_sink`（`OnceLock`）无人注入 | `crates/tauron-adapter/src/lib.rs` 的 `cmd_notify` / `notify_sink` |
+| 双世界沙箱（QuickJS-WASM）、Shell 矩阵 | **参考实现**（模拟返回） | `packages/tauron-dual-world/src/sandbox.ts:134`、`packages/tauron-shell-matrix/src/manager.ts` 的 `simulateShellStart` / `simulated` 判据字段 |
+| 系统通知派发（`DispatchSink`） | **已接线到 OS 与事件两层，OS 气泡仍降级**：`cmd_notify` 按注入的 `notify_sink` 调 `tauron_notify::dispatch`；真实 Tauri 装配里 `command_state_with_dir_and_config` 会 `notify_sink.set(TauriDispatchSink::new(app))`——**「仓库内没有任何 `DispatchSink` 实现、`notify_sink` 无人注入」这句是旧事实，本轮删除**（它一直与 `tauri.rs` 的实现和 R7-3 门禁「DispatchSink 必须有 Tauri 实现」相矛盾）。`send` 做两件真事：向 `NOTIFICATION_TOPIC` `emit` 一条**不含正文**的信号、对警示级以上调 `request_user_attention`；系统通知气泡**没有**（`tauri-plugin-notification` 不在依赖闭包），所以返回 `Ok(false)` = 降级为应用内。**轮 36 补的是接收方**：`emit` 一路 `Ok` 而全仓无人监听那个 topic，`notificationsList()` 也只有自己的单测在调——发出端绿灯、读端孤儿，通知到不了用户且不报错。现在 `ShellController` 订阅 `NOTIFICATION_TOPIC`（TS 线值常量与 Rust `pub const` 由门禁比对）→ 拉 `host_notifications_list` → 经 `onNotification` 上屏，`examples/minimal-app` 是真消费者。 | `crates/tauron-adapter/src/tauri.rs` 的 `TauriDispatchSink` / `NOTIFICATION_TOPIC` / `notification_payload`、`packages/tauron-host/src/host-topics.ts`、`packages/tauron-host/src/shell-controller.ts` 的 `_subscribeNotifications` |
+| 孤儿公共 API（整类问题的登记，不是一条能力） | **已登记 + 上门禁（轮 2）**：12 条「文档宣称未接线」的公共 API（`to_capability` / `load_unverified` / `build_approval_rows` / `resolve_best` / `FaultBoundary::run` / 配置样张三件套 / `trim_to` / `validate_group_key` / `remove_resource_bundle` / `is_downgrade`+`is_monotonic` / TS 的 `validateClientConfig` 族 / 三个 `create*Client` 工厂 + `startAutoCheck`）逐条写明 disposition，并由门禁复核：**未接线宣称必须在产品接线面查不到消费者，已接线反例必须查得到**，另加「不许新增孤儿」棘轮（当前基线 635，收口后应下调）。注意反例的价值——`draft_grant_set` / `validate_grants` / `validate_zip_constants` 看似孤儿（同名符号只在声明文件出现）其实**真在安装链路里被调用**，把「查不到=孤儿」当判据会把好链路判死 | `contracts/orphan-public-api.json`；`scripts/check-orphan-public-api.mjs`（CI 步骤 `Orphan-Public-API（V7 轮 22）`） |
 
 同一份事实的仓库自述见
 [overview.md「接线状态（诚实披露）」](../architecture/overview.md)；竞品文档的头条特性
@@ -506,6 +527,17 @@ tauri::Builder::default()
 
 - 命令数：**3 条**（`plugin_invoke` / `plugin_cancel` / `plugin_emit`），见
   [overview.md](../architecture/overview.md) 的「两层架构」表。
+- > ⚠️ **这一档今天拿不到可运行的调用**，别按「装了就通用」规划：
+  > ① 仓库内**没有任何宿主**注册这 3 条——`examples/minimal-app/src-tauri/src/main.rs`
+  > 用的是 `tauron_adapter::tauron_generate_handler![]`（应用层），`tauron_shell::…`
+  > 那条只存在于**注释**里；
+  > ② `PluginDispatcher` 的**生产实现为零**（唯一的 `impl` 是测试用的 `EchoDispatcher`），
+  > 未装载分发器时 `plugin_invoke` 一律回 `SC-9001`（`crates/tauron-shell/src/dispatch.rs`
+  > 的「装载插件分发器。未装载时 `plugin_invoke` 返回 `SC-9001`」）；
+  > ③ CI 会带 `tauri` feature 编译并测试 `tauron-shell`，但那是**库内自测**，
+  > 不构成「真实宿主装配」证据。
+  > 结论：框架层可用 = 你自己实现并装载 `PluginDispatcher`；在那之前，
+  > 三档对照表（§4）里凡涉及框架层的行都按「需自实现」读。
 - `tauron-shell` 与 `tauron-adapter` 的应用层插件名不同（`tauron-shell` vs `tauron`），
   因此**可以叠加注册**；两层的线格式由 `@tauron/contract-tests` 锁定。
 - 引用出处：`examples/minimal-app/src-tauri/src/main.rs:36-40` 的注释、

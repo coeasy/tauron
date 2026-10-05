@@ -81,12 +81,40 @@ impl TargetSpec {
     }
 }
 
-/// Pick the most-specific compatible artifact target.
-pub fn resolve_best<'a>(variants: &'a [TargetSpec], host: &TargetSpec) -> Option<&'a TargetSpec> {
+/// Pick the most-specific compatible variant, generic over any payload that can expose
+/// its [`TargetSpec`] via [`AsRef`]. On an exact specificity tie Rust `max_by_key`
+/// returns the **last** maximal element; `None` means no variant is runnable on this
+/// host and the caller must fail closed rather than use an unverified default.
+pub fn resolve_best<'a, T: AsRef<TargetSpec>>(
+    variants: &'a [T],
+    host: &TargetSpec,
+) -> Option<&'a T> {
     variants
         .iter()
-        .filter(|candidate| candidate.compatible_with(host))
-        .max_by_key(|candidate| candidate.specificity())
+        .filter(|candidate| candidate.as_ref().compatible_with(host))
+        .max_by_key(|candidate| candidate.as_ref().specificity())
+}
+
+impl AsRef<TargetSpec> for TargetSpec {
+    fn as_ref(&self) -> &TargetSpec {
+        self
+    }
+}
+
+/// Resolve which artifact variant a host may run, **before any OS loader call**.
+///
+/// Concrete entry over [`resolve_best`]: the most specific compatible variant wins;
+/// `None` means no variant is runnable here — callers must fail closed rather than fall
+/// back to an unverified default artifact.
+pub struct ArtifactVariantResolver;
+
+impl ArtifactVariantResolver {
+    pub fn resolve<'a, T: AsRef<TargetSpec>>(
+        variants: &'a [T],
+        host: &TargetSpec,
+    ) -> Option<&'a T> {
+        resolve_best(variants, host)
+    }
 }
 
 #[cfg(test)]
@@ -128,6 +156,37 @@ mod tests {
         let exact = host();
         let variants = vec![generic, exact.clone()];
         assert_eq!(resolve_best(&variants, &host()), Some(&exact));
+    }
+
+    #[test]
+    fn artifact_variant_resolver_returns_none_when_no_variant_is_runnable() {
+        let foreign = TargetSpec { os: TargetOs::Other, ..host() };
+        let variants = vec![foreign];
+        assert_eq!(ArtifactVariantResolver::resolve(&variants, &host()), None);
+    }
+
+    #[test]
+    fn artifact_variant_resolver_keeps_payload_of_the_most_specific_variant() {
+        struct Tagged {
+            target: TargetSpec,
+            tag: &'static str,
+        }
+        impl AsRef<TargetSpec> for Tagged {
+            fn as_ref(&self) -> &TargetSpec {
+                &self.target
+            }
+        }
+        let generic =
+            TargetSpec { abi: None, min_os_version: None, cpu_features: vec![], ..host() };
+        // 泛型在前、精确在后：并列时 `max_by_key` 取后者，选中必须是精确支。
+        let variants = vec![
+            Tagged { target: generic, tag: "generic" },
+            Tagged { target: host(), tag: "exact" },
+        ];
+        assert_eq!(
+            ArtifactVariantResolver::resolve(&variants, &host()).map(|v| v.tag),
+            Some("exact")
+        );
     }
 }
 

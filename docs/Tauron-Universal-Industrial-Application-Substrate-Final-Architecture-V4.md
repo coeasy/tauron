@@ -2494,7 +2494,7 @@ unsupported
 
 | 项 | 位置 | 处置 |
 | --- | --- | --- |
-| 升级**执行侧**（`UpgradeRunner` / `Downloader` / `SignatureVerifier` / `UpgradeState` 等整个 `upgrade` 模块） | `crates/tauron-distribute/src/upgrade.rs` | **留给装配方的集成点**：宿主更新链路只消费检查侧，`host_market_download/install` 是 `simulated` 的进程内状态推进。模块头已写明接入前提，不对外宣称"应用更新器现成可用" |
+| 升级**执行侧**（`UpgradeRunner` / `Downloader` / `SignatureVerifier` / `UpgradeState` 等整个 `upgrade` 模块） | `crates/tauron-distribute/src/upgrade.rs` | **轮 40 起已接仓内装配腿**：`crates/tauron-adapter` 的 `DistributeUpgradeInstaller` 是唯一消费者（seam `UpgradeInstaller` 经 `SubstrateState` 注入面），`host_market_download/install` 装配后为真、缺省仍如实 `simulated`；网络下载器 / 验签器 / 健康检查 / 重启提供者仍由装配方注入——不对外宣称"应用更新器开箱可用" |
 | `SettingsStore::{watch, drain, unwatch, subscriber_count}`、`MAX_WATCH_QUEUE_BYTES` | `crates/tauron-settings/src/store.rs` | **Rust 嵌入方扩展点**：与消息面镜像同挂一个提交口，不会分叉；线上**没有** `host_settings_watch` 这类命令（接口文档已写明，别再去找） |
 | `SettingsStore::{get_with_source, registry}`、`SchemaRegistry::render` | 同上 | 同上口径：Store 的读侧/渲染 API，供嵌入方与 schema 装配用；命令面走自己的路径 |
 | `Registry::bind_identity` / `PluginIdentity` | `crates/tauron-host/src/registry.rs:540` | **已知重复**：适配器在 `plugin-<id>` label 处自己铸身份（`lib.rs:8174` 注释即「唯一铸造点」），核心这套 `u64` token 形态与前端 uuid 期望不一致（`tauri.rs:1825` 已记录）。删除是破坏性变更，1.x 内保留但不接入，后续按新提案统一 |
@@ -2544,10 +2544,10 @@ V4 正文在若干 Gate 里写了建议码名。1.1 的实现**没有新增 `E_*
 | 项 | 判定 | 现状 | 缺口（要落必须先补的） |
 |---|---|---|---|
 | W9 RuntimeDriver | ⬜ 未落 | 三条**各自独立**的路：JS 走 webview label、进程走 `tauron_proc` + `host_runtime_*`、WASM 只有投递器（`tauron-adapter/src/wasm_delivery.rs` 真跑 `validate_plugin_config` + `WasmCrashTracker`） | 没有统一 Driver 抽象，也没有跨形态的同一份 conformance 用例集 |
-| W10 Process Runtime V2 | ⚠️ 部分 | `ProcessStatus` 三态（`Alive`/`Exited`/`Unknown`）已在 `tauron-proc`；崩溃预算、ABI 比对、租约回收（`ReapStats`）已接命令面 | 运行时握手、进程树整体回收、true sidecar E2E 未落（`E_RUNTIME_HANDSHAKE` 即其空缺） |
-| W11 Message Plane push | ⚠️ 部分 | **特定 topic 有推**：`NOTIFICATION_TOPIC`、`DEEP_LINK_TOPIC`，以及 provider 降级信令（dialog / deep-link 的 `emit`） | **事件总线本体仍是拉模型**（`host_events_drain`）；把总线改成推要解决背压与断线补投，不是加一条 `emit` |
+| W10 Process Runtime V2 | ⚠️ 部分 | `ProcessStatus` 三态（`Alive`/`Exited`/`Unknown`）已在 `tauron-proc`；崩溃预算、ABI 比对、租约回收（`ReapStats`）已接命令面；**true sidecar E2E 已落**（轮 22：`crates/tauron-test-sidecar` 真起进程，9 条用例覆盖收帧/回帧/结算/杀进程/崩溃计数/超长帧/旧代际/EOF/pending 上限） | 运行时握手未落（`E_RUNTIME_HANDSHAKE` 即其空缺）；`Drop` 兜底路径无注入式失败测试；Windows post-spawn attach race 未测 |
+| W11 Message Plane push | ⚠️ 部分 | **特定 topic 有推且逐条标了接收方**（轮 36 核对）：`NOTIFICATION_TOPIC` 有接收方——`ShellController` 通知腿订阅后拉 `host_notifications_list` 上屏，示例是真消费者；`DEEP_LINK_TOPIC`（`deep-link`）有接收方——`DeepLinkClient` 监听；dialog / deep-link 的**降级信令**（`tauron://dialog-degraded`、`tauron://deep-link-registration`）**零监听方**，它们是 best-effort 诊断，权威结论在命令返回值自身（`simulated`/`reason`/`native:false`），不冒充"前端会处理" | **事件总线本体仍是拉模型**（`host_events_drain`）；把总线改成推要解决背压与断线补投，不是加一条 `emit` |
 | W12 ResourcePolicy count + bytes | ⚠️ 部分 | 本轮 R3-5 已落**预算层**：单帧 256 KiB / 队列 2 MiB / 设置值 64 KiB / 观察队列 1 MiB / 通知 512 B + 4 KiB，超限拒绝且零副作用 | A80 的分层 `AdmissionController` 与**按 owner 公平调度**未落——今天是全局额度，饿死风险仍在 |
-| W13 WASM Runtime Pack + WIT | ⬜ 未落 | `tauron-wasm` 有实例池 / 模块缓存 / 崩溃预算 / ABI 指纹的**状态层** | 该 crate 的依赖里**没有任何 wasm 引擎**（无 wasmtime/wasmer/wasmi），因此跑不了真模块；安装路径也显式只接受 JS 插件（其余报 `E_PLUGIN_TYPE_NO_RUNTIME`）。WIT 接口层同理为空 |
+| W13 WASM Runtime Pack + WIT | ⚠️ 部分（轮 22 更正：执行层已落，接线未落） | `tauron-wasm` 有实例池 / 模块缓存 / 崩溃预算 / ABI 指纹的**状态层**，并有真 `wasmi` 2.0 provider（`src/provider.rs`）：`execute` 真编译 + 真实例化 + 按活跃代际取实例 + 真调用导出，未加载即 `ModuleNotLoaded` | **仍未落的是接线与 ABI**：适配层 wasm 投递不消费该 provider（回执恒 `delivered:false`），host_fn 只支持整数参数（无字符串/线性内存），WIT 接口层为空；安装路径仍只接受 JS 插件（其余报 `E_PLUGIN_TYPE_NO_RUNTIME`） |
 | Manifest V3 | ⬜ 未落 | 现行清单要求 `framework` range + `abi` 字段，缺失即 `E_INVALID_MANIFEST` | 全仓**没有** `manifestVersion` 字段，也就没有 V2→V3 的迁移与兼容判定 |
 | Permission Diff | ⚠️ 部分 | 扩张才重审的 diff 语义已实现（`tauron-acl` 授予 diff + TS `scopeGrew` / `requiresReapproval`） | 键粒度授权未落（审批是 **topic 粒度**，见 W7 行） |
 | Contributes 全闭环 | ✅ 已落 | `host_contributes_register` / `_list` / `_reconcile` 三条在命令面与档位表内，声明与实注册分叉报 `E_CONTRIBUTES_DRIFT`（0.4-W3） | — |

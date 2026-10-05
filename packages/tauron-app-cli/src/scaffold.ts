@@ -782,10 +782,16 @@ fn load_adapter_config() -> tauron_adapter::AdapterConfig {
                 std::env::set_var("RUST_LOG", cfg.log_level());
             }
             println!(
-                "[tauron] 已加载客户端配置 {path}（logLevel={}, 插件路径 {} 项）",
+                "[tauron] 已加载客户端配置 {path}（logLevel={}, 注册表过滤={}, 环境变量注入 {} 项）",
                 cfg.log_level(),
-                cfg.plugin_paths.as_ref().map_or(0, Vec::len),
+                cfg.plugin_filter().map(|f| f.allow.len()).unwrap_or(0),
+                cfg.env_overrides.as_ref().map_or(0, std::collections::HashMap::len),
             );
+            // 写了但当前没有宿主落点的键必须当场说出来（沉默的假配置比报错更糟）。
+            // 落点表：\`tauron_host::config::CLIENT_CONFIG_LANDING\`。
+            for (key, reason) in cfg.unwired_fields() {
+                eprintln!("[tauron] 配置项 \`{key}\` 当前不生效（无宿主落点）：{reason}");
+            }
             let adapter = tauron_adapter::AdapterConfig::from_client_config(&cfg, None);
             #[cfg(feature = "plugin-install")]
             if let Some(install) = load_plugin_install_config() {

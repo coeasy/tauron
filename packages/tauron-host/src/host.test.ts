@@ -310,6 +310,64 @@ describe('AdminClient（主窗特权，D15）', () => {
       expect(typeof v).toBe('string');
     }
   });
+
+  it('轮 43：preview / reviewToken 原样过线，返回判别形 outcome', async () => {
+    const backend = new MockBackend({
+      capabilities: ALL_CAPS,
+      cases: [
+        {
+          cmd: 'host_registry_admin',
+          args: { op: { op: 'uninstall', id: 'com.example.x', preview: true } },
+          result: {
+            kind: 'review',
+            op: 'uninstall',
+            pluginId: 'com.example.x',
+            version: '1.0.0',
+            state: 'RUNNING',
+            reviewToken: {
+              pluginId: 'com.example.x',
+              op: 'uninstall',
+              version: '1.0.0',
+              issuedAt: 1,
+              expiresAt: 9999999999,
+              nonce: 'n-1',
+            },
+          },
+        },
+      ],
+    });
+    const admin = new AdminClient({ backend });
+    const outcome = await admin.registryAdmin({
+      op: 'uninstall',
+      id: 'com.example.x',
+      preview: true,
+    });
+    expect(outcome.kind).toBe('review');
+    if (outcome.kind === 'review') {
+      expect(outcome.pluginId).toBe('com.example.x');
+      expect(outcome.reviewToken.nonce).toBe('n-1');
+    }
+    expect(backend.invocations[0]?.args).toEqual({
+      op: { op: 'uninstall', id: 'com.example.x', preview: true },
+    });
+  });
+
+  it('轮 43：reviewToken 提交原样过线', async () => {
+    const backend = new MockBackend({ capabilities: ALL_CAPS });
+    const admin = new AdminClient({ backend });
+    const reviewToken = {
+      pluginId: 'com.example.x',
+      op: 'uninstall' as const,
+      version: '1.0.0',
+      issuedAt: 1,
+      expiresAt: 9999999999,
+      nonce: 'n-2',
+    };
+    await admin.registryAdmin({ op: 'uninstall', id: 'com.example.x', reviewToken });
+    expect(backend.invocations[0]?.args).toEqual({
+      op: { op: 'uninstall', id: 'com.example.x', reviewToken },
+    });
+  });
 });
 
 describe('FrameSink', () => {

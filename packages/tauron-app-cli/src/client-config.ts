@@ -39,6 +39,56 @@ export interface ClientConfigOptions {
   outputPath?: string;
 }
 
+/**
+ * `ClientConfig` 的**全部**合法键（与 Rust `ClientConfig` 的 serde 键集合一致）。
+ *
+ * 为什么要在本包再列一遍：Rust 侧是 `deny_unknown_fields`，一个拼错的键不是
+ * "被忽略"，而是**整份配置文件加载失败**（参考宿主随即回落默认装配）。
+ * `doctor` 必须能在文件落到宿主之前就说出这一点。
+ * 基准表在 `tauron_host::config::CLIENT_CONFIG_LANDING`，一致性由
+ * `src/gates.test.ts` 机器校验（增删字段忘了同步，测试直接红）。
+ */
+export const CLIENT_CONFIG_KEYS: readonly string[] = [
+  'registry',
+  'log_level',
+  'data_dir',
+  'auto_update',
+  'update_check_interval_secs',
+  'crash_report_enabled',
+  'brand_id',
+  'env_overrides',
+  'plugin_paths',
+  'performance_monitoring',
+];
+
+/**
+ * 写了**不生效**的键（没有宿主落点，原因见 Rust 表）。
+ *
+ * 本包不复制原因文案，只复制键名集合——理由：文案的权威在
+ * `CLIENT_CONFIG_LANDING`，两处维护同一句中文注释必然漂移；CLI 只需点名
+ * "这几项当前不生效"，为什么去文档/宿主输出里看。
+ */
+export const CLIENT_CONFIG_UNWIRED_KEYS: readonly string[] = [
+  'auto_update',
+  'update_check_interval_secs',
+  'crash_report_enabled',
+  'brand_id',
+  'plugin_paths',
+  'performance_monitoring',
+];
+
+/** 配置文件里出现但 `ClientConfig` 没有的键（Rust 侧会因此整份拒绝加载）。 */
+export function unknownClientConfigKeys(config: ClientConfig): string[] {
+  const known = new Set(CLIENT_CONFIG_KEYS);
+  return Object.keys(config).filter((key) => !known.has(key));
+}
+
+/** 配置里**实际写了**的无落点键。 */
+export function unwiredClientConfigKeys(config: ClientConfig): string[] {
+  const written = config as Readonly<Record<string, unknown>>;
+  return CLIENT_CONFIG_UNWIRED_KEYS.filter((key) => written[key] !== undefined);
+}
+
 /** 配置生成结果。 */
 export interface ClientConfigResult {
   /** 生成的 JSON 配置内容。 */
@@ -49,6 +99,13 @@ export interface ClientConfigResult {
   written: boolean;
   /** 校验错误列表（空 = 通过）。 */
   errors: string[];
+  /**
+   * 本次生成里**没有宿主落点**的键（写了不生效）。
+   *
+   * 不影响 `errors`：这些键合法，只是当前不驱动任何行为。生成器不许一边写键一边
+   * 假装它生效——列出来交给调用方打印（`cli.ts` 的 `client config` 就这么做）。
+   */
+  unwired: string[];
 }
 
 /**
@@ -62,7 +119,13 @@ export function generateClientConfig(options: ClientConfigOptions): ClientConfig
   const content = JSON.stringify(config, null, 2);
   const outputPath = options.outputPath ?? 'client-config.json';
 
-  return { content, outputPath, written: false, errors };
+  return {
+    content,
+    outputPath,
+    written: false,
+    errors,
+    unwired: unwiredClientConfigKeys(config),
+  };
 }
 
 /** 构建配置对象（根据选项）。 */
@@ -126,22 +189,22 @@ function validateConfig(config: ClientConfig): string[] {
     errors.push(`log_level "${config.log_level}" 非法`);
   }
 
-  if (config.update_check_interval_secs !== undefined && config.update_check_interval_secs === 0) {
+  if (config.update_check_interval_secs !== undefined && config.update_check_interval_secs <= 0) {
     errors.push('update_check_interval_secs 必须大于 0');
   }
 
   if (config.registry) {
     const r = config.registry;
-    if (r.max_plugins !== undefined && r.max_plugins === 0) {
+    if (r.max_plugins !== undefined && r.max_plugins <= 0) {
       errors.push('registry.max_plugins 必须大于 0');
     }
-    if (r.max_active_identities !== undefined && r.max_active_identities === 0) {
+    if (r.max_active_identities !== undefined && r.max_active_identities <= 0) {
       errors.push('registry.max_active_identities 必须大于 0');
     }
-    if (r.max_pending_calls !== undefined && r.max_pending_calls === 0) {
+    if (r.max_pending_calls !== undefined && r.max_pending_calls <= 0) {
       errors.push('registry.max_pending_calls 必须大于 0');
     }
-    if (r.pending_ttl_secs !== undefined && r.pending_ttl_secs === 0) {
+    if (r.pending_ttl_secs !== undefined && r.pending_ttl_secs <= 0) {
       errors.push('registry.pending_ttl_secs 必须大于 0');
     }
     if (r.plugin_filter?.allow && r.plugin_filter?.deny) {

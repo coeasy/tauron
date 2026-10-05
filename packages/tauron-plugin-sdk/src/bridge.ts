@@ -17,10 +17,13 @@ import {
   buildEventMessage,
   buildCancelMessage,
   isPluginToHost,
+  PluginErrorCode,
   type BridgeToPluginMessage,
   type PluginToBridgeMessage,
   type BridgeMessage,
 } from '@tauron/types';
+
+import { codeFromThrown, isAppRetryable } from './errors.js';
 
 // 禁用通知的保留事件名（与插件侧 `registerPlugin` 的 `onDisable` 接线共用同一常量，
 // 避免两侧各写一份字面量后悄悄漂移）。
@@ -179,7 +182,11 @@ export class PluginBridge {
     if (requiredPerm && !this.permissions.includes(requiredPerm)) {
       this.sendResult(callId, {
         ok: false,
-        error: { code: 'SC-1002', message: `Permission denied: ${requiredPerm}`, retryable: false },
+        error: {
+          code: PluginErrorCode.PLUGIN_PERMISSION_DENIED,
+          message: `Permission denied: ${requiredPerm}`,
+          retryable: false,
+        },
       });
       return;
     }
@@ -194,12 +201,18 @@ export class PluginBridge {
       this.sendResult(callId, { ok: true, result });
     } catch (err) {
       if (inflight.cancelled) return;
+      // 轮 35：码原样过桥。宿主能力 handler 抛出的多是 `HostException`（带 `E_*`），
+      // 插件作者自己抛的是 `SC-####`——两者都代表"哪一种失败"，塌成 SC-9001 就等于
+      // 把宿主按事实分码的工作在读侧整条抹掉（插件只剩一句 Internal error）。
+      const preserved = codeFromThrown(err);
+      const code = preserved ?? PluginErrorCode.INTERNAL;
       this.sendResult(callId, {
         ok: false,
         error: {
-          code: 'SC-9001',
+          code,
           message: err instanceof Error ? err.message : String(err),
-          retryable: false,
+          // 宿主 `E_*` 的重试语义属于宿主词表，本包不复制那份表，故不下判断。
+          retryable: isAppRetryable(code),
         },
       });
     } finally {

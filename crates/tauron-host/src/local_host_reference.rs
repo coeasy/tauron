@@ -58,6 +58,7 @@ mod unix {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::Path;
+    use std::time::{Duration, Instant};
 
     use crate::{
         peer_proof, LocalHostBroker, LocalHostBrokerError, PeerChallenge, PeerCredentialEvidence,
@@ -99,6 +100,47 @@ mod unix {
         let mut bytes = vec![0u8; len];
         stream.read_exact(&mut bytes)?;
         Ok(bytes)
+    }
+
+    /// 一次参考交换的总上界（轮 2）。取值余量：`client_roundtrip` 在同机毫秒级完成，
+    /// 20s 只用来兜住"peer 连上后不说话"这类永远等不到结局的情况。
+    pub const REFERENCE_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
+
+    /// 带截止时刻的 `accept`。
+    ///
+    /// 用 `fcntl` 临时把监听 fd 置为 `O_NONBLOCK` 再轮询，而不是依赖
+    /// `UnixListener::try_accept`（不同 std 版本的可用性不一致）；结束时**恢复原
+    /// flags**——listener 属于调用方，不能被悄悄改成一个非阻塞监听口。
+    /// `sleep` 只是轮询节奏，不是正确性证据。
+    fn accept_with_deadline(
+        listener: &UnixListener,
+        deadline: Instant,
+    ) -> Result<(UnixStream, std::os::unix::net::SocketAddr), LocalHostReferenceError> {
+        let fd = listener.as_raw_fd();
+        let previous = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if previous < 0 {
+            return Err(LocalHostReferenceError::Io(std::io::Error::last_os_error()));
+        }
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, previous | libc::O_NONBLOCK) } < 0 {
+            return Err(LocalHostReferenceError::Io(std::io::Error::last_os_error()));
+        }
+        let outcome = loop {
+            match listener.accept() {
+                Ok(accepted) => break Ok(accepted),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        break Err(LocalHostReferenceError::Protocol(format!(
+                            "no peer connected within {REFERENCE_EXCHANGE_TIMEOUT:?}"
+                        )));
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => break Err(LocalHostReferenceError::Io(error)),
+            }
+        };
+        // 无论成没成都把 flags 交还给调用方。
+        let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, previous) };
+        outcome
     }
 
     /// Bind a protected Linux/macOS UDS endpoint.
@@ -206,11 +248,20 @@ mod unix {
     }
 
     /// Serve one authenticated request/response exchange on an already protected listener.
+    ///
+    /// **每一跳都有上界**（轮 2）：本函数被测试用「另起线程 + 等它的结局」驱动，
+    /// 而 std 的 `accept` / `read_exact` 默认**没有超时**——一个连上却一句话都不说的
+    /// peer 能把宿主线程（和跟着 `join` 的 CI）永久冻在这里。`REFERENCE_EXCHANGE_TIMEOUT`
+    /// 给整次交换一个截止时刻：accept 轮询到时刻即报错，之后的每次读写都套剩余时间。
     pub fn serve_one(
         listener: &UnixListener,
         broker: &mut LocalHostBroker,
     ) -> Result<(), LocalHostReferenceError> {
-        let (mut stream, _) = listener.accept()?;
+        let deadline = Instant::now() + REFERENCE_EXCHANGE_TIMEOUT;
+        let (mut stream, _) = accept_with_deadline(listener, deadline)?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        stream.set_read_timeout(Some(remaining))?;
+        stream.set_write_timeout(Some(remaining))?;
         let evidence = peer_evidence(&stream)?;
         let challenge = broker.challenge(&evidence)?;
         let challenge_json = serde_json::to_vec(&challenge)
@@ -275,7 +326,40 @@ mod unix {
     mod tests {
         use super::*;
         use crate::{decode_wire_json, encode_wire_json, WireFrame};
+        use std::sync::mpsc;
         use std::thread;
+
+        /// 服务端线程结局的等待上界：比 `serve_one` 自己的交换上界再宽一档，
+        /// 让"超时"只可能来自测试挂死，而不是正常慢。
+        const SERVE_BOUND: Duration = Duration::from_secs(30);
+
+        /// **有界**地跑服务端（轮 2）。
+        ///
+        /// 原先的写法是 `thread::spawn(...).join()`：`join` 只能无限等，一个连上却
+        /// 不说话的 peer（或任何一处漏了上界的阻塞）会把 CI 永久冻住。改成
+        /// channel + `recv_timeout`——超时就**报错**，卡住的线程留给进程退出收尸。
+        fn serve_in_thread<F>(f: F) -> mpsc::Receiver<Result<(), LocalHostReferenceError>>
+        where
+            F: FnOnce() -> Result<(), LocalHostReferenceError> + Send + 'static,
+        {
+            let (tx, rx) = mpsc::channel();
+            thread::spawn(move || {
+                let _ = tx.send(f());
+            });
+            rx
+        }
+
+        fn await_serve(
+            rx: mpsc::Receiver<Result<(), LocalHostReferenceError>>,
+            what: &str,
+        ) -> Result<(), LocalHostReferenceError> {
+            rx.recv_timeout(SERVE_BOUND).unwrap_or_else(|error| {
+                panic!(
+                    "`{what}` 在 {SERVE_BOUND:?} 内没给出结局：{error:?}——要么服务端卡住（上界漏了），\
+                     要么线程 panic 后结局被吞掉"
+                )
+            })
+        }
 
         #[test]
         fn real_uds_peer_auth_and_wire_round_trip() {
@@ -287,7 +371,7 @@ mod unix {
 
             let secret = b"local-reference-secret".to_vec();
             let server_secret = secret.clone();
-            let server = thread::spawn(move || {
+            let server = serve_in_thread(move || {
                 let mut broker = LocalHostBroker::new(server_secret);
                 broker.acquire("reference-host", "unix-uds").unwrap();
                 serve_one(&listener, &mut broker)
@@ -303,7 +387,7 @@ mod unix {
                 decode_wire_json(&response, DEFAULT_MAX_WIRE_BYTES).unwrap();
             assert_eq!(frame.header.schema, "reference.ping/1");
             assert_eq!(frame.payload["ping"], "pong");
-            server.join().unwrap().unwrap();
+            await_serve(server, "真 peer 认证 + Wire 往返").unwrap();
         }
 
         #[test]
@@ -311,7 +395,7 @@ mod unix {
             let dir = tempfile::tempdir().unwrap();
             let socket = dir.path().join("tauron.sock");
             let listener = bind_endpoint(&socket).unwrap();
-            let server = thread::spawn(move || {
+            let server = serve_in_thread(move || {
                 let mut broker = LocalHostBroker::new(b"correct-secret");
                 broker.acquire("reference-host", "unix-uds").unwrap();
                 serve_one(&listener, &mut broker)
@@ -320,7 +404,7 @@ mod unix {
             let request = br#"{}"#;
             assert!(client_roundtrip(&socket, b"wrong-secret", request).is_err());
             assert!(matches!(
-                server.join().unwrap(),
+                await_serve(server, "错误密钥应被拒"),
                 Err(LocalHostReferenceError::Broker(LocalHostBrokerError::InvalidProof))
             ));
         }
@@ -645,6 +729,15 @@ mod windows {
         })
     }
 
+    /// Serve one authenticated request/response exchange on an already protected pipe.
+    ///
+    /// **与 Unix 侧的差别（轮 2 如实记录，不假装已解决）**：这里的
+    /// `ConnectNamedPipe(…, null)` 与后续 `ReadFile(…, null)` 都传空 OVERLAPPED，
+    /// 即**同步等待、无超时**——命名管道没有"读超时"这类开关，要给它加上界必须把
+    /// 整条句柄改成 overlapped（每次读写配一个事件再 `WaitForSingleObject`）。
+    /// 参考实现刻意不带那套机器：它是给三方对照用的最小正确路径，不是宿主运行期组件。
+    /// 因此调用方**必须**在专用线程上跑它，并像本文件 UDS 测试那样用 `recv_timeout`
+    /// 等它的结局，而不是无限 `join`。
     pub fn serve_one(
         listener: &WindowsPipeListener,
         broker: &mut LocalHostBroker,

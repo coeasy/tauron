@@ -12,6 +12,13 @@ tauron 壳层事件契约：`oc-*` 事件名常量与 detail 类型。**零依�
   `oc-updater-install`；
 - 反过来 `oc-updater-check` 曾是**零派发的孤儿监听**（更新对话框根本没有
   「检查更新」按钮）。
+- 同一类漂移也发生在**状态词表**上（轮 32）：写侧 `AutoUpdateClient` 的安装成功终态
+  叫 `ready`，读侧 `<oc-updater-dialog>` 的重启分支却等 `done`，而全仓没有任何生产者
+  产出 `done`——「立即重启」在真装配里永远点不出来，`ready` 反倒落进兜底分支显示
+  「开始更新」（点一下把下载+安装重跑一遍）。于是本包除事件名外还立了
+  `UPDATER_STATUSES` 与 `UPDATER_PRIMARY_ACTION`：**状态取值与「状态 → 主按钮动作」
+  映射同为唯一事实源**，写侧 `UpdateStatus` 是它的类型别名，读侧组件的 `status`
+  是它的类型。
 
 本包把事件名与 detail 类型收敛为**唯一事实源**：派发方与监听方都从这里 import，
 改名/新增在编译期或门禁期暴露，而不是运行时静默断裂。
@@ -43,6 +50,9 @@ el.addEventListener(SHELL_EVENTS.pluginToggle, (e) => { /* ... */ });
 | `ShellEventName` | 事件名联合类型 |
 | `TrayItemEventDetail` / `CommandSelectEventDetail` / `ShortcutChangeEventDetail` / `PluginToggleEventDetail` / `ThemeChangeEventDetail` / `ToastActionEventDetail` | 各事件 detail 类型 |
 | `DetailLessShellEvent` | 无 detail 的事件名联合（标题栏三键、检查/开始更新、重启） |
+| `UPDATER_STATUSES` | 更新流程状态词表（8 个取值，唯一事实源；不含从未被产出的 `done`/`updating`） |
+| `UpdaterStatus` | 上述词表的联合类型；`@tauron/host` 的 `UpdateStatus` 是它的别名 |
+| `UPDATER_PRIMARY_ACTION` | `Record<UpdaterStatus, 事件名>`：更新对话框主按钮派发什么（**只有 `ready` → `oc-restart`**） |
 
 ## 约束
 
@@ -50,4 +60,5 @@ el.addEventListener(SHELL_EVENTS.pluginToggle, (e) => { /* ... */ });
 - 事件名一律 `oc-` 前缀、全小写连字符；自定义事件以
   `bubbles: true, composed: true` 派发（跨 Shadow DOM 边界可达）。
 - `packages/tauron-contract-tests` 的 wire-gate 锁死了「组件不得写字面量
-  `oc-*` 名」「控制器监听方不得多于派发方」两条不变量。
+  `oc-*` 名」「控制器监听方不得多于派发方」「更新状态词表只有一个事实源且
+  `ready` 是唯一能点亮重启按钮的状态」三条不变量。

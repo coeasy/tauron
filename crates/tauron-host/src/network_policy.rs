@@ -252,6 +252,19 @@ pub struct AuthorizedUrl {
     pub origin: String,
 }
 
+/// Resolve a `Location` header value against the current hop URL (RFC 3986).
+///
+/// Single source for the host-side redirect flow (A96 轮 48): the flow resolves
+/// relative references here, then [`NetworkPolicy::authorize_redirect`] authorizes
+/// the absolute result before the next hop is sent.
+pub fn resolve_redirect_location(base: &str, location: &str) -> Result<String, NetworkPolicyError> {
+    let base =
+        Url::parse(base).map_err(|error| NetworkPolicyError::InvalidUrl(error.to_string()))?;
+    base.join(location)
+        .map(|url| url.to_string())
+        .map_err(|error| NetworkPolicyError::InvalidUrl(error.to_string()))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedirectAuthorization {
     pub target: AuthorizedUrl,

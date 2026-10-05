@@ -230,7 +230,7 @@ pub struct HostSubscription {
     pub selectors: Vec<HostEventSelector>,
 }
 
-/// `host_registry_admin` 的 `op` 载荷（D15：操作 + 目标插件 id）。
+/// `host_registry_admin` 的 `op` 载荷（D15：操作 + 目标插件 id；轮 43 增审批令牌两字段）。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostAdminOp {
@@ -238,6 +238,13 @@ pub struct HostAdminOp {
     pub op: RegistryAdminOp,
     /// 目标插件 id。
     pub id: String,
+    /// A83（轮 43）：`true` = 只预览（铸发一次性令牌，不改任何状态）；仅
+    /// uninstall/purge 有效，与 `reviewToken` 互斥。
+    #[serde(default)]
+    pub preview: Option<bool>,
+    /// A83（轮 43）：预览返回的一次性令牌，commit 时原样带回；仅 uninstall/purge 消费。
+    #[serde(default)]
+    pub review_token: Option<crate::AdminReviewToken>,
 }
 
 /// 对话框文件过滤器（与 TS `FileFilter` 同形）。
@@ -591,14 +598,24 @@ pub fn wire_registry_list(
 /// `host_registry_admin` 线格式 → 核心。
 ///
 /// R7 收口：多了主体判定（[`crate::require_main_window`]，落点在
-/// [`crate::cmd_registry_admin_as`]），故必须由调用方把**解析好的主体**传进来——
-/// 本层拿不到 `WebviewWindow`，也就无从"忘了判"。
+/// [`crate::cmd_registry_admin_reviewed_as`]），故必须由调用方把**解析好的主体**
+/// 传进来——本层拿不到 `WebviewWindow`，也就无从"忘了判"。
+///
+/// 轮 43（A83）：转调带审批令牌的入口；返回判别形（`kind: executed | review`）——
+/// executed 变体的 `TransitionOutcome` 字段平铺在顶层，老读法不变。
 pub fn wire_registry_admin(
     caller: &crate::Caller,
     state: &CommandState,
     op: &HostAdminOp,
-) -> HostResult<TransitionOutcome> {
-    crate::cmd_registry_admin_as(caller, state, &op.id, op.op)
+) -> HostResult<crate::RegistryAdminResponse> {
+    crate::cmd_registry_admin_reviewed_as(
+        caller,
+        state,
+        &op.id,
+        op.op,
+        op.preview.unwrap_or(false),
+        op.review_token.as_ref(),
+    )
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -994,15 +1011,19 @@ pub fn host_registry_list_all(
     crate::cmd_registry_list_all_as(&caller, &state).map_err(to_tauri_err)
 }
 
-/// `host_registry_admin`：启用/禁用/卸载/清除（仅主窗；线格式 `{ op: { op, id } }`）。
+/// `host_registry_admin`：启用/禁用/卸载/清除（仅主窗；线格式 `{ op: { op, id, preview?, reviewToken? } }`）。
 ///
 /// **代码层判定**：同上，拒绝路径不产生任何注册表副作用。
+///
+/// 轮 43（A83）：返回 `RegistryAdminResponse` 判别形——既有 `TransitionOutcome`
+/// 字段在 executed 分支仍在顶层（多一个 `kind` 字段）；`preview: true` 时返回
+/// `kind: "review"` + 一次性令牌，不改任何状态。
 #[tauri::command]
 pub fn host_registry_admin(
     state: State<'_, PluginRuntimeState>,
     window: TauriCallerSource,
     op: HostAdminOp,
-) -> Result<TransitionOutcome, TauriError> {
+) -> Result<crate::RegistryAdminResponse, TauriError> {
     let caller = window.caller().map_err(to_tauri_err)?;
     wire_registry_admin(&caller, &state, &op).map_err(to_tauri_err)
 }
@@ -1245,9 +1266,10 @@ pub const NOTIFICATION_TOPIC: &str = "tauron://notification";
 /// # 它到底做了什么（逐条如实，不美化）
 ///
 /// 1. **真实投递**：把通知作为 Tauri 事件 [`NOTIFICATION_TOPIC`] `emit` 给前端
-///    （前端据此刷新通知中心）。这一步每次都会执行；**事件只带信号与归属，
-///    不带正文**（`emit` = 广播给所有 webview，正文见 [`notification_payload`]
-///    的文档），正文由 `host_notifications_list` 按身份过滤后提供；
+///    （轮 36 起前端确实有接收方：`@tauron/host` 的 `ShellController` 通知腿订阅
+///    同一 topic，收到信号后拉 `host_notifications_list` 再上屏）。这一步每次都会
+///    执行；**事件只带信号与归属，不带正文**（`emit` = 广播给所有 webview，正文见
+///    [`notification_payload`] 的文档），正文由 `host_notifications_list` 按身份过滤后提供；
 /// 2. **真实 OS 信号**：对第一个 webview 窗口调 `request_user_attention`，
 ///    让 OS 层闪烁任务栏 / 跳动程序坞。只有 `Warning` / `Error` 才请求——
 ///    每条 Info 都闪一次任务栏是骚扰用户，不是通知；
@@ -1454,7 +1476,9 @@ pub fn host_market_check(
     state: State<'_, SubstrateState>,
     window: TauriCallerSource,
     // 与 host_market_download 保持同一线格式：更新源配置由前端持有并逐次下发。
-    // 当前 check 为本地桩实现，源参数暂不使用（接入 tauri-plugin-updater 后生效）。
+    // ⚠️ 这两个参数**按设计永远不用**（轮 29 定口径，不是"待接入"）：端点的权威来源是
+    // 宿主装配注入的 `EndpointClient`，让 webview 指定宿主去哪取更新清单等于把宿主的
+    // 更新通道交给调用方。真检查在 host_updater_check，见 [`crate::cmd_market_check`]。
     #[allow(unused_variables)] endpoints: Option<Vec<String>>,
     #[allow(unused_variables)] pubkey: Option<String>,
 ) -> Result<crate::MarketCheckResult, TauriError> {
@@ -2000,7 +2024,11 @@ pub const DIALOG_DEGRADED_REASON: &str =
 ///    又禁止新增依赖 → 这里**没有任何可调用的原生对话框 API**；
 /// 2. **真实做的事**：向前端 `emit` 一条降级信令 [`DIALOG_DEGRADED_TOPIC`]，载荷
 ///    `{ op, degraded: true, nativeDialog: false, fallback, reason }`——它是**信令**，
-///    作用是让前端知道"该用 web 文件选择器 / 自备确认 UI 了"，**不是**对话框本身；
+///    设计意图是"让愿意处理的前端知道自己该改用 web 文件选择器了"，**不是**对话框本身。
+///    如实记一笔（轮 36 核对）：**仓库内没有任何代码监听这个 topic**，权威结论也从来
+///    不在信令里——它在第 3 条的返回值与命令结果的 `simulated`/`reason` 字段上。
+///    接了原生对话框或想做提示的接入方需要自己 `listen(DIALOG_DEGRADED_TOPIC)`；
+///    不接不会有任何报错，也不会改变本命令的结果。
 /// 3. **返回值**与 R8 之前的桩逐字一致（行为不退化）：
 ///    `open_file` / `save_file` → `Ok(None)`（取消）、`confirm` → `Ok(false)`、
 ///    `message` → `Ok(())`。
@@ -2133,8 +2161,25 @@ impl crate::DeepLinkSink for TauriDeepLinkSink {
 // **不注入 = `lib.rs` 的进程内降级实现**（[`crate::MemoryMenuSink`] /
 // [`crate::MemoryTraySink`]：只留痕，不建菜单/托盘）。
 //
-// 菜单点击**不新造传输**：`MenuItemSpec.event` 指定的 topic 经 `AppHandle::emit`
-// 发出（与 `TauriDialogSink` 的信令走同一条通路），前端按既有 Tauri 事件监听消费。
+// 菜单点击**不新造传输**，但也不是 `host_events_*` 总线：`MenuItemSpec.event` 指定的
+// topic 由 [`crate::MenuRouteTable`] 解析（应用菜单与托盘菜单**分道**共用一张表），
+// 命中后经 `AppHandle::emit` 发出，前端用 Tauri 的 `listen` 收；线形是
+// `@tauron/host` 的 `MenuClickFrame`。Tauri 的菜单事件监听表是**全局**的
+// （`manager.menu.global_event_listeners`：`TrayIcon::register` 与
+// `AppHandle::on_menu_event` 往同一个 vec 里 push，事件循环也只遍历它一次），
+// 托盘点击同样进它——所以本模块只注册**一个**监听，用表里的 lane 决定 `source`
+// 是 `menu` 还是 `tray`，不重复 emit、也不给托盘另造一条腿。
+//
+// **哪些 `emit` 真的有人在听**（轮 36 逐条核对，别再拿"发出 = 送达"当证据）：
+// - 菜单/托盘点击：`examples/minimal-app` 的菜单腿 `listen(MENU_CLICK_TOPIC)`，
+//   按载荷 `source` 把点击上屏 —— **有监听方**（轮 37 补上的；此前它写着"有监听方"
+//   而实际上仓库内没有任何 `listen`）。
+// - [`NOTIFICATION_TOPIC`]：`@tauron/host` 的 `ShellController` 通知腿订阅它，
+//   收到信号后拉 `host_notifications_list` 上屏 —— **有监听方**（轮 36 补上的）。
+// - [`DIALOG_DEGRADED_TOPIC`] / [`DEEP_LINK_NATIVE_TOPIC`]：**仓库内零监听方**，
+//   它们是 best-effort 诊断，权威结论在命令返回值自身（`simulated` / `reason` /
+//   `native: false`）。信令发不出去也不改变任何语义，所以这里**不**为它们造接收方，
+//   也不得把"emit 成功"写进任何"前端会如何处理"的叙述里。
 //
 // 本模块要求 `tauri` 依赖启用 `tray-icon` feature（见 `Cargo.toml`）；本轮只在
 // **Windows** 验证编译，Linux 还需额外系统依赖（未在本机验证）。
@@ -2169,43 +2214,49 @@ fn build_tauri_menu(
 /// - `set_menu` / `reset`：真的调用 `AppHandle::set_menu` / `remove_menu`；
 /// - `popup`：`MenuSpec` 不带窗口句柄，取主窗（label `"main"`）为上下文目标；
 ///   没有主窗时如实返回 `Ok(false)`（**不假装**弹出）；
-/// - 菜单点击：`on_menu_event` → 查 `id → topic` 路由 → `emit(topic, ...)`。
+/// - 菜单点击：`on_menu_event` → 查 [`crate::menu_routes`] 的 `AppMenu` lane →
+///   `emit(topic, { id, source: "menu", native: true })`。
+///
+/// 路由表是**两条 lane 共享**的一张全局表，不是本 sink 的私有字段：Tauri 只有一个
+/// 全局菜单监听，托盘点击也进它，因此托盘那条 lane 必须能被同一个监听查到。
 pub struct TauriMenuSink {
     app: tauri::AppHandle<tauri::Wry>,
-    /// 菜单项 id → 事件 topic（`set_menu`/`popup` 时按规格重建）。
-    routes: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl TauriMenuSink {
     /// 绑定宿主 `AppHandle` 并注册**一次**全局菜单事件监听。
     pub fn new(app: tauri::AppHandle<tauri::Wry>) -> Self {
-        let routes: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
-        let routes_for_handler = Arc::clone(&routes);
-        // 全局监听只注册一次（本 sink 唯一）；载荷带 `native: true` 表明是真实点击。
+        // 全局监听只注册一次（本 sink 唯一）；它同时服务应用菜单与托盘菜单——
+        // 载荷的 `source` 来自命中 lane，`native: true` 表明是真实点击。
         app.on_menu_event(move |app, event| {
             let id = event.id().0.clone();
-            let topic = routes_for_handler.lock().get(&id).cloned();
-            if let Some(topic) = topic {
+            let hit = crate::menu_routes().lookup(&id);
+            if let Some((lane, topic)) = hit {
                 // best-effort：点击回传失败不升级为错误（它不改变菜单的状态语义）。
                 let _ = app.emit(
                     &topic,
-                    serde_json::json!({ "id": id, "source": "menu", "native": true }),
+                    serde_json::json!({
+                        "id": id,
+                        "source": lane.as_str(),
+                        "native": true,
+                    }),
                 );
             }
         });
-        Self { app, routes }
+        Self { app }
     }
 
-    /// 构建菜单并登记 `id → topic` 路由。
-    fn build_and_route(&self, spec: &crate::MenuSpec) -> HostResult<tauri::menu::Menu<tauri::Wry>> {
+    /// 构建菜单并把该 lane 的 `id → topic` **整体替换**进共享路由表。
+    ///
+    /// 失败时**不**登记：菜单没建成，路由却生效的话，前端会收到一次"点击了不存在
+    /// 的菜单项"的回传——那比静默更难解释。
+    fn build_and_route(
+        &self,
+        spec: &crate::MenuSpec,
+        lane: crate::MenuLane,
+    ) -> HostResult<tauri::menu::Menu<tauri::Wry>> {
         let menu = build_tauri_menu(&self.app, spec)?;
-        let mut routes = self.routes.lock();
-        routes.clear();
-        for item in &spec.items {
-            if let Some(topic) = &item.event {
-                routes.insert(item.id.clone(), topic.clone());
-            }
-        }
+        crate::menu_routes().replace(lane, crate::menu_routes_of(spec));
         Ok(menu)
     }
 }
@@ -2216,13 +2267,13 @@ impl crate::MenuSink for TauriMenuSink {
     }
 
     fn set_menu(&self, spec: &crate::MenuSpec) -> HostResult<bool> {
-        let menu = self.build_and_route(spec)?;
+        let menu = self.build_and_route(spec, crate::MenuLane::AppMenu)?;
         self.app.set_menu(menu).map_err(menu_build_err)?;
         Ok(true)
     }
 
     fn popup(&self, spec: &crate::MenuSpec) -> HostResult<bool> {
-        let menu = self.build_and_route(spec)?;
+        let menu = self.build_and_route(spec, crate::MenuLane::AppMenu)?;
         match self.app.get_webview_window("main") {
             Some(window) => {
                 window.popup_menu(&menu).map_err(menu_build_err)?;
@@ -2235,7 +2286,8 @@ impl crate::MenuSink for TauriMenuSink {
 
     fn reset(&self) -> HostResult<bool> {
         let removed = self.app.remove_menu().map_err(menu_build_err)?;
-        self.routes.lock().clear();
+        // 只撤应用菜单那条 lane：托盘菜单的路由与它无关（共享表按 lane 替换）。
+        crate::menu_routes().replace(crate::MenuLane::AppMenu, HashMap::new());
         Ok(removed.is_some())
     }
 }
@@ -2245,6 +2297,11 @@ impl crate::MenuSink for TauriMenuSink {
 /// `TrayIcon` 是引用计数类型，最后一个实例 drop 即从系统托盘消失，故本 sink
 /// **持有**当前图标（[`Self::current`]）。图标资产用宿主窗口图标
 /// （`default_window_icon`）——本仓无 `image` 依赖，不造假图标。
+///
+/// 托盘右键菜单的点击**与共用同一条全局监听**（见本模块头部注释）：本 sink 只负责把
+/// `MenuLane::TrayMenu` 那条 lane 的路由登记进 [`crate::menu_routes`]，emit 由
+/// `TauriMenuSink::new` 注册的那个监听完成。所以两条 lane **各自**替换/清空——
+/// `host_menu_reset` 不该让托盘菜单失去回传，`host_tray_remove` 也不该。
 pub struct TauriTraySink {
     app: tauri::AppHandle<tauri::Wry>,
     current: Mutex<Option<tauri::tray::TrayIcon<tauri::Wry>>>,
@@ -2282,6 +2339,12 @@ impl crate::TraySink for TauriTraySink {
         })?;
         // 覆盖旧图标：旧实例 drop 即从系统托盘消失。
         *self.current.lock() = Some(tray);
+        // 托盘**真的建出来**之后才登记路由：失败的 create 不留下一条能回传的路由。
+        // 没有菜单的托盘登记空表——它会连同上一次的路由一起失效（托盘只有一个）。
+        crate::menu_routes().replace(
+            crate::MenuLane::TrayMenu,
+            spec.menu.as_ref().map(crate::menu_routes_of).unwrap_or_default(),
+        );
         Ok(true)
     }
 
@@ -2293,6 +2356,9 @@ impl crate::TraySink for TauriTraySink {
                 tray.set_menu(Some(menu)).map_err(|e| {
                     HostError::new(ErrorCode::E_INVALID_MANIFEST, format!("托盘菜单设置失败：{e}"))
                 })?;
+                // 同上：真的挂上去了才替换 lane（整体替换，旧 id 随之失效）。
+                crate::menu_routes()
+                    .replace(crate::MenuLane::TrayMenu, crate::menu_routes_of(spec));
                 Ok(true)
             }
             // 还没有托盘：如实返回"未应用"（调用方应先 create）。
@@ -2302,7 +2368,13 @@ impl crate::TraySink for TauriTraySink {
 
     fn remove(&self) -> HostResult<bool> {
         let mut slot = self.current.lock();
-        Ok(slot.take().is_some())
+        let removed = slot.take().is_some();
+        if removed {
+            // 托盘没了，它的点击路由也必须一起消失——否则下一次同名 id 的点击
+            // 会发给一个已无人监听的 topic。
+            crate::menu_routes().replace(crate::MenuLane::TrayMenu, HashMap::new());
+        }
+        Ok(removed)
     }
 }
 
@@ -2622,6 +2694,12 @@ pub fn host_dialog_confirm(
 // ──────────────────────────────────────────────────────────────────────────
 
 /// `host_menu_set`：设置应用菜单（仅主窗）。
+///
+/// **点击回传**：**只有显式填了** `MenuItemSpec::event` 的项才发帧（宿主不会补默认
+/// topic，`None` = 点了什么都不回；仓库内约定值 `crate::MENU_CLICK_TOPIC`）。命中后
+/// 宿主经 `AppHandle::emit` 发一帧 `MenuClickFrame`（`{ id, source: "menu", native:
+/// true }`）。它**不经** `host_events_*` 总线——`host_events_drain` 取不到菜单点击，
+/// 接收方是前端 `listen(topic)`。
 #[tauri::command]
 pub fn host_menu_set(
     state: State<'_, SubstrateState>,
@@ -2633,6 +2711,9 @@ pub fn host_menu_set(
 }
 
 /// `host_menu_popup`：弹出上下文菜单（仅主窗）。
+///
+/// 点击回传与 [`host_menu_set`] 同一条腿（同一 lane 的路由、`source: "menu"`）；
+/// 没有主窗时宿主如实返回 `applied: false`，不假装弹出。
 #[tauri::command]
 pub fn host_menu_popup(
     state: State<'_, SubstrateState>,
@@ -2644,6 +2725,9 @@ pub fn host_menu_popup(
 }
 
 /// `host_menu_reset`：移除应用菜单（仅主窗）。
+///
+/// 只失效 `MenuLane::AppMenu` 那条点击路由；托盘右键菜单的路由**不受影响**
+/// （两条 lane 各存一份，见 `crate::MenuRouteTable`）。
 #[tauri::command]
 pub fn host_menu_reset(
     state: State<'_, SubstrateState>,
@@ -2654,6 +2738,10 @@ pub fn host_menu_reset(
 }
 
 /// `host_tray_create`：创建/更新系统托盘（仅主窗）。
+///
+/// 托盘右键菜单的点击**与菜单点击共用宿主那一个全局监听**（Tauri 只有一张全局
+/// 菜单监听表），差别只在 `source: "tray"`；重复调用即整体替换 `MenuLane::TrayMenu`
+/// 的路由（旧 id 随之失效）。
 #[tauri::command]
 pub fn host_tray_create(
     state: State<'_, SubstrateState>,
@@ -2665,6 +2753,9 @@ pub fn host_tray_create(
 }
 
 /// `host_tray_set_menu`：设置托盘菜单（仅主窗）。
+///
+/// 路由在菜单**真的挂上去之后**才登记：托盘还不存在时宿主如实返回
+/// `applied: false`，且不会留下任何能回传的路由。
 #[tauri::command]
 pub fn host_tray_set_menu(
     state: State<'_, SubstrateState>,
@@ -2676,6 +2767,9 @@ pub fn host_tray_set_menu(
 }
 
 /// `host_tray_remove`：移除系统托盘（仅主窗）。
+///
+/// 真的移除了才连带清空 `MenuLane::TrayMenu` 的路由——托盘没了还留着路由，
+/// 下一次同 id 的点击就会发给一个无人监听的 topic。
 #[tauri::command]
 pub fn host_tray_remove(
     state: State<'_, SubstrateState>,
@@ -2755,6 +2849,12 @@ pub fn host_fs_remove(
 }
 
 /// `host_http_request`：发起一次 HTTP 请求（仅主窗；缺省诚实降级）。
+///
+/// **单跳契约（轮 48，A96）**：provider 只发单跳、必须在 `resolvedAddrs` 回报本跳
+/// 解析地址；重定向跟随由宿主逐跳执行——`resolve_redirect_location` 归一 Location、
+/// `authorize_redirect` 授权（hop 上界 + 跨源剥离 `authorization`/`cookie`/
+/// `proxy-authorization`）、`authorize_resolution` 复检私网/字面 IP；provider 声明非
+/// `RedirectAndDns` 档一律拒发。
 #[tauri::command]
 pub fn host_http_request(
     state: State<'_, SubstrateState>,
@@ -2777,6 +2877,11 @@ pub fn host_updater_check(
 }
 
 /// `host_updater_status`：更新通道状态（仅主窗）。
+///
+/// **线形**：返回 `{ available, state, stateSimulated, grayscalePercent, crashGateStopped, reason }`。
+/// `state` 与 `stateSimulated` 必须成对读（轮 33）：账本现有写入方是 `host_market_download` /
+/// `host_market_install` 两条桩，`state` 字符串自己分不出模拟与真实，单独上屏会把
+/// "点了一下模拟安装"说成"已安装"。`state === null` 时 `stateSimulated` 恒为 `false`。
 #[tauri::command]
 pub fn host_updater_status(
     state: State<'_, SubstrateState>,
@@ -3347,11 +3452,26 @@ mod handler_families {
 ///
 /// R7-3：`app` 只用来注入系统通知通道（[`TauriDispatchSink`]）。底座本身
 /// 不依赖 tauri，`OnceLock` 是它与 wire 层之间唯一的接缝。
+///
+/// **返回 `Result`（V7-P1-01）**：装配失败不再靠日志留痕——同一底座重复装插件运行时
+/// （`AlreadyAssembled`）、同一 managed state 重复注册（`AlreadyManaged`）、进程运行时
+/// 配置被拒（`ProcessRuntimeRejected`）都以 [`crate::AssemblyError`] 结构化上抛，
+/// setup 在 `manage` **之前**失败，因此不存在「半装配状态」或 managed-state panic。
 fn command_state_with_dir_and_config(
     dir: Option<std::path::PathBuf>,
     mut cfg: AdapterConfig,
     app: &tauri::AppHandle<tauri::Wry>,
-) -> CommandState {
+) -> Result<CommandState, crate::AssemblyError> {
+    // **单例检查排在建状态之前**（V7-P1-01）。`init()` 与 `state_init()` 同时使用时
+    // 会第二次 `manage::<CommandState>`，而 Tauri 对重复 manage 直接 panic——那发生在
+    // setup 内部、没有任何结构化错误可接。这里先把「同一份 managed state 已注册」
+    // 翻译成 [`crate::AssemblyError::AlreadyManaged`]，让 setup 如实失败。
+    if app.try_state::<CommandState>().is_some() {
+        return Err(crate::AssemblyError::AlreadyManaged { state: "PluginRuntimeState" });
+    }
+    if app.try_state::<SubstrateState>().is_some() {
+        return Err(crate::AssemblyError::AlreadyManaged { state: "SubstrateState" });
+    }
     if cfg.recovery_data_dir.is_none() {
         cfg.recovery_data_dir = dir;
     }
@@ -3376,6 +3496,9 @@ fn command_state_with_dir_and_config(
     // http 因离线缺少 TLS 后端**诚实降级**（缺省即降级，无需注入）。
     substrate.menu_sink = std::sync::Arc::new(TauriMenuSink::new(app.clone()));
     substrate.tray_sink = std::sync::Arc::new(TauriTraySink::new(app.clone()));
+    // 两个都必须注入，且**菜单 sink 在前**不是风格问题：`TauriMenuSink::new` 注册的那个
+    // 全局菜单监听是托盘点击回传的**唯一**出口（Tauri 只有一张全局监听表）。只装托盘
+    // 的话，右键菜单能建出来、能被点，但帧永远发不出去。
     PluginRuntimeState::with_substrate(std::sync::Arc::new(substrate), cfg)
 }
 
@@ -3387,6 +3510,10 @@ fn command_state_with_dir_and_config(
 ///
 /// 底座-only 宿主**不用**本函数：只 `manage(SubstrateState)` 并注册
 /// `tauron_substrate_handler![]`，一分插件状态都不建。
+///
+/// 本函数**只**在 [`command_state_with_dir_and_config`] 成功返回后调用，所以这里
+/// 不需要再防重复注册：重复注册已经在上游变成 `AlreadyManaged` 结构化错误（V7-P1-01），
+/// 走不到 `manage`。
 fn manage_states<R: tauri::Runtime, M: tauri::Manager<R>>(manager: &M, state: CommandState) {
     // 先克隆底座（浅克隆：全部字段是 Arc/Mutex，共享同一份内部状态），再移动插件态。
     manager.manage((*state.substrate).clone());
@@ -3412,10 +3539,11 @@ pub fn init() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 pub fn init_with_adapter_config(cfg: AdapterConfig) -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("tauron")
         .setup(move |app, _api| {
-            manage_states(
-                app,
-                command_state_with_dir_and_config(app.path().app_config_dir().ok(), cfg, app),
-            );
+            // 装配失败（单例冲突 / 进程运行时配置被拒）在 setup 阶段结构化上抛，
+            // 由 Tauri 终止启动——不留「半装配」状态，也不让后面的 `manage` panic。
+            let state =
+                command_state_with_dir_and_config(app.path().app_config_dir().ok(), cfg, app)?;
+            manage_states(app, state);
             Ok(())
         })
         .invoke_handler(generate_handler!())
@@ -3428,7 +3556,9 @@ pub fn init_with_adapter_config(cfg: AdapterConfig) -> tauri::plugin::TauriPlugi
 /// 为什么需要它：[`init`] 把命令注册在插件 invoke_handler 上，前端必须经
 /// `plugin:tauron|<name>` 路由，而 Tauri v2 对 `plugin:` 命令**强制 capability/ACL**；
 /// 零配置的起步集成改用 root 注册（裸命令名）+ 本函数补状态，即无需任何
-/// capability 文件。二者**二选一**——同时使用会重复 `manage::<CommandState>` 而 panic。
+/// capability 文件。二者**二选一**——同时使用会在 setup 阶段以
+/// [`crate::AssemblyError::AlreadyManaged`] 结构化失败（V7-P1-01 之前是 Tauri 的
+/// 重复 `manage` panic，错误信息里没有任何可操作的语义）。
 pub fn state_init() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     state_init_with_adapter_config(AdapterConfig::default())
 }
@@ -3439,10 +3569,9 @@ pub fn state_init_with_adapter_config(
 ) -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("tauron-state")
         .setup(move |app, _api| {
-            manage_states(
-                app,
-                command_state_with_dir_and_config(app.path().app_config_dir().ok(), cfg, app),
-            );
+            let state =
+                command_state_with_dir_and_config(app.path().app_config_dir().ok(), cfg, app)?;
+            manage_states(app, state);
             Ok(())
         })
         .build()
@@ -3717,7 +3846,12 @@ mod wire_tests {
     #[test]
     fn registry_admin_maps_id_and_op_onto_core() {
         let state = CommandState::new();
-        let op = HostAdminOp { op: RegistryAdminOp::Disable, id: "com.example.x".to_string() };
+        let op = HostAdminOp {
+            op: RegistryAdminOp::Disable,
+            id: "com.example.x".to_string(),
+            preview: None,
+            review_token: None,
+        };
         // 未注册插件 → 核心以"未知插件"拒绝，证明 id/op 已正确映射到核心参数
         // （R7 收口后须带主体：这里用主窗，绕开身份判定、只验映射）。
         let main = crate::Caller::MainWindow;

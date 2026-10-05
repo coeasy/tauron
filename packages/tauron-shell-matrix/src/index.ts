@@ -12,6 +12,7 @@
 // ---- Types ----
 export type {
   ShellForm,
+  ShellStatus,
   ShellConfig,
   LocalShellConfig,
   LocalServerShellConfig,
@@ -19,7 +20,10 @@ export type {
   SubWebviewShellConfig,
   ShellInstance,
   ShellManager,
+  ShellManagerOptions,
+  ShellManagerStats,
+  ShellStartProvider,
 } from './types.js';
 
 // ---- Manager ----
-export { createShellManager } from './manager.js';
+export { createShellManager, ShellStartAbandonedError } from './manager.js';

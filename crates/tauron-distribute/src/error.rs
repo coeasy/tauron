@@ -27,6 +27,56 @@ pub enum DistributeError {
     /// 安装身份（§9.1 InstallationIdentityProvider）读写或校验失败。
     #[error("安装身份错误：{0}")]
     InstallationIdentity(String),
+
+    /// 升级执行器缺少必需组件（未注入 Downloader / SignatureVerifier /
+    /// RestartProvider）。缺组件 = 硬失败，绝不做 mock 兜底。
+    #[error("升级组件未注入：{component}")]
+    UpgradeComponentMissing { component: &'static str },
+
+    /// 安装根 `current` 目录缺失：无可备份、无可回滚，拒绝升级。
+    #[error("安装目录缺失：{path}")]
+    InstallRootMissing { path: String },
+
+    /// 下载产物 SHA-256 与清单声明不一致。
+    #[error("更新包 sha256 不一致：期望 {expected}，实际 {actual}")]
+    PackageHashMismatch { expected: String, actual: String },
+
+    /// 归档被拒绝（zip-slip 路径穿越 / 绝对路径 / 盘符 / 符号链接 /
+    /// 非常规条目 / 条目数或解压尺寸超限）。
+    #[error("归档被拒绝：{0}")]
+    ArchiveRejected(String),
+
+    /// 备份核验失败（备份树哈希集合与源树不一致）。
+    #[error("备份核验失败：{0}")]
+    BackupVerifyFailed(String),
+
+    /// 阶段超时（Download / Extract / Swap / HealthCheck）。
+    #[error("升级阶段 {phase} 超过期限 {timeout_secs}s")]
+    PhaseTimeout { phase: &'static str, timeout_secs: u64 },
+
+    /// 原子交换失败（含跨文件系统导致的 rename 失败；绝不降级为部分复制）。
+    #[error("原子交换失败：{0}")]
+    SwapFailed(String),
+
+    /// 提交前健康检查失败（错误文本注明是否已自动回滚）。
+    #[error("健康检查失败：{0}")]
+    HealthCheckFailed(String),
+
+    /// 回滚失败或无可回滚备份。
+    #[error("回滚失败：{0}")]
+    RollbackFailed(String),
+
+    /// 注入的 RestartProvider 返回失败。
+    #[error("重启失败：{0}")]
+    RestartFailed(String),
+
+    /// 通用文件操作失败（备份 / 解压 / 清理；清理失败必须上浮，不得吞掉）。
+    #[error("文件操作失败：{0}")]
+    FileOperationFailed(String),
+
+    /// 升级状态日志（journal）读写失败。
+    #[error("升级状态日志失败：{0}")]
+    Journal(String),
 }
 
 pub type DistributeResult<T> = Result<T, DistributeError>;
@@ -39,5 +89,14 @@ mod tests {
     fn error_messages() {
         assert!(DistributeError::EndpointError("500".into()).to_string().contains("500"));
         assert!(DistributeError::SignatureInvalid.to_string().contains("签名"));
+        assert!(DistributeError::UpgradeComponentMissing { component: "Downloader" }
+            .to_string()
+            .contains("Downloader"));
+        assert!(DistributeError::PhaseTimeout { phase: "Download", timeout_secs: 30 }
+            .to_string()
+            .contains("30"));
+        assert!(DistributeError::PackageHashMismatch { expected: "e".into(), actual: "a".into() }
+            .to_string()
+            .contains("sha256"));
     }
 }

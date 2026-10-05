@@ -33,7 +33,7 @@ tauron UI 原语：**零宿主依赖**的 Web Components + 设计令牌 + 动效
 | 类别 | 内容 |
 |---|---|
 | 设计令牌 | `designTokens`、`safemodeTokens`、`toCssVariables`、`toCssText` |
-| 状态层（纯，可离线测试） | `TitleBarStore`、`UpdaterStore`、`ToastStore`、`CommandPaletteStore`、`ShortcutRecorderStore` |
+| 状态层（纯，可离线测试） | `TitleBarStore`、`ToastStore`、`CommandPaletteStore`、`ShortcutRecorderStore`；`UpdaterStore` **未接线**（见下节） |
 | Web Components | `<oc-toast>`、`<oc-title-bar>`、`<oc-tray-menu>`、`<oc-updater-dialog>`、`<oc-command-palette>`、`<oc-shortcut-recorder>`、`<oc-plugin-manager>`、`<oc-theme-picker>`、`<oc-splash>`、`<oc-skeleton>` |
 | 动效 | `motion`（时长/缓动/关键帧）、`wc-motion`（SplashStore）、`animation-hook` |
 | 时序工具 | `ExitAnimation`、`animateEnter`/`animateLeave`/`staggerIn`/`staggerOut`/`animateListUpdate` |
@@ -55,3 +55,32 @@ import '@tauron/ui-primitives';           // 或经入口（含壳组件注册�
 
 `@tauron/ui-primitives`、`@tauron/ui-primitives/tokens`、
 `@tauron/ui-primitives/wc`、`@tauron/ui-primitives/theme-picker`
+
+## `<oc-updater-dialog>` 的状态契约（轮 32）
+
+组件是**哑的**：`open` / `version` / `message` / `status` / `progress` 由接入方喂，
+「稍后」只收起对话框（派发 `oc-updater-dismiss`，**不是** `oc-close`——那是关窗口）。
+
+`status` 的取值不是本包定的，而是 `@tauron/shell-events` 的 `UPDATER_STATUSES`
+（`idle` / `checking` / `available` / `downloading` / `downloaded` / `installing` /
+`ready` / `error`）。主按钮**派发什么事件也从这张表推导**（`UPDATER_PRIMARY_ACTION`）：
+
+| status | 主按钮 | 派发 |
+|---|---|---|
+| `idle` / `checking` / `error` | 检查更新 | `oc-updater-check` |
+| `available` / `downloaded` / `downloading` / `installing` | 开始更新 | `oc-update-start` |
+| `ready` | **立即重启** | `oc-restart` |
+
+`downloading` / `installing` 额外渲染进度条。为什么把词表与映射都放进契约包：
+轮 32 之前写侧（`@tauron/host` 的 `AutoUpdateClient`，安装成功终态 `ready`）与读侧
+（本组件，重启分支等 `done`）各用一套字符串，而全仓没人产出 `done`——「立即重启」
+在真装配里点不出来，`ready` 反倒显示「开始更新」，点一下把下载+安装重跑一遍。
+组件的 `status` 当时是裸 `string`，这个漂移无处显形。今天它是 `UpdaterStatus`，
+写错状态是编译错误；词表里也刻意不含 `done` / `updating`。
+
+> **`UpdaterStore`（`updater-dialog.ts`）不是更新流程的状态契约**，且今天没有生产
+> 消费者：它自建一套 `…installing → restarting` 状态机，`endpoint` / `retryCount` /
+> `maxDownloadSpeed` 三个配置项没有任何代码读过。它已登记在
+> `contracts/orphan-public-api.json`（随 v1.0.0 发布过，收口属破坏性变更，需单独批准）。
+> 更新流程的权威状态机在 Rust 侧（`tauron-distribute` 的 `UpgradeRunner`），
+> 事件契约在本节上面的表里，接线中的 UI 是 `wc-shell.ts` 的 `OcUpdaterDialog`。

@@ -20,6 +20,14 @@ import type { PluginManifest } from '@tauron/types';
 /** Shell 形态枚举 */
 export type ShellForm = 'local' | 'local-server' | 'remote-url' | 'sub-webview';
 
+/**
+ * Shell 实例状态（本包用到的 4 态）。
+ *
+ * ⚠️ `ready` **不等于**「已装载可用」：四条 start 路径都是延迟模拟，
+ * 判据是 {@link ShellInstance.simulated}（见文件头诚实边界）。
+ */
+export type ShellStatus = 'loading' | 'ready' | 'error' | 'unloaded';
+
 /** Shell 配置基类 */
 export interface ShellConfig {
   /** Shell 形态 */
@@ -80,8 +88,8 @@ export interface SubWebviewShellConfig extends ShellConfig {
 export interface ShellInstance {
   /** 配置 */
   config: ShellConfig;
-  /** 插件状态 */
-  status: 'loading' | 'ready' | 'error' | 'unloaded';
+  /** 插件状态（迁移规则见 `manager.ts` 的 `SHELL_STATUS_TRANSITIONS`） */
+  status: ShellStatus;
   /**
    * 本轮启动是否为**模拟**（当前恒为 `true`）。
    *
@@ -93,12 +101,51 @@ export interface ShellInstance {
   simulated: boolean;
   /** 错误信息 */
   error?: string;
-  /** 启动 shell */
+  /**
+   * 启动 shell。
+   *
+   * ⚠️ 失败**一定 reject**（V7-P1-03）：此前它把异常咽成 `status: 'error'`
+   * 却正常 resolve，调用方会把"没起来"当成"起来了"。被 `stop()`/`destroy()`/
+   * 再次 `start()` 作废的那次启动同样 reject（`code: 'SHELL_START_ABANDONED'`），
+   * 不返回旧一代的结果。
+   */
   start(): Promise<void>;
-  /** 停止 shell */
+  /** 停止 shell（作废在途启动并等它结束，见 `start()` 的说明） */
   stop(): Promise<void>;
   /** 获取 shell URL */
   getUrl(): string;
+}
+
+/**
+ * 装载实现注入点。
+ *
+ * 默认实现（`manager.ts` 的四个 `start*` 路径）是 **10ms 延迟模拟**，不装载任何
+ * 资源。这里留出注入位有两个理由：① 测试能把「启动何时落定」握在自己手里，
+ * 从而确定性地验证陈旧启动不得复活实例；② 接真实装载时替换的就是这一层，
+ * 而不必改动代际/迁移表。注入实现**不会**收到取消信号，因此它的结果同样受
+ * 代际闸门约束：作废之后的完成只会被记为 `abandonedStarts`。
+ */
+export type ShellStartProvider = (config: ShellConfig) => Promise<void>;
+
+/** `createShellManager()` 的可选参数 */
+export interface ShellManagerOptions {
+  /**
+   * 按形态覆盖装载实现；未列出的形态仍走内置 10ms 模拟。
+   *
+   * ⚠️ 覆盖它**不等于**接上了真实装载：`simulated` 仍恒为 `true`，
+   * 那要等本包真正产出文件/服务器/webview/远程装载时才改。
+   */
+  startProviders?: Partial<Record<ShellForm, ShellStartProvider>>;
+}
+
+/** 生命周期观测计数（供测试与泄漏门禁读取，不是业务状态）。 */
+export interface ShellManagerStats {
+  /** 因代际失效（stop/destroy/再次 start）而被丢弃的启动完成数 */
+  abandonedStarts: number;
+  /** 被状态迁移表拒绝的写入数（表外写入等于状态机说谎） */
+  illegalTransitions: number;
+  /** 累计创建的代际数（双 start 不重叠的判据：每次 start 恰好 +1） */
+  generations: number;
 }
 
 /** Shell 管理器 */
@@ -109,8 +156,15 @@ export interface ShellManager {
   get(pluginId: string): ShellInstance | undefined;
   /** 列出所有 shell */
   list(): ShellInstance[];
-  /** 销毁 shell */
+  /**
+   * 销毁 shell
+   *
+   * 先 `stop()`（作废在途启动并等其结束），再删表项——顺序反了就会留下
+   * 「已删除但又被陈旧启动写成 ready」的实例。
+   */
   destroy(pluginId: string): Promise<void>;
   /** 清理所有 shell */
   clear(): Promise<void>;
+  /** 观测计数快照 */
+  stats(): ShellManagerStats;
 }
