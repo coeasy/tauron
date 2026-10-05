@@ -2972,6 +2972,17 @@ contract-tests 终态 2 文件 213 例通过；`cargo test -p tauron-proc --lock
 **诚实边界**：本轮只动文档与注释，**没有**接任何孤儿 API，也没跑 workspace / market / adapter 全量腿
 （唯一 Rust 源改动是 `//` 注释，无语义变化）；两份被删文档在 git 历史中仍可取回，本次删除只落文件系统、未进 index。
 
+**发布链状态（轮 50 收尾时实测，不是推测）**：代码侧已提交并推送（`74bf2cc..52881de main`），
+但**发布链在这里断在凭据与标签上，不是断在代码上**：
+`node scripts/check-published-versions.mjs` 判「共 37 项在 1.1.0 上未通过核验：npm 缺 20 个、
+crates.io 缺 9 个、未能核实 8 个（网络/超时，重跑可复核）」。
+两个发布脚本都硬性要求环境变量令牌（`NPM_TOKEN` / `CARGO_REGISTRY_TOKEN`），本机 `npm whoami` 为 `ENEEDAUTH`，
+所以真发布只能走仓库自带的 `Publish SDK packages` 工作流（`workflow_dispatch`，`publish=true`）。
+另有一条必须在发布前定死的不一致：`v1.1.0` 标签已在 origin 上、指向 `6388953`（轮 13–18），
+而 main HEAD 是 `52881de`（轮 22–50），且 GitHub Releases 列表为空。
+按「先 publish、registry 校验通过后才推 `v*` tag」的规矩，**不能**让 registry 里的 1.1.0 源码与标签指向的
+提交不是同一份：要么为轮 22–50 另起版本号（`pnpm version:sync --set`），要么显式同意移标签（破坏性，需单独批准）。
+
 ## 9. 明确推迟 / 不做（附理由）
 
 | 项 | 处置 | 理由 |
