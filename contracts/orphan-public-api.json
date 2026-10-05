@@ -45,14 +45,6 @@
       "docRef": "docs/architecture/v4-industrial-gap-closure-plan.md"
     },
     {
-      "symbol": "build_approval_rows",
-      "declaredIn": "crates/tauron-acl/src/approval.rs",
-      "lang": "rust",
-      "probe": "\\bbuild_approval_rows\\b",
-      "disposition": "未接线：审批行由安装预览链路直接构造，这个「从 manifest 批量生成审批行」的入口无人调用。",
-      "docRef": "docs/architecture/v4-industrial-gap-closure-plan.md"
-    },
-    {
       "symbol": "FaultBoundary::run",
       "declaredIn": "crates/tauron-host/src/fault.rs",
       "lang": "rust",

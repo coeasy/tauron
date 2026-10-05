@@ -968,6 +968,12 @@ pub struct PluginPermissionReview {
     pub risk: String,
     pub description: String,
     pub default_checked: bool,
+    /// scope 的可读形式（无 scope 的权限缺席）。由 `tauron_acl::build_approval_rows` 给出。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// 高危行的确认词（**文案唯一来源是 acl 审批构造器**，前端不得另写一份）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmation_hint: Option<String>,
 }
 
 #[cfg(feature = "plugin-install")]
@@ -4919,7 +4925,7 @@ fn registry_install_preview_inner(
         return Err(HostError::new(ErrorCode::E_PLUGIN_TYPE_NO_RUNTIME, "当前仅支持 JS 插件安装"));
     }
     let index = embedded_permission_index();
-    let rows = tauron_acl::draft_grant_set(
+    let draft = tauron_acl::draft_grant_set(
         manifest.id.as_str(),
         &manifest.version.to_string(),
         &manifest.framework.to_string(),
@@ -4951,14 +4957,19 @@ fn registry_install_preview_inner(
         plugin_id: manifest.id.to_string(),
         plugin_name: manifest.name.clone(),
         version: manifest.version.to_string(),
-        permissions: rows
-            .grants
+        permissions: tauron_acl::build_approval_rows(&draft, &index)
             .into_iter()
-            .map(|grant| PluginPermissionReview {
-                permission: grant.permission,
-                risk: grant.risk.as_str().to_string(),
-                description: grant.description,
-                default_checked: grant.risk != tauron_host::manifest::Risk::High,
+            .map(|row| {
+                // 先取借用形态的确认词，再按字段移动 `row`（`confirmation_hint()` 借 `&self`）。
+                let confirmation_hint = row.confirmation_hint().map(str::to_string);
+                PluginPermissionReview {
+                    permission: row.permission,
+                    risk: row.risk.as_str().to_string(),
+                    description: row.human_text,
+                    default_checked: row.default_checked,
+                    scope: row.scope,
+                    confirmation_hint,
+                }
             })
             .collect(),
         review_token,
@@ -11328,6 +11339,71 @@ mod tests {
         assert!(!install_root.join("com.install.traverse").exists());
         assert!(!install_root.join("escape.txt").exists(), "逃逸文件不得落盘");
         assert!(!dir.path().join("escape.txt").exists(), "逃逸文件不得落到安装根之外");
+    }
+
+    #[cfg(feature = "plugin-install")]
+    #[test]
+    fn preview_approval_rows_come_from_the_acl_builder() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("plugins");
+        let id = "com.install.approval-rows";
+        let manifest = serde_json::json!({
+            "id": id,
+            "name": "Approval Rows",
+            "version": "1.0.0",
+            "type": "js",
+            "entry": { "js": "src/index.js", "ui": "index.html" },
+            "permissions": ["store:allow-get", "autostart:allow-enable", "fs:allow-remove"],
+            "scopes": { "fs:allow-remove": ["$APPDATA/sub/**"] },
+            "framework": ">=1.0.0, <2.0.0"
+        });
+        let files = vec![
+            ("manifest.json".to_string(), serde_json::to_vec(&manifest).unwrap()),
+            ("src/index.js".to_string(), b"export const activate = () => 'ok';".to_vec()),
+            ("index.html".to_string(), b"<!doctype html><body>ok</body>".to_vec()),
+        ];
+        let (package, verifying_key) = signed_tpkg(dir.path(), id, &files);
+        let state = install_state(install_root, &verifying_key);
+
+        let preview =
+            cmd_registry_install_preview_as(&Caller::MainWindow, &state, package.to_str().unwrap())
+                .unwrap();
+        let rows = preview.permissions;
+        let names: Vec<&str> = rows.iter().map(|r| r.permission.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["store:allow-get", "autostart:allow-enable", "fs:allow-remove"],
+            "审批行顺序必须跟随 manifest 声明顺序"
+        );
+
+        let index = tauron_host::manifest::embedded_permission_index();
+        for row in &rows {
+            assert_eq!(
+                row.description,
+                index.entry_of(row.permission.as_str()).unwrap().description,
+                "审批文案必须取自权限词表（§4.5 单一来源）"
+            );
+        }
+
+        let high = rows.iter().find(|r| r.permission == "autostart:allow-enable").unwrap();
+        assert_eq!(high.risk, "high");
+        assert!(!high.default_checked, "高危档一律默认不勾");
+        assert_eq!(
+            high.confirmation_hint.as_deref(),
+            Some("我理解该权限的能力边界并显式批准"),
+            "确认词由 acl 审批构造器单源给出，前端不得另写一份"
+        );
+
+        let low = rows.iter().find(|r| r.permission == "store:allow-get").unwrap();
+        assert!(low.default_checked);
+        assert!(low.confirmation_hint.is_none(), "非高危行不该带确认词");
+        assert!(low.scope.is_none(), "无 scope 的权限整字段为 None");
+        // 载荷形状：缺席的可选字段不得写成 `null` 混进线形（既有 TS 镜像按缺席处理）。
+        let json = serde_json::to_value(low).unwrap();
+        assert!(json.get("scope").is_none() && json.get("confirmationHint").is_none(), "{json}");
+
+        let scoped = rows.iter().find(|r| r.permission == "fs:allow-remove").unwrap();
+        assert_eq!(scoped.scope.as_deref(), Some("$APPDATA/sub/**"));
     }
 
     #[cfg(feature = "plugin-install")]

@@ -683,6 +683,8 @@ export class AdminClient {
       risk: string;
       description: string;
       defaultChecked: boolean;
+      scope?: string;
+      confirmationHint?: string;
     }>;
     reviewToken: InstallReviewToken;
   }> {
@@ -696,6 +698,8 @@ export class AdminClient {
           risk: string;
           description: string;
           defaultChecked: boolean;
+          scope?: string;
+          confirmationHint?: string;
         }>;
         reviewToken: InstallReviewToken;
       }>('host_registry_install_preview', { packagePath })

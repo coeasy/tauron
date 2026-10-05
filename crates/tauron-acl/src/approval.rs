@@ -45,6 +45,10 @@ fn scope_to_string(v: &serde_json::Value) -> String {
 
 /// 构造审批行。
 ///
+/// **已接线（轮 55）**：宿主 `host_registry_install_preview`（适配层
+/// `registry_install_preview_inner`）用它生成审批行——含高危档默认不勾与确认词，
+/// 因此这两条规则在本仓库只有一份实现。
+///
 /// 文案来源链：`PermissionIndex` → `authz::approval_hints` → `ApprovalRow.human_text`，
 /// 中间没有任何前端自定义文案。词表查不到的权限被 [`validate_grants`] 先拦掉。
 pub fn build_approval_rows(grant_set: &GrantSet, index: &PermissionIndex) -> Vec<ApprovalRow> {

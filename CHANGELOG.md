@@ -15,6 +15,13 @@
 
 ### Changed
 
+- **安装预览的审批行改由 acl 单源构造（轮 55）**：`host_registry_install_preview` 过去内联造行，
+  把 §4.5「高危档一律默认不勾」抄成仓库里的第二份实现，并且丢掉 `scope` 与高危确认词——
+  前端拿不到 `我理解该权限的能力边界并显式批准`，只能自己硬编码文案（§4.5 明文禁止）。
+  现在预览行由 `tauron_acl::build_approval_rows` 生成，适配层只做形制映射；
+  `PluginPermissionReview` 新增可选字段 `scope` / `confirmationHint`（`skip_serializing_if` 保证
+  缺席即整字段省略，既有载荷字节不变），TS `registryInstallPreview` 返回类型同步两处。
+  加的是返回字段不是新命令，85 条命令面不变；孤儿台账 `build_approval_rows` 条目删除（12 → 11）。
 - **升级执行器默认拒绝降级（轮 54）**：`tauron-distribute` 此前**没有任何版本序比较**——
   「降级门禁另有实现」是一句与代码相反的宣称，一条目标版本低于已安装版本的清单会被当成正常升级
   走完 download→extract→swap 并在 journal 里记为成功。本轮新增 `ensure_not_downgrade()` 与具名错误

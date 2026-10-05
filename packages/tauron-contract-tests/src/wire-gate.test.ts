@@ -4910,6 +4910,53 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     const changelog = read('CHANGELOG.md');
     expect(changelog, 'CHANGELOG 缺轮 54 条目').toMatch(/轮 54/);
   });
+  it('轮 55：安装预览的审批行改由 acl 审批构造器单源生成（build_approval_rows 不再是孤儿）', () => {
+    // 轮 55 立的规矩：预览链路过去自己内联造行，把「高危档默认不勾」这条 §4.5 规则抄了第二份
+    // （acl 里已有），并且**丢掉了 scope 与确认词**——前端拿不到高危确认文案，只能自己硬编码，
+    // 而那正是 §4.5 禁止的。门禁钉：①行由 `build_approval_rows` 生成；②内联副本不许回来；
+    // ③两个新可选字段带出去且缺席时整字段省略（线形与既有 TS 镜像一致）；④TS 类型同步；
+    // ⑤台账条目已删除。语义（顺序=manifest 顺序、文案=词表原文、高危不勾+确认词、无 scope 为 None）
+    // 由适配层测试在 cargo 上实跑判定。
+    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    for (const needle of [
+      'tauron_acl::build_approval_rows(&draft, &index)',
+      'let confirmation_hint = row.confirmation_hint().map(str::to_string);',
+      'pub confirmation_hint: Option<String>,',
+      'fn preview_approval_rows_come_from_the_acl_builder(',
+    ]) {
+      expect(adapter, `lib.rs 缺 ${needle}（轮 55 的审批行单源接线被掏空）`).toContain(needle);
+    }
+    // 反向钉：内联抄的那份默认勾选规则不许回来。
+    expect(
+      adapter,
+      'lib.rs 又出现了内联的「risk != High」默认勾选副本（§4.5 规则必须只有 acl 一份）',
+    ).not.toContain('default_checked: grant.risk != tauron_host::manifest::Risk::High');
+    // 计数钉：两个可选审批字段各一根 skip_serializing_if（缺席写成 null 会破既有线形）。
+    expect(
+      [...adapter.matchAll(/#\[serde\(skip_serializing_if = "Option::is_none"\)\]/g)].length,
+      'PluginPermissionReview 的可选字段省略标记数量变了（应 2 处：scope / confirmationHint）',
+    ).toBe(2);
+
+    const ledger = read('contracts/orphan-public-api.json');
+    expect(
+      (ledger.match(/"symbol": "build_approval_rows"/g) ?? []).length,
+      '孤儿台账仍登记 build_approval_rows（轮 55 已接线，条目必须删除）',
+    ).toBe(0);
+
+    const acl = read('crates/tauron-acl/src/approval.rs');
+    expect(acl, 'acl 的 build_approval_rows 注释仍宣称无人调用').toContain('已接线（轮 55）');
+
+    const hostTs = read('packages/tauron-host/src/host.ts');
+    expect(
+      [...hostTs.matchAll(/confirmationHint\?: string;/g)].length,
+      'host.ts 的预览行类型没把确认词带出来（应 2 处：返回声明 + invoke 泛型）',
+    ).toBe(2);
+
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案缺轮 55 小节').toMatch(/^### 轮 55：/m);
+    const changelog = read('CHANGELOG.md');
+    expect(changelog, 'CHANGELOG 缺轮 55 条目').toMatch(/轮 55/);
+  });
 
   it('V7 §7：风险表的复核结论必须与代码同形（宣称链不得悄悄升级）', () => {
     // 轮 28 立的规矩：审计风险表一旦被逐行复核，"结论"就成了对外宣称。这条门禁挡两种漂移：
