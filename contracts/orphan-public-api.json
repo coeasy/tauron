@@ -77,14 +77,6 @@
       "docRef": "docs/integration/incremental-adoption.md"
     },
     {
-      "symbol": "validate_group_key",
-      "declaredIn": "crates/tauron-notify/src/lib.rs",
-      "lang": "rust",
-      "probe": "\\bvalidate_group_key\\b",
-      "disposition": "未接线：分组键校验只在 notify 内部与单测里跑，宿主接收任意 group 字符串不经它。",
-      "docRef": "docs/integration/incremental-adoption.md"
-    },
-    {
       "symbol": "is_downgrade / is_monotonic",
       "declaredIn": "crates/tauron-market/src/lib.rs",
       "lang": "rust",

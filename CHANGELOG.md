@@ -15,6 +15,15 @@
 
 ### Changed
 
+- **通知分组键校验接进写入路径（轮 53）**：`tauron-notify` 的 `validate_group_key` 此前是孤儿
+  （只有库内 API + 单测）。`cmd_notify` 校验标题/正文字节预算却原样放行 `plugin_id`，
+  `group_key()` 无条件拼成 `plugin:<id>`——空 id 或含 `..` 的键一旦入环形缓冲，
+  `cleanup_plugin` / `by_group` 都指不到它，条目只能等容量裁掉（静默泄漏）。
+  现由 `push` 在动任何状态之前校验派生键（非法即 `InvalidGroup` 且零副作用），
+  校验器补上「`plugin:` 前缀后不得为空」这条对派生键真正有效的规则；
+  `dispatch` 的「入缓冲失败不阻断即时通道」契约不变。孤儿台账 13 → **12**。
+  同轮实测 `cargo test -p tauron-notify --locked` **48 passed**、`tauron-adapter --lib` **310 passed**、
+  `gates:check` / `format:check` rc=0。
 - **卸载插件不再遗留空语言资源包（轮 52）**：`tauron-i18n` 的 `remove_resource_bundle` 原先是
   `contracts/orphan-public-api.json` 登记的孤儿——`cleanup_plugin` 删完 `plugin:<id>.` 命名空间的键后
   **从不回收语言包本身**，只含该插件文案的 locale 会留下一个 `texts` 为空却永久驻留的包，

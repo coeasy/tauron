@@ -3042,6 +3042,37 @@ npm 缺 20、crates.io 缺 9、未能核实 8」，其中 crates 列表面含 `t
 另：本轮顺手补上轮 51 遗留的 `installation.md` 对账（§3.5 的「全部 15 个 crate」改为本轮实测的
 `publish:crates --check` 16 个/失败 0 口径；§3.7 的 2026-09-27 段是**带日期的历史读数**，按惯例不改写）。
 
+### 轮 53：分组键校验是纸面防线——接进 `NotifyStore::push`，坏键条目此前永久不可回收
+
+**断链（孤儿逻辑 + 边界不校验）**：`crates/tauron-notify` 的 `validate_group_key` 在孤儿台账里登记为
+「只在 notify 内部与单测里跑，宿主接收任意 group 字符串不经它」。核对调用链后确认边界洞是真的：
+`cmd_notify` 对 `title`/`body` 有字节预算校验，`plugin_id` 却**原样**进 `NotifyEntry`，
+而 `group_key()` 无条件拼成 `plugin:<id>`。坏键一旦入环就落在回收路径之外——
+`cleanup_plugin(plugin_id)` 按真实插件 id 拼键取条目，`plugin:`（空 id）这类分组没有任何入口能指名它；
+`by_group` 同样查不到，条目只能等容量裁掉 = 静默泄漏。
+
+**修法**：①`push` 在**动任何状态之前**（重复 id 检查之前）校验 `entry.group_key()`，
+非法即 `NotifyError::InvalidGroup` 且零副作用——与轮 52 同一取向：宁可拒绝写入，也不留下取不回的数据。
+②`validate_group_key` 补一条「整键校验必须连 `plugin:` 后面的载荷一起看」：前缀后为空即拒。
+不补这条它对派生键形同虚设——派生键永远以 `plugin:` 开头，`is_empty` 与 `starts_with('$')` 都不成立，
+只剩 `..` 一条会红。③`dispatch` 的既有契约不变（入缓冲失败不阻断即时通道），
+其文档注释把错误类别从「重复 id」扩为「重复 id / 非法分组键」。孤儿台账相应删除（13 → **12**）。
+
+**读数（本轮日志）**：新增 `push_rejects_group_keys_no_cleanup_can_reach`（空 id 与 `a..b` 各拒一次，
+`len()==0`、`group_counts()` 空、`eviction_total()==0`）与
+`bad_group_key_does_not_evict_history_on_a_full_ring`（满环上坏键写入不得先驱逐真实历史）；
+既有 `validate_group_key_rejects_empty_and_dollar` 补 `plugin:` 断言。
+`cargo fmt --all` 已跑；`cargo test -p tauron-notify --locked` = **48 passed**；
+`cargo test -p tauron-adapter --locked --lib` = **310 passed**（宿主侧零回归 ⇒ 现有链路没有合法的空插件 id 生产者）；
+`pnpm run gates:check` rc=0（输出「12 条未接线宣称复核通过…自动发现 629 ≤ 基线 635」）、
+`pnpm run format:check` rc=0。
+
+**诚实边界**：本轮补的是**存储边界**的校验，`cmd_notify` 自身仍不预检 `plugin_id`
+（错误从 `push` 冒出、由 `guard` 统一包成 `HostError`）；`cmd_notify_as` 的署名保证「不能冒充别人」，
+不等于「id 形状合法」。另外这只消掉 12 条孤儿里的 1 条：`NotifyStore::trim_to`（无用户侧收缩入口，
+命令面 85 条冻结 ⇒ 只能挂配置）、`is_downgrade`/`build_approval_rows`/`AclStore::to_capability`
+等仍是未接线公开 API。
+
 ## 9. 明确推迟 / 不做（附理由）
 
 | 项 | 处置 | 理由 |

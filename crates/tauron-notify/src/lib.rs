@@ -227,6 +227,10 @@ impl NotifyStore {
     /// 而是宿主被挂死。因此每次迭代校验 `entries` 是否真的缩小，没有就中止。
     /// 宁可让通知短暂超容，也不让整个客户端失去响应。
     pub fn push(&mut self, entry: NotifyEntry) -> NotifyResult<Vec<String>> {
+        // 分组键必须在**动任何状态之前**校验：`plugin_id` 来自调用方（宿主
+        // `cmd_notify` 直接把它拼成 `plugin:<id>`），坏键一旦入环就再也取不回——
+        // 既查不到也裁不掉，等于静默泄漏。校验失败时零副作用。
+        validate_group_key(&entry.group_key())?;
         // 重复 ID 必须在任何容量裁剪前拒绝；否则满环上重放一条已存在的通知
         // 会先驱逐真实历史，再由 `insert_no_evict` 报重复，失败操作却产生副作用。
         if self.entries.contains_key(&entry.id) {
@@ -467,7 +471,7 @@ impl NotifyStore {
 /// 缓冲与分发**互相独立失败**：
 /// - `send` 返回 `Ok(false)`（不支持/未授权）或 `Err`（致命错误）→ `Degraded`，
 ///   通知仍在缓冲里，本函数**不返回错误**；
-/// - 入缓冲失败（重复 id）不阻断分发，也不改判结果。
+/// - 入缓冲失败（重复 id / 非法分组键）不阻断分发，也不改判结果。
 pub fn dispatch(
     store: &mut NotifyStore,
     sink: &dyn DispatchSink,
@@ -493,6 +497,12 @@ pub fn validate_group_key(key: &str) -> NotifyResult<()> {
         return Err(NotifyError::InvalidGroup(key.to_string()));
     }
     if key.starts_with('$') || key.contains("..") {
+        return Err(NotifyError::InvalidGroup(key.to_string()));
+    }
+    // 整键校验必须连 `plugin:` 后面的插件 id 一起看：否则空 id 会造出一个
+    // 合法的「plugin:」分组，而 `cleanup_plugin` 按真实插件 id 取名下的历史，
+    // 永远取不到它——条目留在环形缓冲里直到被容量裁掉。
+    if key.strip_prefix("plugin:").is_some_and(|id| id.is_empty()) {
         return Err(NotifyError::InvalidGroup(key.to_string()));
     }
     Ok(())
@@ -544,6 +554,29 @@ mod tests {
         s.push(entry("n1", "p.a", NotifyKind::Info)).unwrap();
         let e = s.push(entry("n1", "p.b", NotifyKind::Info)).unwrap_err();
         assert!(matches!(e, NotifyError::DuplicateId(ref id) if id == "n1"));
+    }
+
+    #[test]
+    fn push_rejects_group_keys_no_cleanup_can_reach() {
+        // 空插件 id 造出「plugin:」分组、`..` 造出越界形：写进去就再也取不回来。
+        let mut s = NotifyStore::new(10).unwrap();
+        for bad in ["", "a..b"] {
+            let err = s.push(entry(&format!("n-{bad}"), bad, NotifyKind::Info)).unwrap_err();
+            assert!(matches!(err, NotifyError::InvalidGroup(_)), "{bad:?} 应被拒");
+        }
+        assert_eq!(s.len(), 0, "拒绝必须零副作用");
+        assert!(s.group_counts().is_empty());
+        assert_eq!(s.eviction_total(), 0);
+    }
+
+    #[test]
+    fn bad_group_key_does_not_evict_history_on_a_full_ring() {
+        let mut s = NotifyStore::new(2).unwrap();
+        s.push(entry_with_ts("n1", "p.a", 1)).unwrap();
+        s.push(entry_with_ts("n2", "p.a", 2)).unwrap();
+        assert!(s.push(entry_with_ts("n3", "", 3)).is_err());
+        assert_eq!(s.len(), 2, "满环上的坏键拒绝不得先驱逐真实历史");
+        assert_eq!(s.eviction_total(), 0);
     }
 
     #[test]
@@ -779,6 +812,7 @@ mod tests {
     #[test]
     fn validate_group_key_rejects_empty_and_dollar() {
         assert!(validate_group_key("").is_err());
+        assert!(validate_group_key("plugin:").is_err(), "空插件 id 不是可达分组");
         assert!(validate_group_key("$bad").is_err());
         assert!(validate_group_key("a..b").is_err());
         assert!(validate_group_key("plugin:p.a").is_ok());
