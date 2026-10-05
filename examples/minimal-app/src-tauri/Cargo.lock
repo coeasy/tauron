@@ -3616,6 +3616,7 @@ dependencies = [
  "chrono",
  "hex",
  "hmac",
+ "icu_normalizer",
  "libc",
  "parking_lot",
  "rustix",

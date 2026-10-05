@@ -44,6 +44,15 @@
 > **发布状态**：Release 由 `release.yml` 在推 `v*` tag 时自动构建并创建公开版本，
 > Windows、macOS 和 Linux 的安装包会作为 Release assets 上传。
 >
+> **当前实测（轮 50）——现在去 Releases 还下载不到任何东西**：GitHub Releases 列表为空，
+> 尽管 tag `v1.1.0` 已经存在。拦它的是这条链自己的 `registry-check`：
+> `node scripts/check-published-versions.mjs` 判「37 项在 1.1.0 上未通过核验」（npm 缺 20、
+> crates.io 缺 9、另 8 项因网络超时未能核实）。registry 里没有 1.1.0，就不会生成一个
+> 装着不存在之物的 Release。因此**在 npm + crates.io 发布完成之前，唯一可用的安装路径是
+> §2.3 的源码构建**；上表的文件名是发布后的命名约定，不是当前可下载清单。
+> 另有一条待决：`v1.1.0` 标签指向的是轮 13–18 的提交，而 main 已推进到轮 22–50——
+> 发布前必须让「registry 里的源码」与「tag」是同一份（另起版本号，或显式移标签，后者属破坏性操作）。
+>
 > **Windows 只提供 NSIS，不提供 MSI**：`targets: "all"` 在 Windows 上等于
 > nsis + msi，而 MSI 需要构建期下载 WiX 工具链，属额外网络依赖，失败时会连
 > NSIS 一起拿不到。原因与转正条件登记在 [CHANGELOG 的「已知债务」第 11 条](../CHANGELOG.md)。
