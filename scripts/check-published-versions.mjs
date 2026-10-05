@@ -13,14 +13,27 @@ const packageNames = readdirSync(join(ROOT, 'packages'))
   .map((file) => JSON.parse(readFileSync(file, 'utf8')))
   .filter((pkg) => pkg.private !== true)
   .map((pkg) => pkg.name);
-const crateNames = readdirSync(join(ROOT, 'crates'), { withFileTypes: true })
+const crates = readdirSync(join(ROOT, 'crates'), { withFileTypes: true })
   .filter((entry) => entry.isDirectory())
   .map((entry) => {
     const manifest = readFileSync(join(ROOT, 'crates', entry.name, 'Cargo.toml'), 'utf8');
     const name = /^name\s*=\s*"([^"]+)"/m.exec(manifest)?.[1];
     if (!name) throw new Error(`Could not read crate name from crates/${entry.name}/Cargo.toml`);
-    return name;
+    // `publish = false` / `registry = false` 的 crate 永远不可能出现在 crates.io。
+    // 把它们算进核验清单，这条门禁在任何版本上都恒红，而 release.yml 的 registry-check
+    // 正是 GitHub Release 的创建门槛——被剔除的项必须打印出来，不能静默少查。
+    const unpublished =
+      /^\s*publish\s*=\s*false\s*$/m.test(manifest) ||
+      /^\s*registry\s*=\s*false\s*$/m.test(manifest);
+    return { name, unpublished };
   });
+const skippedCrates = crates.filter((crate) => crate.unpublished).map((crate) => crate.name);
+const crateNames = crates.filter((crate) => !crate.unpublished).map((crate) => crate.name);
+if (skippedCrates.length > 0) {
+  console.log(
+    `剔除 ${skippedCrates.length} 个 publish=false 的 crate（不参与 registry 核验）：${skippedCrates.join(', ')}`,
+  );
+}
 
 // 「registry 上没有这个版本」由检查自己抛出；网络异常/超时抛的是别人的错误，不带包名。
 // 所以身份（registry + 包名）由 checks 数组带着走，输出时统一格式化一次，

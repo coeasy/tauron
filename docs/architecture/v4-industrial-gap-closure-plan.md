@@ -2983,6 +2983,33 @@ crates.io 缺 9 个、未能核实 8 个（网络/超时，重跑可复核）」
 按「先 publish、registry 校验通过后才推 `v*` tag」的规矩，**不能**让 registry 里的 1.1.0 源码与标签指向的
 提交不是同一份：要么为轮 22–50 另起版本号（`pnpm version:sync --set`），要么显式同意移标签（破坏性，需单独批准）。
 
+### 轮 51：registry-check 恒红的根因——`publish = false` 的 crate 被算进核验清单
+
+**断链（发布主链上的死锁，不是文档问题）**：`scripts/check-published-versions.mjs` 用
+`readdirSync('crates')` 枚举全部 crate 目录，**没有**任何 `publish = false` 过滤（npm 侧有
+`private !== true` 对偶过滤）。轮 41 之后 `crates/tauron-test-sidecar/` 进来了（清单里
+`publish = false`），于是这条门禁开始要求一个**永远不可能出现在 crates.io 的 crate**。
+而 `release.yml` 的 `registry-check` 正是创建公开 Release 的门槛——门槛被一个不可满足的条件钉死，
+这就是「tag `v1.1.0` 已推、GitHub Releases 却一条都没有」的真实原因。
+
+**修法**：与 npm 侧同构——解析每个 crate 清单，`publish = false` 或 `registry = false` 的**剔除**，
+并把剔除项**打印出来**（不静默少查），核验清单只用可发布的那些。
+
+**读数（本轮日志）**：修复前 `node scripts/check-published-versions.mjs` = 「共 **37** 项未通过核验：
+npm 缺 20、crates.io 缺 9、未能核实 8」，其中 crates 列表面含 `tauron-test-sidecar`；
+修复后同一命令 = 「剔除 1 个 publish=false 的 crate（不参与 registry 核验）：tauron-test-sidecar」+
+「共 **36** 项在 1.1.0 上未通过核验：npm 缺 20 个、crates.io 缺 9 个、未能核实 7 个」——
+与本台账先前登记的 36 项口径（npm 20 + crates 16）重新对齐。
+`pnpm gates:check` rc=0、`pnpm docs:check` rc=0、`pnpm format:check` rc=0（脚本改动经 prettier 重写后复验）。
+同一轮把发布载荷也实测了一遍：`node scripts/publish-npm.mjs`（--check 模式）= 可发布包 20 个、通过 20、失败 0；
+`node scripts/publish-crates.mjs`（--check 模式）= crate 共 16 个、产物校验失败 0。
+
+**诚实边界**：恒红死锁已解，但**1.1.0 仍未发布**（rc=1 是真的缺，不是门禁坏）——
+真发布要 `NPM_TOKEN` / `CARGO_REGISTRY_TOKEN`，两个脚本在没有令牌时都硬拒绝，本机 `npm whoami` 为 `ENEEDAUTH`，
+所以这一步只能由带令牌的 `publish-sdk.yml`（publish=true）完成；上面 37→36 的差值也只证明「门禁不再钉死」，
+不证明「Release 已建出」。另有一条未做的核对：`docs/installation.md` 里「15 个 crate」的旧读数段（§发布相关，
+写于 `tauron-ffi`/sidecar 之前）与本轮的 16 未逐句对齐，留作下一轮的文档对账项。
+
 ## 9. 明确推迟 / 不做（附理由）
 
 | 项 | 处置 | 理由 |

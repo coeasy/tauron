@@ -15,6 +15,15 @@
 
 ### Changed
 
+- **修掉发布主链上的恒红死锁（轮 51）**：`scripts/check-published-versions.mjs` 枚举 `crates/` 时
+  不过滤 `publish = false`（npm 侧却有 `private !== true` 的对偶过滤），于是轮 41 进来的
+  `tauron-test-sidecar`（清单 `publish = false`）让这条门禁要求一个永不可能是 crates.io 包的 crate；
+  `release.yml` 的 `registry-check` 是创建公开 Release 的门槛，因此**「tag 已推、Release 一条也没有」是它钉死的**。
+  现与 npm 侧同构剔除并**打印剔除项**：实测同一命令从「共 37 项未通过核验（crates 列表含 sidecar）」
+  变为「剔除 1 个 publish=false 的 crate：tauron-test-sidecar」+「共 36 项在 1.1.0 上未通过核验
+  （npm 缺 20、crates.io 缺 9、未能核实 7）」，与本台账的 36 项口径重新对齐。
+  同轮实测发布载荷：`publish-npm.mjs --check` 20/20 通过、`publish-crates.mjs --check` 16 个 crate 零失败；
+  **1.1.0 仍未发布**（真发布需 `NPM_TOKEN` / `CARGO_REGISTRY_TOKEN`，无令牌即硬拒绝）。
 - **删除无效历史文档（轮 50）**：`docs/architecture/capability-closure-plan.md`（0.4，自陈仅 A1–A3 落地、
   §2 孤儿判定过期、`plugin-install` 默认特性口径被 1.1 反转）与 `full-architecture-refactor-plan.md`
   （1.0，状态停在「其余待做」）整体删除；保留 0.3 roadmap（承载 §0 硬不变量与 M-9 现行判定）。
