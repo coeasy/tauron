@@ -77,11 +77,11 @@
       "docRef": "docs/integration/incremental-adoption.md"
     },
     {
-      "symbol": "is_downgrade / is_monotonic",
+      "symbol": "is_monotonic",
       "declaredIn": "crates/tauron-market/src/lib.rs",
       "lang": "rust",
-      "probe": "\\bis_downgrade\\b|\\bis_monotonic\\b",
-      "disposition": "未接线：版本序关系已实现且有测试，但更新链的降级门禁另有实现（distribute 侧），安装路径不调用这两个谓词。注意 `cmp_version` 不是孤儿——它是这两个谓词与 `VersionRange::contains` 的底座。",
+      "probe": "\\bis_monotonic\\b",
+      "disposition": "未接线：只有测试调用。对偶谓词 `is_downgrade` 自轮 54 起已接线（`tauron-distribute::ensure_not_downgrade` 的降级门禁），但两者对「版本相等」判定不同（is_monotonic 含相等、门禁要求严格不倒退），不能拿它替身。`cmp_version` 不是孤儿——它是这两个谓词与 `FrameworkRange::matches` 的底座。",
       "docRef": "docs/architecture/v4-industrial-gap-closure-plan.md"
     },
     {

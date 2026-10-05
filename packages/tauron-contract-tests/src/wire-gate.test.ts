@@ -4831,6 +4831,85 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     const changelog = read('CHANGELOG.md');
     expect(changelog, 'CHANGELOG 缺轮 49 条目').toMatch(/轮 49，A71/);
   });
+  it('轮 54：降级门禁接进升级执行器——is_downgrade 从在册孤儿变为 distribute 侧的单一算术消费者', () => {
+    // 轮 54 立的规矩：此前文档敢写「降级门禁另有实现（distribute 侧）」，而 `UpgradeRunner::validate`
+    // 里一个版本比较都没有 ⇒ 一条低于已装版本的清单会被当正常升级走完 download→extract→swap。
+    // 这条门禁钉四件事：①版本序的**唯一算术源**仍是 market 的 `cmp_version`/`is_downgrade`
+    // （distribute 靠依赖边复用，不许自己再写一份解析）；②门禁在 `validate` 这个零副作用段里；
+    // ③装配腿 download/install 共用同一判据（轮 49 口径）；④台账把 `is_downgrade` 换成它非对偶的
+    // `is_monotonic`。语义（数字序不是字符串序、相等放行、无基线如实放行、拒绝先于任何文件效果）
+    // 由 distribute/adapter 三条测试在 cargo 上实跑判定。
+    const cargo = read('crates/tauron-distribute/Cargo.toml');
+    // 行锚定（不带 `#` 前缀也算命中是轮 54 变异 W1 实测的假绿：把依赖行注释掉，
+    // `toContain` 照样满意，而 crate 早就没有那条边了）。
+    expect(cargo, 'distribute 不再依赖 tauron-market（版本序要变成第二套实现了）').toMatch(
+      /^tauron-market = \{ path = "\.\.\/tauron-market", version = "1\.1\.0" \}/m,
+    );
+
+    const upgrade = read('crates/tauron-distribute/src/upgrade.rs');
+    for (const needle of [
+      // 带签名收尾：改名或收窄参数形状都会破配（后缀式改名会骗过裸名针）。
+      'pub fn ensure_not_downgrade(installed: Option<&str>, target: &str) -> DistributeResult<()> {',
+      'tauron_market::is_downgrade(current, target)',
+      'ensure_not_downgrade(self.options.installed_version.as_deref(), &manifest.version)?;',
+      // 测试名带 `fn ` 与左括号收尾。
+      'fn validate_rejects_downgrade_with_zero_file_effect(',
+      'fn downgrade_gate_uses_numeric_version_order_not_strings(',
+    ]) {
+      expect(upgrade, `upgrade.rs 缺 ${needle}（轮 54 的降级门禁被掏空）`).toContain(needle);
+    }
+    // 计数钉：执行器侧生产调用点恰一处（validate）。
+    expect(
+      [...upgrade.matchAll(/ensure_not_downgrade\(self\.options\.installed_version/g)].length,
+      'ensure_not_downgrade 在 upgrade.rs 的生产调用点变了（应 1 处：validate）',
+    ).toBe(1);
+    expect(
+      [...upgrade.matchAll(/\bDistributeError::DowngradeRejected\b/g)].length,
+      'DowngradeRejected 在 upgrade.rs 出现次数变了（应 2 处：门禁构造 + 测试断言）',
+    ).toBe(2);
+
+    const errors = read('crates/tauron-distribute/src/error.rs');
+    expect(errors, 'distribute 缺具名降级错误').toContain('DowngradeRejected { current: String');
+
+    const distLib = read('crates/tauron-distribute/src/lib.rs');
+    expect(distLib, 'tauron-distribute 未导出 ensure_not_downgrade').toContain(
+      'download_bounded, ensure_not_downgrade,',
+    );
+
+    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    for (const needle of [
+      'tauron_distribute::ensure_not_downgrade(',
+      '| D::DowngradeRejected { .. }',
+      'fn downgrade_manifest_is_rejected_before_any_download(',
+    ]) {
+      expect(adapter, `lib.rs 缺 ${needle}（装配腿的降级门禁被掏空）`).toContain(needle);
+    }
+    // 计数钉：download/install 共用 select_manifest，调用点恰一处。
+    expect(
+      [...adapter.matchAll(/tauron_distribute::ensure_not_downgrade\(/g)].length,
+      'ensure_not_downgrade 在 adapter 的调用点变了（应 1 处：select_manifest，两腿同判据）',
+    ).toBe(1);
+
+    // 台账：`is_downgrade` 条目必须删除（仍在 = 文档还在宣称它未接线），
+    // 且必须留下非对偶的 `is_monotonic`（拿它当替身会放行等版本降级）。
+    const ledger = read('contracts/orphan-public-api.json');
+    expect(
+      (ledger.match(/"symbol": "is_downgrade"/g) ?? []).length,
+      '孤儿台账仍登记 is_downgrade（轮 54 已接线，条目必须删除）',
+    ).toBe(0);
+    expect(
+      (ledger.match(/"symbol": "is_monotonic"/g) ?? []).length,
+      '孤儿台账缺 is_monotonic 条目（它与门禁的相等判定不同，不得一起销账）',
+    ).toBe(1);
+
+    // 宣称链：market 侧文档注释必须跟着翻篇，缺口方案有轮 54 小节，CHANGELOG 有对应条目。
+    const market = read('crates/tauron-market/src/lib.rs');
+    expect(market, 'market 的 is_downgrade 注释仍宣称未接线').toContain('已接线（轮 54）');
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案缺轮 54 小节').toMatch(/^### 轮 54：/m);
+    const changelog = read('CHANGELOG.md');
+    expect(changelog, 'CHANGELOG 缺轮 54 条目').toMatch(/轮 54/);
+  });
 
   it('V7 §7：风险表的复核结论必须与代码同形（宣称链不得悄悄升级）', () => {
     // 轮 28 立的规矩：审计风险表一旦被逐行复核，"结论"就成了对外宣称。这条门禁挡两种漂移：

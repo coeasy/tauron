@@ -23,16 +23,19 @@ pub mod upgrade;
 pub use error::{DistributeError, DistributeResult};
 pub use installation::InstallationIdentity;
 pub use upgrade::{
-    create_default_upgrade_runner, create_upgrade_runner, download_bounded, verify_package,
-    ArchiveExtractor, ArchiveLimits, Downloader, ExtractedArchive, PhaseControl, RestartProvider,
-    SignatureVerifier, UpgradeHealthCheck, UpgradeJournal, UpgradeOptions, UpgradeProgress,
-    UpgradeResult, UpgradeRunner, UpgradeState, VerificationContext, ZipCrateExtractor,
+    create_default_upgrade_runner, create_upgrade_runner, download_bounded, ensure_not_downgrade,
+    verify_package, ArchiveExtractor, ArchiveLimits, Downloader, ExtractedArchive, PhaseControl,
+    RestartProvider, SignatureVerifier, UpgradeHealthCheck, UpgradeJournal, UpgradeOptions,
+    UpgradeProgress, UpgradeResult, UpgradeRunner, UpgradeState, VerificationContext,
+    ZipCrateExtractor,
 };
 
 /// 更新清单（latest.json 格式）。
 ///
 /// 完整清单（含 `sha256` 与签名）是执行侧的硬前提：升级执行器（`upgrade`
-/// 模块）拒绝在下载 URL/版本/签名/包摘要缺失或组件未注入时产生任何文件效果。
+/// 模块）拒绝在下载 URL/版本/签名/包摘要缺失或组件未注入时产生任何文件效果，
+/// 并且（轮 54）**默认拒绝降级**——`manifest.version` 低于 `UpgradeOptions::installed_version`
+/// 时在 `validate` 段就硬拒，零文件副作用。
 /// `sha256` 之外的扩展字段（`signature_algorithm` / `public_key_id` /
 /// `min_host_version` / `abi` / `rollback_policy`）会被如实传给注入的
 /// `SignatureVerifier` 并记入状态日志；执行器本身不解释宿主版本/ABI（仓内

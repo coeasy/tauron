@@ -5,10 +5,15 @@
 // - 解包只用 `ZipFile::enclosed_name()` 自写循环；拒 `..`/绝对路径/符号链接；
 // - 条目 ≤2000、解压 ≤200 MB、压缩比 ≤100×、单文件 ≤100 MB；
 // - 校验顺序固定：验签 → hash → 解包常量 → 权限审批 → 注册；
-// - 版本序关系（`cmp_version` / `is_downgrade` / `is_monotonic`）**已实现且有测试，
-//   但尚未接线**：宿主安装路径（`tauron-adapter::registry_install_inner`）目前对
-//   已存在的插件 id 一律 `E_PLUGIN_EXISTS` 拒绝，因此"升级 / 降级安装"这条路径
-//   在整仓**不存在**，"降级默认拒绝"这条策略**尚未生效**（详见 `is_downgrade`）。
+// - 版本序关系（`cmp_version` / `is_downgrade` / `is_monotonic`）**已实现且有测试**，
+//   自**轮 54**起由更新执行侧消费：`tauron-distribute` 依赖本 crate（只用到
+//   serde/serde_json/thiserror/sha2，无新增重依赖），`ensure_not_downgrade` 用
+//   `is_downgrade` 做「降级默认拒绝」的硬门禁（`UpgradeRunner::validate` +
+//   适配层 `DistributeUpgradeInstaller::select_manifest` 同一判定源）。
+//   仍**没有**「覆盖安装 / 降级安装」的插件级流程：宿主注册表安装
+//   （`tauron-adapter::registry_install_inner`）对已存在的插件 id 一律
+//   `E_PLUGIN_EXISTS` 拒绝，所以 `PackageManifest::min_allowed_version`
+//   依旧只被解析、不被读取（见 `tauron-host::manifest`）。
 // - 审计日志追加式 + 链式 hash，记录 grants 快照。
 //
 // 本 crate 不依赖 `tauri`：签名验证、HTTP 拉取、zip 解包由适配层提供。
@@ -112,21 +117,27 @@ pub fn cmp_version(a: &str, b: &str) -> i32 {
 
 /// 检查是否有降级（目标版本 < 当前版本）。
 ///
-/// **未接线（诚实标注）**：本谓词只有测试调用，生产路径没有调用方——不是忘了接，
-/// 而是**没有可接的地方**：`tauron-adapter::registry_install_inner` 对已存在的插件
-/// id 直接返回 `E_PLUGIN_EXISTS`，宿主里不存在"覆盖安装 / 升级 / 降级"这条流程。
-/// 因此 `PackageManifest` 的 `min_allowed_version` 字段（见 `tauron-host::manifest`）
-/// 也**只被解析、从未被读取**。要让它生效，先得有"更新安装"这条路径（当前
-/// `host_market_install` 是 `simulated: true` 的桩）。
+/// **已接线（轮 54）**：判定源是 `tauron-distribute::ensure_not_downgrade`——
+/// 升级执行器 `UpgradeRunner::validate`（零文件副作用段）与适配层
+/// `DistributeUpgradeInstaller::select_manifest`（下载腿之前）都调它，
+/// 因此「降级默认拒绝」在真安装链上生效。
+/// 本 crate 自己的插件安装路径**仍不**用它：`tauron-adapter::registry_install_inner`
+/// 对已存在的插件 id 直接返回 `E_PLUGIN_EXISTS`，不存在"覆盖安装 / 降级安装"流程，
+/// 所以 `PackageManifest` 的 `min_allowed_version` 字段（见 `tauron-host::manifest`）
+/// 依旧**只被解析、从未被读取**。
 ///
-/// 保留实现而不删：序关系判定（含 2³¹ 截断边界）已有测试覆盖，接线时直接可用。
+/// 刻意保留在 market 而不是搬走：序关系算术（含 2³¹ 截断边界）的回归测试在这里，
+/// distribute 依赖 market 只带到 serde/thiserror/sha2 级轻依赖，不引第二套算术。
 pub fn is_downgrade(current: &str, target: &str) -> bool {
     cmp_version(current, target) > 0
 }
 
-/// 版本号是否单调递增（target > current）。
+/// 版本号是否单调递增（target >= current，注意**含相等**）。
 ///
-/// **未接线**：同 [`is_downgrade`]——宿主没有更新安装路径，本谓词只有测试调用。
+/// **未接线**：本谓词只有测试调用。生效的更新门禁用的是 [`is_downgrade`]
+/// （严格更低才拒；同版本重装允许）——两者对「相等」的判定不同，不能互换。
+/// 需要「必须严格更高」的场合请用 `cmp_version(target, current) > 0`，
+/// 或等真有单调性需求时再接。
 pub fn is_monotonic(current: &str, target: &str) -> bool {
     cmp_version(target, current) >= 0
 }

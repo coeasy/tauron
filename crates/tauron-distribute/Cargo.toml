@@ -18,6 +18,10 @@ uuid = { workspace = true }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sha2 = { workspace = true }
 hex = { workspace = true }
+# 版本序关系的**单一算术源**在 `tauron-market`（`cmp_version` / `is_downgrade`，
+# 含 2³¹ 截断边界的回归测试）。market 的非可选依赖只有 serde/serde_json/thiserror/sha2，
+# 全部已在本 crate 依赖集里，因此这条边不引入新的重依赖；`signing` 特性不开。
+tauron-market = { path = "../tauron-market", version = "1.1.0" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

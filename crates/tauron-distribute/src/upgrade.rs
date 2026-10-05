@@ -311,7 +311,11 @@ pub struct UpgradeOptions {
     /// 归档解压预算。
     #[serde(default)]
     pub archive: ArchiveLimits,
-    /// 当前已安装版本（仅记入日志供回滚/审计对账，执行器不解释）。
+    /// 当前已安装版本。
+    ///
+    /// 两个用途（轮 54）：①**降级门禁的基线**——`validate` 用它对比清单目标版本，
+    /// 更低即硬拒（见 [`ensure_not_downgrade`]）；②记入 journal 的 `old_version`
+    /// 供回滚/审计对账。为 `None` 时门禁无基线可判、如实放行。
     #[serde(default)]
     pub installed_version: Option<String>,
 }
@@ -1048,6 +1052,9 @@ impl UpgradeRunner {
         if manifest.version.is_empty() {
             return Err(DistributeError::InvalidBody("版本号不能为空".into()));
         }
+        // 降级门禁（轮 54）：见 [`ensure_not_downgrade`]。判定落在 `validate` 这个
+        // 「纯检查、零文件系统副作用」段里，坏清单不会留下 staged/backup/journal 任何痕迹。
+        ensure_not_downgrade(self.options.installed_version.as_deref(), &manifest.version)?;
         if manifest.signature.is_empty() {
             return Err(DistributeError::SignatureInvalid);
         }
@@ -1597,6 +1604,27 @@ impl UpgradeRunner {
 // ──────────────────────────────────────────────────────────────────────────
 // 工厂函数
 // ──────────────────────────────────────────────────────────────────────────
+
+/// 降级门禁（轮 54）：**默认拒绝**把 `target` 装到低于已安装版本 `installed`。
+///
+/// - 序关系用 `tauron_market::is_downgrade`——全仓唯一一份版本算术（数值分段比较，
+///   对 ≥2³¹ 分段不截断）。本模块刻意不再写第二套比较：两套算术意味着改一处不会让
+///   另一处变红。
+/// - `installed` 为 `None` = 没有基线可判（首次装配 / 装配方未上报安装版本），如实放行，
+///   不假装知道不知道的事。
+/// - 回滚不经这里：[`UpgradeRunner::rollback`] 恢复既有树、不下载新包。
+/// - 「同版本重装」不算降级（`is_downgrade` 只在 target 严格更低时为真），放行。
+pub fn ensure_not_downgrade(installed: Option<&str>, target: &str) -> DistributeResult<()> {
+    if let Some(current) = installed {
+        if tauron_market::is_downgrade(current, target) {
+            return Err(DistributeError::DowngradeRejected {
+                current: current.to_string(),
+                target: target.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
 
 /// 创建升级执行器。
 pub fn create_upgrade_runner(options: UpgradeOptions) -> UpgradeRunner {
@@ -2653,6 +2681,41 @@ mod tests {
         assert!(matches!(runner.validate(), Ok(())), "完整配置必须通过校验");
         assert!(!h.root().join("download").exists(), "validate 必须零副作用");
         assert!(!h.root().join("backup").exists());
+    }
+
+    #[test]
+    fn validate_rejects_downgrade_with_zero_file_effect() {
+        let h = Harness::new();
+        h.seed_current(&[("app.bin", b"old")]);
+        let mut manifest = manifest_for(b"pkg");
+        manifest.version = "1.0.0".into();
+        let mut options = h.options(manifest);
+        options.installed_version = Some("2.0.0".into());
+        let runner = UpgradeRunner::new(options)
+            .with_downloader(Box::new(MockDownloader::new(vec![])))
+            .with_verifier(Box::new(MockVerifier::new(true)));
+        assert!(
+            matches!(
+                runner.validate(),
+                Err(DistributeError::DowngradeRejected { current, target })
+                    if current == "2.0.0" && target == "1.0.0"
+            ),
+            "已装 2.0.0 却给 1.0.0 清单必须具名拒绝，而不是撞成别的校验错误"
+        );
+        assert!(!h.root().join("download").exists(), "降级拒绝必须零文件副作用");
+        assert!(!h.root().join("backup").exists());
+    }
+
+    #[test]
+    fn downgrade_gate_uses_numeric_version_order_not_strings() {
+        // 字符串序会把 1.10.0 判成低于 1.9.0；数值分段才是真序关系。
+        assert!(ensure_not_downgrade(Some("1.9.0"), "1.10.0").is_ok());
+        assert!(ensure_not_downgrade(Some("1.10.0"), "1.9.0").is_err());
+        // 同版本重装不是降级；无基线（首次装配）如实放行。
+        assert!(ensure_not_downgrade(Some("2.0.0"), "2.0.0").is_ok());
+        assert!(ensure_not_downgrade(None, "0.0.1").is_ok());
+        // ≥2³¹ 的分段不得因截断被判成「不小于」而绕过门禁。
+        assert!(ensure_not_downgrade(Some("2147483648.0.0"), "2147483647.0.0").is_err());
     }
 
     #[test]

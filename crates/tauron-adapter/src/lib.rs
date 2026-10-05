@@ -2968,23 +2968,37 @@ impl DistributeUpgradeInstaller {
 
     /// 选出本次动作使用的清单：变体列表非空 → 按**本机编译目标**解析（无兼容即硬拒）；
     /// 空 → 单清单默认。判定发生在下载/解压/OS 加载之前，失败关闭。
+    ///
+    /// 选出之后还要过**降级门禁**（轮 54）：清单版本低于 `installed_version` 即硬拒，
+    /// 与 `UpgradeRunner::validate` 同一口径（同一个 `ensure_not_downgrade`）。
+    /// 放在这里是必要的——`download` 腿不经 runner，只靠 `validate` 会在拒绝前
+    /// 已经把整包下载并落 staged 文件。
     fn select_manifest(&self) -> HostResult<&tauron_distribute::UpdateManifest> {
-        if self.variants.is_empty() {
-            return Ok(&self.options.manifest);
-        }
-        let host = tauron_host::current_target_spec();
-        match tauron_host::ArtifactVariantResolver::resolve(&self.variants, &host) {
-            Some(variant) => Ok(&variant.manifest),
-            None => Err(HostError::new(
-                ErrorCode::E_INVALID_MANIFEST,
-                format!(
-                    "更新清单提供 {} 个变体，无一兼容本机目标（os={:?} arch={:?}）：拒绝下载，不静默回退单包",
-                    self.variants.len(),
-                    host.os,
-                    host.arch
-                ),
-            )),
-        }
+        let manifest = if self.variants.is_empty() {
+            &self.options.manifest
+        } else {
+            let host = tauron_host::current_target_spec();
+            match tauron_host::ArtifactVariantResolver::resolve(&self.variants, &host) {
+                Some(variant) => &variant.manifest,
+                None => {
+                    return Err(HostError::new(
+                        ErrorCode::E_INVALID_MANIFEST,
+                        format!(
+                            "更新清单提供 {} 个变体，无一兼容本机目标（os={:?} arch={:?}）：拒绝下载，不静默回退单包",
+                            self.variants.len(),
+                            host.os,
+                            host.arch
+                        ),
+                    ))
+                }
+            }
+        };
+        tauron_distribute::ensure_not_downgrade(
+            self.options.installed_version.as_deref(),
+            &manifest.version,
+        )
+        .map_err(map_distribute_error)?;
+        Ok(manifest)
     }
 
     /// 下载 + 校验，返回（路径，实际 SHA-256）。下载腿的纯逻辑（失败清理在调用方）。
@@ -3147,6 +3161,7 @@ fn map_distribute_error(error: tauron_distribute::DistributeError) -> HostError 
         D::PackageHashMismatch { .. }
         | D::SignatureInvalid
         | D::ArchiveRejected(_)
+        | D::DowngradeRejected { .. }
         | D::InvalidBody(_)
         | D::ManifestParse(_) => ErrorCode::E_INVALID_MANIFEST,
         D::PhaseTimeout { .. } => ErrorCode::E_CALL_TIMEOUT,
@@ -20174,6 +20189,29 @@ mod round49_variant_resolution_tests {
             Arc::new(AlwaysHealthy),
             None,
         )
+    }
+
+    /// 降级门禁（轮 54）：清单目标版本低于 `installed_version`（装配腿缺省 1.0.0）
+    /// 必须在**任何下载动作之前**硬拒，且不留 staged 残留。
+    #[test]
+    fn downgrade_manifest_is_rejected_before_any_download() {
+        let root = tempfile::tempdir().unwrap();
+        let urls = Arc::new(Mutex::new(Vec::new()));
+        let lower = vec![UpdateArtifactVariant {
+            target: tauron_host::current_target_spec(),
+            manifest: manifest("0.5.0", "https://updates.example/tauron-0.5.0.zip", b"x"),
+        }];
+        let installer =
+            installer(root.path(), b"payload".to_vec(), urls.clone()).with_variants(lower);
+        let err = installer.download().unwrap_err();
+        assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST, "降级属清单类硬拒");
+        assert!(
+            err.message.contains("拒绝降级") && err.message.contains("1.0.0"),
+            "拒绝理由必须点名降级与基线版本：{}",
+            err.message
+        );
+        assert!(urls.lock().unwrap().is_empty(), "降级拒绝不得下载任何字节");
+        assert!(!installer.staged_path().exists(), "降级拒绝不得落 staged 残留");
     }
 
     #[test]

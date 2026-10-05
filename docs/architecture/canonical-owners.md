@@ -41,7 +41,7 @@
 | `tauron-market` | 迁移中 | M1/M7 共用取包与验签；HTTP / `.tpkg` 安装闭环前不宣称已接线。 |
 | `tauron-wasm` | 部分接线 | opt-in `runtime-wasm-broker` 已接配置校验与崩溃预算；执行层 `delivered: false` → `E_PLUGIN_TYPE_NO_RUNTIME`，不引入默认运行时。 |
 | `tauron-theme` | 已接线 | 轮 13 实测：`SubstrateState::themes` 即 `ThemeRegistry`，`host_theme_list`/`get`/`set`（仅主窗）落在它上面；UI design tokens 仍是客户端外观的另一事实源。 |
-| `tauron-distribute` | 已接线 | 轮 13 实测：updater provider 真跑 `check_for_update`（灰度 + 签名 + 崩溃门禁），`InstallationIdentity::load_or_create` 落盘；未注入 endpoint 时 fail-closed。 |
+| `tauron-distribute` | 已接线 | 轮 13 实测：updater provider 真跑 `check_for_update`（灰度 + 签名 + 崩溃门禁），`InstallationIdentity::load_or_create` 落盘；未注入 endpoint 时 fail-closed。轮 54 起升级执行器默认拒绝降级（`ensure_not_downgrade` 复用 `tauron-market` 的版本序算术，不再自造第二套比较）。 |
 | `tauron-shell` | 迁移中 | legacy 冻结；按本文阶段 2/3 迁移到 `tauron-host` canonical 引擎。 |
 
 迁移中状态表示决策已定但接线尚未完成，不能作为「功能可用」的证据；对应轮次完成后必须同步更新 Cargo 依赖和本表。

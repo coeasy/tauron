@@ -41,6 +41,14 @@ pub enum DistributeError {
     #[error("更新包 sha256 不一致：期望 {expected}，实际 {actual}")]
     PackageHashMismatch { expected: String, actual: String },
 
+    /// 降级被拒：清单目标版本低于已安装版本。
+    ///
+    /// 判定用的是 `tauron-market` 的序关系（唯一算术源），**默认拒绝**：
+    /// 更新链没有任何「故意装旧版」的合法入口（回滚走
+    /// [`crate::UpgradeRunner::rollback`] 的既有树恢复，不下载新包，因此不受此门禁影响）。
+    #[error("拒绝降级：已安装 {current}，清单目标版本 {target}")]
+    DowngradeRejected { current: String, target: String },
+
     /// 归档被拒绝（zip-slip 路径穿越 / 绝对路径 / 盘符 / 符号链接 /
     /// 非常规条目 / 条目数或解压尺寸超限）。
     #[error("归档被拒绝：{0}")]

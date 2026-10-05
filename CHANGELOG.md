@@ -15,6 +15,16 @@
 
 ### Changed
 
+- **升级执行器默认拒绝降级（轮 54）**：`tauron-distribute` 此前**没有任何版本序比较**——
+  「降级门禁另有实现」是一句与代码相反的宣称，一条目标版本低于已安装版本的清单会被当成正常升级
+  走完 download→extract→swap 并在 journal 里记为成功。本轮新增 `ensure_not_downgrade()` 与具名错误
+  `DowngradeRejected{current,target}`，挂在 `UpgradeRunner::validate()` 的零副作用检查段，并让装配腿
+  `DistributeUpgradeInstaller::select_manifest` 在 download/install 两条腿任何字节移动之前复用同一判据
+  （对外映射 `E_INVALID_MANIFEST`）。版本序走**单一算术源**：新增 `tauron-distribute → tauron-market`
+  依赖边复用 `cmp_version`/`is_downgrade`，不在 distribute 里再写一份解析；无版本基线（`None`）如实放行
+  ——装配方不传 `installed_version` 就拦不住，而本仓库目前没有生产构造点（安装器仍由装配方注入），
+  这一装配缺口在 `docs/architecture/v4-industrial-gap-closure-plan.md` 轮 54 小节登记在案。
+  `installed_version` 的文档随之改为双用途（降级门禁基线 + journal `old_version`）。
 - **通知分组键校验接进写入路径（轮 53）**：`tauron-notify` 的 `validate_group_key` 此前是孤儿
   （只有库内 API + 单测）。`cmd_notify` 校验标题/正文字节预算却原样放行 `plugin_id`，
   `group_key()` 无条件拼成 `plugin:<id>`——空 id 或含 `..` 的键一旦入环形缓冲，

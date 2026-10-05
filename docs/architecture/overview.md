@@ -190,7 +190,7 @@ tauron-*       ← 全部 Rust crate
 > | **部分接线** | `tauron-wasm` | opt-in `runtime-wasm-broker` 下进入依赖表：配置校验与崩溃预算**真跑** `tauron-wasm`，投递回执保持诚实失败（`delivered: false` → `E_PLUGIN_TYPE_NO_RUNTIME`）——引擎本身轮 22 已落（`wasmi = "2.0.0"` + `src/provider.rs`），**没接的是适配层对它的消费** |
 > | **已接线** | `tauron-brand` | `cmd_brand_info` 走 `tauron-brand` 的校验链返回 `BrandInfo`；**env 未配置时**如实降级 `UnsupportedBody`，不伪装成空品牌数据 |
 > | **已接线** | `tauron-theme` | `SubstrateState::themes` 就是 `tauron_theme::ThemeRegistry`；`host_theme_list` / `host_theme_get` / `host_theme_set`（均仅主窗）落在它上面 |
-> | **已接线** | `tauron-distribute` | updater provider：`host_updater_check` / `host_updater_status` 真跑 `check_for_update`（灰度 + 签名 + 崩溃门禁），`InstallationIdentity` 落盘持久化；未注入 `EndpointClient` 时 fail-closed |
+> | **已接线** | `tauron-distribute` | updater provider：`host_updater_check` / `host_updater_status` 真跑 `check_for_update`（灰度 + 签名 + 崩溃门禁），`InstallationIdentity` 落盘持久化；未注入 `EndpointClient` 时 fail-closed；轮 54 起升级执行器**默认拒绝降级**（`ensure_not_downgrade` 复用 market 的 `cmp_version`/`is_downgrade` 单一算术源，门禁落在 `validate` 的零文件副作用段） |
 > | **未接线** | `tauron-shell` | 框架层整层：它的 3 条 `plugin_*` 命令在仓库内**没有任何宿主注册**——示例 `main.rs` 只把 `tauron_shell::tauron_generate_handler![]` 写在**注释**里；且 `PluginDispatcher` 的**生产实现为零**（唯一 `impl` 是测试用的 `EchoDispatcher`），未装载分发器时 `plugin_invoke` 恒回 `SC-9001`。CI 会带 `tauri` feature 编译并自测该 crate，但那是库内自测，**不构成宿主装配证据** |
 >
 > **公共 API 的孤儿面另有台账**：12 条「文档宣称未接线」的公共 API（`to_capability`、
@@ -248,6 +248,8 @@ tauron-*       ← 全部 Rust crate
 │                           (runtime-wasm-broker)                │
 │  tauron-acl ──────────────────→ tauron-host                    │
 │  tauron-settings ─────────────→ tauron-schema                  │
+│  tauron-distribute ───────────→ tauron-market（版本序单一算术  │
+│                                 源，轮 54 降级门禁）            │
 └────────────────────────────────────────────────────────────────┘
 
 单向约束：`SubstrateState`（底座）**不得**触达注册表；插件运行时 → 底座的
