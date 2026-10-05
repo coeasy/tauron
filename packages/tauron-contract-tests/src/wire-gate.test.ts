@@ -5025,6 +5025,107 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(changelog, 'CHANGELOG 缺轮 56 条目').toMatch(/轮 56/);
   });
 
+  it('轮 57：通知容量设置键接通 NotifyStore::trim_to（判定一处、生效两点、先判后写）', () => {
+    // 轮 57 立的规矩：`trim_to` 此前是「库内 API + 单测」的孤儿——用户侧没有任何入口能让
+    // 通知环形缓冲收缩，容量在宿主里是装配期的一个字面量。命令面 85 条冻结 ⇒ 只能挂设置键。
+    // 门禁钉：①容量判定只有一处实现（`parse_notify_capacity`）；②生效点恰两处（装配期读盘 +
+    // `host_settings_set` 落盘提交后），且校验发生在**落盘之前**；③内建默认是常量、不是被抄的
+    // 字面量；④磁盘坏值必须留痕（降级不许静默）；⑤孤儿条目已删、声明侧注释改口；
+    // ⑥四条行为测试在。语义（驱逐最旧、unread 记账、非法值零副作用、重启仍生效、坏值不拒启）
+    // 由 cargo 实跑判定。
+    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    const capacity = read('crates/tauron-adapter/src/notify_capacity.rs');
+    // 判定与生效的**实现**都在域文件里（轮 57：`lib.rs` 顶层条目已封顶，新能力按台账建议开新域文件）。
+    for (const needle of [
+      'pub(crate) const NOTIFICATIONS_CAPACITY_KEY: &str = "notifications.capacity";',
+      'pub(crate) const NOTIFICATIONS_CAPACITY_MAX: usize = 4096;',
+      'pub(crate) const NOTIFICATIONS_CAPACITY_DEFAULT: usize = 512;',
+      'pub(crate) fn parse_notify_capacity(value: &serde_json::Value) -> HostResult<usize>',
+      'pub(crate) fn apply_notify_capacity(state: &SubstrateState) -> HostResult<Option<usize>>',
+      '.trim_to(capacity)',
+    ]) {
+      expect(capacity, `notify_capacity.rs 缺 ${needle}（容量的单源实现被搬空）`).toContain(needle);
+    }
+    // `lib.rs` 只许留**调用点**：装配期读盘一次、写前判定一次、落盘提交后生效一次。
+    for (const needle of [
+      'mod notify_capacity;',
+      'match notify_capacity_from_settings(&settings) {',
+      'NotifyStore::new(NOTIFICATIONS_CAPACITY_DEFAULT)',
+      'if key == NOTIFICATIONS_CAPACITY_KEY {\n            parse_notify_capacity(&value)?;',
+      'if key == NOTIFICATIONS_CAPACITY_KEY {\n            apply_notify_capacity(state)?;',
+    ]) {
+      expect(adapter, `lib.rs 缺 ${needle}（轮 57 的容量接线被掏空）`).toContain(needle);
+    }
+    // 行锚定：`toContain` 只认子串，把整行注释掉仍算命中——域文件必须真的被挂上。
+    expect(adapter, 'lib.rs 的 mod notify_capacity; 只是作为注释存在（域文件没真接上）').toMatch(
+      /^mod notify_capacity;$/m,
+    );
+    // 计数钉（跨两个文件）：裁剪调用点恰 2、判定/生效各只有 1 份实现、调用点各 1 处。
+    expect(
+      [...`${adapter}${capacity}`.matchAll(/\.trim_to\(/g)].length,
+      '环形缓冲裁剪的调用点变了（应 2：装配期 + 落盘后；别处不得再抄一份裁剪）',
+    ).toBe(2);
+    expect(
+      [...`${adapter}${capacity}`.matchAll(/fn parse_notify_capacity\(/g)].length,
+      '容量判定函数长了第二份实现（判定必须只有一处）',
+    ).toBe(1);
+    expect(
+      [...`${adapter}${capacity}`.matchAll(/fn apply_notify_capacity\(/g)].length,
+      '容量生效函数长了第二份实现（生效必须只有一处）',
+    ).toBe(1);
+    expect(
+      [...`${adapter}${capacity}`.matchAll(/parse_notify_capacity\(/g)].length,
+      '判定的定义+调用点数量变了（应 3：定义 + 读盘判定 + 写前判定）',
+    ).toBe(3);
+    expect(
+      [...`${adapter}${capacity}`.matchAll(/notify_capacity_from_settings\(/g)].length,
+      '读盘事实的定义+调用点数量变了（应 3：定义 + 生效内 + 装配期）',
+    ).toBe(3);
+    // 反向钉：内建默认只能是常量。
+    expect(
+      adapter,
+      '装配处又把内建默认容量抄成了字面量（「默认」与「键缺席」必须是同一个事实）',
+    ).not.toContain('NotifyStore::new(512)');
+    // 反向钉：实现不许被搬回 `lib.rs`（那是本仓的 god file，条目预算已封顶）。
+    expect(
+      adapter,
+      '容量的判定/生效实现又搬回了 lib.rs（应留在 notify_capacity.rs 域文件里）',
+    ).not.toContain('const NOTIFICATIONS_CAPACITY_KEY');
+    // 反向钉：坏值降级必须留痕（分支必须是 `eprintln!`，消息里点明键名）。
+    expect(adapter, '磁盘上的坏容量不再留痕了——启动降级必须是诚实报告，不能静默沿用默认').toContain(
+      'Err(error) => eprintln!(',
+    );
+    expect(adapter, '降级留痕没点明是哪个键坏了').toContain(
+      '[tauron] 磁盘上的 {NOTIFICATIONS_CAPACITY_KEY} 非法',
+    );
+
+    const ledger = read('contracts/orphan-public-api.json');
+    expect(
+      (ledger.match(/"symbol": "NotifyStore::trim_to"/g) ?? []).length,
+      '孤儿台账仍登记 NotifyStore::trim_to（轮 57 已接线，条目必须删除）',
+    ).toBe(0);
+
+    const notify = read('crates/tauron-notify/src/lib.rs');
+    expect(notify, 'trim_to 的注释仍宣称无人调用').toContain('已接线（轮 57）');
+
+    for (const name of [
+      'fn notify_capacity_setting_shrinks_the_ring_and_reports_it_on_the_wire(',
+      'fn notify_capacity_setting_rejects_bad_values_before_they_reach_disk_or_ring(',
+      'fn notify_capacity_is_reapplied_from_disk_at_assembly_after_restart(',
+      'fn a_bad_capacity_on_disk_never_refuses_startup(',
+    ]) {
+      expect(adapter, `缺轮 57 的行为测试 ${name}`).toContain(name);
+    }
+
+    const adoption = read('docs/integration/incremental-adoption.md');
+    expect(adoption, '孤儿行的删除清单没登记轮 57').toContain('`trim_to` 轮 57 已接线');
+
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案缺轮 57 小节').toMatch(/^### 轮 57：/m);
+    const changelog = read('CHANGELOG.md');
+    expect(changelog, 'CHANGELOG 缺轮 57 条目').toMatch(/轮 57/);
+  });
+
   it('V7 §7：风险表的复核结论必须与代码同形（宣称链不得悄悄升级）', () => {
     // 轮 28 立的规矩：审计风险表一旦被逐行复核，"结论"就成了对外宣称。这条门禁挡两种漂移：
     // ①代码没动、文档把「部分／仍成立」改成「已闭合」（假宣称）；②文档没动、代码悄悄多了

@@ -15,6 +15,21 @@
 
 ### Changed
 
+- **通知环形缓冲的容量第一次有了用户侧入口（轮 57）**：`NotifyStore::trim_to` 自落地以来是台账里
+  的孤儿——库内 API + 单测，宿主侧没有任何入口能让缓冲收缩，而 `host_notifications_list` 早已把
+  `capacity` 当线字段报给前端（读数有出口、事实无入口）。命令面冻结在 85 条，因此新增的是主窗专属
+  设置键 `notifications.capacity`（合法范围 `1..=4096`，判定只在 `parse_notify_capacity` 一处）而
+  不是新命令：`host_settings_set` **先判后写**（非法值返回 `E_INVALID_MANIFEST`，磁盘与缓冲都不动），
+  落盘并提交镜像后立即生效；装配期再消费一次磁盘，重启不再回到内建默认（内建默认升格为
+  `NOTIFICATIONS_CAPACITY_DEFAULT`，装配处不再抄字面量）。磁盘上若有越界写入的坏值则**不拒绝启动**——
+  留痕并沿用内建默认，姿态与 A101 的降级分支一致。调小是破坏性动作：按环形语义驱逐最旧并同步
+  `unread`/分组记账，不额外存档、不弹二次确认。边界：每插件上限（64）与分发日志上限（200）仍不可配；
+  设置面没有「撤销键」入口，所以 `null` 也判非法；`adopt_legacy`/`migrate` 这条整份文档写路径仍不做
+  按键语义校验。顺带闭环一处工具链漂移：`pnpm lint:rust`（workspace clippy 硬门禁）在本轮跑红于
+  一个既有 example（`install_stream_probe.rs` 的 `chunks_exact_mut(8)` 触发新 lint
+  `chunks_exact_to_as_chunks`），已改为语义等价的 `as_chunks_mut::<8>().0`——「HEAD 上发布门禁是红的」
+  本身就是断链，不因为不是本轮引入就留着。
+
 - **壳层安装流开始真的消费宿主的审批判定（轮 56）**：轮 55 之后 `defaultChecked` / `scope` /
   `confirmationHint` 三个字段在 `packages/` 里**零读者**——壳层安装对每一行都问同一句
   「是否授予」，把宿主的高危判定降级成一次普通是/否点击。现在 `_installPlugin` 按宿主的

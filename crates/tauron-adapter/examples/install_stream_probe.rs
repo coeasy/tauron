@@ -197,7 +197,7 @@ mod probe {
             let mut state = 0x9e37_79b9_7f4a_7c15u64 ^ (index as u64 + 1);
             let mut written = 0u64;
             while written < BLOB_BYTES {
-                for slot in chunk.chunks_exact_mut(8) {
+                for slot in chunk.as_chunks_mut::<8>().0 {
                     state ^= state << 13;
                     state ^= state >> 7;
                     state ^= state << 17;

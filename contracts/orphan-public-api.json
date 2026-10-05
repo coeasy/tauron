@@ -61,14 +61,6 @@
       "docRef": "docs/api/client-config.md"
     },
     {
-      "symbol": "NotifyStore::trim_to",
-      "declaredIn": "crates/tauron-notify/src/lib.rs",
-      "lang": "rust",
-      "probe": "\\btrim_to\\b",
-      "disposition": "未接线：容量裁剪只有库内 API + 单测；宿主命令面没有「收缩通知环形缓冲」的入口，用户侧无法触发。",
-      "docRef": "docs/integration/incremental-adoption.md"
-    },
-    {
       "symbol": "is_monotonic",
       "declaredIn": "crates/tauron-market/src/lib.rs",
       "lang": "rust",

@@ -38,6 +38,14 @@ mod menu_routes;
 
 pub use menu_routes::{menu_routes, menu_routes_of, MenuLane, MenuRouteTable, MENU_CLICK_TOPIC};
 
+/// 通知环形缓冲容量的判定与生效（轮 57；`NotifyStore::trim_to` 的唯一消费者）。
+mod notify_capacity;
+
+pub(crate) use notify_capacity::{
+    apply_notify_capacity, notify_capacity_from_settings, parse_notify_capacity,
+    NOTIFICATIONS_CAPACITY_DEFAULT, NOTIFICATIONS_CAPACITY_KEY,
+};
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -3920,13 +3928,14 @@ impl SubstrateState {
         }
 
         // §8-17 生产自检（P1-10）：档位表是构建期常量，错了就是构建缺陷。
-        // 失败**立即 panic**（与同一构造函数里 `NotifyStore::new(512).expect(..)` 的
+        // 失败**立即 panic**（与同一构造函数里 `NotifyStore::new(内建默认).expect(..)` 的
         // 失败姿态一致）——让缺陷在第一次启动就暴露，而不是带病运行到越权发生。
         if let Err(msg) = authz_table_selfcheck() {
             panic!("[tauron] 授权档位表自检失败（§8-17 构建缺陷）：{msg}");
         }
 
-        let notify_store = NotifyStore::new(512).expect("NotifyStore::new(512) should succeed");
+        let mut notify_store =
+            NotifyStore::new(NOTIFICATIONS_CAPACITY_DEFAULT).expect("内建默认容量恒 > 0");
 
         // V4 A87: the same durable data directory is the canonical owner for recovery + settings.
         // Acquire a real OS-backed writer lease before reading or mutating any persistent state.
@@ -4020,6 +4029,25 @@ impl SubstrateState {
                     }
                 }
             }
+        }
+
+        // 轮 57：容量的**装配期生效点**。磁盘上写过的值必须在这里被消费一次，否则
+        // 「用户把通知容量调小」只活到下一次启动——内建默认会在装配时把它悄悄覆盖回去。
+        // 磁盘上的坏值**不拒绝启动**：保留内建默认并留痕，姿态与上面 A101 的降级分支一致
+        // （一个坏掉的可选容量键不该让用户整个宿主起不来）。
+        match notify_capacity_from_settings(&settings) {
+            Ok(Some(capacity)) => {
+                if let Err(error) = notify_store.trim_to(capacity) {
+                    eprintln!(
+                        "[tauron] 磁盘上的 {NOTIFICATIONS_CAPACITY_KEY}={capacity} 无法生效（{error:?}），沿用内建默认 {NOTIFICATIONS_CAPACITY_DEFAULT}"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!(
+                "[tauron] 磁盘上的 {NOTIFICATIONS_CAPACITY_KEY} 非法（{}），沿用内建默认 {NOTIFICATIONS_CAPACITY_DEFAULT}",
+                error.message
+            ),
         }
 
         // §33 R2-4（W6）：宿主设置的**提交**要接进消息面——插件侧 `onSettingsChanged`
@@ -7521,6 +7549,19 @@ pub fn cmd_settings_get(state: &SubstrateState, key: &str) -> HostResult<serde_j
 /// **线形不变**（前端契约）：入参 `key: string, value: any`，返回 `()`。
 /// 写入**经 [`SettingsStore`]**（不再是裸 `HashMap`）：键会被编码成合法点路径，
 /// 值要过命名空间 schema，落盘形态由 Store 的四层结构决定。
+///
+/// **轮 57 起的唯一带语义的键**：[`NOTIFICATIONS_CAPACITY_KEY`]
+/// （`notifications.capacity`，主窗专属——插件写宿主键由 [`require_settings_key_scope`] 拒）。
+/// 合法性由 [`parse_notify_capacity`] 一处判定，范围 `1..=NOTIFICATIONS_CAPACITY_MAX`，
+/// **在落盘之前**判：非法值返回 `E_INVALID_MANIFEST`，设置文档与环形缓冲都保持原样
+/// （没有“撤销键”的命令面入口，所以 `null` 也拒；要回内建默认 [`NOTIFICATIONS_CAPACITY_DEFAULT`]
+/// 就显式把默认值写回来）。
+/// 落盘并镜像提交成功后由 [`apply_notify_capacity`] 立即生效（收缩=驱逐最旧并同步
+/// `unread`/分组记账，放大=只抬上限）；`host_notifications_list` 的 `capacity` 字段
+/// 报的就是**生效后的真值**。宿主启动时会再读一次磁盘（见装配处的
+/// `notify_capacity_from_settings`），重启不会回到内建默认；磁盘上若有越界写入的坏值
+/// （例如旧文档经 `host_settings_adopt_legacy` + `host_settings_migrate` 带进来的）
+/// **不拒绝启动**：留痕并沿用内建默认。
 pub fn cmd_settings_set(
     state: &SubstrateState,
     key: &str,
@@ -7532,6 +7573,13 @@ pub fn cmd_settings_set(
                 ErrorCode::E_INVALID_MANIFEST,
                 "设置键不能为空（调用方可能传了 undefined/null）".to_string(),
             ));
+        }
+
+        // 轮 57：**先判后写**。通知容量的合法性只由 [`parse_notify_capacity`] 一处说了算，
+        // 非法值在写租约与落盘之前就被拒——磁盘上永远不会留下一个「装配期读回来会报错」
+        // 的容量键，装配分支因此只用来兜「用户手改文件」这种越界写入。
+        if key == NOTIFICATIONS_CAPACITY_KEY {
+            parse_notify_capacity(&value)?;
         }
 
         // 单写者事务。两件事必须分清：**写租约故意横跨落盘**（否则另一个 writer 能插进
@@ -7556,6 +7604,13 @@ pub fn cmd_settings_set(
 
         // Watchers only observe a revision after durable persistence succeeded.
         commit_settings_change(state, event);
+
+        // 轮 57：容量键的**运行期生效点**——落盘与提交都成功了才动环形缓冲。
+        // 放在 persist 之前会出现「缓冲已经缩了、磁盘写失败回滚」的不一致（下次启动又长回去）。
+        // 这里取 `settings` 锁不会与落盘交叉：`_write` 是写租约，不是设置互斥量。
+        if key == NOTIFICATIONS_CAPACITY_KEY {
+            apply_notify_capacity(state)?;
+        }
         Ok(())
     })
 }
@@ -14670,6 +14725,146 @@ mod tests {
         cmd_settings_set(&state, "plugin:p.theme", serde_json::json!("dark")).unwrap();
         let result = cmd_settings_get(&state, "plugin:p.theme").unwrap();
         assert_eq!(result, serde_json::json!("dark"));
+    }
+
+    /// 轮 57：`notifications.capacity` 调小**真的驱逐最旧条目**，且线形 `capacity` 报的是
+    /// 生效后的真值（不是设置文档里的期望值）。
+    #[test]
+    fn notify_capacity_setting_shrinks_the_ring_and_reports_it_on_the_wire() {
+        let state = CommandState::new();
+        for n in 1..=3 {
+            cmd_notify(&state, "com.a", &format!("T{n}"), "B").unwrap();
+        }
+        let before = cmd_notifications_list(&state, None).unwrap();
+        assert_eq!(before["total"], 3, "前置：三条真的都写进去了");
+        let built_in = before["capacity"].clone();
+
+        cmd_settings_set(&state, NOTIFICATIONS_CAPACITY_KEY, serde_json::json!(2)).unwrap();
+
+        let after = cmd_notifications_list(&state, None).unwrap();
+        assert_ne!(after["capacity"], built_in, "容量必须真的变了，而不是只写进设置文档");
+        assert_eq!(after["capacity"], 2);
+        assert_eq!(after["total"], 2, "收缩要驱逐最旧的 1 条，不是只改上限");
+        let items = after["items"].as_array().unwrap();
+        assert_eq!(items[0]["title"], "T3", "时间倒序：留下的必须是最旧那条的对立面");
+        assert_eq!(items[1]["title"], "T2");
+        assert_eq!(after["unread"], 2, "驱逐未读条目要同步扣减 unread 记账");
+
+        // 放大不搬条目，只抬上限。
+        cmd_settings_set(&state, NOTIFICATIONS_CAPACITY_KEY, serde_json::json!(4)).unwrap();
+        assert_eq!(cmd_notifications_list(&state, None).unwrap()["total"], 2, "放大不得凭空造条目");
+        cmd_notify(&state, "com.a", "T4", "B").unwrap();
+        cmd_notify(&state, "com.a", "T5", "B").unwrap();
+        assert_eq!(cmd_notifications_list(&state, None).unwrap()["total"], 4);
+    }
+
+    /// 轮 57：**先判后写**——非法容量在写租约与落盘之前就被拒，磁盘与环形缓冲都不动。
+    #[test]
+    fn notify_capacity_setting_rejects_bad_values_before_they_reach_disk_or_ring() {
+        let t = tempfile::tempdir().unwrap();
+        let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+        cmd_notify(&state, "com.a", "T1", "B").unwrap();
+        cmd_settings_set(&state, NOTIFICATIONS_CAPACITY_KEY, serde_json::json!(2)).unwrap();
+
+        for bad in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(notify_capacity::NOTIFICATIONS_CAPACITY_MAX as i64 + 1),
+            serde_json::json!("2"),
+            serde_json::json!(1.5),
+            serde_json::json!(null),
+        ] {
+            let err = cmd_settings_set(&state, NOTIFICATIONS_CAPACITY_KEY, bad.clone())
+                .expect_err(&format!("{bad} 不是合法容量"));
+            assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST);
+            assert!(
+                err.message.contains(NOTIFICATIONS_CAPACITY_KEY),
+                "报错要点明是哪个键被拒：{} → {}",
+                bad,
+                err.message
+            );
+        }
+
+        let snap = cmd_notifications_list(&state, None).unwrap();
+        assert_eq!(snap["capacity"], 2, "非法写入不得动环形缓冲");
+        assert_eq!(snap["total"], 1);
+        assert_eq!(
+            cmd_settings_get(&state, NOTIFICATIONS_CAPACITY_KEY).unwrap(),
+            serde_json::json!(2),
+            "非法写入不得改磁盘上的事实"
+        );
+
+        // 上界本身可写（范围是 1..=MAX，不是「小于 MAX」）。
+        cmd_settings_set(
+            &state,
+            NOTIFICATIONS_CAPACITY_KEY,
+            serde_json::json!(notify_capacity::NOTIFICATIONS_CAPACITY_MAX),
+        )
+        .unwrap();
+        assert_eq!(
+            cmd_notifications_list(&state, None).unwrap()["capacity"],
+            notify_capacity::NOTIFICATIONS_CAPACITY_MAX
+        );
+
+        // 磁盘上留下的仍然是合法值：重新装配走的是「读到合法容量」分支，不是降级分支。
+        drop(state);
+        let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+        assert_eq!(
+            cmd_notifications_list(&state, None).unwrap()["capacity"],
+            notify_capacity::NOTIFICATIONS_CAPACITY_MAX
+        );
+    }
+
+    /// 轮 57：容量的**装配期生效点**——磁盘上的值在重启后仍然生效，不回内建默认。
+    #[test]
+    fn notify_capacity_is_reapplied_from_disk_at_assembly_after_restart() {
+        let t = tempfile::tempdir().unwrap();
+        {
+            let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+            cmd_settings_set(&state, NOTIFICATIONS_CAPACITY_KEY, serde_json::json!(3)).unwrap();
+        }
+        let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+        let snap = cmd_notifications_list(&state, None).unwrap();
+        assert_eq!(snap["capacity"], 3, "重启后容量必须来自磁盘，而不是内建默认");
+        assert_eq!(
+            cmd_settings_get(&state, NOTIFICATIONS_CAPACITY_KEY).unwrap(),
+            serde_json::json!(3)
+        );
+        // 环形缓冲是**进程内**账本：重启后为空是既有语义，本轮不改变它。
+        assert_eq!(snap["total"], 0);
+    }
+
+    /// 轮 57：磁盘上的坏容量**不拒绝启动**——降级成内建默认并留痕，且键不会被冻住。
+    #[test]
+    fn a_bad_capacity_on_disk_never_refuses_startup() {
+        let built_in =
+            cmd_notifications_list(&CommandState::new(), None).unwrap()["capacity"].clone();
+        let t = tempfile::tempdir().unwrap();
+        {
+            // 坏值的真实来路：越界写入。`host_settings_set` 现在先判后写，但**整份接手**
+            // 那条链不经过它——旧文档里的裸键被 v1→v2 迁移转义后照样落盘。
+            let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+            cmd_settings_adopt_legacy(
+                &state,
+                serde_json::json!({ (NOTIFICATIONS_CAPACITY_KEY): "plenty" }),
+            )
+            .unwrap();
+            assert_eq!(cmd_settings_migrate(&state).unwrap(), 1);
+        }
+        let state = CommandState::with_adapter_config(recovery_cfg(t.path()));
+        assert_eq!(
+            cmd_notifications_list(&state, None).unwrap()["capacity"],
+            built_in,
+            "坏值要降级成内建默认（并留痕），不能拒启、也不能带着非法容量运行"
+        );
+        // 读路径不校验 schema：坏值原样读回（既有契约，本轮不改）。
+        assert_eq!(
+            cmd_settings_get(&state, NOTIFICATIONS_CAPACITY_KEY).unwrap(),
+            serde_json::json!("plenty")
+        );
+        // 坏值不冻结这个键：一次合法写入立即生效。
+        cmd_settings_set(&state, NOTIFICATIONS_CAPACITY_KEY, serde_json::json!(2)).unwrap();
+        assert_eq!(cmd_notifications_list(&state, None).unwrap()["capacity"], 2);
     }
 
     #[test]

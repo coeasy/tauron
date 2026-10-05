@@ -333,6 +333,11 @@ impl NotifyStore {
     }
 
     /// 批量裁剪到目标容量（供外部缩容使用）。
+    ///
+    /// **已接线（轮 57）**：调用方是宿主适配层的两个生效点——装配期从磁盘读一次，
+    /// `host_settings_set` 在 `notifications.capacity` 落盘并提交镜像后一次。
+    /// 容量的**合法性判定不在这里**（由适配层 `parse_notify_capacity` 单源解释），
+    /// 但 `0` 仍然硬拒：一个零容量环形缓冲会让下一次 `push` 空转。
     pub fn trim_to(&mut self, capacity: usize) -> NotifyResult<Vec<String>> {
         if capacity == 0 {
             return Err(NotifyError::ZeroCapacity);
