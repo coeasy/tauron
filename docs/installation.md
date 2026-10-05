@@ -405,8 +405,11 @@ pnpm add @tauron/types @tauron/core @tauron/host   # npm / yarn 同理
 16 个 crate 均已通过 `cargo package` 检查：产物 manifest 里内部依赖已只剩 `version`
 （`path` 由 cargo 剥离）。本次发布工作流按依赖顺序上传，完成后再由 Windows 干净消费者工程实际安装构建。
 
-- ✅ **本机已验证**：`cargo package -p <crate> --allow-dirty --offline` 对全部 15 个 crate
+- ✅ **本机已验证**：`cargo package -p <crate> --allow-dirty --offline` 对全部 16 个可发布 crate
   产出并构建 `.crate`，且产物内 `[dependencies.tauron-*]` 只剩 `version = "1.1.0"`、没有 `path`。
+  （轮 52 对账：此句原写「15 个」，是 `tauron-ffi` 进 workspace 前的旧口径；
+  最新一次实测见轮 51 的 `pnpm publish:crates -- --check` = 16 个 crate、产物校验失败 0。
+  §3.7 里带日期 2026-09-27 的「15 个」是**当日历史读数**，按惯例不改写。）
 - ⏳ **CI 发布与验收**：由配置了发布凭据的 GitHub Actions 执行；失败可从断点安全续发。
 
 **发布必须按依赖拓扑顺序逐个来**（被依赖者先发）——`cargo publish` 剥离 `path` 后

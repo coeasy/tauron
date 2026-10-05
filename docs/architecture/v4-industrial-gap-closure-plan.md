@@ -3012,6 +3012,36 @@ npm 缺 20、crates.io 缺 9、未能核实 8」，其中 crates 列表面含 `t
 不证明「Release 已建出」。另有一条未做的核对：`docs/installation.md` 里「15 个 crate」的旧读数段（§发布相关，
 写于 `tauron-ffi`/sidecar 之前）与本轮的 16 未逐句对齐，留作下一轮的文档对账项。
 
+### 轮 52：卸载插件会漏下一个空的 locale 资源包——把 `remove_resource_bundle` 从孤儿接进生产路径
+
+**断链（孤儿逻辑，泄漏类）**：`crates/tauron-i18n` 的 `I18nEngine::remove_resource_bundle` 在
+`contracts/orphan-public-api.json` 里挂着「只有本包测试能调用」。它不是多余 API——`cleanup_plugin`
+（宿主卸载插件时清理该插件命名空间 `plugin:<id>.` 下的所有键）删完键之后**从不回收语言包本身**：
+某个 locale 的资源若全部来自被卸载的插件，删完后会留下一个 `texts` 为空、却永久驻留在
+`self.bundles` 里的包。反复装卸插件 = 无界增长的空包，且 `get_bundle()` 返回 `Some(空包)`，
+让上层误判「该语言仍受支持」。这正是「接口在、事实不在」的反向形态：事实（回收）代码里根本没有。
+
+**修法（真实接线，不是补测试）**：`cleanup_plugin` 在遍历各包删键时记录**本次被清空过键的** locale，
+遍历结束后只对「本次被清空且现在 `texts` 为空」的包调用 `remove_resource_bundle`。
+刻意不加「顺手回收所有空包」的宽口径——卸载 A 插件不该删掉本来就空着的 B 语言的包。
+台账里该孤儿条目随之删除（`gates:check` 接受删除，孤儿数 14 → **13**）。
+
+**读数（本轮日志）**：新增两个行为测试——
+`locale_bundle_whose_only_texts_came_from_the_plugin_is_dropped`（卸载后 `get_bundle("de")` 为 `None`）与
+`cleanup_keeps_a_locale_that_still_has_non_plugin_texts`（混有非插件键的 `fr` 包保留、剩 1 键）。
+`cargo fmt --all` rc=0；`cargo test -p tauron-i18n --locked` = **34 passed; 0 failed**；
+`cargo test -p tauron-adapter --locked --lib` = **310 passed**；
+`pnpm run gates:check` rc=0；`pnpm run format:check` rc=0。
+收尾时复核：孤儿台账现存 **13** 条（`node -e` 计数，见上），i18n 34 passed 为同一轮重跑实测。
+
+**诚实边界**：这一轮只消掉**一个**孤儿，且它是 Rust 侧的泄漏修复；它**不**证明 i18n 的宿主链路完整——
+`cleanup_plugin` 目前仍只有本包测试与 Rust 侧调用者，TS/前端卸载路径是否走到这里未在本轮验证。
+台账余下 13 条（`AclStore::to_capability`、`build_approval_rows`、`NotifyStore::trim_to`、
+`is_downgrade`/`validate_group_key`、TS 侧 `createAutoUpdateClient…`/`UpdaterStore`/`PluginRegistry`/
+`ConfigManager` 等）仍是未接线公开 API，逐条口径见台账文件本身。
+另：本轮顺手补上轮 51 遗留的 `installation.md` 对账（§3.5 的「全部 15 个 crate」改为本轮实测的
+`publish:crates --check` 16 个/失败 0 口径；§3.7 的 2026-09-27 段是**带日期的历史读数**，按惯例不改写）。
+
 ## 9. 明确推迟 / 不做（附理由）
 
 | 项 | 处置 | 理由 |

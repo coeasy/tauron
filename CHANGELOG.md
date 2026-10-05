@@ -15,6 +15,14 @@
 
 ### Changed
 
+- **卸载插件不再遗留空语言资源包（轮 52）**：`tauron-i18n` 的 `remove_resource_bundle` 原先是
+  `contracts/orphan-public-api.json` 登记的孤儿——`cleanup_plugin` 删完 `plugin:<id>.` 命名空间的键后
+  **从不回收语言包本身**，只含该插件文案的 locale 会留下一个 `texts` 为空却永久驻留的包，
+  且 `get_bundle()` 返回 `Some(空包)` 让上层误判该语言仍受支持（反复装卸 = 无界增长）。
+  现由 `cleanup_plugin` 记录**本次被清空过键**的 locale 并只回收其中已转空的包（不顺手删本来就空的包）。
+  新增两个行为测试：独占来源的 `de` 包卸载后为 `None`、混有非插件键的 `fr` 包保留剩 1 键。
+  同轮实测 `cargo test -p tauron-i18n --locked` **34 passed**、`tauron-adapter --lib` **310 passed**、
+  `gates:check` / `format:check` / `cargo fmt --all` rc=0；孤儿台账 14 → **13** 条。
 - **修掉发布主链上的恒红死锁（轮 51）**：`scripts/check-published-versions.mjs` 枚举 `crates/` 时
   不过滤 `publish = false`（npm 侧却有 `private !== true` 的对偶过滤），于是轮 41 进来的
   `tauron-test-sidecar`（清单 `publish = false`）让这条门禁要求一个永不可能是 crates.io 包的 crate；
