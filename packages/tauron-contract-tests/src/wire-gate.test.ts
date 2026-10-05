@@ -27,7 +27,7 @@ import {
   PLUGIN_REPORTABLE_EVENTS,
   RETRYABLE_HOST_ERROR_CODES,
 } from '@tauron/host';
-import { PluginErrorCode, RETRYABLE_ERROR_CODES } from '@tauron/types';
+import { PluginErrorCode, RETRYABLE_ERROR_CODES, TRANSITIONS } from '@tauron/types';
 
 const here = dirname(fileURLToPath(import.meta.url));
 // packages/tauron-contract-tests/src → packages/tauron-contract-tests → packages → root
@@ -5243,6 +5243,123 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(plan, '缺口方案缺轮 59 小节').toMatch(/^### 轮 59：/m);
     expect(plan, '轮 57 的遗留句没被轮 59 就地改口').toMatch(/降级兜住（\*\*轮 59 已落地\*\*/);
     expect(read('CHANGELOG.md'), 'CHANGELOG 缺轮 59 条目').toMatch(/轮 59/);
+  });
+
+  it('轮 60：三套插件生命周期词表的分歧必须逐名钉死（mock 有小写→线名映射，SDK 假注释已改口）', () => {
+    // 事实面：宿主线名只有一个权威（Rust `tauron-host::lifecycle::State::as_str()`，
+    // TS 镜像 = 本文件已 import 的 `LIFECYCLE_STATES`）。另有两份**已发布**的 TS 词表：
+    // ①`@tauron/types` 的 §4.3 设计模型名（10 个，与线名只重合 5 个）；
+    // ②`@tauron/app-contract-kit` mock 的 5 个小写名（作者被 README 引导用它测生命周期）。
+    // 轮 60 前两者与线名之间零可证一致性：改名、加名、把 mock 的小写名喂给真实宿主都不红。
+    const wire: readonly string[] = LIFECYCLE_STATES;
+    expect(wire.length, 'LIFECYCLE_STATES 读数异常（构建产物过期？先 pnpm build）').toBe(10);
+
+    // ── ①mock 词表 → 线名：整表逐名核对，两侧都不许悄悄动 ─────────────
+    const kit = read('packages/tauron-app-contract-kit/src/mock-registry.ts');
+    const unionMatch = /export type PluginState =\s*([^;]+);/.exec(kit);
+    expect(unionMatch, '未解析到 mock 的 PluginState union（门禁定位失败）').not.toBeNull();
+    const mockStates = [...unionMatch![1]!.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]!);
+    expect(mockStates.length, 'mock PluginState 解析到 0 个成员（正则失配）').toBeGreaterThan(0);
+
+    const tableMatch = /MOCK_STATE_TO_WIRE[^=]*=\s*\{([\s\S]*?)\};/.exec(kit);
+    expect(
+      tableMatch,
+      'mock 缺 MOCK_STATE_TO_WIRE（小写名→线名的唯一映射表被搬空）',
+    ).not.toBeNull();
+    const rows = [...tableMatch![1]!.matchAll(/(\w+):\s*'([A-Z_]+)'/g)].map((m) => ({
+      from: m[1]!,
+      to: m[2]!,
+    }));
+    expect(rows.length, 'MOCK_STATE_TO_WIRE 解析到 0 行（表形制变了）').toBeGreaterThan(0);
+
+    // 定义域 = union 全集：漏一个名字（或表里多出一个 union 里没有的名字）都红。
+    expect(
+      [...rows.map((r) => r.from)].sort(),
+      '映射表定义域与 mock PluginState union 不同集',
+    ).toEqual([...mockStates].sort());
+    // 值域必须是**真实线名**且互不重复：映射到不存在的名字 = mock 测得出的状态线上发不出。
+    for (const row of rows) {
+      expect(
+        wire,
+        `mock 的 ${row.from} 映射到 ${row.to}，而它不是 LIFECYCLE_STATES 的成员`,
+      ).toContain(row.to);
+    }
+    expect(new Set(rows.map((r) => r.to)).size, '两枚 mock 状态映射到同一线名（词表被压平）').toBe(
+      rows.length,
+    );
+
+    // ── ②SDK 设计模型名 ↔ 线名：分歧集合本身被钉死，收敛/改名必须走批准 ──
+    const modelStates = Object.keys(TRANSITIONS);
+    expect(modelStates.length, '@tauron/types 的 TRANSITIONS 表条目数异常（构建产物过期？）').toBe(
+      10,
+    );
+    const shared = modelStates.filter((s) => wire.includes(s));
+    const modelOnly = modelStates.filter((s) => !wire.includes(s));
+    const wireOnly = wire.filter((s) => !modelStates.includes(s));
+    expect(shared.sort(), '设计模型与线名的重合集变了（任一侧改名都会到这里来）').toEqual([
+      'DISABLED',
+      'DISCOVERED',
+      'ENABLED',
+      'INSTALLED',
+      'INSTALLING',
+    ]);
+    expect(
+      modelOnly.sort(),
+      'SDK 词表冒出新的非线名状态（本表已发布，不得再加不可表达的名）',
+    ).toEqual(['ENABLING', 'ERRORED', 'DISABLING', 'UNINSTALLING', 'UPGRADING'].sort());
+    expect(
+      wireOnly.sort(),
+      '线名冒出 SDK 词表表达不了的状态（宿主加了态而 @tauron/types 没跟上，须单独批准收敛）',
+    ).toEqual([
+      'ERRORED_RETRYABLE',
+      'ERRORED_USER_CONFIRM',
+      'INSTALL_FAILED',
+      'RUNNING',
+      'UNINSTALLED',
+    ]);
+
+    // ── ③假注释不得复活：@tauron/types 曾自称「表驱动 + 单点收口」 ───────
+    const typesPlugin = read('packages/types/src/plugin.ts');
+    expect(
+      typesPlugin,
+      'plugin.ts 又把设计模型表说成「单点收口」（真收口点是 Rust lifecycle::TRANSITIONS）',
+    ).not.toContain('DSH 模式：表驱动 + 单点收口');
+    expect(typesPlugin, 'plugin.ts 没交代设计模型名与线名的关系').toContain('这不是宿主线名');
+    for (const needle of [
+      'export const MOCK_STATE_TO_WIRE: Readonly<Record<PluginState, MockWireState>> = {',
+      'getWireState(pluginId: string): MockWireState | null',
+      '是本 mock 的小写私有词表，不是宿主线名',
+    ]) {
+      expect(kit, `mock-registry.ts 缺 ${needle}（轮 60 的桥被掏空）`).toContain(needle);
+    }
+    expect(
+      read('packages/tauron-app-contract-kit/src/index.ts'),
+      'MOCK_STATE_TO_WIRE 没对外导出（作者拿不到唯一的映射表）',
+    ).toContain('export { MOCK_STATE_TO_WIRE }');
+    for (const name of [
+      'getWireState 随生命周期操作返回线名',
+      'getWireState 对未知与已卸载插件返回 null',
+    ]) {
+      expect(
+        read('packages/tauron-app-contract-kit/src/mock-registry.test.ts'),
+        `缺轮 60 的行为测试 ${name}`,
+      ).toContain(name);
+    }
+
+    const guide = read('docs/api/plugin-development-guide.md');
+    expect(guide, '接口文档没交代 mock 小写名 / SDK 设计模型名 / 线名三者关系').toMatch(
+      /词表：哪份状态名在线上/,
+    );
+    expect(
+      read('docs/architecture/app-layer-wire.md'),
+      '线格式文档没登记「不在线上」的那两套 TS 词表（读者只看得见镜像表就会以为小写名也是线名）',
+    ).toMatch(/另外两套\*\*不在线上\*\*的 TS 词表（轮 60 登记）/);
+    const plan = read('docs/architecture/v4-industrial-gap-closure-plan.md');
+    expect(plan, '缺口方案缺轮 60 小节').toMatch(/^### 轮 60：/m);
+    expect(plan, '轮 59 的遗留②（SDK 面未审）没被轮 60 就地改口（做了一半也要标出来）').toMatch(
+      /导出未审（轮 58 遗留②）（\*\*轮 60 已落地\*\*/,
+    );
+    expect(read('CHANGELOG.md'), 'CHANGELOG 缺轮 60 条目').toMatch(/轮 60/);
   });
 
   it('V7 §7：风险表的复核结论必须与代码同形（宣称链不得悄悄升级）', () => {

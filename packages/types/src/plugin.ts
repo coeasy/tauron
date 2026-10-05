@@ -2,7 +2,16 @@
  * tauron 插件状态与事件（设计文档 §4.3/§2.3）
  */
 
-/** 插件生命周期状态 */
+/**
+ * 插件生命周期状态（设计文档 §4.3 的**设计模型**词表）
+ *
+ * 这不是宿主线名。线上状态由 Rust `tauron-host::lifecycle::State::as_str()` 单一写入
+ * （TS 侧镜像 = `@tauron/host` 的 `LIFECYCLE_STATES`），两份词表只有 5 个名字重合：
+ * 本表的 `ENABLING`/`DISABLING`/`ERRORED`/`UPGRADING`/`UNINSTALLING` 不在线上，
+ * 线上的 `RUNNING`/`ERRORED_RETRYABLE`/`ERRORED_USER_CONFIRM`/`INSTALL_FAILED`/`UNINSTALLED`
+ * 本表无法表达。逐名分歧由 `@tauron/contract-tests` 的线格式门禁钉死（轮 60），
+ * 改名或收敛属破坏性变更（本包已发布 1.0.x），需单独批准。
+ */
 export type PluginState =
   | 'DISCOVERED'
   | 'INSTALLING'
@@ -15,7 +24,15 @@ export type PluginState =
   | 'UNINSTALLING'
   | 'UPGRADING';
 
-/** 状态迁移表（DSH 模式：表驱动 + 单点收口） */
+/**
+ * 状态迁移表（表驱动）。
+ *
+ * 「单点收口」的说法在轮 60 被证伪并删掉：真正的收口点是 Rust
+ * `tauron-host::lifecycle::TRANSITIONS`（57 条规则，表内顺序即匹配优先级，
+ * 迁移由 `transition()` 校验）；本表在仓内只被 `@tauron/core` 的 `PluginRegistry`
+ * 读取，而那条链路是孤儿台账在册项（无生产装配）。按本表判定为合法的迁移，
+ * 宿主可能判非法——线上口径以 Rust 表为准。
+ */
 export const TRANSITIONS: Readonly<Record<PluginState, readonly PluginState[]>> = {
   DISCOVERED: ['INSTALLING'],
   INSTALLING: ['INSTALLED', 'ERRORED'],

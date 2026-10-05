@@ -128,6 +128,28 @@ describe('MockRegistry', () => {
     expect(registry.find('test.plugin.a')).not.toHaveProperty('lastError');
   });
 
+  it('getWireState 随生命周期操作返回线名', () => {
+    registry.install(makeManifest('test.plugin.a'));
+    expect(registry.getWireState('test.plugin.a')).toBe('INSTALLED');
+
+    registry.enable('test.plugin.a');
+    expect(registry.getWireState('test.plugin.a')).toBe('ENABLED');
+
+    registry.disable('test.plugin.a');
+    expect(registry.getWireState('test.plugin.a')).toBe('DISABLED');
+
+    // mock 的 errored 无重试预算、当场禁用并要调用方显式清错 → 宿主侧「交人工」那一档。
+    registry.setErrored('test.plugin.a', 'boom');
+    expect(registry.getWireState('test.plugin.a')).toBe('ERRORED_USER_CONFIRM');
+  });
+
+  it('getWireState 对未知与已卸载插件返回 null', () => {
+    expect(registry.getWireState('nonexistent')).toBeNull();
+    registry.install(makeManifest('test.plugin.a'));
+    registry.uninstall('test.plugin.a');
+    expect(registry.getWireState('test.plugin.a')).toBeNull();
+  });
+
   it('snapshot 返回完整快照', () => {
     registry.install(makeManifest('test.plugin.a'));
     registry.enable('test.plugin.a');

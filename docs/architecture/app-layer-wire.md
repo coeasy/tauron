@@ -571,6 +571,20 @@ label 集合，留空展开为 `["main"]`，轮 10）、`registry`、`required_p
 
 两侧逐名、逐序一致，由 `@tauron/contract-tests` 的镜像门禁锁定。
 
+### 4.0 另外两套**不在线上**的 TS 词表（轮 60 登记）
+
+上表只覆盖线格式真相。仓里另有两份**已发布**（npm 1.0.x）的生命周期词表，与线名**零同源关系**，
+把它们当线名用会静默失败：
+
+| 词表 | 位置 | 与线名的关系 | 正确用法 |
+| --- | --- | --- | --- |
+| §4.3 设计模型名 | `@tauron/types` 的 `PluginState` / `TRANSITIONS`（10） | 只重合 5 名；`ENABLING`/`DISABLING`/`ERRORED`/`UPGRADING`/`UNINSTALLING` 不在线上，线上的 `RUNNING`/`ERRORED_RETRYABLE`/`ERRORED_USER_CONFIRM`/`INSTALL_FAILED`/`UNINSTALLED` 它表达不了 | 只当设计模型读；真收口点是 Rust `lifecycle::TRANSITIONS`（57 条规则 / 7 个守卫） |
+| mock 小写名 | `@tauron/app-contract-kit` 的 `MockRegistry.getState()`（5） | 测试替身的私有词表 | 要线名用 `getWireState()`，映射单源 = `MOCK_STATE_TO_WIRE` |
+
+三份词表的重合与分歧（重合集 5 / 仅模型侧 5 / 仅线侧 5）由同一门禁**逐名钉死**
+（`wire-gate.test.ts` 的「轮 60」用例）；真收敛要动已发布 union，属破坏性变更，须单独批准。
+面向作者的版本见 [插件开发指南](../api/plugin-development-guide.md) 的「词表：哪份状态名在线上」。
+
 `RUNTIME_CRASH`（第 18 条，P0-2）是**宿主探测**而非插件上报：轮询
 `host_runtime_health` 发现 sidecar 不存活时由宿主投递，与 `ERROR_RETRYABLE`
 同形（崩溃重启是有预算的自动重试，`tauron-proc` 的 `CrashLimit` 缺省

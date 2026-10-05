@@ -10,6 +10,11 @@
 // - 无并发控制（单线程测试环境）
 // - 无容量限制（测试专用）
 // - 无过滤（简化测试）
+// - **状态名是本 mock 的小写私有词表，不是宿主线名**：宿主状态由
+//   `tauron-host::lifecycle` 单一写入并以 SCREAMING_SNAKE_CASE 上线
+//   （`@tauron/host` 的 `LIFECYCLE_STATES`）。要按线上口径断言请用
+//   `MockRegistry.getWireState()`（映射见 `MOCK_STATE_TO_WIRE`），
+//   别把手写的小写名喂给真实宿主。
 // ──────────────────────────────────────────────────────────────────────────
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -47,6 +52,36 @@ export interface RegistryOpResult {
 
 /** 插件状态。 */
 export type PluginState = 'installed' | 'enabled' | 'disabled' | 'errored' | 'uninstalled';
+
+/**
+ * 宿主状态线名中本 mock 能表达的那五个（`@tauron/host` 的 `LIFECYCLE_STATES` 子集）。
+ *
+ * 写成字面量而不是从 `@tauron/host` 引入类型：本包**零运行时依赖**（见 package.json），
+ * 而线名的权威在 Rust `tauron-host::lifecycle`。两份词表的逐名一致性由
+ * `@tauron/contract-tests` 的线格式门禁核对，不靠这里的 import。
+ */
+export type MockWireState =
+  'INSTALLED' | 'ENABLED' | 'DISABLED' | 'ERRORED_USER_CONFIRM' | 'UNINSTALLED';
+
+/**
+ * mock 小写状态名 → 宿主状态线名（整份词表逐名映射，编译期强制全覆盖：
+ * 给 {@link PluginState} 加一个名字而不在这里补行，本包直接编译失败）。
+ *
+ * `errored` 对应 `ERRORED_USER_CONFIRM` 而不是 `ERRORED_RETRYABLE`：mock 没有重试预算，
+ * `setErrored` 当场禁用插件并要求调用方显式 `clearError`，与宿主「升级交人工」那一档同形。
+ *
+ * `uninstalled` 这一行**当前没有产出点**：`uninstall()` 删除条目，所以 `getState()` 之后
+ * 返回 `null` 而不是 `'uninstalled'`。保留该行是为了让整份词表都有对得上的线上名字，
+ * 且门禁能逐名核对；把 `'uninstalled'` 真产出来要改 `getState()` 对未知 ID 的已发布契约
+ * （现在是 `null`），属破坏性改动，须单独批准。
+ */
+export const MOCK_STATE_TO_WIRE: Readonly<Record<PluginState, MockWireState>> = {
+  installed: 'INSTALLED',
+  enabled: 'ENABLED',
+  disabled: 'DISABLED',
+  errored: 'ERRORED_USER_CONFIRM',
+  uninstalled: 'UNINSTALLED',
+};
 
 /** 插件条目。 */
 export interface RegistryEntry {
@@ -336,6 +371,21 @@ export class MockRegistry {
   getState(pluginId: string): PluginState | null {
     const entry = this.entries.get(pluginId);
     return entry ? entry.state : null;
+  }
+
+  /**
+   * 以**宿主线名**获取插件状态（`@tauron/host` 的 `LIFECYCLE_STATES` 子集）。
+   *
+   * `getState()` 返回的是本 mock 的小写私有词表；真实宿主的状态由
+   * `tauron-host::lifecycle` 单一写入并以 SCREAMING_SNAKE_CASE 上线。被测量代码若按
+   * 线名分支（例如把 `host_registry_list` 的 `state` 透传进 UI），用本方法在 mock 上
+   * 走同一条分支，不要手写字符串——手写的小写名喂给真实宿主必然反序列化失败。
+   *
+   * 未安装（含已被 `uninstall()` 移除）的插件返回 `null`。
+   */
+  getWireState(pluginId: string): MockWireState | null {
+    const state = this.getState(pluginId);
+    return state === null ? null : MOCK_STATE_TO_WIRE[state];
   }
 
   /**

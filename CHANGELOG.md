@@ -15,6 +15,33 @@
 
 ### Changed
 
+- **插件生命周期终于只有「一份线上事实」被信任（轮 60）**：仓里并行存着三套状态词表，而彼此之间
+  零可证一致性——①宿主线名（Rust `tauron-host::lifecycle`，TS 镜像 `@tauron/host` 的
+  `LIFECYCLE_STATES`，10 名）；②`@tauron/types` 的 §4.3 设计模型 `PluginState`/`TRANSITIONS`（也
+  10 名，却只与线名重合 5 个：`ENABLING`/`DISABLING`/`ERRORED`/`UPGRADING`/`UNINSTALLING` 不在线上，
+  线上独有的 `RUNNING`/`ERRORED_RETRYABLE`/`ERRORED_USER_CONFIRM`/`INSTALL_FAILED`/`UNINSTALLED`
+  它表达不了）；③`@tauron/app-contract-kit` 的 `MockRegistry`（第三套、小写 5 名，README 直接把
+  那行注释当状态词表教给插件作者）。②与③都已发布到 npm 1.0.x，所以本轮**不动任何已发布的名字**，
+  只把断链接上、把假话说实：mock 侧新增唯一映射 `MOCK_STATE_TO_WIRE`（`Readonly<Record<PluginState,
+  MockWireState>>`——用 `Record` 注解而非 `as const`，给 union 加名字不补行就编译失败，覆盖性是编译期
+  事实）与真消费者 `MockRegistry.getWireState()`（被测量代码若按线名分支，在 mock 上走同一条分支即可
+  拿到线上口径；`errored` 映射到 `ERRORED_USER_CONFIRM` 而非 `ERRORED_RETRYABLE`，因为 mock 没有重试
+  预算、`setErrored` 当场禁用并要求显式 `clearError`）；`@tauron/types` 的「表驱动 + 单点收口」注释
+  被证伪并删掉（真收口点是 Rust `lifecycle::TRANSITIONS`，本轮按源码核对为 57 条规则 / 7 个守卫），
+  改口写明本表读者只有台账在册的孤儿 `PluginRegistry`、按它判定合法≠宿主判合法。门禁把三份词表的
+  **重合与分歧逐名钉死**（`wire-gate.test.ts` 轮 60）：mock union 成员集 = 映射表定义域、每个映射值
+  必须是真实线名且互不重复，`Object.keys(TRANSITIONS)` 与线名的重合集（5）/仅模型侧（5）/仅线侧（5）
+  三个集合逐个等值——任一侧改名或悄悄收敛都会红。顺带抓出 mock 自己也是「声明了却没人产」：union 里
+  的 `'uninstalled'` 在整个包**没有任何产出点**（`uninstall()` 是删条目，之后 `getState()` 返回
+  `null`），本轮用行为测试把这条现状测成显式事实。边界：`getWireState()` 在仓内的读者只有本包单测
+  （这个包的消费者本来就是外部作者的测试代码，与 `getState()` 同状态，不假装已接进产品）；把三份词表
+  **真收敛**（改名/删名）要动已发布 union、`'uninstalled'` 要改 `getState()` 对未知 ID 返回 `null`
+  的已发布契约，两者都属破坏性变更，须单独批准；`packages/tauron-contract-tests/src/contract.test.ts`
+  那段「Plugin State Contract」是拿本地字面量自证（从不 import `TRANSITIONS`），守护已搬到 wire-gate
+  一侧，那段本身无害但无用，留作下一轮清理。同时暴露出门禁口径的洞：`check-orphan-public-api.mjs`
+  的自动发现只枚举 Rust `pub fn` 与 TS `export function|class`，TS 的 `export const`/`export type`
+  不在棘轮覆盖内——轮 58 遗留②的「SDK 面未审」正是从这里漏下去的。
+
 - **设置键的语义不再只守一扇门（轮 59）**：轮 57 给 `host_settings_set` 加了「先判后写」，
   但两条**整份文档**写路径绕着它——`host_settings_adopt_legacy`（接手旧版文档）与
   `host_settings_migrate`（schema 迁移）把同一个 `notifications.capacity` 当自由值直写 Store。

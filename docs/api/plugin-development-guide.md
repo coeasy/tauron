@@ -918,6 +918,20 @@ DISCOVERED → INSTALLING → INSTALLED → ENABLED ⇄ RUNNING
 | `INSTALL_FAILED` | 准终态（仅可卸载，不自动重试） |
 | `UNINSTALLED` | **完全终态**（无任何出边） |
 
+### 词表：哪份状态名在线上
+
+仓库里有**三份**插件生命周期词表，只有一份是线上事实：
+
+| 词表 | 位置 | 名字形态 | 能不能喂给宿主 |
+|---|---|---|---|
+| **线名（唯一权威）** | Rust `tauron-host::lifecycle::State::as_str()`，TS 镜像 `@tauron/host` 的 `LIFECYCLE_STATES` | `RUNNING` / `ERRORED_RETRYABLE` / `ERRORED_USER_CONFIRM` / `INSTALL_FAILED` / `UNINSTALLED` … | ✅ 宿主上报/回读都用它 |
+| §4.3 设计模型名 | `@tauron/types` 的 `PluginState` / `TRANSITIONS` | 与线名只重合 5 个；`ENABLING` / `DISABLING` / `ERRORED` / `UPGRADING` / `UNINSTALLING` **不在线上** | ❌ 只是设计模型，宿主按线名反序列化，写上去必失败 |
+| mock 小写名 | `@tauron/app-contract-kit` 的 `MockRegistry.getState()` | `'installed'` / `'enabled'` / `'disabled'` / `'errored'` | ❌ 仅测试替身内部用；要线名请调 `getWireState()`（映射表 `MOCK_STATE_TO_WIRE`） |
+
+后两份都已发布（1.0.x），收敛它们与线名的分歧属破坏性变更，需单独批准；在此之前，
+`@tauron/contract-tests` 的门禁把**三份词表的重合与分歧逐名钉死**——任一侧改名、或把
+mock 的映射表指到一个不存在的线名，CI 立即红（`wire-gate.test.ts` 的「轮 60」用例）。
+
 ### 事件（18）
 
 用户可触发：`InstallStart` / `InstallOk` / `InstallFail` / `Enable` / `Disable` /

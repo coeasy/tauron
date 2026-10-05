@@ -3500,7 +3500,9 @@ TS 表定为纯对外文档面——两条路都会动两套世界的一致性�
 时用户层的其它键也已经随 `rollback_migration` 退回，这是全有或全无的代价，与 A101 的既有姿态一致。
 
 **遗留（本轮之后仍未闭合，如实登记）**：①内层权限词表的**执行者缺位**（轮 58 遗留①）仍开着，
-要动 Rust/TS 两套世界的口径；②`packages/types` 其它「SDK 面」导出未审（轮 58 遗留②）；③装配缺省
+要动 Rust/TS 两套世界的口径；②`packages/types` 其它「SDK 面」导出未审（轮 58 遗留②）（**轮 60 已落地**
+部分：生命周期三份词表的分歧已逐名钉死并补上 mock→线名的唯一映射，`packages/types` 余下零读者导出
+仍在，且暴露出门禁本身不覆盖 TS `export const`/`export type` 的口径洞，见轮 60 遗留②）；③装配缺省
 `upgrade_installer = NoUpgradeInstaller`（`lib.rs:4150`），仓库内只有测试 fixture 换成真
 `DistributeUpgradeInstaller` ⇒ 出厂路径的 `host_market_download/install` 仍是 `simulated: true`，
 轮 54 的降级门禁在真实宿主里永不触发——属 Batch 5' 装配缺口，V7 §7 Upgrade 行维持**部分**；
@@ -3550,6 +3552,110 @@ v1（那会让迁移以为自己有起点）」，而脚本的 `expect` 抄的�
 `notify_capacity.rs` 文件预算 4→5（新增 `validate_notify_capacity_document`）、键 `fn validate`
 高点 4→5 且 owner 从 `lib.rs` 扩成两个文件——**多一个落点不等于第二套范围**，新函数只是把两种键
 拼法逐个交给同一个 `parse_notify_capacity`，范围与错误文案仍只有一个来源；`lib.rs` 预算分毫未动。
+
+### 轮 60：三套插件生命周期词表并行发布，彼此之间零可证一致性（轮 58 遗留②的 SDK 面审计）
+
+**断链（先证伪再修）**：宿主的状态线名只有一个权威——Rust `tauron-host::lifecycle::State::as_str()`
+（TS 镜像 `@tauron/host` 的 `LIFECYCLE_STATES`，10 名，已被逐名门禁钉住）。但仓库里另有**两份也已
+发布**（npm 1.0.x）的生命周期词表，与它零比对：
+
+1. `@tauron/types` 的 `PluginState` / `TRANSITIONS`（§4.3 设计模型，10 名）：与线名只重合 5 个
+   （`DISCOVERED`/`INSTALLING`/`INSTALLED`/`ENABLED`/`DISABLED`）。它自称
+   「**表驱动 + 单点收口**」，实测该收口不存在——仓内读者只有 `@tauron/core` 的 `PluginRegistry`
+   （孤儿台账在册项，无生产装配），而 `packages/tauron-contract-tests/src/contract.test.ts` 的
+   「Plugin State Contract」段拿**本地字面量**当被测对象（`expectedStates` 是自己写的数组），
+   从不 import `TRANSITIONS`：这条看似在守护 SDK 的门禁对 SDK 的改动完全无感。
+2. `@tauron/app-contract-kit` 的 `MockRegistry`：第三套、且是小写的 5 名
+   （`installed`/`enabled`/`disabled`/`errored`/`uninstalled`）。README 直接把这行注释当状态词表
+   教给插件作者（`registry.getState(...) // 'installed' | ...`），而这个包是**面向作者**的测试 SDK。
+
+后果是前后端各说各话的两类真事故：①作者照 README 把小写名喂给真实宿主 → 宿主按线名反序列化，
+必失败（这正是 `@tauron/host/src/lifecycle.ts` 头注释里记着的那条历史断链的镜像方向）；②按
+`@tauron/types` 的表判定「合法」的迁移（如 `ENABLED → UPGRADING`）在宿主侧根本没有这个态，测试绿
+而线上非法。第三种缺陷也一并抓到：mock 的 union 声明了 `'uninstalled'`，但 `uninstall()` 是**删条目**，
+`getState()` 之后返回 `null`——该名字在整个包里没有任何产出点（轮 58 立的「声明了却没人产」这一类）。
+
+**修法（全部非破坏性，四步）**：
+
+1. mock 侧补上唯一的桥：`MOCK_STATE_TO_WIRE`（`Readonly<Record<PluginState, MockWireState>>`，
+   整份 union 逐名映射到**真实线名**）。用 `Record` 注解而不是 `as const`：给 `PluginState` 加一个
+   名字而不在表里补行，本包直接编译失败——覆盖性是编译期事实，不靠门禁兜。
+2. 真消费者：`MockRegistry.getWireState(pluginId)`——被测量代码若按线名分支（例如把
+   `host_registry_list` 的 `state` 透传进 UI），在 mock 上走同一条分支即可拿到线上口径；表与
+   `MockWireState` 一并从 `index.ts` 对外导出。`errored → ERRORED_USER_CONFIRM` 的选择有实测理由：
+   mock 没有重试预算，`setErrored` 当场禁用并要求调用方显式 `clearError`，与宿主「升级为需用户确认」
+   同形，而不是 `ERRORED_RETRYABLE`。
+3. `@tauron/types` 改口不删名：`PluginState` 的头注释写明「这不是宿主线名」并列出两份词表的重合与
+   分歧；`TRANSITIONS` 的「DSH 模式：表驱动 + 单点收口」假宣称删掉，指明真收口点是 Rust
+   `lifecycle::TRANSITIONS`（57 条规则 / 7 个守卫，本轮实数从源码核对），并交代本表读者只有台账在册
+   的孤儿 `PluginRegistry`。
+4. 门禁两侧都钉（`wire-gate.test.ts` 的「轮 60」用例）：mock 的 union 成员集与映射表定义域**必须同集**、
+   每个映射值都必须是 `LIFECYCLE_STATES` 的成员且互不重复；`Object.keys(TRANSITIONS)` 与线名的
+   重合集（5 名）、仅模型侧（5 名）、仅线侧（5 名）三个集合逐个等值断言——**把已知分歧钉成事实**，
+   任一侧改名或悄悄收敛都会红，而不是继续靠人记得「有三份」。再加假注释复活针（`not.toContain` 掉
+   「DSH 模式：表驱动 + 单点收口」）、SDK 导出针、两条行为测试名针、接口文档小节针与本轮小节/
+   CHANGELOG 针。
+
+**新增行为测试（2 条，`packages/tauron-app-contract-kit/src/mock-registry.test.ts`）**：
+`getWireState 随生命周期操作返回线名`（install→`INSTALLED`、enable→`ENABLED`、disable→`DISABLED`、
+setErrored→`ERRORED_USER_CONFIRM`）、`getWireState 对未知与已卸载插件返回 null`（后者同时把
+`'uninstalled'` 无产出点这件事测成显式事实，而不是留在注释里）。
+
+**诚实边界（四条）**：①门禁读 mock 的表用**源码文本**解析而不是 import：`@tauron/contract-tests`
+的依赖集是 `@tauron/core`/`@tauron/host`/`@tauron/types`，为一个测试替身新增依赖边不值，且本文件
+早有成例（`transitions()` / `rustPluginReportable()` 同样解析 Rust 源码）；解析到 0 行即硬失败。
+②`getWireState()` 在**仓内**的读者只有本包单测：这个包的消费者本来就是外部作者的测试代码，
+不是仓内链路，这一点与 `getState()` 同状态，不假装它已接进产品。③三份词表的**真收敛是破坏性变更**
+（改名/删名会动 `@tauron/types` 与 kit 的已发布 union），本轮只做到「分歧逐名钉死 + README/接口文档
+说清哪份在线上」，收敛须单独批准。④`'uninstalled'` 仍无产出点：产出它要改 `getState()` 对未知 ID
+返回 `null` 的已发布契约，同属破坏性，故本轮只把它的线名留在表里并写明现状。
+
+**遗留（本轮之后仍未闭合）**：①`contract.test.ts` 的「Plugin State Contract」仍是自证式断言
+（本地数组 vs 本地数组），轮 60 把守护搬到了 wire-gate 一侧，那段本地断言没删也没接线——它无害但
+无用，删它属测试面清理，不做成「已闭合」的读数；②`@tauron/types` 余下的 SDK 面仍有大量零读者导出：
+本轮按探针实测 **89 条导出声明 / 46 条在接线面零消费者**（探针口径**比门禁松**——它把再导出行也算成
+消费者，故真实数只多不少；日志 `C:/tmp/r60-types-face.log`，接线面可见文件 248 个）。典型条目如
+`acl.ts#PERMISSION_GRANULARITY`、`plugin.ts#TERMINAL_STATES`/`allowedTransitions`、`errors.ts` 的
+`ERROR_CATEGORIES`/`ERROR_MESSAGES`/`errorCategory`/`isValidErrorCode` 族。更根本的是**门禁口径的洞**：
+`check-orphan-public-api.mjs` 的自动发现只枚举 Rust `pub fn` 与 TS `export function|class`，
+TS 的 `export const`/`export type`/`interface` 不在棘轮覆盖内，轮 58 遗留②的「SDK 面未审」正是从这里
+漏下去的——补这个覆盖属下一轮；③轮 58 遗留①（内层权限词表的执行者缺位）仍开着。
+
+**变异证明（本轮实跑 17 例，全部转红；日志 `C:/tmp/r60-mut.log`、修针后复跑 `C:/tmp/r60-mut2.log`、
+补完线格式文档后的终跑 `C:/tmp/r60-close2.log`）**：15 例门禁针（W1 抽掉线名读取方法、W2 映射到不存在的线名、
+W3 映射表少一行、W4 给 union 加名字而表不补行、W5 两枚状态压到同一线名、W6 映射表退回
+`Record<string, string>` 弱注解、W7 SDK 面不再导出映射表、W8 让 `@tauron/types` 的假宣称重新出现、
+W9 删掉头注释里的线名改口、W10 行为测试改名、W11 搬走接口文档的词表小节、W12 本轮小节降级成四级标题、
+W13 抹掉轮 59 遗留段里那枚落地标注、W13 抹掉轮 59 遗留段里那枚落地标注、W14 改掉 CHANGELOG 的本轮编号、W15 删掉线格式文档新增的「不在线上」词表小节）与 2 例行为变异
+（C1 `getWireState` 直接回报小写名 → 本包单测按线名的断言炸；C2 让它在缺条目时凭空报
+`UNINSTALLED` → 「未知/已卸载返回 null」那条测试炸）。首跑 **15/16**，W4 报 NOT-RED：
+排查发现门禁**确实红了**（`C:/tmp/r60-w4.log`），只是红在更早的一条断言上——union 被改成多行形式后
+`/export type PluginState = ([^;]+);/` 里那个**写死的空格**匹配不上（多行形式是 `=` 紧跟换行），
+于是先撞「未解析到 mock 的 PluginState union（门禁定位失败）」，而不是预期的「定义域不同集」。
+这不是假绿（解析失败被硬失败接住了，正是轮 46/48 立的「解析到 0 条即失败」规矩在生效），但它是
+**针的形状依赖格式**：把正则改成 `=\s*` 后 W4 落到预期的语义断言上，全量复跑 16/16。**口径**：
+按文本解析的门禁针要用 `\s*` 而不是字面空格，格式化（换行/prettier 重排）不该改变门禁查的对象。
+补完线格式文档与 W15（此时共 17 例）后按同一脚本终跑：`MUTATION(r60): 17/17 RED`，17 例逐条 `restore` 后做
+**8 文件**树完整性终检，全部 `OK`（无残留变异在盘上）。
+
+**读数（轮 60 收口时同批采集，全部来自本轮日志）**：`pnpm build` 全仓 rc=0（含 kit 的
+`Record<PluginState, MockWireState>` 类型检查，`C:/tmp/r60-build.log`）；`@tauron/app-contract-kit`
+整包 **94 passed / 2 files**、`@tauron/types` 整包 **71 passed / 6 files**、`tauron-contract-tests`
+整包 **220 passed / 2 files**（`C:/tmp/r60-close.log`），wire-gate 单文件复跑 **199 passed**
+（`C:/tmp/r60-wg3.log`）；`pnpm verify` **20 个包 / 1943 个测试全绿**（`C:/tmp/r60-verify.log`）。
+node 侧五闸 + 格式化 + lint 全 rc=0（终跑 `C:/tmp/r60-close2.log`；本轮中途 `format:check` 曾红一次，
+是门禁文件自己被 prettier 重排，格式化后重跑门禁与变异终检才作数——沿用门禁 doctrine 里
+「格式化动过被钉文件后必须重跑门禁 + 变异证明」那条规矩）：
+`format:check`、`lint`（`--max-warnings 0`）、`version:check`
+**26 处版本号全部 1.1.0**、`command-surface:check` **85 commands（底座 61 / 运行时 22 / 安装 2），
+孤儿命令 0**、`gates:check`（孤儿台账 **10 条未接线 + 5 条已接线反例、自动发现 621 ≤ 基线 635**，
+本轮没有新增 Rust/TS 的 `pub fn`/`export function|class`，计数分毫未动；域归属 **lib.rs 顶层条目 292
+已封顶**，19 个域 / 41 个 impl 类型 / 187 个方法；Tier↔Bundle **3 tiers / 10 bundles / 85 commands**）、
+`docs:check` **7 个文档 / 279 条引用**（本轮只动注释与文档正文，没动 Rust 行长，锚点零漂移）。
+Rust 侧发布级硬门禁同轮复跑：`pnpm lint:rust`（workspace clippy `-D warnings`）rc=0、
+`cargo fmt --all --check` rc=0（`C:/tmp/r60-rust.log`，本轮未改 Rust 源码，跑它是按轮 57 立的规矩：
+工具链漂移能把 HEAD 上的门禁照红，不查就不知道）。
+
 
 ## 9. 明确推迟 / 不做（附理由）
 

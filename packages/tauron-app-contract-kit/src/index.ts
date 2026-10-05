@@ -8,8 +8,10 @@
 // ──────────────────────────────────────────────────────────────────────────
 
 export { MockRegistry, createMockRegistry, createPopulatedRegistry } from './mock-registry.js';
+export { MOCK_STATE_TO_WIRE } from './mock-registry.js';
 export type {
   MockPluginManifest,
+  MockWireState,
   PluginState,
   RegistryEntry,
   RegistryOpResult,

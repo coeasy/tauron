@@ -38,12 +38,24 @@ registry.uninstall('com.example.p1');
 
 registry.list();                       // 全部条目
 registry.getState('com.example.p1');   // 'installed' | 'enabled' | 'disabled' | 'errored' | 'uninstalled'
+registry.getWireState('com.example.p1');// 'INSTALLED' | 'ENABLED' | 'DISABLED' | 'ERRORED_USER_CONFIRM' | 'UNINSTALLED'
 registry.snapshot();                   // 聚合快照（统计 + 条目）
 registry.getOperations();              // 操作记录（断言状态机路径用）
 
 // 预置多插件场景
 const populated = createPopulatedRegistry();
 ```
+
+> **`getState()` 的名字不在线上。** 它是本 mock 的小写私有词表；真实宿主的状态由
+> Rust `tauron-host::lifecycle` 单一写入并以 SCREAMING_SNAKE_CASE 上线（TS 镜像
+> `@tauron/host` 的 `LIFECYCLE_STATES`）。被测量代码若按线名分支，测 mock 时改用
+> `getWireState()`，别把 `'enabled'` 这类小写名写进喂宿主的代码——那条串在 Tauri 侧
+> 必然反序列化失败。映射表 `MOCK_STATE_TO_WIRE` 已对外导出，逐名一致性由
+> `@tauron/contract-tests` 的线格式门禁核对。
+>
+> `'uninstalled'` 目前**产不出来**：`uninstall()` 直接删条目，所以之后 `getState()` 与
+> `getWireState()` 都返回 `null`。改这一点会动 `getState()` 对未知 ID 返回 `null` 的
+> 已发布契约，属破坏性变更。
 
 ### PluginTestRunner — 轻量测试运行器
 
