@@ -50,6 +50,17 @@ fn frame_cost(topic: &str, payload: &Value) -> usize {
 /// 连续溢出达到该次数即熔断该订阅者的该通道。
 pub const OVERFLOW_STREAK_LIMIT: usize = 3;
 
+/// topic 名的长度上限（字符数，非字节数）。
+///
+/// 这条约定此前**只存在于前端已发布面**：`@tauron/host` 的 `TOPIC_MAX_LENGTH = 200`
+/// 带着「事件主题命名约定，最长 200 字符」的注释发布给所有 SDK 使用者，而两侧都没有
+/// 读取方——声明方（[`EventBus::declare_topics`]）对任意长度的 topic 一律接受，
+/// 于是「上限」只是一个写在类型旁边的数字。轮 64 起由这里强制，wire-gate 把两份数字
+/// 对钉（改一侧不改另一侧会当场红）。长度按**字符数**计（不是字节数）：非 ASCII 名的
+/// UTF-16 计数比字符数大，所以同一串在两种口径下结论可能不同——今天前端没有强制点，
+/// 记下口径是为了将来前端也接强制点时不会误当同口径。
+pub const MAX_TOPIC_NAME_LENGTH: usize = 200;
+
 /// 订阅表全局上限。
 ///
 /// `(subscriber, window, topic)` 三元组是幂等键，而 `window` 由调用方给定且
@@ -531,8 +542,35 @@ impl EventBus {
     /// 声明插件发布的 topic（安装期调用一次）。
     ///
     /// 重复声明同名 topic 视为 manifest 错误——同一 topic 的归属必须唯一。
+    ///
+    /// 名字本身也要过校验（轮 64）：空/纯空白名此前能进声明表，而订阅侧
+    /// （`host_events_subscribe`）拒空名——声明得进、订阅不进来，那条 topic 就是
+    /// 一张永远无人能取的账；超长名同样在安装期硬拒，因为 `TOPIC_MAX_LENGTH` 是
+    /// 已发布给 SDK 使用者的命名约定。
+    ///
+    /// 三段校验（非空 → 长度 → 归属不冲突）都在**同一次写锁内**、插入之前跑完：
+    /// 原来边查边插，第 N 条失败时前 N-1 条已经留在表里，而调用方（安装期）拿到的
+    /// 是「整批失败」——部分生效的批次既没被声明方预期，也没有回滚路径。
     pub fn declare_topics(&self, publisher: &str, decls: &[EventDecl]) -> HostResult<()> {
         let mut t = self.topics.write();
+        for d in decls {
+            if d.topic.trim().is_empty() {
+                return Err(HostError::new(
+                    ErrorCode::E_INVALID_MANIFEST,
+                    format!("插件 `{publisher}` 声明了空的 topic 名：订阅侧本就拒收空名，不留一条取不走的事实"),
+                ));
+            }
+            let chars = d.topic.chars().count();
+            if chars > MAX_TOPIC_NAME_LENGTH {
+                return Err(HostError::new(
+                    ErrorCode::E_INVALID_MANIFEST,
+                    format!(
+                        "topic 名 {} 个字符，超过已发布约定上限 {MAX_TOPIC_NAME_LENGTH}（`@tauron/host` 的 `TOPIC_MAX_LENGTH`）：插件 `{publisher}` 的声明被拒",
+                        chars
+                    ),
+                ));
+            }
+        }
         for d in decls {
             if let Some(prev) = t.get(&d.topic) {
                 if prev.publisher != publisher {
@@ -545,6 +583,8 @@ impl EventBus {
                     ));
                 }
             }
+        }
+        for d in decls {
             t.insert(
                 d.topic.clone(),
                 TopicMeta { publisher: publisher.to_string(), is_public: d.public },
@@ -1724,6 +1764,54 @@ mod tests {
         let o2 = b.subscribe("com.b", "w2", "plugin:com.a:x").unwrap();
         assert!(!o1.duplicate && !o2.duplicate);
         assert_ne!(o1.token, o2.token);
+    }
+
+    // ── topic 名预算（轮 64：已发布的 `TOPIC_MAX_LENGTH` 第一次有强制点）──
+
+    #[test]
+    fn blank_topic_name_is_rejected_at_declare_time() {
+        let b = EventBus::default();
+        for bad in ["", "   "] {
+            let err = b
+                .declare_topics("com.a", &[EventDecl { topic: bad.into(), public: true }])
+                .expect_err("空白 topic 名必须安装期硬拒");
+            assert!(err.message.contains("空的 topic 名"), "{:?}", err.message);
+        }
+    }
+
+    #[test]
+    fn topic_name_boundary_takes_exactly_the_published_budget() {
+        let b = EventBus::default();
+        let exact = "t".repeat(MAX_TOPIC_NAME_LENGTH);
+        b.declare_topics("com.a", &[EventDecl { topic: exact.clone(), public: false }])
+            .expect("正好等于上限的名字应被接受");
+        assert_eq!(b.topic_meta(&exact).unwrap().publisher, "com.a");
+
+        let over = "x".repeat(MAX_TOPIC_NAME_LENGTH + 1);
+        let err = b
+            .declare_topics("com.b", &[EventDecl { topic: over, public: false }])
+            .expect_err("超出已发布约定的名字必须拒, 不能静默收下");
+        assert!(err.message.contains("超过已发布约定上限"), "{:?}", err.message);
+        assert_eq!(err.code, ErrorCode::E_INVALID_MANIFEST);
+    }
+
+    #[test]
+    fn a_rejected_batch_leaves_no_partially_declared_topic() {
+        let b = EventBus::default();
+        let err = b
+            .declare_topics(
+                "com.a",
+                &[
+                    EventDecl { topic: "com.a.first".into(), public: true },
+                    EventDecl { topic: "  ".into(), public: true },
+                ],
+            )
+            .expect_err("批次里第 2 条非法应整批失败");
+        assert!(err.message.contains("空的 topic 名"), "{:?}", err.message);
+        assert!(
+            b.topic_meta("com.a.first").is_none(),
+            "被拒批次的第一条不得留下声明事实（调用方拿到的是整批失败）"
+        );
     }
 
     // ── 队列上限边界（999 / 1000 / 1001）─────────────────────────

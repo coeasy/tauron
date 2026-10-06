@@ -59,7 +59,24 @@
     "②其余 11 条是已发布 npm 包里「只被同包内使用 + 由 barrel 再导出」的对外面（app-cli 的 6 条脚手架生成器、",
     "  cli 与 app-cli 各一份同名不同返回类型的 `generatePluginManifest`/`generatePackageJson`、",
     "  `types/config.ts#validateConfig`、`host/errors.ts#normalizeError`）。删除/改名是破坏性动作，等单独批准；",
-    "  本轮只把它们计数与定性写清，不静默删、也不为凑数抬判据。"
+    "  本轮只把它们计数与定性写清，不静默删、也不为凑数抬判据。",
+    "轮 64：39 条 B 候选逐条分诊（清单出自 `--discover --list-decl`，分档按「声明文件之外有没有读者」）。",
+    "  ①24 条在声明文件**之外**有生产读者（别的文件/别的包真引用它）。B 口径把「只被同文件用」判成候选，",
+    "    这是判据使然而非接线缺失——不改判据（改了轮 61 立的 B 面就没意义了），只登记。",
+    "  ②10 条只有测试读者，其中 4 条是 Rust 真源的 TS 镜像：`channels.ts#MAX_QUEUE`、",
+    "    `channels.ts#OVERFLOW_STREAK_LIMIT`（真源＝`tauron-host::eventbus` 的同名 const）、",
+    "    `host-topics.ts#DEEP_LINK_NATIVE_TOPIC`、`host-topics.ts#DIALOG_DEGRADED_TOPIC`（真源在",
+    "    `tauron-adapter::tauri`，轮 38 起名字两侧对钉）。本轮把前两条的**数字**也并进同源针。",
+    "  ③2 条只被 barrel 再导出：`core/config.ts#ConfigLayer`（删除/改名是破坏性动作，等批准）与",
+    "    `host/events.ts#TOPIC_MAX_LENGTH`。后者是**已发布给 SDK 使用者的命名约定、全仓没有任何强制点**：",
+    "    manifest 校验层只查空名与空白/冒号，长度从未有人查，而 `declare_topics` 此前连空名都收。",
+    "    本轮补上强制点（`MAX_TOPIC_NAME_LENGTH`，三段校验全在写入之前，被拒批次不留部分声明）。",
+    "  ④3 条连跨文件读者都没有（`cli/scaffold.ts#ImplementedTemplate`、",
+    "    `host/tauri-backend.ts#FrameworkCommand`、`shell-events/index.ts#DetailLessShellEvent`，均为 type）",
+    "    ——同属已发布面的收敛议题，等批准。",
+    "  - **B 口径把注释也算读者**（判据＝声明文件正文除声明行外命中，不剔注释），所以给镜像写注释时刻意",
+    "    不提自己的名字，否则候选数会被注释假降。wire-gate 用「整文件出现次数恰好 1」的计数针盯这件事。",
+    "  - B 上限从 43 收到实测 39，**余量清零**，与轮 63 的 A 口径同一口径。"
   ],
   "plane": {
     "include": ["crates/*/src", "packages/*/src", "examples", "apps"],
@@ -231,7 +248,7 @@
       "meaning": "B 口径的非空洞性反例（轮 61）：这个取消信封类型此前在接线面零读者——`@tauron/core` 的两处 `plugin_cancel` 调用点直接写裸字面量 `{ request: { callId } }`，于是「已发布的类型」与「真正上线的载荷」之间没有任何绑定，而 Rust 侧 `PluginCancelRequest` 带 `deny_unknown_fields`，字段名一漂移就是运行期反序列化失败、且没有测试会红。轮 61 让两处调用点显式按该类型标注，本条即那条绑定存在的证据。"
     }
   ],
-  "discoveryBaselineDecl": 43,
+  "discoveryBaselineDecl": 39,
   "discoveryBaseline": 633,
   "discoveryObserved": {
     "a": 633,
@@ -246,6 +263,8 @@
     "存量里绝大多数是**合法的对外库 API**（发布出去的 crate/包的公开面），棘轮只保证「不再新增」，",
     "不代表这些都要删；逐条收口后必须同步下调本数字（写死不动等于把债务固化）。",
     "轮 63 起上限＝实测读数 633，**不留余量**：口径漂移已经由 discoveryObserved 等值钉负责（判据被换掉",
-    "当场红），上限的职责只剩「新增公开面必须显式改账」。轮 62 末那句「只剩 1 条余量」到此作废。"
+    "当场红），上限的职责只剩「新增公开面必须显式改账」。轮 62 末那句「只剩 1 条余量」到此作废。",
+    "轮 64 起 B 口径上限同样收到实测读数 39、**不留余量**（两条棘轮同一口径）。39 条的逐条分诊（含",
+    "「B 口径把注释也算读者」这个判据副作用）见本文件 note 的轮 64 段。"
   ]
 }

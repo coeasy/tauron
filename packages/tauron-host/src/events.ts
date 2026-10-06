@@ -9,7 +9,14 @@
 export type JsonValue =
   null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
-/** 事件主题命名约定：`<插件id>.<名字>`，最长 200 字符。 */
+/**
+ * 事件主题命名约定：`<插件id>.<名字>`，最长 200 字符。
+ *
+ * 这个数字此前只是写在类型旁边的约定——两侧都不强制它。轮 64 起强制点在 Rust
+ * `tauron-host::eventbus` 的 `MAX_TOPIC_NAME_LENGTH`（声明期硬拒超长名），wire-gate
+ * 逐轮把两侧数字对钉，改一侧不改另一侧会当场红。长度按字符数计，非 ASCII 名的
+ * UTF-16 计数更大，两种口径不必等同——将来前端也接强制点时别当成同口径。
+ */
 export const TOPIC_MAX_LENGTH = 200;
 
 export interface TopicDescriptor {

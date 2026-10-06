@@ -16,10 +16,16 @@ import type { JsonValue } from './events.js';
 export const CHANNEL_KINDS = ['event', 'request', 'state'] as const;
 export type ChannelKind = (typeof CHANNEL_KINDS)[number];
 
-/** 单插件队列上限（计划 §4.4 关键约束）。 */
+/**
+ * 单插件队列上限（计划 §4.4 关键约束）。
+ *
+ * 强制点在 Rust `tauron-host::eventbus` 的同名预算常量上（本文件只是契约镜像，
+ * 没有 TS 侧队列实现可读它）；wire-gate 轮 64 起把两侧数字对钉——改一侧不改
+ * 另一侧会当场红，而不是让 SDK 使用者拿着一个已经漂移的数字。
+ */
 export const MAX_QUEUE = 1000;
 
-/** 连续溢出达到该次数即熔断该订阅者的该通道。 */
+/** 连续溢出达到该次数即熔断该订阅者的该通道（强制点同上）。 */
 export const OVERFLOW_STREAK_LIMIT = 3;
 
 /** 总线上的一帧。 */

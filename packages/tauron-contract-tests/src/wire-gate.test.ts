@@ -8371,3 +8371,132 @@ describe('门禁：轮 63 窗口几何持久化链路（委派出去的那条腿
     expect(note, '其余 11 条的「破坏性等批准」口径被删').toContain('②其余 11 条');
   });
 });
+
+describe('门禁：轮 64 总线预算的两份镜像必须同源（TS 已发布数字 ↔ Rust 强制点）', () => {
+  const BUS = 'crates/tauron-host/src/eventbus.rs';
+  const CH = 'packages/tauron-host/src/channels.ts';
+  const EV = 'packages/tauron-host/src/events.ts';
+
+  const rustBudget = (src: string, name: string): number => {
+    // 注意双反斜杠：模板字面量里的 `\d` 会先被 JS 解析成 `d`，针就永远匹配不上。
+    const m = src.match(new RegExp(`pub const ${name}: usize = (\\d+);`));
+    if (!m) throw new Error(`Rust 侧读不到 pub const ${name}: usize = N;`);
+    return Number(m[1]);
+  };
+  const tsBudget = (src: string, name: string): number => {
+    const m = src.match(new RegExp(`export const ${name} = (\\d+);`));
+    if (!m) throw new Error(`TS 侧读不到 export const ${name} = N;`);
+    return Number(m[1]);
+  };
+  const declareBody = (src: string): string => {
+    const start = src.indexOf('pub fn declare_topics');
+    const end = src.indexOf('pub fn topic_meta');
+    if (start < 0 || end < 0 || end <= start) throw new Error('declare_topics 函数体切不出来');
+    return src.slice(start, end);
+  };
+  /** 全文件出现次数（含注释）——B 口径把注释也算读者，自名只能出现一次。 */
+  const nameHits = (src: string, name: string): number => src.split(name).length - 1;
+
+  it('① 两份数字两两相等，且 Rust 侧是真强制点而不是第二个声明', () => {
+    const bus = read(BUS);
+    for (const [name, file] of [
+      ['MAX_QUEUE', CH],
+      ['OVERFLOW_STREAK_LIMIT', CH],
+    ] as const) {
+      expect(rustBudget(bus, name), `Rust ${name} 与已发布镜像不再同值`).toBe(
+        tsBudget(read(file), name),
+      );
+    }
+    expect(rustBudget(bus, 'MAX_TOPIC_NAME_LENGTH'), 'Rust 名上限与 TOPIC_MAX_LENGTH 漂移').toBe(
+      tsBudget(read(EV), 'TOPIC_MAX_LENGTH'),
+    );
+    // 强制点必须存在于真实判定里（只在 `pub const` 行出现＝又回到纸面约定）。
+    expect(bus, '名上限没有真实比较点（只剩声明＝约定又是纸面的）').toMatch(
+      /if chars > MAX_TOPIC_NAME_LENGTH \{/,
+    );
+    // 三处判定各在自己的路径上（字节预算、回压、入队），presence 针会被任意一处满足，
+    // 所以这里数次数：削掉任意一处都必须显式改账。
+    expect(
+      nameHits(bus, 'self.frames.len() >= self.capacity'),
+      '队列上限的强制点少了判定处（镜像与真源脱钩：三处判定缺一不可）',
+    ).toBeGreaterThanOrEqual(3);
+  });
+
+  it('② 三段校验都在写入之前——被拒批次一条声明都不留', () => {
+    const body = declareBody(read(BUS));
+    const insert = body.indexOf('t.insert(');
+    expect(
+      insert,
+      'declare_topics 里找不到写入点（结构变了，针该跟着改而不是盲改）',
+    ).toBeGreaterThan(-1);
+    for (const [label, guard] of [
+      ['空名', 'd.topic.trim().is_empty()'],
+      ['超长名', 'chars > MAX_TOPIC_NAME_LENGTH'],
+      ['归属冲突', 't.get(&d.topic)'],
+    ] as const) {
+      const at = body.indexOf(guard);
+      expect(at, `校验「${label}」不在函数体里`).toBeGreaterThan(-1);
+      expect(at < insert, `校验「${label}」排在写入之后＝部分声明回来了`).toBe(true);
+    }
+    expect(body, '归属冲突校验的报错文案缺席（校验还在但不再说明理由）').toContain('不可重复声明');
+  });
+
+  it('③ 空名/边界/整批原子三条各有行为用例，边界按「正好等于上限」取值', () => {
+    const bus = read(BUS);
+    for (const name of [
+      'blank_topic_name_is_rejected_at_declare_time',
+      'topic_name_boundary_takes_exactly_the_published_budget',
+      'a_rejected_batch_leaves_no_partially_declared_topic',
+    ]) {
+      expect(bus, `缺 Rust 用例：${name}`).toContain(`fn ${name}()`);
+    }
+    expect(
+      bus,
+      '边界用例不再按 MAX_TOPIC_NAME_LENGTH 取值（硬编码数字＝用例自己也会漂）',
+    ).toContain('"t".repeat(MAX_TOPIC_NAME_LENGTH)');
+    expect(bus, '超长用例不再走 +1 边界').toContain('"x".repeat(MAX_TOPIC_NAME_LENGTH + 1)');
+    expect(bus, '被拒批次的部分声明不再被断言拦住').toContain(
+      'b.topic_meta("com.a.first").is_none()',
+    );
+  });
+
+  it('④ TS 镜像注释要点到强制者，且不许用自身名字喂孤儿棘轮', () => {
+    const ch = read(CH);
+    expect(ch, '队列镜像又不说强制点在哪（下一轮会再当成已接线）').toContain(
+      '强制点在 Rust `tauron-host::eventbus` 的同名预算常量上',
+    );
+    // B 口径把注释文本也算读者：注释里一旦出现自己的名字，候选数就被假降一次。
+    // 所以「出现次数恰好＝声明行那一次」才是真针，负向正则只是它的一个子集。
+    for (const [name, hits] of [
+      ['MAX_QUEUE', nameHits(ch, 'MAX_QUEUE')],
+      ['OVERFLOW_STREAK_LIMIT', nameHits(ch, 'OVERFLOW_STREAK_LIMIT')],
+      ['TOPIC_MAX_LENGTH', nameHits(read(EV), 'TOPIC_MAX_LENGTH')],
+    ] as const) {
+      expect(hits, `${name} 在声明之外又被提到（注释自名＝假读者，棘轮读数会假降）`).toBe(1);
+    }
+    expect(read(EV), '名上限约定没写真实强制者').toContain('MAX_TOPIC_NAME_LENGTH');
+  });
+
+  it('⑤ 本轮记录与台账同口径（39 条 B 候选的分诊要有名有姓）', () => {
+    expect(
+      read('docs/architecture/v4-industrial-gap-closure-plan.md'),
+      '缺口方案缺轮 64 小节',
+    ).toContain('### 轮 64：已发布的总线预算第一次和真源对上');
+    expect(read('CHANGELOG.md'), 'CHANGELOG 缺轮 64 条目').toContain(
+      '已发布的数字第一次有了强制点',
+    );
+    const ledger = JSON.parse(read('contracts/orphan-public-api.json')) as {
+      note: string[];
+      discoveryObserved: { decl: number };
+      discoveryBaselineDecl: number;
+    };
+    const note = ledger.note.join('\n');
+    expect(note, '台账没记 B 候选的分诊口径').toContain('39 条 B 候选逐条分诊');
+    expect(note, '注释能喂饱棘轮这件事被埋掉').toContain('B 口径把注释也算读者');
+    // 单向棘轮只在候选变多时红：把上限抬回 40 也能绿，所以「不留余量」要等值钉。
+    expect(
+      ledger.discoveryBaselineDecl,
+      'B 上限没收口到实测（余量假象回来了，新增公开面就能静默过关）',
+    ).toBe(ledger.discoveryObserved.decl);
+  });
+});

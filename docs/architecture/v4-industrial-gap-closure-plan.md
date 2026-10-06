@@ -115,7 +115,7 @@ F1/F2/F3/F4 四项属**同一类病**：判定或类型存在、缺一个 fail-c
 | A66 zero-surface/headless ReadinessSet | **已落**（轮 46） | `tauron-host/src/readiness.rs`：`ReadinessFact` + `ReadinessSet` 六组必备事实、`headless()` 空 Surface 不阻塞、`evaluate()` 未就绪事实具名进 `blockers`、`health()` 桥 A103 `HealthReport`；真跑 conformance 三条（`v4_host_conformance.rs`：零 Surface 就绪 / 声明未挂载 Surface 具名拦下 / kernel 未就绪不豁免）；`wire-gate` 轮 46 段钉形状与测试名 | — |
 | A69 generated Error Registry | **部分** | 见 §2 半闭合行 | 取消三处顺序耦合；补 codegen（Rust 24 个 `E_*` / TS 数组 / JSON 三份手工同步）；框架侧 14 个 `SC-####`（`tauron-shell/src/error.rs`）与宿主码的关系成文 |
 | A70 RetryClass | **部分** | 判定已改（`error.rs:110-134`）、两侧断言齐（`wire-gate.test.ts:273-299`） | §90 的 RetryPolicy/OperationClass/RetryBudget **无类型无实现**；`RetryClass::AutoIdempotent` 当前无码映射 → `retryable()` 恒 false（诚实但字段零信息）；TS 侧无自动重放路径 |
-| A91 FaultBoundary / subsystem quarantine | **部分** | `fault.rs:71` panic 后 `NotReady` 确定性拒新工作；生产面四条边界——settings（`run_settings_boundary:7231`；四个写租约消费点 `reconcile_settings_boundary:7252` / `cmd_settings_set:6915` / `cmd_settings_adopt_legacy:7633` / `cmd_settings_migrate:7632`），重建自 durable（`load_settings_doc:6791`）、无持久化即 Quarantined（`settings_fault_without_durable_state_is_quarantined_not_faked_ready:15167`）；**轮 47 扩到** events/approval/registry 三条（`run_events_boundary:7348` / `run_review_boundary:7364` / `run_registry_boundary:7379`；三段式共用 `run_subsystem_boundary:7327` + 修复前置判定 `begin_subsystem_reconcile:7398`）：7 条事件命令走闸门，修复=**会话态清零且保留 topic 声明**（`EventBus::reset_session_state:518`；测试 `session_reset_clears_subscriptions_but_keeps_topic_declarations:1223` / `events_fault_boundary_rejects_bus_work_and_recover_boot_resets_session_state:15182`）；4 个令牌消费点走闸门，修复=重新 preview 清空旧令牌（`reconcile_review_boundary:7441`；测试 `approval_fault_boundary_blocks_tokens_and_preview_reconcile_clears_them:15234`）；5 条注册表命令走闸门，无会话内重建=**如实 Quarantined 待重启**（`reconcile_registry_boundary:7458`；测试 `registry_fault_boundary_quarantines_until_reassembly_not_faked_ready:15299`）；四条边界的故障读数并入 `host_resource_stats` 的 faults（settings/events/approval/registry）；**轮 11 拆分**：闸门只保留「就绪判定 + 事后登记」（`ensure_ready:63` + `record_panic:85`），边界锁**不再跨磁盘 I/O**，单写者边界交回 `settings_write_lock`（A87），并有行为证明 `concurrent_settings_writes_never_lose_a_key_or_share_a_generation` | 其余子系统（registry 的调用/流/运行时读取面、http/fs/process、总线内部调用点）未包边界——一个 panic 仍是全宿主风险；`FaultBoundary::run` 拆分后只剩 fault.rs 单测消费者，按「未接线公开 API 台账」登记为 embedder 面（轮 11 小节） |
+| A91 FaultBoundary / subsystem quarantine | **部分** | `fault.rs:71` panic 后 `NotReady` 确定性拒新工作；生产面四条边界——settings（`run_settings_boundary:7231`；四个写租约消费点 `reconcile_settings_boundary:7252` / `cmd_settings_set:6915` / `cmd_settings_adopt_legacy:7633` / `cmd_settings_migrate:7632`），重建自 durable（`load_settings_doc:6791`）、无持久化即 Quarantined（`settings_fault_without_durable_state_is_quarantined_not_faked_ready:15167`）；**轮 47 扩到** events/approval/registry 三条（`run_events_boundary:7348` / `run_review_boundary:7364` / `run_registry_boundary:7379`；三段式共用 `run_subsystem_boundary:7327` + 修复前置判定 `begin_subsystem_reconcile:7398`）：7 条事件命令走闸门，修复=**会话态清零且保留 topic 声明**（`EventBus::reset_session_state:529`；测试 `session_reset_clears_subscriptions_but_keeps_topic_declarations:1263` / `events_fault_boundary_rejects_bus_work_and_recover_boot_resets_session_state:15182`）；4 个令牌消费点走闸门，修复=重新 preview 清空旧令牌（`reconcile_review_boundary:7441`；测试 `approval_fault_boundary_blocks_tokens_and_preview_reconcile_clears_them:15234`）；5 条注册表命令走闸门，无会话内重建=**如实 Quarantined 待重启**（`reconcile_registry_boundary:7458`；测试 `registry_fault_boundary_quarantines_until_reassembly_not_faked_ready:15299`）；四条边界的故障读数并入 `host_resource_stats` 的 faults（settings/events/approval/registry）；**轮 11 拆分**：闸门只保留「就绪判定 + 事后登记」（`ensure_ready:63` + `record_panic:85`），边界锁**不再跨磁盘 I/O**，单写者边界交回 `settings_write_lock`（A87），并有行为证明 `concurrent_settings_writes_never_lose_a_key_or_share_a_generation` | 其余子系统（registry 的调用/流/运行时读取面、http/fs/process、总线内部调用点）未包边界——一个 panic 仍是全宿主风险；`FaultBoundary::run` 拆分后只剩 fault.rs 单测消费者，按「未接线公开 API 台账」登记为 embedder 面（轮 11 小节） |
 | A92 RecoveryExecutor 生产接线 | **已落** | `cmd_recover_trial_enable:8575` + dedup 分支（`should_execute:8607`）；测试 `recovery_trial_enable_action_is_deduplicated_in_same_incident:12729`、`cmd_recover_report_drives_phase_and_reconciles_registry:12631` | — |
 | A93 DurableEnvelope/checksum/generation/quarantine | **已落** | `durable.rs:37-76`；读写口 `load_settings_doc:6791` / `persist_settings_doc:6916`（密封 ↔ `decode_durable`）、`recovery.rs:305/345/394`；损坏隔离到 `.corrupt`；测试 `settings_durable_envelope_detects_tamper_and_quarantines_file:15679` | — |
 | A109 production security self-test / doctor | **已落** | Rust + 命令面 + TS + 示例三层通（§0 末段）；档位 `authz.rs:340` Privileged；测试 `production_doctor_is_main_window_only_and_mirrors_readiness:16527`；**轮 11**：`admin-audit` 检查项由真实 sink 的 `AdminAuditFacts::healthy()` 推导，并把读数快照（条数/裁剪/写失败/链完整）一并上线（`production_doctor_report:6704`，测试 `doctor_derives_the_admin_audit_check_from_the_live_sink:10986`） | 空清单 fail-open（F2）与开关位（F3）均已在轮 10/11 闭合；剩余边界=分支保护未开（0-7，需用户操作） |
@@ -141,7 +141,7 @@ F1/F2/F3/F4 四项属**同一类病**：判定或类型存在、缺一个 fail-c
 | A78 event causation depth/budget | **已落**（有洞） | `eventbus.rs:854` publish 路径校验；命令面回传上下文（`tauri.rs:500-511`）；测试 `:1618` | 无「A→B→A 调用环 + 事件回流」复合场景 |
 | A79 credit-based stream backpressure | **部分**（轮 10 收紧） | stream 一路是真 credit，且**轮 10 起额度只有一个原语**：`StreamHandle.credit: CreditWindow`（`stream.rs` 的 `grant`/`consume`）+ `host_stream_grant` 命令面 | RPC result / state update / telemetry 三类仍无端到端 credit。~~`CreditWindow` 死类型~~ 已接线（`admission.rs` 模块头 + `wire-gate` 双向钉住） |
 | A80 hierarchical AdmissionController / fair | **部分** | 双层限额真实存在（global+per_principal，`registry.rs` 的 `AdmissionController` 字段与 `call_begin` admit / 全终态 release） | **按 owner 公平调度仍未落**：`FairQueue` 原为零消费者死类型，轮 10 已**删除并在 V4 台账登记**（半接的轮转队列比不接更危险）。缺额转入后续 Batch「A80 公平调度接线 + 端到端饿死压测」 |
-| A81 PolicyEpoch/GrantVersion/DecisionToken | **部分** | `DecisionToken:11`（含 `PolicyAuthority::forget:83` 的订阅者销毁回收，轮 16 R2）；`eventbus.rs:553-569` bump_grant、提交前 `validate_scoped`（锁内，锁序注释）；**轮 11 把撤销从「只影响新调用」改成有实效**：`revoke:612` 对「他人声明且非公共」档同时①退订该 `(subscriber, topic)` 的全部既有订阅②经 `drop_queued`（同文件）作废三类通道的待取帧③作废走幂等重放（授权行已不存在也再作一次），公共/自属档刻意不动；命令面 `cmd_events_revoke_as:6667` → TS `host.ts` `eventsRevoke`；并发对抗测试 `revoke_racing_publish_leaves_no_revoked_content_behind:1479` + SDK/host 两侧断言 | fs/http/process/secret 完全不重检 token（adapter 内 `DecisionToken` 零命中）；与撤销**并发**且已在撤销前解析到 token 的 publish 仍可能落一帧——靠管理面重放 revoke 收口，要封窗口本身得让发布在 `queues` 临界区内重检审批表（`eventbus.rs` revoke doc 已写明边界） |
+| A81 PolicyEpoch/GrantVersion/DecisionToken | **部分** | `DecisionToken:11`（含 `PolicyAuthority::forget:83` 的订阅者销毁回收，轮 16 R2）；`eventbus.rs:553-569` bump_grant、提交前 `validate_scoped`（锁内，锁序注释）；**轮 11 把撤销从「只影响新调用」改成有实效**：`revoke:612` 对「他人声明且非公共」档同时①退订该 `(subscriber, topic)` 的全部既有订阅②经 `drop_queued`（同文件）作废三类通道的待取帧③作废走幂等重放（授权行已不存在也再作一次），公共/自属档刻意不动；命令面 `cmd_events_revoke_as:6667` → TS `host.ts` `eventsRevoke`；并发对抗测试 `revoke_racing_publish_leaves_no_revoked_content_behind:1519` + SDK/host 两侧断言 | fs/http/process/secret 完全不重检 token（adapter 内 `DecisionToken` 零命中）；与撤销**并发**且已在撤销前解析到 token 的 publish 仍可能落一帧——靠管理面重放 revoke 收口，要封窗口本身得让发布在 `queues` 临界区内重检审批表（`eventbus.rs` revoke doc 已写明边界） |
 | A82 SettingsRevision + post-commit watch | **已落**（范围内） | `tauron-settings/src/store.rs:314-315/471-482`；`commit_settings_change`（`adapter/lib.rs`，`:6070` 把 revision 写进镜像帧）、`cmd_settings_set` stage→persist→commit/restore；SDK `createPlugin.ts:166`；示例 `plugin/first.ts:50`；两侧结构门禁 `settings_commit_has_single_mirror_site`（`adapter/lib.rs`） + `wire-gate:2816-2826/3427-3441/3461` | `getAtLeastRevision()` 未落（`host_settings_revision` 的文档注释自陈无 wire 口）；`cmd_settings_adopt_legacy`/`cmd_settings_migrate` 不产帧也不推 revision → bulk 提交对观察者不可见 |
 | A90 stale-handle generation protection | **部分** | runtime handle 一条真走代际：activate（`runtime.rs` 的 `RuntimeTable::register` 调用点，符号锚定）→ 捕获 `runtime_generation`（`registry.rs:812`）→ 回帧拒旧代（`process_delivery.rs:44/175`）+ 版本化租约查找（`runtime_lease_versioned:1293` ← `tauri.rs:844`，测试 `runtime_ensure_lease_is_idempotent_and_starts_at_most_once`）；**轮 25 补：代际号源改全局单调计数器**，摘除跟踪后重装同名插件仍拿到更大的号（`abandoned_generation_handle_stays_rejected_after_forget_and_reactivation`） | 插件激活（`activation.rs:30`）只带字段不校验；Provider 侧未接（A74 同源） |
 | A104 no-lock-across-await gate | **已落**（覆盖面窄） | `ci.yml:88` + `check-no-lock-across-await.mjs:12` | 只扫 `tauron-host`/`tauron-adapter` 两个 crate 的 src，且是文本级而非 AST |
@@ -3983,6 +3983,75 @@ contract-tests 2 文件 **235** passed（wire-gate 单跑 **214**）；`pnpm ver
 **7** 个文档 **281** 条引用。`version:check` 26 处 = 1.1.0；`command-surface:check` **85** 条命令
 （底座 61 / 运行时 22 / 安装 2），孤儿命令 0、未归类 0、无代码层判定 9；`format:check` 与
 `lint --max-warnings 0` 全 rc=0。
+
+### 轮 64：已发布的总线预算第一次和真源对上（轮 61 遗留①：39 条 B 候选的分诊）
+
+**分诊口径**：轮 61 立了 B 口径、轮 62 把判据收紧，39 条候选一直没逐条定性。清单出自
+`node scripts/check-orphan-public-api.mjs --discover --list-decl`（15 个 const / 14 个 interface /
+10 个 type，其中 25 条在 `@tauron/host`），分档按「**声明文件之外**有没有读者」：24 条有跨文件生产
+读者、10 条只有测试读者、2 条只被 barrel 再导出、3 条连跨文件读者都没有。
+
+**断链（本轮真正修的那条）**：`packages/tauron-host/src/events.ts` 的 `TOPIC_MAX_LENGTH = 200` 是
+发布给 SDK 使用者的 topic 命名约定，而全仓没有任何一方执行它——`packages/tauron-host/src/index.ts`
+再导出它之外，实测只有它自己的声明行。两层都漏：manifest 校验层
+（`crates/tauron-host/src/manifest.rs` 的 `EventsDecl::validate`）只查空名与「含空白或冒号」，长度
+从未有人查；`EventBus::declare_topics` 更宽——**连空名都收**，而订阅侧 `host_events_subscribe` 拒
+空名。声明得进、订阅不进来，那条 topic 就是永远取不走的账（与轮 57 的「坏值不留」同一判据）。
+顺带实测出第二条：`channels.ts` 的 `MAX_QUEUE = 1000` / `OVERFLOW_STREAK_LIMIT = 3` 是 Rust
+`tauron-host::eventbus` 同名 const 的镜像，两侧数字此前**零针**——真源改数字，镜像不会红。
+
+**修法**：Rust 侧新增 `pub const MAX_TOPIC_NAME_LENGTH: usize = 200;`，`declare_topics` 写入前分
+三段校验（非空 → 长度 → 归属不冲突）。三段全在插入之前跑完：原来边查边插，第 N 条失败时前 N-1 条
+已经留在表里，而调用方（安装期）拿到的是「整批失败」——部分生效的批次既没被声明方预期，也没有回滚
+路径。校验与插入共用**同一次写锁**，不是先解锁再插（那会把归属冲突检查打成 TOCTOU）。TS 侧两条镜像
+的注释指到真源，名上限的注释记下面那条口径差；注释刻意不提自己的名字。
+
+**B 口径的判据副作用（本轮实测发现）**：B 的消费判据是「声明文件正文除声明行外命中」，而它**不剔
+注释**。于是给镜像写一句「真源在 Rust 的那个名字」，只要注释里出现候选自己的名字，候选数就假降一次
+——棘轮读数由**叙述**决定而不是由接线决定。所以门禁 ④ 用计数针（整文件出现次数恰好＝声明行那一次）
+而不是负向正则：负向正则只是计数针的一个子集，换个措辞就能绕过去。
+
+**口径**：`discoveryBaselineDecl` 从 43 收到实测 **39，余量清零**——轮 63 对 A 口径的那句理由在这里
+同样成立（漂移由等值读数钉负责，上限的职责只剩「新增公开面必须显式改账」）。两条棘轮自此同一口径。
+
+**边界/遗留**：①24 条假阳性**不改判据**：B 的「只被同文件用就不算接线」正是轮 61 立这条口径的理由，
+改判等于把 B 面作废，只登记；②③④档共 5 条（`ConfigLayer`、`ImplementedTemplate`、`FrameworkCommand`、
+`DetailLessShellEvent`，加 TOPIC 已另办）的收敛要动已发布 npm 面，删除/改名是破坏性动作，等单独批准；
+③长度强制只覆盖**声明侧**——订阅/发布走声明表判定，名字进不了表就订不到，因此不需要第二道闸，但
+这也意味着「先订阅后声明」的顺序变化会动摇这个前提；④字符数 vs UTF-16 长度的口径差在 TS 侧没有强制点
+（宿主拒的字符数比 `String.length` 对 emoji 更宽），要收口得动已发布的校验语义。
+
+**变异证明**：27/27 逐段按名变红（终检复跑门禁 219 passed + 6/6 参与文件与开跑前同哈希）。
+覆盖：数字与强制点 6 条（三对数字各漂一次、名上限比较点搬走、队列判定处削掉一处、TS 侧数字单独改）；
+校验次序 5 条（空名/超长名/归属冲突三条针各摘一次、空名校验被搬到写入之后＝部分声明回来了、
+归属冲突文案改写）；行为用例 6 条（三条 Rust 用例改名 + 边界硬编码 200 + `+1` 换成 `+2` +
+`is_none()` 翻成 `is_some()`）；镜像注释 5 条（两条「指到真源」的措辞被抹、三条把候选自己的名字
+写进注释＝喂棘轮）；台账与文档 5 条（B 上限 39→40、两条分诊口径改写、计划小节与 CHANGELOG 短语改写）。
+另有**行为侧独立一跑**：把 Rust 的两处判定改成永假条件后 `cargo test -p tauron-host` 自己变红——
+`blank_topic_name_is_rejected_at_declare_time`、`topic_name_boundary_takes_exactly_the_published_budget`、
+`a_rejected_batch_leaves_no_partially_declared_topic` 三条全 FAILED，还原后该过滤器 18 passed 全绿
+（证明这三条不是只给门禁针当陪衬）。
+两处脚本缺陷值得记：①变异断言的期望串写成 `校验 「空名」…`（多一个空格），针的实际文案是
+`校验「空名」…`，首跑 22/27 里有 4 条是这种「针红了但按名找不到」的误判；②**M2 首跑是真假绿**——
+「队列上限的强制点被搬走」用的是 presence 针，而 `self.frames.len() >= self.capacity` 在
+`eventbus.rs` 里有三处判定（字节预算、回压、入队），削掉任意一处另外两处仍然满足针。presence 针
+证不了「判定处数」，改成计数针 `>= 3` 后 M2 才按名变红。还有一条在门禁首跑就撞出来：用
+`new RegExp` 拼数字针时，模板字面量会先吃掉 `\d` 的反斜杠，针变成「等号后跟 d 一个以上」——
+它靠「读不到就 throw」当场暴露，而不是静默绿。
+
+**读数**（本小节全部出自同一次跑批日志）：`pnpm build` rc=0；tauron-host 包 22 文件 **458** passed；
+contract-tests 2 文件 **240** passed（wire-gate 单跑 **219**，轮 63 末 214 + 本轮 5 条）；
+`pnpm verify` **20** 包 **107** 文件 **1975** passed rc=0（轮 63 末 1970，+5 全是本轮门禁用例）。
+`cargo fmt --all --check` rc=0；`pnpm lint:rust` rc=0；`cargo test --workspace --locked` 41 个测试
+二进制 **1608** passed / 0 failed（轮 63 末 1605，+3 本轮 Rust 用例）；`-p tauron-market --features signing`
+**78**；`-p tauron-adapter --features plugin-install` **345**；`--features tauri,plugin-install` **380**
++ 4 ignored。`gates:check` rc=0：孤儿台账 **14** 条未接线宣称 + **6** 条已接线反例、A 口径
+**633 ≤ 基线 633 且实测＝读数钉 633**、B 口径 **39 ≤ 基线 39 且实测＝读数钉 39**（上限本轮收口）、
+adapter 域归属 lib.rs 顶层条目 **292 已封顶**。`docs:check` rc=0：**7** 个文档 **281** 条引用——
+本轮 `eventbus.rs` 加了 14 行前置内容，`--fix` 重锚 **3** 条行号漂移（`reset_session_state`、
+`session_reset_clears_subscriptions_but_keeps_topic_declarations`、`revoke_racing_publish_leaves_no_revoked_content_behind`）。
+`version:check` 26 处 = 1.1.0；`command-surface:check` **85** 条命令（底座 61 / 运行时 22 / 安装 2），
+孤儿命令 0、未归类 0、无代码层判定 9；`format:check` 与 `lint --max-warnings 0` 全 rc=0。
 
 ## 10. 对外口径修订（必须与代码同批改）
 
