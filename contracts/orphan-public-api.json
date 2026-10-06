@@ -13,7 +13,18 @@
     "  - wiredWitness 条目：probe 在接线面（除声明文件）必须**至少一处命中**；",
     "    它们是非空洞性证明——如果哪天连它们都查不到消费者，说明判定逻辑本身坏了。",
     "  - discovery：重跑自动发现，孤儿候选总数不得超过 discoveryBaseline。",
-    "    这是「不许新增孤儿」的棘轮；基线里的存量是历史债务，逐条收口后应当**下调**基线。"
+    "    这是「不许新增孤儿」的棘轮；基线里的存量是历史债务，逐条收口后应当**下调**基线。",
+    "",
+    "轮 61 的两处口径变更（都让门禁更严，不是放松）：",
+    "  - A 口径的行视图不再把「只 import 未使用」当消费者：旧实现漏掉了单行 `use ...;` 与",
+    "    多行 `import {` 的成员行，于是一条 `use std::ops::Deref;` 就能替一个毫不相干的",
+    "    `WindowOpRecorder::ops` 充当证据（同名词面巧合）。修好后当场浮出 1 个真孤儿（见 ops 条目）。",
+    "    同一处修复也解除了 `useEffect(() => {` 被误判成 Rust use 语句、整段 hook 体被吞掉的失真。",
+    "  - 新增 B 口径：TS 的 `export const` / `export type` / `export interface` 进棘轮，",
+    "    上限是独立数字 discoveryBaselineDecl（A 的余量不许拿来给 B 遮丑）。B 的消费判据与 A 不同：",
+    "    **声明文件正文也算消费者**（候选自身的声明行除外，同文件其它声明行算引用位）。实测落差：",
+    "    同一声明集按 A 判据会报 420 个、按 B 判据 43 个——前者是「只被同文件使用」的在用面噪声。",
+    "    用 --discover --list-decl 看全量清单。"
   ],
   "plane": {
     "include": ["crates/*/src", "packages/*/src", "examples", "apps"],
@@ -107,6 +118,38 @@
       "probe": "\\bConfigManager\\b",
       "disposition": "未接线的历史 SDK 面（轮 34 登记，与 `PluginRegistry` 同批）：`@tauron/core` 的分层配置容器，接线面内除 core 自己的再导出与自身测试外零消费者；设置事实源的读写在 Rust 侧（`cmd_settings_*` + `DurableEnvelope`），TS 侧没有第二份配置账本。`capability-closure-plan.md` 的 P1-1/P1-10 把它与 `PluginRegistry` 写成「活线拖着死线」的现存耦合，载体同样已删除——那份文档（0.4 收口方案，轮 50 作为无效历史文档清理删除）的状态横幅只声明 §1/§2 是施工前状态，未点名这两个类今天无人消费，故在此登记。不静默删除：随 v1.0.0 发布过。",
       "docRef": "docs/architecture/multi-plugin-substrate-roadmap.md"
+    },
+    {
+      "symbol": "WindowOpRecorder::ops",
+      "declaredIn": "crates/tauron-adapter/src/lib.rs",
+      "lang": "rust",
+      "probe": "\\.ops\\(\\)",
+      "disposition": "未接线（轮 61 由 A 口径严化后浮出）：窗口操作环形缓冲的整表快照只有自己的单测在读（lib.rs 内 16197 行一处），生产路径用的是谓词式判定（同文件的 `iter().any(...)`）。它此前被误记成「已接线」，是因为旧行视图把 `use std::ops::Deref;` 这类 import 行当消费者——同名词面巧合替一个毫不相干的方法作了证。不删：环形缓冲本身在生产写入，快照 API 属对外诊断面；收口方式是给它接上真读者或降级为 pub(crate)，均属单独改动。",
+      "docRef": "docs/architecture/v4-industrial-gap-closure-plan.md"
+    },
+    {
+      "symbol": "SIDECAR_ABI_CONTRACT",
+      "declaredIn": "packages/tauron-host/src/shell-client.ts",
+      "lang": "ts",
+      "probe": "\\bSIDECAR_ABI_CONTRACT\\b",
+      "disposition": "B 口径在册（轮 61）：文档写「**必须用它填 `RuntimeSpawnProfile.abi`**」，但接线面内没有任何 `runtimeSpawn` 生产调用点——只有本包自己的单测引用它。所以「宿主声明的 ABI 与框架契约不符 → E_ABI_MISMATCH 拒绝启动」这条守卫在仓库里拿不到端到端证据；比对逻辑本身由 Rust 侧测试覆盖（`profile.abi` vs `ProcAbiFingerprint::now`）。不静默删除：随包发布过，且让 SDK 在调用方省略 abi 时以本常量兜底是**语义变更**（把守卫从关变开），需单独批准。轮 61 已把接口文档的两处含糊改口：abi 是必填（省略＝整次 spawn 参数反序列化失败，不是跳过校验）、仓内证据只有「常量同值 + Rust 侧比对」两级。",
+      "docRef": "docs/api/plugin-development-guide.md"
+    },
+    {
+      "symbol": "PERMISSION_GRANULARITY",
+      "declaredIn": "packages/types/src/acl.ts",
+      "lang": "ts",
+      "probe": "\\bPERMISSION_GRANULARITY\\b",
+      "disposition": "B 口径在册（轮 61 收口轮 58 的尾巴）：内层框架 ACL 的声明词表，仓内零执行者——Rust `check_plugin_permission` 按字符串比对，审批文案自轮 55 起由 Rust `build_approval_rows` 单源生成。轮 58 删掉了唯一校验它的 `isValidPermission`，却留下 `missingPermissions` 的注释宣称「内层词表里唯一有真实读者的工具」：那个函数只读 `grant.permissions`，**从不读这张表**。现在注释改口，条目入台账。不删：随 @tauron/types 1.0.x 发布，属破坏性变更。",
+      "docRef": "docs/architecture/app-layer-wire.md"
+    },
+    {
+      "symbol": "TERMINAL_STATES",
+      "declaredIn": "packages/types/src/plugin.ts",
+      "lang": "ts",
+      "probe": "\\bTERMINAL_STATES\\b",
+      "disposition": "B 口径在册（轮 61）：§4.3 设计模型的终态集合，只有一个成员 `UNINSTALLING`。它不仅是零读者，而且在类型上**表达不出线上的真终态**——`PluginState` 里没有宿主线名 `UNINSTALLED`（轮 60 的三套词表门禁逐名钉过：wire-only 含 UNINSTALLED/ERRORED_USER_CONFIRM）。谁把它当 UI 启停依据就会得到「卸载中是唯一终态」的错误结论。注释已写明不是线上口径；删除属破坏性变更，需单独批准。",
+      "docRef": "docs/architecture/app-layer-wire.md"
     }
   ],
   "wiredWitnesses": [
@@ -144,11 +187,21 @@
       "lang": "rust",
       "probe": "\\bvalidate_grants\\b",
       "meaning": "同上：安装路径 validate_grants 是真实调用点，不是测试专用。"
+    },
+    {
+      "symbol": "PluginCancelRequest",
+      "declaredIn": "packages/types/src/envelope.ts",
+      "lang": "ts",
+      "probe": "\\bPluginCancelRequest\\b",
+      "meaning": "B 口径的非空洞性反例（轮 61）：这个取消信封类型此前在接线面零读者——`@tauron/core` 的两处 `plugin_cancel` 调用点直接写裸字面量 `{ request: { callId } }`，于是「已发布的类型」与「真正上线的载荷」之间没有任何绑定，而 Rust 侧 `PluginCancelRequest` 带 `deny_unknown_fields`，字段名一漂移就是运行期反序列化失败、且没有测试会红。轮 61 让两处调用点显式按该类型标注，本条即那条绑定存在的证据。"
     }
   ],
+  "discoveryBaselineDecl": 43,
   "discoveryBaseline": 635,
   "discoveryNote": [
-    "自动发现口径：`pub fn` / `export function` / `export class` 声明中，在接线面（除声明文件）零命中者。",
+    "A 口径：`pub fn` / `export function` / `export class` 声明中，在接线面（除声明文件）零命中者。",
+    "B 口径（轮 61）：TS 的 `export const` / `export type` / `export interface` 声明中，在接线面",
+    "（含声明文件正文，声明行本身除外）零命中者。上限独立（discoveryBaselineDecl），两条棘轮互不借余量。",
     "存量（轮 2 实测 635 条）里绝大多数是**合法的对外库 API**（发布出去的 crate/包的公开面），棘轮只保证「不再新增」，不代表这 635 条都要删。",
     "逐条收口后必须下调本数字；635 是本轮门禁实测值（同轮日志见 CHANGELOG 轮 22 条目），写死不动等于把债务固化。"
   ]

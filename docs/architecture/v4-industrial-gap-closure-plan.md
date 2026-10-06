@@ -3657,6 +3657,121 @@ Rust 侧发布级硬门禁同轮复跑：`pnpm lint:rust`（workspace clippy `-D
 工具链漂移能把 HEAD 上的门禁照红，不查就不知道）。
 
 
+### 轮 61：孤儿棘轮看不见 TS 的声明面，看不见之后又漏出一条真断链（轮 60 遗留②）
+
+**断链**：`scripts/check-orphan-public-api.mjs` 的自动发现只枚举 Rust `pub fn` 与 TS
+`export function|class`，TS 的 `export const` / `export type` / `export interface` 从头到尾在
+棘轮外。轮 58 遗留②（「SDK 面未审」）与轮 60 遗留②都点名了这条覆盖缺口，但缺口不是抽象的：
+B 口径装上以后当场掉出三类「文档宣称可用、代码里没人履行」的事实——
+
+1. **取消信封的载荷与已发布类型零绑定**。`@tauron/types` 发布着 `PluginCancelRequest`（`{ callId }`），
+   而真正发这条命令的 `@tauron/core/tauri-backend.ts` 两处调用点写的是裸字面量
+   `{ request: { callId } }`。宿主侧 `crates/tauron-shell/src/envelope.rs` 的同名 struct 带
+   `deny_unknown_fields`，于是字段名一旦漂移（任一侧改名）不是「多一个无用字段」，而是整次
+   `plugin_cancel` 反序列化失败；而当时既有门禁只钉了 `rename_all = "camelCase"`，字段级只有
+   `ProgressEvent` 有逐字段核对。类型改了编译不红、载荷漂了测试不红——这是「前后端贯通」意义上的
+   空档，不是风格问题。
+2. **`PERMISSION_GRANULARITY` 的读者是编出来的**。轮 58 删掉了唯一校验这张表的 `isValidPermission`，
+   却在同文件留下注释宣称 `missingPermissions` 是「内层词表里唯一有真实读者的工具」。实测
+   `missingPermissions` 只比对 `grant.permissions`，**从未引用那张表**；`@tauron/core` 的
+   `getMissingPermissions` 调的是这个函数，不是那张表。也就是说轮 58 的「把话说实」只实了一半。
+3. **`TERMINAL_STATES` 在类型上就表达不出线上真终态**。设计模型的 `PluginState` 里没有线名
+   `UNINSTALLED`（轮 60 已把三套词表的重合/分歧逐名钉死：仅线侧 5 名含 `UNINSTALLED`），
+   所以这份「终态集合」只能是 `['UNINSTALLING']`——谁拿它当 UI 启停依据，就会得到「卸载中是唯一
+   终态」的错误结论。它同样是零读者。
+
+**修法**：
+
+1. 门禁长出**第二条独立棘轮**：`discoveryBaselineDecl`（B 口径上限）与 A 的 `discoveryBaseline`
+   并列，缺键直接红（否则新口径等于不设上限）。B 的消费判据**不照抄 A**：声明文件正文也算消费者
+   （候选自身的声明行除外，同文件其它声明行算引用位）。实测落差写进 `--discover` 的输出，让后来人
+   一眼看懂为什么不照抄——同一声明集按 A 判据报 420 个、按 B 判据 43 个，落差全是「只被同文件使用」
+   的在用面（`TAURON_COMMANDS` 只被同文件调用点用、`PluginForm` 只出现在同文件函数签名位）。
+2. 行视图的**宽松失真**一并修掉（宽松＝放过真孤儿，比假红更需要防）：单行 `use ...;` 与多行
+   `import {` 的成员行曾被当消费者，于是 `use std::ops::Deref;` 替毫不相干的 `WindowOpRecorder::ops`
+   作了证；同一支 `use\b` 还把 TS 的 `useEffect(() => {` 误判成 Rust use 语句、整段吞掉 hook 体里的
+   真消费者。严化后 A 口径 621→622，多出来的正是那个被 std import 遮了很久的真孤儿。
+3. 取消载荷接上真绑定：`@tauron/core` 新增 `CancelPayload = { request: PluginCancelRequest }`，
+   显式 `cancel()` 与超时 best-effort cancel 两条路径都按类型标注后再交给 `api.invoke`；
+   `wire-gate` 补 `PluginCancelRequest` 的 TS↔Rust **逐字段**核对（复用既有 snake→camel 口径），
+   并钉死「裸字面量不得回归」；台账把它转成 B 口径的**已接线反例**（非空洞性证明）。
+4. 两处假话改口 + 三条登记：`acl.ts` 注释写明 `missingPermissions` 不读那张表；`plugin.ts` 的
+   `TERMINAL_STATES` 注释写明「不是线上的终态」及为什么表达不出；`shell-client.ts` 的
+   `SIDECAR_ABI_CONTRACT` 保留给外部宿主的「必须」规范，但补上「仓内没有装配点履行它」的诚实边界。
+   台账新增 4 条 orphan（`WindowOpRecorder::ops`、`SIDECAR_ABI_CONTRACT`、`PERMISSION_GRANULARITY`、
+   `TERMINAL_STATES`）与 1 条 witness；`packages/tauron-core/README.md` 的导出清单补上「别按 README
+   推断仓库里跑通过」的边界段（`PluginRegistry`/`ConfigManager` 与内层权限检查的真相）。
+   接口文档 `docs/api/plugin-development-guide.md` 的 `abi` 小节同批改两处含糊：省略 `abi` 的真实
+   后果（两侧类型都必填、无 `serde(default)`，所以是**整次 spawn 参数反序列化失败**而不是「跳过
+   校验」）、以及这条守卫在仓内只有「常量同值 + Rust 侧比对」两级证据、没有端到端证据；台账的
+   `SIDECAR_ABI_CONTRACT.docRef` 随之指向这份作者真会读的文档。
+
+**新增行为测试**：`packages/tauron-core/src/tauri-backend.test.ts` 的
+`轮 61：两处 plugin_cancel 的载荷键名逐字对上线上信封`——用 fake timers 同时驱动显式 `cancel()` 与
+超时 best-effort cancel 两条路径，断言真正交给 `api.invoke` 的第二个参数逐字等于
+`{ request: { callId: … } }`。选它而不是选类型标注，是因为 `deny_unknown_fields` 下的失效方式是
+**运行期整次反序列化失败**：TS 侧改键名编译不红（结构上仍然自洽），宿主侧改键名 TS 也不红，
+只有把发出去的键名钉成断言才有信号。变异 K4（把 `callId` 改成 `call_id`）证明的正是这一环。
+
+**诚实边界（本轮没做到的部分）**：
+
+- 取消载荷的两端**没有同一条链路跑过真宿主**。TS 侧用 fake api 捕获载荷、Rust 侧的
+  `deny_unknown_fields` 由 `crates/tauron-shell` 自己的测试覆盖，本门禁核对的是两侧的字段集相等，
+  不是「一次真实 `plugin_cancel` 被宿主接受」。把它读成端到端证据会超出实际。
+- B 口径的 43 个候选里只有 4 条写了 disposition，其余是**总数被上限钉住**、逐条仍未定性：本轮把
+  「看不见」变成「看得见且有上限」，没有把「看得见」变成「逐条有说法」。
+- 判据没有第三档：`SIDECAR_ABI_CONTRACT` 的真实状态是「只有本包单测读者」，而 TESTY 排除测试文件
+  之后它与「零读者」在 B 口径里同形。台账用 disposition 把它说清了，但口径本身不区分这两类。
+- `WindowOpRecorder::ops` 只是**登记**了，没接真读者也没降级成 `pub(crate)`——两者都是改动，留下一轮。
+
+**遗留**：① 43 个 B 口径候选的逐条定性（`--list-decl` 可列全量）；② 「只有测试读者」是否值得独立
+档位（若加，`SIDECAR_ABI_CONTRACT` 一类会从孤儿变成「测试面」，判据要重写非空洞性证明）；
+③ 三处破坏性动作（删 `PERMISSION_GRANULARITY`/`TERMINAL_STATES`、给 `abi` 加 SDK 兜底、把
+`getState()` 对未知 ID 的 `null` 契约改成 `UNINSTALLED`）都要单独批准，不并入本轮；
+④ 轮 58 遗留①（内层权限词表没有执行者）仍在——本轮只把「注释说谎」改成「台账在册」，
+没有给内层词表接上校验点。
+
+**变异证明**：终检 **45 例全红、树完整性 14/14 OK**（`C:/tmp/r61-mut4.log`；本节文字收口后按
+「动过被钉文件必须重跑」复跑一遍仍 **45/45**，`C:/tmp/r61-mut5.log`）。分布：① 口径与棘轮 9 例
+（三种声明各少枚举、视图被搬空、落差句丢失、缺键守卫失效、A 枚举被改、A 上限被抬高、读者判据被改名）、
+行为侧 4 例（新增零读者公开 const → `总数 44 > 基线 43`；删基线键 → `台账缺少 discoveryBaselineDecl`；
+B 判据照抄 A → 候选从 43 涨到越限；宽松视图复活 → 台账反过来指控 `TERMINAL_STATES` 已接线）、
+② 视图守卫 4 例、③ 取消载荷文本与类型绑定 8 例（含 TS 加字段 / Rust 去掉 `deny_unknown_fields`
+各让逐字段针变红）、行为测试 4 例（多塞键 / 改值 / 丢 `request` 包装 / 运行期改名 `call_id`）、
+④ 台账与文档 16 例（含接口文档 `docs/api/plugin-development-guide.md` 的 abi 两条新针）。
+两条**没设成红**的诊断值得记下来：① 撤掉单行 `use` 的 `;` 守卫后，门禁仍然绿（DIAG 行：A 口径候选
+622→624，仍在 635 上限内）——上限型棘轮对「视图变宽松/变吞」不提供红绿信号，这类守卫只能靠 ② 的
+文本钉守，所以本轮把它写成**判据余量**而不是证明。② 首轮有 4 例没红，根因全在针的设计而不在门禁，
+三条都值得进门禁 doctrine：**改标识符的变异必须让该标识符全树消失**（只改定义行会留下调用行仍含被钉串，
+`hasDeclConsumer`/`blockTerminator`/`declViews` 三例都这么漏过）；**替换文本不得包含被钉串的子串**
+（`declViewsX` 依然满足 `toContain('declViews')`）；**标题针必须钉整行标题而不是前缀**——
+`#### 轮 61：` 本身包含 `### 轮 61：`，而更绕的是把针改成前缀检查后，本小节写这条教训时用的那个代码串
+自己把针喂饱了，于是「标题降级」那例在第二轮反而不红；针换成完整标题文本才恢复信号。四条都在本轮内
+实测到并改掉，终检才是 45/45。
+
+**读数（本轮收口时同批采集，全部来自本轮日志）**：`pnpm build` rc=0；`pnpm verify` **20 个包全绿**
+（`C:/tmp/r61-close2.log`）——`tauron-contract-tests` **224 passed / 2 files**（轮 60 收口时 220，本轮
+新增 4 条 B 口径门禁）、`@tauron/core` **79 passed / 7 files**（`tauri-backend.test.ts` 17 → 18 条）、
+`@tauron/types` **71 passed / 6 files**、`@tauron/app-contract-kit` **94 passed / 2 files**，逐包计数
+相加 **1948**（轮 60 的 1943 + 本轮 4 + 1）。wire-gate 单文件在门禁针每次改动后都先 prettier 再复跑，
+最后一次 **203 passed**（`C:/tmp/r61-wg6.log`），随后跑变异终检：**45/45 全红、树完整性 14/14 OK**
+（`C:/tmp/r61-mut4.log`；本小节文字收口后再复跑一遍仍 45/45，`C:/tmp/r61-mut5.log`）。最后两轮只改
+文档正文，改完按 doctrine 复跑的四项检查全 rc=0（`C:/tmp/r61-close3.log`：`format:check`、`lint`
+`--max-warnings 0`、`gates:check` 九闸、`docs:check`）。
+node 侧九闸 + 格式化 + lint 全 rc=0：`format:check`（`All matched files use Prettier code style!`，
+本轮改过的门禁/代码文件都在改完后先格式化再重跑门禁与变异，沿用「格式化动过被钉文件必须重跑」那条
+doctrine）、`lint`（`--max-warnings 0`）、`version:check` **26 处版本号全部 1.1.0**、
+`command-surface:check` **85 commands（底座 61 / 运行时 22 / 安装 2），孤儿命令 0、未归类 0**、
+`gates:check`（九条闸各打印一行 OK：孤儿台账 **14 条未接线宣称 + 6 条已接线反例**、
+**A 口径 622 ≤ 基线 635、B 口径 43 ≤ 基线 43**——622 比轮 60 的 621 多 1，正是行视图严化后浮出的
+`WindowOpRecorder::ops`；域归属 **lib.rs 顶层条目 292 已封顶** / 19 个域 / 41 个 impl 类型 / 187 个方法；
+Tier↔Bundle **3 tiers / 10 bundles / 85 commands**）、`docs:check` **7 个文档 / 279 条引用**
+（本轮只动注释与文档正文，没动 Rust 行号，锚点零漂移）。Rust 侧发布级硬门禁同轮复跑：
+`pnpm lint:rust`（workspace clippy `-D warnings`）rc=0、`cargo fmt --all --check` rc=0
+（`C:/tmp/r61-rust.log`；本轮对 Rust 源码的唯一改写是变异脚本的临时注入，脚本自身的树完整性核对已确认
+逐字节还原，跑这两条是按轮 57 立的规矩：工具链漂移能把 HEAD 上的门禁照红，不查就不知道）。
+
+
 ## 9. 明确推迟 / 不做（附理由）
 
 | 项 | 处置 | 理由 |

@@ -46,7 +46,14 @@ export const TRANSITIONS: Readonly<Record<PluginState, readonly PluginState[]>> 
   UPGRADING: ['INSTALLED', 'ERRORED'],
 };
 
-/** 终态集合 */
+/**
+ * 终态集合（§4.3 设计模型口径）。
+ *
+ * 轮 61 把它说实：**这不是线上的终态**。`PluginState` 里根本没有 `UNINSTALLED`
+ * （那是宿主线名，见轮 60 的三套词表门禁），所以本集合在类型上就表达不出
+ * 「卸载完成且记录保留」这个真终态；线上还把 `ERRORED_USER_CONFIRM` 计为需用户动作后
+ * 停止的态。仓内零读者（B 口径在册），别拿它当 UI 的启用/禁用依据。
+ */
 export const TERMINAL_STATES: ReadonlySet<PluginState> = new Set(['UNINSTALLING']);
 
 /** 活跃态集合（可以执行调用的状态） */

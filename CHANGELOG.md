@@ -15,6 +15,40 @@
 
 ### Changed
 
+- **孤儿棘轮第一次看见「TS 声明面」，并顺手补掉一条真断链（轮 61）**：`check-orphan-public-api.mjs`
+  的自动发现只枚举 `pub fn` / `export function` / `export class`，`export const` / `export type` /
+  `export interface` 全程在棘轮外——轮 58 遗留②「SDK 面未审」正是从这里漏下去的。现在 B 口径是
+  **第二条独立棘轮**（`discoveryBaselineDecl`，本轮实测 43），A 的余量不许拿来给 B 遮丑。判据也不是
+  照抄 A：同一声明集按 A 的「除声明文件」判据本轮实测会报 420 个、按 B 判据 43 个，落差全是「只被
+  同文件使用」的在用面（`TAURON_COMMANDS` 只被同文件调用点用、`PluginForm` 只出现在同文件函数签名位），
+  照抄等于把门禁做成噪声源。同轮修掉两处**宽松方向**失真（宽松＝放过真孤儿）：单行 `use ...;` 与多行
+  `import {` 的成员行曾被当消费者——一条 `use std::ops::Deref;` 就这样替毫不相干的
+  `WindowOpRecorder::ops` 作了证；旧模式里 `use\b` 一支还会把 TS 的 `useEffect(() => {` 误判成 Rust
+  use 语句、整段吞掉 hook 体里的真消费者。严化后当场浮出 1 个真孤儿（A 口径 621→622，仍 ≤ 基线 635）。
+  B 口径的 43 个里，挑「文档宣称可用」的那三类下手：
+  ① `plugin_cancel` 的载荷——`@tauron/types` 发布着 `PluginCancelRequest`，而 `@tauron/core` 两处
+  调用点写的是裸字面量 `{ request: { callId } }`，已发布类型与真正上线的载荷之间**零绑定**；宿主侧
+  Rust struct 带 `deny_unknown_fields`，字段名一漂不是「多一个字段」而是整次调用反序列化失败，且
+  没有任何测试会红。现在两处都按该类型标注、外层 `{ request }` 由 `CancelPayload` 别名钉住，字段集
+  加了 TS↔Rust 逐字段门禁（此前只钉 `rename_all = "camelCase"`），并加行为测试逐字断言显式 cancel
+  与超时 best-effort cancel 两条路径实际发出的键名；该类型同时转为 B 口径的**已接线反例**。
+  ② `PERMISSION_GRANULARITY` 的注释宣称 `missingPermissions` 是「内层词表里唯一有真实读者的工具」——
+  实测那个函数只比对 `grant.permissions`，**从不读这张表**（轮 58 删掉唯一校验者 `isValidPermission`
+  之后留下的尾巴）；注释改口并登记台账。③ `TERMINAL_STATES` 的「终态集合」在设计模型的类型上
+  **表达不出线上真终态**（`PluginState` 里没有线名 `UNINSTALLED`，轮 60 已逐名钉死），注释写明它不是
+  线上口径并登记。边界：`SIDECAR_ABI_CONTRACT` 的文档写「**必须用它填 `profile.abi`**」，但接线面内
+  没有任何 `runtimeSpawn` 生产调用点，守卫在仓内拿不到端到端证据——让 SDK 在调用方省略 `abi` 时以它
+  兜底会把守卫从「关」变「开」，属已发布面的语义变更，登记为遗留而非本轮擅自改行为。接口文档
+  `docs/api/plugin-development-guide.md` 同批改掉两处含糊：`abi` 在 `RuntimeSpawnProfile` 两侧都是
+  **必填**（TS `abi: RuntimeAbiFingerprint`、Rust `pub abi` 无 `serde(default)`），所以**省略它不是
+  「跳过校验」而是整次 spawn 参数反序列化失败**；且这条守卫在仓内只有「两端常量同值 + Rust 侧比对
+  测试」两级证据，没有端到端证据。台账该条的 `docRef` 改指这份作者真会读的文档。
+  `WindowOpRecorder::ops` 是对外诊断快照、只被自身单测读，不静默删除。已发布导出/类型的删除与改名
+  一律不在本轮范围（属破坏性变更，需单独批准）。门禁落在 `wire-gate.test.ts` 轮 61 段（4 条 `it`），
+  加行为侧与口径侧共 **45 个变异，终检 45/45 全红、树完整性 14/14 OK**（`C:/tmp/r61-mut4.log`）；其中
+  一条**没能设成红**的诊断同样记进事实：撤掉单行 `use` 的 `;` 守卫后门禁仍绿（A 口径候选 622→624，
+  仍在 635 上限内）——上限型棘轮对「视图变吞/变宽松」不提供红绿信号，这类守卫只能靠文本钉守，
+  本轮把它写成判据余量而不是证明。
 - **插件生命周期终于只有「一份线上事实」被信任（轮 60）**：仓里并行存着三套状态词表，而彼此之间
   零可证一致性——①宿主线名（Rust `tauron-host::lifecycle`，TS 镜像 `@tauron/host` 的
   `LIFECYCLE_STATES`，10 名）；②`@tauron/types` 的 §4.3 设计模型 `PluginState`/`TRANSITIONS`（也

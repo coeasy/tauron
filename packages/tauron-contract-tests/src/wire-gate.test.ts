@@ -7920,3 +7920,166 @@ describe('门禁：轮 39 能力可见性（主窗特权命令对插件主体不
     expect(readme, 'README 没有给出插件主体下主窗命令报 false 的事实').toContain('一律报');
   });
 });
+
+describe('门禁：轮 61 孤儿棘轮的 TS 声明面口径（公开 const/type/interface 进账，取消信封被真用）', () => {
+  const SCRIPT = 'scripts/check-orphan-public-api.mjs';
+  const LEDGER = 'contracts/orphan-public-api.json';
+  const CORE_BACKEND = 'packages/tauron-core/src/tauri-backend.ts';
+  const CORE_TEST = 'packages/tauron-core/src/tauri-backend.test.ts';
+
+  it('① B 口径确实枚举三种 TS 公开声明，判据不照抄 A，缺基线必须红', () => {
+    const script = read(SCRIPT);
+    const ledger = JSON.parse(read(LEDGER)) as {
+      discoveryBaseline: number;
+      discoveryBaselineDecl?: number;
+    };
+    // 三种声明各自入枚举（漏一种就等于把那一类对外面继续留在棘轮外）。
+    expect(script, 'B 口径没枚举 export const').toContain('export const ([A-Za-z0-9_]+)');
+    expect(script, 'B 口径没枚举 export type').toContain('export type ([A-Za-z0-9_]+)');
+    expect(script, 'B 口径没枚举 export interface').toContain('export interface ([A-Za-z0-9_]+)');
+    // 判据差别：声明文件正文算消费者（候选自身声明行除外），同文件其它声明行算引用位。
+    expect(script, 'B 口径的声明面读者判据被搬空').toContain('hasDeclConsumer');
+    expect(script, 'B 口径应当有保留声明行的视图，否则签名位类型别名会被误判成孤儿').toContain(
+      'declViews',
+    );
+    // 落差由脚本自己打印，不靠注释口头声称。
+    expect(script, '--discover 不再对比两种判据的落差，后来人会照抄 A 判据做出噪声门禁').toContain(
+      '同一声明集若按 A 判据',
+    );
+    // 第二条棘轮独立存在且缺键即红；A 的枚举与上限不许被动过。
+    expect(script, 'B 口径上限键名不再被脚本读取').toContain('discoveryBaselineDecl');
+    expect(script, '缺 discoveryBaselineDecl 若不红，B 口径等于不设上限').toContain(
+      "typeof declBaseline !== 'number'",
+    );
+    expect(script, 'A 口径的 pub fn 枚举被改动（两条棘轮不许互相借余量）').toContain(
+      'pub fn ([a-z0-9_]+)',
+    );
+    expect(typeof ledger.discoveryBaselineDecl, '台账缺 B 口径上限').toBe('number');
+    expect(ledger.discoveryBaseline, 'A 口径上限被顺手改动').toBe(635);
+  });
+
+  it('② 行视图的宽松失真已修：import 行不再充当消费者，未闭合判据才开启吞块', () => {
+    const script = read(SCRIPT);
+    expect(script, '跨行块的开启/终结判据丢了').toContain('blockTerminator');
+    // 只有本行真的没闭合才开启块：`;` 与 `}` 两个守卫各管一支。
+    expect(script, 'Rust use 语句不再要求本行无 ; ——单行 use 会被当成块起点').toContain(
+      '&& !/[;]/.test(line)',
+    );
+    expect(script, 'TS import/export 不再要求花括号本行闭合').toContain('&& !/[}]/.test(line)');
+    expect(script, 'TS 块起点应只由 import/export 的花括号或 * 触发').toContain(
+      '(?:import|export)(?:\\s+type)?\\s*[*{]',
+    );
+  });
+
+  it('③ plugin_cancel 的载荷由已发布类型承担：两处标注、裸字面量不回归、字段集 TS↔Rust 逐字段一致', () => {
+    const core = read(CORE_BACKEND);
+    expect(core, '取消调用点没再引用 @tauron/types 的取消信封').toContain(
+      'type PluginCancelRequest,',
+    );
+    expect(core, 'CancelPayload 别名不再由已发布的取消信封类型描述').toMatch(
+      /type\s+CancelPayload\s*=\s*\{\s*request:\s*PluginCancelRequest\s*\};/,
+    );
+    expect(core, '显式取消点的载荷丢了取消信封类型标注').toMatch(
+      /const\s+request:\s*PluginCancelRequest\s*=\s*\{\s*callId\s*\};/,
+    );
+    expect(core, '超时取消点的载荷丢了取消信封类型标注').toMatch(
+      /const\s+cancel:\s*PluginCancelRequest\s*=\s*\{\s*callId:\s*request\.callId\s*\};/,
+    );
+    expect(core, '取消调用不再按 payload 变量发出').toMatch(
+      /invoke<\s*void\s*>\(\s*TAURON_COMMANDS\.cancel,\s*payload\s*\)/,
+    );
+    // 裸字面量回归＝类型与线上载荷重新变成零绑定，正是本轮补的空档。
+    expect(core, '又出现未经类型标注的取消载荷字面量').not.toMatch(
+      /TAURON_COMMANDS\.cancel,\s*\{\s*request:\s*\{/,
+    );
+
+    const rust = read(`${SHELL}/envelope.rs`);
+    const typesEnvelope = read('packages/types/src/envelope.ts');
+    const rustIdx = rust.search(/pub struct PluginCancelRequest\b/);
+    expect(rustIdx, 'Rust 侧取消信封 struct 不见了').toBeGreaterThan(-1);
+    // deny_unknown_fields 是「改名即整次调用失败」的前提，也是这条逐字段门禁的意义所在。
+    expect(rust.slice(Math.max(0, rustIdx - 200), rustIdx), '取消信封不再拒绝未知字段').toContain(
+      'deny_unknown_fields',
+    );
+    const rustBlock = /pub struct PluginCancelRequest\s*\{([\s\S]*?)\n\}/.exec(rust)?.[1] ?? '';
+    const tsBlock =
+      /export interface PluginCancelRequest\s*\{([\s\S]*?)\n\}/.exec(typesEnvelope)?.[1] ?? '';
+    const rustFields = [...rustBlock.matchAll(/^\s+pub (\w+):/gm)]
+      .map((x) => x[1]!.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase()))
+      .sort();
+    const tsFields = [...tsBlock.matchAll(/^\s*(\w+)\??:/gm)].map((x) => x[1]!).sort();
+    expect(rustFields.length, 'Rust 字段解析到 0 个：门禁在自我豁免').toBeGreaterThan(0);
+    expect(tsFields.length, 'TS 字段解析到 0 个：门禁在自我豁免').toBeGreaterThan(0);
+    expect(tsFields, '取消信封字段集与宿主不一致（宿主 deny_unknown_fields）').toEqual(rustFields);
+  });
+
+  it('④ 台账与文档同口径：B 口径在册 4 条、取消信封成反例、被证伪的注释不得回归', () => {
+    const ledger = JSON.parse(read(LEDGER)) as {
+      orphans: { symbol: string; declaredIn: string; docRef: string; disposition: string }[];
+      wiredWitnesses: { symbol: string; declaredIn: string; meaning: string }[];
+    };
+    const symbols = ledger.orphans.map((o) => o.symbol);
+    for (const s of [
+      'WindowOpRecorder::ops',
+      'SIDECAR_ABI_CONTRACT',
+      'PERMISSION_GRANULARITY',
+      'TERMINAL_STATES',
+    ]) {
+      expect(symbols, `台账缺 B 口径在册条目 ${s}`).toContain(s);
+    }
+    for (const s of ['WindowOpRecorder::ops', 'SIDECAR_ABI_CONTRACT']) {
+      const entry = ledger.orphans.find((o) => o.symbol === s)!;
+      expect(entry.docRef, `${s} 没有可核对的文档落点`).not.toBe('');
+    }
+    const witness = ledger.wiredWitnesses.find((w) => w.symbol === 'PluginCancelRequest');
+    expect(witness, '取消信封没被登记成已接线反例（B 口径就缺非空洞性证明）').toBeTruthy();
+    expect(witness!.declaredIn, '取消信封反例的声明文件登记漂移').toBe(
+      'packages/types/src/envelope.ts',
+    );
+
+    const acl = read('packages/types/src/acl.ts');
+    expect(acl, '被证伪的「唯一有真实读者的工具」注释回来了').not.toContain(
+      '内层词表里唯一有真实读者的工具',
+    );
+    expect(acl, '注释没交代 missingPermissions 根本不读那张表').toContain('本函数，不是那张表');
+    expect(read('packages/types/src/plugin.ts'), 'TERMINAL_STATES 又装作线上终态口径').toContain(
+      '不是线上的终态',
+    );
+    expect(
+      read('packages/tauron-host/src/shell-client.ts'),
+      'ABI 契约的「必须」又没了诚实边界',
+    ).toContain('轮 61 的诚实边界');
+    // 接口文档是插件作者唯一会读的那一份：必填语义与「仓内没有装配点」都得在上面。
+    expect(
+      read('docs/api/plugin-development-guide.md'),
+      '接口文档没说清省略 abi 的真实后果与仓内无装配点',
+    ).toContain('省略 `abi` 不是「跳过校验」');
+    expect(
+      read('docs/api/plugin-development-guide.md'),
+      '接口文档没交代这条守卫缺端到端证据',
+    ).toContain('没有任何 `runtimeSpawn` 生产');
+
+    const coreTest = read(CORE_TEST);
+    expect(coreTest, '缺取消载荷的键名行为测试（只靠类型标注挡不住运行期改名）').toContain(
+      '轮 61：两处 plugin_cancel 的载荷键名逐字对上线上信封',
+    );
+    expect(coreTest, '行为测试不再逐字钉住取消载荷的键名').toMatch(
+      /args:\s*\{\s*request:\s*\{\s*callId:\s*'call-1'\s*\}\s*\}/,
+    );
+    const readme = read('packages/tauron-core/README.md');
+    expect(readme, 'README 没说清取消载荷的字段名后果').toContain('deny_unknown_fields');
+    expect(readme, 'README 的导出清单缺「别按 README 推断仓库里跑通过」边界段').toContain(
+      '已知边界（不要按 README 的导出名推断',
+    );
+    expect(read('docs/architecture/app-layer-wire.md'), '§6 权限分层没跟上轮 61 的改口').toContain(
+      '轮 61 把剩下那半句假话也改口了',
+    );
+    expect(
+      read('docs/architecture/v4-industrial-gap-closure-plan.md'),
+      '缺口方案缺轮 61 小节',
+    ).toContain('### 轮 61：孤儿棘轮看不见 TS 的声明面');
+    expect(read('CHANGELOG.md'), 'CHANGELOG 缺轮 61 的孤儿棘轮条目').toContain(
+      '孤儿棘轮第一次看见「TS 声明面」',
+    );
+  });
+});

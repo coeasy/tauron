@@ -63,8 +63,12 @@ export const PERMISSION_GRANULARITY: Readonly<Record<string, string>> = {
 };
 
 /**
- * 获取缺失的权限列表。内层词表里唯一有真实读者的工具——
- * `packages/tauron-core/src/acl.ts` 的 `getMissingPermissions` 走它。
+ * 获取缺失的权限列表。
+ *
+ * 注意它**不读** `PERMISSION_GRANULARITY`：只做 `grant.permissions` 的字符串比对，
+ * 表内标识写错也照样通过。轮 61 的 B 口径（公开 const/type/interface 进棘轮）实测
+ * 那张表在接线面零读者，正包括这里——`@tauron/core` 的 `getMissingPermissions` 调的是
+ * 本函数，不是那张表。
  */
 export function missingPermissions(
   grant: PluginPermissionGrant,

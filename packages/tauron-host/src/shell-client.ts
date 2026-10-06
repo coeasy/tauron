@@ -565,6 +565,11 @@ export interface RuntimeAbiFingerprint {
  * （Rust 侧：`tauron_proc::SIDECAR_ABI_RUST_VERSION` / `SIDECAR_ABI_INTERFACE_HASH`）。
  *
  * **不随框架发版变动**：`/1` 只在 sidecar 协议本身发生**不兼容**改动时递增。
+ *
+ * 轮 61 的诚实边界：那句「必须」是给**宿主装配方**的规范，不是仓库里已跑通的事实——
+ * 接线面内没有任何 `runtimeSpawn` 生产调用点（只有本包自己的单测），所以这条常量目前
+ * 零读者。比对逻辑本身有 Rust 侧测试兜着（`profile.abi` vs `ProcAbiFingerprint::now`）。
+ * 让 SDK 在调用方省略 `abi` 时用它兜底属语义变更（会把守卫从「关」变「开」），需单独批准。
  */
 export const SIDECAR_ABI_CONTRACT: Readonly<RuntimeAbiFingerprint> = Object.freeze({
   rustVersion: 'tauron-proc-abi/1',

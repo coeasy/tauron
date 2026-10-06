@@ -19,6 +19,7 @@ import {
   buildErrorResponse,
   PluginErrorCode,
   DEFAULT_TIMEOUT_MS,
+  type PluginCancelRequest,
   type PluginInvokeRequest,
   type PluginInvokeResponse,
   type ProgressEvent,
@@ -35,6 +36,17 @@ export const TAURON_COMMANDS = {
   cancel: 'plugin_cancel',
   emit: 'plugin_emit',
 } as const;
+
+/**
+ * `plugin_cancel` 的载荷（与 Rust `PluginCancelRequest` 同构）。
+ *
+ * 宿主侧该 struct 带 `deny_unknown_fields`：字段名漂移不是「多个字段」而是整次调用
+ * 反序列化失败。轮 61 前这里只是个裸字面量，`@tauron/types` 那份同名类型的读者数为零，
+ * 类型与真实载荷之间没有绑定，所以类型改了编译也不红、字段漂了测试也不红。
+ * 两处调用点（显式 cancel 与超时 best-effort cancel）都改成按该类型标注，
+ * 字段集由跨语言门禁逐字段核对。
+ */
+type CancelPayload = { request: PluginCancelRequest };
 
 /** 后端配置 */
 export interface TauriBackendOptions {
@@ -146,9 +158,9 @@ export function createTauriBackend(options: TauriBackendOptions = {}): TauronBac
           // 实现），异常会冒出定时器回调、令下面的 resolve 永不执行 ——
           // 那就破坏了本函数的承诺（"调用方不会永久挂起"）。
           try {
-            void api
-              .invoke<void>(TAURON_COMMANDS.cancel, { request: { callId: request.callId } })
-              .catch(() => undefined);
+            const cancel: PluginCancelRequest = { callId: request.callId };
+            const payload: CancelPayload = { request: cancel };
+            void api.invoke<void>(TAURON_COMMANDS.cancel, payload).catch(() => undefined);
           } catch {
             // 同步失败同样忽略。
           }
@@ -175,7 +187,9 @@ export function createTauriBackend(options: TauriBackendOptions = {}): TauronBac
 
     async cancel(callId: string): Promise<void> {
       const api = await load();
-      await api.invoke<void>(TAURON_COMMANDS.cancel, { request: { callId } });
+      const request: PluginCancelRequest = { callId };
+      const payload: CancelPayload = { request };
+      await api.invoke<void>(TAURON_COMMANDS.cancel, payload);
     },
 
     async listen(topic: string, handler: (payload: unknown) => void): Promise<() => void> {

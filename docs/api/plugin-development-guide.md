@@ -999,6 +999,15 @@ await shell.runtimeSpawn('com.example.sys', {
 > 前端用了旧模板"，**不是**"恶意调用方伪造 ABI"——后者需要 sidecar 在 RPC 握手时
 > 自报指纹（**尚未实现**）。它与 `validate_spawn_config` 的签名 / 哈希检查同属
 > "配置一致性"层，不是安全边界。
+>
+> **轮 61 补（读这道守卫时要拿准的两件事）**：① `abi` 在 `RuntimeSpawnProfile` 里是**必填**字段——
+> TS 侧 `abi: RuntimeAbiFingerprint`、Rust 侧 `pub abi: RuntimeAbiFingerprint`，两侧都不是可选、
+> 也没有 `serde(default)`，所以**省略 `abi` 不是「跳过校验」，而是整次 spawn 的参数反序列化失败**。
+> SDK 不会在调用方缺省时用 `SIDECAR_ABI_CONTRACT` 兜底：那等于把「调用方显式声明 ABI」改成
+> 「框架代为声明」，属已发布面的语义变更，需单独批准。② 本仓库内**没有任何 `runtimeSpawn` 生产
+> 调用点**（该常量在接线面零读者，已登记 `contracts/orphan-public-api.json`），所以这条守卫在仓内
+> 只有两级证据——两端常量同值（wire-gate）与 Rust 侧 `profile.abi` vs `ProcAbiFingerprint::now`
+> 比对测试——**没有端到端证据**，「照这段填就能起」要到真实宿主装配方才验得到。
 
 ### 失败码
 

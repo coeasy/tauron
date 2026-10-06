@@ -170,6 +170,40 @@ describe('createTauriBackend.invoke', () => {
     }
   });
 
+  it('轮 61：两处 plugin_cancel 的载荷键名逐字对上线上信封', async () => {
+    // Rust `PluginCancelRequest` 带 deny_unknown_fields：`request` 这个外层键与 `callId`
+    // 任一处改名，宿主就整次反序列化失败。类型标注只挡得住编译，这里把真正发出去的
+    // 键名钉成断言——显式 cancel 与超时 best-effort cancel 两条路径共用同一份形状。
+    vi.useFakeTimers();
+    try {
+      const payloads: Array<{ cmd: string; args: unknown }> = [];
+      const { api } = fakeApi({
+        invoke: ((cmd: string, args?: unknown) => {
+          payloads.push({ cmd, args });
+          return cmd === TAURON_COMMANDS.cancel
+            ? Promise.resolve(undefined)
+            : new Promise<never>(() => undefined);
+        }) as TauriApi['invoke'],
+      });
+      const backend = createTauriBackend({ loader: async () => api });
+
+      await backend.cancel('call-1');
+      expect(payloads.at(-1)).toEqual({
+        cmd: TAURON_COMMANDS.cancel,
+        args: { request: { callId: 'call-1' } },
+      });
+
+      const request = buildRequest({ pluginId: 'p', method: 'm', timeoutMs: 50 });
+      const promise = backend.invoke(request);
+      await vi.advanceTimersByTimeAsync(60);
+      await promise;
+      const timeoutCancel = payloads.filter((p) => p.cmd === TAURON_COMMANDS.cancel).at(-1);
+      expect(timeoutCancel?.args).toEqual({ request: { callId: request.callId } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('取消失败不放大超时结果（best-effort：只吞不抛）', async () => {
     vi.useFakeTimers();
     try {

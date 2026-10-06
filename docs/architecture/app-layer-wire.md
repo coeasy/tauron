@@ -711,6 +711,9 @@ capability/ACL 强制（生产客户端应采用——把 8 条特权命令只�
   仓库内**没有它的执行者**——Rust `check_plugin_permission` 按字符串精确比对、不查表，
   审批人话文案自轮 55 起来自 Rust `tauron_acl::build_approval_rows` 的线上行，也不读这张表；
   曾与它并列的 `isValidPermission` / `hasPermission` / `hasAllPermissions` 零读者，已删。
+  轮 61 把剩下那半句假话也改口了：`missingPermissions` 并**不**读这张表（它只比对
+  `grant.permissions`，表内标识写错照样放行），所以这张表目前的读者数就是零——它已按 B 口径
+  （TS 公开 const/type/interface 的棘轮）登记在 `contracts/orphan-public-api.json`。
   框架层 `check_plugin_permission`（Rust）/ `getMissingPermissions`（TS，经 `missingPermissions`）
   是**嵌入式扩展点**，默认分发主链不调用。
 - **外层（应用层 manifest，静态声明）**：只能取自随框架发版的
