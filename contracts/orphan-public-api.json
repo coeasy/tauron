@@ -76,7 +76,15 @@
     "    ——同属已发布面的收敛议题，等批准。",
     "  - **B 口径把注释也算读者**（判据＝声明文件正文除声明行外命中，不剔注释），所以给镜像写注释时刻意",
     "    不提自己的名字，否则候选数会被注释假降。wire-gate 用「整文件出现次数恰好 1」的计数针盯这件事。",
-    "  - B 上限从 43 收到实测 39，**余量清零**，与轮 63 的 A 口径同一口径。"
+    "  - B 上限从 43 收到实测 39，**余量清零**，与轮 63 的 A 口径同一口径。",
+    "  - **轮 65：同一类账扫到打包端**（`@tauron/app-cli` 的 `pack.ts` 三条预算）。它不是孤儿——同文件有读者、",
+    "    barrel 也再导出——而是**数值与宿主不符**：解包总预算写 512 MiB，宿主",
+    "    `tauron-market::validate_zip_constants` 对 >200 MiB 一律拒收（`competitive-analysis` 对外承诺的正是「解压≤200MB」）；",
+    "    单文件用 `> 100 MiB` 判拒，宿主按取整到 MiB 后 `>= 100` 判拒。于是打包端放行的是注定装不上的包：",
+    "    链没断在「没人读」，断在「读了错的数」。修法＝打包端跟随宿主（总预算 200 MiB、单文件严格小于），",
+    "    wire-gate 除等值针外还钉**判据方向**与两处总大小判定的**处数**；本轮不改声明名，A/B 读数不变。",
+    "    遗留同族：`tauron-host/src/stream.ts` 的 `DEFAULT_STREAM_CREDIT_BYTES` / `MAX_STREAM_CREDIT_BYTES`",
+    "    与 `tauron-host::stream` 同名 const 之间仍无针；`types/envelope.ts#DEFAULT_TIMEOUT_MS` 在 Rust 侧无强制点，登记不动。"
   ],
   "plane": {
     "include": ["crates/*/src", "packages/*/src", "examples", "apps"],

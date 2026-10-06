@@ -8500,3 +8500,120 @@ describe('门禁：轮 64 总线预算的两份镜像必须同源（TS 已发布
     ).toBe(ledger.discoveryObserved.decl);
   });
 });
+
+describe('门禁：轮 65 打包端预算必须停在宿主的拒收线上（@tauron/app-cli ↔ tauron-market）', () => {
+  // 打包端与安装端读的是同一个包：宿主 `validate_zip_constants` 超线即拒收，
+  // 所以打包端的预算**只能等于**它，不能更大——更大只是把失败从打包当场挪到装不上。
+  const MARKET = 'crates/tauron-market/src/lib.rs';
+  const SIG = 'crates/tauron-market/src/package_signature.rs';
+  const PACK = 'packages/tauron-app-cli/src/pack.ts';
+  const PLAN = 'docs/architecture/v4-industrial-gap-closure-plan.md';
+
+  /** 读 Rust 侧的整数预算常量；读不到就抛，针失效不许静默变绿。 */
+  const rustNum = (src: string, name: string): number => {
+    const m = src.match(new RegExp(`pub const ${name}: (?:usize|u64) = (\\d+);`));
+    if (!m) throw new Error(`Rust 侧读不到 pub const ${name} = N;`);
+    return Number(m[1]);
+  };
+  /** 读 TS 侧的预算常量，容忍 `N` 与 `N * 1024 * 1024` 两种写法，统一返回字节数。 */
+  const tsBytes = (src: string, name: string): number => {
+    const m = src.match(new RegExp(`export const ${name} = (\\d+)( \\* 1024 \\* 1024)?;`));
+    if (!m) throw new Error(`TS 侧读不到 export const ${name} = N;`);
+    return m[2] ? Number(m[1]) * 1024 * 1024 : Number(m[1]);
+  };
+  const hits = (src: string, needle: string): number => src.split(needle).length - 1;
+
+  it('① 三条预算同值：条目数、解包总大小、单文件大小', () => {
+    const market = read(MARKET);
+    const pack = read(PACK);
+    expect(tsBytes(pack, 'MAX_FILE_COUNT'), '条目数预算与宿主脱钩').toBe(
+      rustNum(market, 'MAX_ENTRIES'),
+    );
+    expect(tsBytes(pack, 'MAX_TOTAL_SIZE'), '解包总预算与宿主脱钩（打包端曾写 512MB）').toBe(
+      rustNum(market, 'MAX_UNPACKED_MB') * 1024 * 1024,
+    );
+    expect(tsBytes(pack, 'MAX_FILE_SIZE'), '单文件预算与宿主脱钩').toBe(
+      rustNum(market, 'MAX_SINGLE_FILE_MB') * 1024 * 1024,
+    );
+    // 自我豁免检查：值针解析不到数字会抛，但解析成功而两侧都是 0 仍然能绿。
+    expect(rustNum(market, 'MAX_UNPACKED_MB'), '宿主预算被读成 0：值针在自我豁免').toBeGreaterThan(
+      0,
+    );
+  });
+
+  it('② 边界判据同向：同值不等于同判据（差一正是这轮的另一半）', () => {
+    const market = read(MARKET);
+    const pack = read(PACK);
+    expect(market, '宿主的条目数判据改了，打包端对不上').toContain(
+      'if entries.len() > MAX_ENTRIES {',
+    );
+    expect(market, '宿主的总大小判据改了').toContain(
+      'if total_uncompressed > MAX_UNPACKED_MB * 1024 * 1024 {',
+    );
+    expect(market, '宿主按向下取整到 MiB 后 ≥ 拒单文件，判据方向不许反').toContain(
+      'if size_mb >= MAX_SINGLE_FILE_MB {',
+    );
+    // 总大小有两处判定：打包腿（validateFiles）与读包腿（readPluginArchive 的累计）。
+    // presence 针分不清处数，改计数针。
+    expect(
+      hits(pack, 'if (totalSize > MAX_TOTAL_SIZE) throw new Error('),
+      '总大小的两处判定被搬走一处（打包腿与读包腿缺一不可）',
+    ).toBe(2);
+    expect(
+      hits(pack, 'if (file.size >= MAX_FILE_SIZE) {'),
+      '单文件判据又退回严格大于（恰好 100 MiB 的包能打出去、装不上）',
+    ).toBe(1);
+    expect(pack, '被证伪的旧判据还留在别处').not.toContain('if (file.size > MAX_FILE_SIZE)');
+  });
+
+  it('③ 签名腿取的是同一份常量，不另抄数字', () => {
+    const sig = read(SIG);
+    // 「名字还在判定行」不等于「账还从宿主来」：把名字从 import 删掉，Rust 编译会失败，
+    // 但门禁只读文本——presence 针与计数针都照样绿（轮 65 变异 S4 连抓两次：一次是
+    // presence 针被判定行喂饱，一次是计数针低估了判定行的处数）。所以钉 import 清单本身。
+    expect(sig, '签名腿的 import 清单少了某条预算名（判定行还在，账却不再同源）').toMatch(
+      /MAX_ENTRIES,\s*MAX_SINGLE_FILE_MB,\s*MAX_UNPACKED_MB,/,
+    );
+    expect(sig, '签名腿的条目数判据与宿主脱钩').toContain('zip.len() > MAX_ENTRIES');
+    expect(sig, '签名腿的总大小判据与宿主脱钩').toContain(
+      'if total_unpacked > MAX_UNPACKED_MB * 1024 * 1024 {',
+    );
+    expect(sig, '签名腿的单文件判据与宿主脱钩').toContain(
+      'if file.size() >= MAX_SINGLE_FILE_MB * 1024 * 1024 {',
+    );
+  });
+
+  it('④ 镜像注释交代真源与被修掉的漂移', () => {
+    const pack = read(PACK);
+    expect(pack, '打包端预算没交代它的真源').toContain(
+      '`MAX_SINGLE_FILE_MB` / `MAX_ENTRIES` / `MAX_UNPACKED_MB`',
+    );
+    expect(pack, '512MB→200MB 这段被抹平，下一个人会把 200 当成写错').toContain('轮 65 修掉的漂移');
+  });
+
+  it('⑤ 本轮记录与对外口径同向（200MB 是竞品分析里写死的宿主承诺）', () => {
+    expect(read(PLAN), '缺口方案缺轮 65 小节').toContain(
+      '### 轮 65：打包端第一次停在宿主的拒收线上',
+    );
+    expect(read('CHANGELOG.md'), 'CHANGELOG 缺轮 65 条目').toContain('打包端放行过注定装不上的包');
+    expect(
+      read('docs/competitive-analysis/competitive-analysis.md'),
+      '宿主的对外预算口径漂了',
+    ).toContain('解压≤200MB');
+  });
+
+  it('⑥ 行为用例在册：两条边界各有真跑过的用例，不只靠值针', () => {
+    const t = read('packages/tauron-app-cli/src/pack.test.ts');
+    expect(t, '缺行为用例：恰好 100 MiB 的单文件也拒').toContain(
+      "it('恰好 100 MiB 的单文件也拒（与宿主的 ≥ 判据对齐，不留差一）'",
+    );
+    expect(t, '缺行为用例：解包总预算就是宿主的 200 MiB').toContain(
+      "it('解包总预算就是宿主的 200 MiB（卡线通过，超 1 字节当场拒）'",
+    );
+    // 打包端两处预算的调用者都在：值针只证明数字对，不证明这两个函数还在校验。
+    expect(t, '打包腿的用例被搬走，值针就成了无读者的空账').toContain("describe('validateFiles'");
+    expect(read(PACK), '读包腿不再逐条走同一份校验（100 MiB 的包又能读过去）').toContain(
+      'validateFiles([{ path: name, size, hash:',
+    );
+  });
+});

@@ -183,9 +183,18 @@ export const SUPPORTED_SIGN_ALGORITHMS: readonly SignAlgorithm[] = [
   'rsa-2048',
   'rsa-4096',
 ];
+/**
+ * 打包/读包侧的三条预算，镜像宿主 `tauron-market` 的同名硬校验
+ * （`MAX_SINGLE_FILE_MB` / `MAX_ENTRIES` / `MAX_UNPACKED_MB`；强制点在
+ * `validate_zip_constants` 与 `verify_tpkg_reader`）。
+ *
+ * 轮 65 修掉的漂移：总预算这里曾写 512MB，而宿主对 >200MB 的包一律拒收——
+ * 打包端当时放行的是注定装不上的包。单文件也曾用「> 上限」判拒，恰好等于
+ * 100MB 的文件因此能打包出去，宿主仍按 `≥` 拒收；下面用严格小于对齐它。
+ */
 export const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 export const MAX_FILE_COUNT = 2000;
-export const MAX_TOTAL_SIZE = 512 * 1024 * 1024; // 512MB unpacked per package
+export const MAX_TOTAL_SIZE = 200 * 1024 * 1024; // 200MB unpacked per package
 
 // ── 验证函数 ──
 
@@ -254,8 +263,8 @@ export function validateFiles(files: PluginFileInfo[]): PluginFileInfo[] {
     if (file.size < 0) {
       throw new Error(`文件大小不能为负数：${file.size}`);
     }
-    if (file.size > MAX_FILE_SIZE) {
-      throw new Error(`文件大小 ${file.size} 超过上限 ${MAX_FILE_SIZE}`);
+    if (file.size >= MAX_FILE_SIZE) {
+      throw new Error(`文件大小 ${file.size} 达到上限 ${MAX_FILE_SIZE}`);
     }
     if (!/^[a-f0-9]{64}$/.test(file.hash)) {
       throw new Error(`哈希格式错误：${file.hash}`);

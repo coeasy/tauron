@@ -4053,6 +4053,86 @@ adapter 域归属 lib.rs 顶层条目 **292 已封顶**。`docs:check` rc=0：**
 `version:check` 26 处 = 1.1.0；`command-surface:check` **85** 条命令（底座 61 / 运行时 22 / 安装 2），
 孤儿命令 0、未归类 0、无代码层判定 9；`format:check` 与 `lint --max-warnings 0` 全 rc=0。
 
+### 轮 65：打包端第一次停在宿主的拒收线上（轮 64 同族：已发布预算没有强制点）
+
+**分诊口径**：轮 64 把「TS 已发布数字 ↔ Rust 强制点」做成了可复核的一类账。本轮按同一类扫剩下的
+数值面：先列 TS 侧全部 `export const 名字 = 数字`（10 条），再逐条问「这个数字在 Rust 里有没有同名
+强制点、有没有针把两边钉在一起」。结果是两条无针家族——`stream.ts` 的流控信贷（本轮不做，见边界）、
+以及 `@tauron/app-cli/src/pack.ts` 的三条打包预算。后者当场读出**数值分歧**，不是缺针那么简单。
+
+**断链**：宿主 `crates/tauron-market/src/lib.rs` 的 `validate_zip_constants`（安装/验包硬闸，
+`package_signature.rs` 的签名腿用同一份常量）判定是——条目数 `> 2000` 拒、解包总大小
+`> 200 MiB` 拒、单文件按字节向下取整到 MiB 后 `>= 100` 拒。发布在 npm 上的打包端
+`@tauron/app-cli` 写的是 `MAX_TOTAL_SIZE = 512 MiB`、单文件按 `size > 100 MiB` 判拒。两处都朝
+「打包端比宿主宽」的方向错：
+
+1. 200–512 MiB 区间的包能打包、能签名、能发布，装的那一刻必被 `UnpackedSizeExceeded` 拒收；
+   `competitive-analysis.md:312` 对外承诺的正是「解压≤200MB」，所以错的是打包端。
+2. 恰好 100 MiB 的单文件能过打包端（它用 `>`），宿主用 `>=` 判拒——差一让整个平面存在。
+   同一条判据在打包腿（`validateFiles`）与读包腿（`readPluginArchive` 逐条走 `validateFiles`）共用，
+   所以读侧当时也对 100 MiB 的包放行。
+
+**修法**：打包端跟随宿主——`MAX_TOTAL_SIZE` 从 512 MiB 改成 200 MiB（= `MAX_UNPACKED_MB`），
+单文件判据从 `>` 改成 `>=`；三条常量的注释交代真源名与被修掉的漂移（不写自身名字，避免注释自名
+喂假读者）。方向选定理由：反过来把宿主抬到 512 MiB 会削弱防 zip 炸弹的公开预算，且要走已发布
+crate 的破坏性变更批准。**这是打包端的行为收紧**：过去能打出的 200–512 MiB 包现在打包当场就报错，
+但那批包本来就装不上，失去的不是可用能力而是一个更晚、更含糊的失败。
+
+**门禁**（`wire-gate.test.ts`「轮 65 打包端预算必须停在宿主的拒收线上」5 条）：①三条预算两侧**解析
+数值**后等值（Rust 侧 `pub const N: usize|u64`、TS 侧容忍 `N` 与 `N * 1024 * 1024` 两种写法），
+读数解析不到即 throw，另加「宿主预算读成 0 就是值针自我豁免」的自检；②**判据方向**同向——同值不
+等于同判据，本轮的另一半正是 `>` vs `>=`，所以三处 Rust 判定式与两处 TS 判定式逐字钉住，其中总大小
+用计数针 `= 2`（打包腿＋读包腿，presence 针分不清处数，轮 64 教训）；③签名腿必须复用同一份常量而
+非另抄数字；④镜像注释要写真源与「轮 65 修掉的漂移」，并负向钉住被证伪的旧判据不许回来；⑤本轮记录
+与对外口径同向——把 `competitive-analysis.md` 的「解压≤200MB」也钉进门禁，宿主预算若被偷偷抬高，
+这条会红而不是让文档单独漂着。
+
+**行为用例**（`pack.test.ts` +2）：恰好 100 MiB 的单文件被拒、`MAX_FILE_SIZE - 1` 放行；总大小卡在
+`MAX_TOTAL_SIZE` 通过、超 1 字节当场拒（同时断三文件之和确实等于上限，防止用例自己算错线）。
+
+**边界**：①`stream.ts` 的 `DEFAULT_STREAM_CREDIT_BYTES` / `MAX_STREAM_CREDIT_BYTES` 与 Rust
+`tauron-host::stream` 的同名常量同样无针——本轮未做，属同一修法，留给下一轮；
+②`types/envelope.ts` 的 `DEFAULT_TIMEOUT_MS = 30_000` 在 Rust 侧无对应强制点，先登记不动；
+③打包端的读包腿（`readPluginArchive`）累计总大小用 `> MAX_TOTAL_SIZE`，与宿主同向，但它在
+`validateFiles` 之外**另抄了一次**判据（两处判定、同一预算）——计数针锁住处数，不做结构性合并；
+④本轮不改命令面（85 条不变）、不动已发布符号名，只改数值与判据方向；
+⑤**别把另一个 512 MiB 当成同一笔账**：`tauron-distribute::ArchiveLimits::default()` 的
+`max_total_uncompressed_bytes` 也是 512 MiB（条目 10_000、单条目 256 MiB），但它管的是**应用自更新归档**
+的解压，与插件包的 `tauron-market` 预算是两类工件面——`upgrade.rs` 只从 `tauron_market` 取
+`is_downgrade`，从不走 `validate_zip_constants`（实测：全文件对 `validate_zip_constants`/`verify_tpkg`
+零命中）。两类面各自内部一致即可，跨面强行对齐反而是改语义；打包端当年写 512 MiB 很可能就是被这个
+数字带偏的，故在此留名。
+
+**变异证明**（`C:/tmp/r65-mutate.mjs`，25 条，逐条按名变红 **25/25**，跑完复跑门禁 225 passed、
+7 个参与文件 sha256 与开跑前 7/7 一致）：值漂移 7 条（P1–P3 打包端自己漂、M1–M3 宿主漂、Z1 两侧同时
+归零——等值针在 `0 == 0` 上仍然绿，只有「宿主预算读成 0 就是值针自我豁免」那条救得回来）；判据方向 5 条
+（P4/P5 打包端、M4–M6 宿主）；签名腿 4 条（S1–S3 判据、S4 import 清单）；镜像注释 2 条（P7/P8）；
+行为用例与读包腿 4 条（T1–T3、P6）；文档同口径 3 条（D1–D3）。
+
+三条教训值得单独记：**① S4 连抓两次，抓的都是我自己写的假针。**第一版 ③ 用
+`toContain('MAX_SINGLE_FILE_MB,')`——把名字从 import 删掉，判定行里还剩两处带逗号/名字的引用，
+针照绿；换成「每个名字整文件命中 ≥ 2」的计数针，仍然绿，因为该文件里 `MAX_SINGLE_FILE_MB` 实际命中
+5 次（import 1 + 判定与错误结构体 4）。presence 针与「猜一个下限」的计数针证不了**import 清单**这件事，
+最后钉的是 import 的顺序本身（`/MAX_ENTRIES,\s*MAX_SINGLE_FILE_MB,\s*MAX_UNPACKED_MB,/`，
+用 `\s*` 容纳 rustfmt 换行）。**② 文本门禁读不到编译器的事实**：删掉 import 会让 Rust 编译失败，
+所以这条针在 CI 里看似冗余——但门禁的意义正是「在跑 cargo 之前先按名指认是哪一处账不对」，
+S4 也顺手证明了它不会只靠 cargo 兜底。**③ 变异跑中途被外力打断会在被变异文件留下残留**：
+第一次跑批被中止时 `package_signature.rs` 带着 S2 的变异留在工作树里（该文件本轮**没有任何合法改动**，
+`git status` 里它就是唯一线索），按 HEAD 还原后重跑；据此，变异跑期间不得并行编辑仓库内任何文件，
+被打断后必须先比对 `git status` 与被变异文件清单再信工作树。
+
+**读数**（本小节全部出自同一次跑批日志）：`pnpm build` rc=0；`pnpm verify` rc=0——**20** 包
+**107** 文件 **1983** passed（轮 64 末 1975，+8 = wire-gate 6 条 + `pack.test.ts` 2 条），其中
+contract-tests 2 文件 246 passed、wire-gate 单跑 **225** passed（轮 64 末 219）；app-cli
+`pack.test.ts` 单跑 69 passed。Rust 侧本轮**零源码改动**（门禁只读它的文本），故只跑相关面：
+`cargo fmt --all --check` rc=0、`pnpm lint:rust` rc=0、`cargo test -p tauron-market --features signing`
+**78** passed / 0 failed。`gates:check` rc=0：孤儿台账 14 条未接线宣称 + 6 条已接线反例、
+A 口径 **633 ≤ 633 且实测＝读数钉**、B 口径 **39 ≤ 39 且实测＝读数钉**（本轮不改任何声明名，两侧读数
+不变）、adapter 域归属 lib.rs 顶层条目 292 已封顶、Tier-Bundle 3 tiers / 10 bundles / **85** 命令单属。
+`docs:check` rc=0：**7** 个文档 **283** 条行号引用（轮 64 末 281，+2 来自本轮新小节自己写下的
+`competitive-analysis.md:312` 等引用，复算通过，无需 `--fix` 重锚）。`format:check`、`version:check`
+（26 处 = 1.1.0）、`command-surface:check`（85 条，孤儿 0 / 未归类 0）均 rc=0。
+
 ## 10. 对外口径修订（必须与代码同批改）
 
 1. 继续使用 §138.2 的表述：**「较强的 Tauri-first substrate 基础 + 完整的 Universal/Industrial 演进设计」**，

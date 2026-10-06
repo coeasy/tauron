@@ -30,6 +30,7 @@ import {
   SUPPORTED_SIGN_ALGORITHMS,
   MAX_FILE_SIZE,
   MAX_FILE_COUNT,
+  MAX_TOTAL_SIZE,
   type PluginConfig,
   type PluginFileInfo,
   type PluginSignature,
@@ -150,6 +151,29 @@ describe('validateFiles', () => {
     expect(() =>
       validateFiles([{ path: 'file.js', size: MAX_FILE_SIZE + 1, hash: 'a'.repeat(64) }]),
     ).toThrow();
+  });
+
+  // 轮 65：宿主把单文件字节数向下取整到 MiB 后按 `≥ 100` 拒收，恰好 100 MiB 装不上；
+  // 打包端若用 `>` 判拒，就是在产出一个注定被拒的包。
+  it('恰好 100 MiB 的单文件也拒（与宿主的 ≥ 判据对齐，不留差一）', () => {
+    expect(() =>
+      validateFiles([{ path: 'file.js', size: MAX_FILE_SIZE, hash: 'a'.repeat(64) }]),
+    ).toThrow();
+    expect(() =>
+      validateFiles([{ path: 'file.js', size: MAX_FILE_SIZE - 1, hash: 'a'.repeat(64) }]),
+    ).not.toThrow();
+  });
+
+  it('解包总预算就是宿主的 200 MiB（卡线通过，超 1 字节当场拒）', () => {
+    expect(MAX_TOTAL_SIZE).toBe(200 * 1024 * 1024);
+    const atLine = [
+      { path: 'a.js', size: MAX_FILE_SIZE - 1, hash: 'a'.repeat(64) },
+      { path: 'b.js', size: MAX_FILE_SIZE - 1, hash: 'b'.repeat(64) },
+      { path: 'c.js', size: 2, hash: 'c'.repeat(64) },
+    ];
+    expect(atLine.reduce((s, f) => s + f.size, 0)).toBe(MAX_TOTAL_SIZE);
+    expect(() => validateFiles(atLine)).not.toThrow();
+    expect(() => validateFiles(atLine.map((f, i) => (i === 2 ? { ...f, size: 3 } : f)))).toThrow();
   });
 
   it('拒绝格式错误的哈希', () => {
