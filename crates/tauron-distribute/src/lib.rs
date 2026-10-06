@@ -18,10 +18,14 @@ use serde::{Deserialize, Serialize};
 
 pub mod error;
 pub mod installation;
+pub mod recovery;
 pub mod upgrade;
 
 pub use error::{DistributeError, DistributeResult};
 pub use installation::InstallationIdentity;
+pub use recovery::{
+    ReconcileReport, RecoveryDisposition, RecoveryFinding, RecoveryPaths, UpgradeReconciler,
+};
 pub use upgrade::{
     create_default_upgrade_runner, create_upgrade_runner, download_bounded, ensure_not_downgrade,
     verify_package, ArchiveExtractor, ArchiveLimits, Downloader, ExtractedArchive, PhaseControl,

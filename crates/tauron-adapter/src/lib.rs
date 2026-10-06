@@ -33,6 +33,9 @@ mod recovery;
 
 pub use recovery::{BootRecord, LoadSource, RecoveryStore};
 
+/// 升级 journal 的启动对账装配点（V9 N-03：boot 读取 journal 的非测试消费者）。
+mod upgrade_recovery;
+
 /// 菜单点击回传的路由表（`host_menu_*` / `host_tray_*` 共用的唯一事实源）。
 mod menu_routes;
 
@@ -369,6 +372,8 @@ impl AdapterConfig {
             admin_audit_dir: None,
             mock_provider_enabled: false,
             recovery_data_dir,
+            // V9 N-03：由 `ClientConfig` 派生的装配不带升级安装根（缺省不扫描）。
+            upgrade_recovery_paths: None,
             required_plugins: HashSet::new(),
             origin_allowlist: Vec::new(),
             main_window_labels: Vec::new(),
@@ -461,6 +466,11 @@ pub struct AdapterConfig {
     /// 生产宿主应传 Tauri 的 `app.path().app_config_dir()`。为 `None` 时恢复
     /// 引擎只有内存态：进程一退计数器即失，安全模式永不触发。
     pub recovery_data_dir: Option<PathBuf>,
+    /// **升级安装根（V9 N-03）**：boot 时 [`upgrade_recovery`] 据此读回中断的升级
+    /// journal 并对账。为 `None`（缺省）时不扫描——宿主没有升级安装根就如实不谎报
+    /// 「已对账」。装配方注入 [`tauron_distribute::UpgradeRunner`] 同款
+    /// `install_dir` / `backup_dir` 时启用。
+    pub upgrade_recovery_paths: Option<tauron_distribute::RecoveryPaths>,
     /// 安全模式/修复模式下仍必须加载的插件 id（引擎的必需集合）。
     ///
     /// 这里是必需性的**权威来源**，每次启动都会用它整体替换引擎里的集合。
@@ -3429,6 +3439,12 @@ pub struct SubstrateState {
     /// 如实走模拟路径）。装配方在 Arc 化**之前**替换为
     /// [`DistributeUpgradeInstaller`]（注入清单/目录与五组件），下载/安装腿即真。
     pub upgrade_installer: Arc<dyn UpgradeInstaller>,
+    /// **升级启动对账报告（V9 N-03）**：`cfg.upgrade_recovery_paths` 为 `Some` 时，
+    /// boot 序列经 [`upgrade_recovery::scan_upgrade_recovery`] 读回中断的升级
+    /// journal 后写入；`None`（缺省宿主）恒为 `None`。由 `host_updater_status` 读数
+    /// 消费（见 [`cmd_updater_status`]）——这是 `UpgradeReconciler::scan` 的**非测试**
+    /// 生产消费锚，收口「journal 只被测试读过」的 N-03 断链。
+    pub upgrade_recovery: Arc<Mutex<Option<tauron_distribute::ReconcileReport>>>,
     /// **主题注册表**（任务二：接通孤儿 crate `tauron-theme`）。
     ///
     /// 与既有 settings 的 `theme` 键**不是同一事实源**：`settings` 存的是"用户选了
@@ -4094,6 +4110,10 @@ impl SubstrateState {
             }))
         });
 
+        // V9 N-03：boot 时读回中断的升级 journal 并对账（只补发事实、不改状态）。
+        // 缺省宿主没有升级安装根（`upgrade_recovery_paths == None`）→ 不扫描、报告为空，
+        // 而不是假装对过账。这是 journal 读侧此前唯一缺失的**非测试**消费者。见下方
+        // `upgrade_recovery` 字段的装配。
         Self {
             deployment_mode: cfg.deployment_mode,
             production_readiness: cfg.production_readiness(),
@@ -4148,6 +4168,10 @@ impl SubstrateState {
             // 轮 40：升级装配腿缺省不接入（与 updater_sink 同一装配姿态：宿主
             // 注入才为真；`with_adapter_config` 不替装配方虚构组件）。
             upgrade_installer: Arc::new(NoUpgradeInstaller),
+            // V9 N-03：boot 对账升级 journal（见上方 `scan_upgrade_recovery`）。
+            upgrade_recovery: Arc::new(Mutex::new(
+                cfg.upgrade_recovery_paths.as_ref().map(upgrade_recovery::scan_upgrade_recovery),
+            )),
             themes: Arc::new(Mutex::new(tauron_theme::ThemeRegistry::default())),
         }
     }
@@ -9543,7 +9567,29 @@ pub fn cmd_updater_check_as(
 pub fn cmd_updater_status(state: &SubstrateState) -> HostResult<UpdaterStatus> {
     guard("updater_status", || {
         let ext = state.shell_ext.lock();
-        Ok(state.updater_sink.status(ext.update_state.clone(), ext.update_state_simulated))
+        let mut status =
+            state.updater_sink.status(ext.update_state.clone(), ext.update_state_simulated);
+        // V9 N-03：并入 boot 对账得到的升级恢复读数（只读、不改任何状态）。缺省宿主没有
+        // `upgrade_recovery_paths` → 报告为 `None` → 本分支不触碰 `reason`，既有读数逐字不变。
+        // 挂起项以纯文本并入既有 `reason` 字段，而不是新增线字段：命令面与 `UpdaterStatus`
+        // 线形都是冻结面（轮 33 先例「加读数不破形状」，这里连字段都不加）。
+        let pending_note = state.upgrade_recovery.lock().as_ref().and_then(|report| {
+            if report.has_pending() {
+                Some(format!(
+                    "上次升级有未收尾操作：未提交交换 {}、staging 残骸 {}、撕裂日志已隔离 {}（可由宿主按 UpgradeReconciler 的 resume/restore 显式处置）",
+                    report.needs_decision, report.stale_staging, report.quarantined,
+                ))
+            } else {
+                None
+            }
+        });
+        if let Some(note) = pending_note {
+            status.reason = Some(match status.reason.take() {
+                Some(existing) => format!("{existing}；{note}"),
+                None => note,
+            });
+        }
+        Ok(status)
     })?
 }
 
@@ -19653,6 +19699,67 @@ mod tests {
             let after_install = cmd_updater_status(&state).unwrap();
             assert_eq!(after_install.state.as_deref(), Some("installed:2.0.0"));
             assert!(after_install.state_simulated);
+        }
+
+        #[test]
+        fn boot_reads_interrupted_upgrade_journal_and_surfaces_recovery() {
+            // V9 N-03：boot 必须读回升级 journal（`UpgradeReconciler::scan` 的非测试
+            // 生产消费者 = `SubstrateState::with_adapter_config`），并把挂起项并入既有
+            // `host_updater_status` 的 `reason`。缺省宿主（无 `upgrade_recovery_paths`）
+            // 不扫描、不追加——既有读数逐字不变。
+            let root = tempfile::tempdir().unwrap();
+            let install_dir = root.path().join("install");
+            let backup_dir = root.path().join("backup");
+            // 未提交的交换：`Swapped` + `previous` 在 → `NeedsDecision`。
+            std::fs::create_dir_all(install_dir.join("current")).unwrap();
+            std::fs::write(install_dir.join("current").join("app.bin"), b"new").unwrap();
+            std::fs::create_dir_all(install_dir.join("previous")).unwrap();
+            let op1 = backup_dir.join("op1");
+            std::fs::create_dir_all(&op1).unwrap();
+            let journal = tauron_distribute::UpgradeJournal {
+                operation_id: "op1".into(),
+                old_version: Some("1.0.0".into()),
+                new_version: "2.0.0".into(),
+                package_sha256: None,
+                backup_path: op1.display().to_string(),
+                staging_path: install_dir.join("staging").join("op1").display().to_string(),
+                states: vec![tauron_distribute::UpgradeState::Swapped],
+                current_state: tauron_distribute::UpgradeState::Swapped,
+                commit_marker: false,
+                error: None,
+            };
+            std::fs::write(op1.join("journal.json"), serde_json::to_vec(&journal).unwrap())
+                .unwrap();
+
+            let substrate = SubstrateState::with_adapter_config(&AdapterConfig {
+                upgrade_recovery_paths: Some(tauron_distribute::RecoveryPaths {
+                    install_dir: install_dir.clone(),
+                    backup_dir: backup_dir.clone(),
+                }),
+                ..AdapterConfig::default()
+            });
+            let report = substrate
+                .upgrade_recovery
+                .lock()
+                .clone()
+                .expect("装配了 recovery 路径，boot 必须已写入对账报告");
+            assert_eq!(report.needs_decision, 1, "boot 必须读到未提交的交换");
+            assert!(report.has_pending());
+
+            let reason = cmd_updater_status(&substrate).unwrap().reason.unwrap_or_default();
+            assert!(
+                reason.contains("升级有未收尾操作") && reason.contains("未提交交换 1"),
+                "恢复读数应并入既有 reason，实际：{reason}"
+            );
+
+            // 缺省宿主（无 upgrade_recovery_paths）：不扫描、reason 不含恢复字样。
+            let bare = SubstrateState::with_adapter_config(&AdapterConfig::default());
+            assert!(bare.upgrade_recovery.lock().is_none());
+            assert!(!cmd_updater_status(&bare)
+                .unwrap()
+                .reason
+                .unwrap_or_default()
+                .contains("升级有未收尾操作"));
         }
 
         #[test]

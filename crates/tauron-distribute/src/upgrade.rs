@@ -746,7 +746,7 @@ impl UpgradeJournal {
     }
 
     /// 原子落盘：写临时文件 → flush → `sync_all` → rename。
-    fn save(&self, path: &Path) -> DistributeResult<()> {
+    pub(crate) fn save(&self, path: &Path) -> DistributeResult<()> {
         let json = serde_json::to_vec_pretty(self)
             .map_err(|e| DistributeError::Journal(format!("序列化日志失败：{e}")))?;
         let tmp = path.with_extension("json.tmp");
@@ -768,7 +768,7 @@ impl UpgradeJournal {
 // 文件系统工具（真实效果 + 逐文件哈希核对）
 // ──────────────────────────────────────────────────────────────────────────
 
-fn io_fail(context: String) -> DistributeError {
+pub(crate) fn io_fail(context: String) -> DistributeError {
     DistributeError::FileOperationFailed(context)
 }
 
@@ -822,7 +822,7 @@ fn relative_key(root: &Path, path: &Path) -> DistributeResult<String> {
 }
 
 /// 递归枚举树内普通文件的相对路径 → SHA-256 集合。
-fn tree_hashes(root: &Path) -> DistributeResult<BTreeMap<String, String>> {
+pub(crate) fn tree_hashes(root: &Path) -> DistributeResult<BTreeMap<String, String>> {
     let mut out: BTreeMap<String, String> = BTreeMap::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -864,7 +864,7 @@ fn copy_file_fsynced(src: &Path, dst: &Path) -> DistributeResult<()> {
 }
 
 /// 递归复制整棵树，逐文件 fsync。
-fn copy_tree_fsynced(src: &Path, dst: &Path) -> DistributeResult<()> {
+pub(crate) fn copy_tree_fsynced(src: &Path, dst: &Path) -> DistributeResult<()> {
     fs::create_dir_all(dst)
         .map_err(|e| io_fail(format!("创建目录 `{}` 失败：{e}", dst.display())))?;
     let entries = fs::read_dir(src)
@@ -884,7 +884,7 @@ fn copy_tree_fsynced(src: &Path, dst: &Path) -> DistributeResult<()> {
 }
 
 /// 存在才删；NotFound 视为成功（幂等清理）。
-fn remove_tree_if_exists(path: &Path) -> io::Result<()> {
+pub(crate) fn remove_tree_if_exists(path: &Path) -> io::Result<()> {
     match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -1508,62 +1508,7 @@ impl UpgradeRunner {
         backup_tree: &Path,
         operation_id: &str,
     ) -> DistributeResult<()> {
-        let want = tree_hashes(backup_tree)?;
-        if want.is_empty() {
-            return Err(DistributeError::RollbackFailed("备份树为空，拒绝恢复".into()));
-        }
-        let staging_root = self.options.install_dir.join(STAGING_DIR);
-        fs::create_dir_all(&staging_root)
-            .map_err(|e| io_fail(format!("创建 staging 根失败：{e}")))?;
-        let restore_dir = staging_root.join(format!("rollback-{operation_id}"));
-        remove_tree_if_exists(&restore_dir)
-            .map_err(|e| io_fail(format!("清理残留恢复目录失败：{e}")))?;
-        copy_tree_fsynced(backup_tree, &restore_dir)?;
-        let staged = tree_hashes(&restore_dir)?;
-        if staged != want {
-            let _ = remove_tree_if_exists(&restore_dir);
-            return Err(DistributeError::BackupVerifyFailed(
-                "恢复暂存树与备份树哈希不一致，拒绝换入".into(),
-            ));
-        }
-        let current_dir = self.current_dir();
-        let quarantine =
-            self.options.install_dir.join(format!("{FAILED_DIR_PREFIX}rollback-{operation_id}"));
-        remove_tree_if_exists(&quarantine)
-            .map_err(|e| io_fail(format!("清理旧隔离目录失败：{e}")))?;
-        if current_dir.exists() {
-            fs::rename(&current_dir, &quarantine).map_err(|e| {
-                DistributeError::RollbackFailed(format!(
-                    "移出现装 `{}` 失败：{e}",
-                    current_dir.display()
-                ))
-            })?;
-        }
-        if let Err(e) = fs::rename(&restore_dir, &current_dir) {
-            let undo =
-                if current_dir.exists() { Ok(()) } else { fs::rename(&quarantine, &current_dir) };
-            return Err(match undo {
-                Ok(()) => {
-                    DistributeError::RollbackFailed(format!("换入恢复树失败（现场已保住）：{e}"))
-                }
-                Err(undo_err) => DistributeError::RollbackFailed(format!(
-                    "换入恢复树失败：{e}；且还原现场失败：{undo_err}，需人工处理"
-                )),
-            });
-        }
-        let restored = tree_hashes(&current_dir)?;
-        if restored != want {
-            return Err(DistributeError::BackupVerifyFailed(
-                "换入后的 current 哈希与备份树不一致（备份本身可信，未回退）".into(),
-            ));
-        }
-        remove_tree_if_exists(&quarantine).map_err(|e| {
-            DistributeError::RollbackFailed(format!(
-                "恢复已完成且哈希核对通过，但清理隔离损坏树 `{}` 失败：{e}",
-                quarantine.display()
-            ))
-        })?;
-        Ok(())
+        restore_backup_tree(&self.options.install_dir, backup_tree, operation_id)
     }
 
     /// 找 backup_dir 下最近（按 journal 文件修改时间）含备份树的操作目录。
@@ -1604,6 +1549,70 @@ impl UpgradeRunner {
 // ──────────────────────────────────────────────────────────────────────────
 // 工厂函数
 // ──────────────────────────────────────────────────────────────────────────
+
+/// 从备份树**真实**恢复 `current`：复制 → 核对 → 原子换入 → 再核对 → 清理损坏树。
+///
+/// 这是 [`UpgradeRunner::restore_from_backup`] 与恢复对账腿
+/// （[`crate::UpgradeReconciler::restore`]）**唯一一份**实现：两条路都必须走
+/// 逐文件哈希核对，任何一份分叉都会让「重启恢复」与「运行期回滚」的字节一致性
+/// 判定漂移。`install_dir` 内建模为 staging/current/previous + failed- 隔离目录。
+pub(crate) fn restore_backup_tree(
+    install_dir: &Path,
+    backup_tree: &Path,
+    operation_id: &str,
+) -> DistributeResult<()> {
+    let want = tree_hashes(backup_tree)?;
+    if want.is_empty() {
+        return Err(DistributeError::RollbackFailed("备份树为空，拒绝恢复".into()));
+    }
+    let staging_root = install_dir.join(STAGING_DIR);
+    fs::create_dir_all(&staging_root).map_err(|e| io_fail(format!("创建 staging 根失败：{e}")))?;
+    let restore_dir = staging_root.join(format!("rollback-{operation_id}"));
+    remove_tree_if_exists(&restore_dir)
+        .map_err(|e| io_fail(format!("清理残留恢复目录失败：{e}")))?;
+    copy_tree_fsynced(backup_tree, &restore_dir)?;
+    let staged = tree_hashes(&restore_dir)?;
+    if staged != want {
+        let _ = remove_tree_if_exists(&restore_dir);
+        return Err(DistributeError::BackupVerifyFailed(
+            "恢复暂存树与备份树哈希不一致，拒绝换入".into(),
+        ));
+    }
+    let current_dir = install_dir.join(CURRENT_DIR);
+    let quarantine = install_dir.join(format!("{FAILED_DIR_PREFIX}rollback-{operation_id}"));
+    remove_tree_if_exists(&quarantine).map_err(|e| io_fail(format!("清理旧隔离目录失败：{e}")))?;
+    if current_dir.exists() {
+        fs::rename(&current_dir, &quarantine).map_err(|e| {
+            DistributeError::RollbackFailed(format!(
+                "移出现装 `{}` 失败：{e}",
+                current_dir.display()
+            ))
+        })?;
+    }
+    if let Err(e) = fs::rename(&restore_dir, &current_dir) {
+        let undo =
+            if current_dir.exists() { Ok(()) } else { fs::rename(&quarantine, &current_dir) };
+        return Err(match undo {
+            Ok(()) => DistributeError::RollbackFailed(format!("换入恢复树失败（现场已保住）：{e}")),
+            Err(undo_err) => DistributeError::RollbackFailed(format!(
+                "换入恢复树失败：{e}；且还原现场失败：{undo_err}，需人工处理"
+            )),
+        });
+    }
+    let restored = tree_hashes(&current_dir)?;
+    if restored != want {
+        return Err(DistributeError::BackupVerifyFailed(
+            "换入后的 current 哈希与备份树不一致（备份本身可信，未回退）".into(),
+        ));
+    }
+    remove_tree_if_exists(&quarantine).map_err(|e| {
+        DistributeError::RollbackFailed(format!(
+            "恢复已完成且哈希核对通过，但清理隔离损坏树 `{}` 失败：{e}",
+            quarantine.display()
+        ))
+    })?;
+    Ok(())
+}
 
 /// 降级门禁（轮 54）：**默认拒绝**把 `target` 装到低于已安装版本 `installed`。
 ///

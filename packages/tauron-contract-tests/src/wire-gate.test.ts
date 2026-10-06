@@ -7955,7 +7955,7 @@ describe('门禁：轮 61 孤儿棘轮的 TS 声明面口径（公开 const/type
       'pub fn ([a-z0-9_]+)',
     );
     expect(typeof ledger.discoveryBaselineDecl, '台账缺 B 口径上限').toBe('number');
-    expect(ledger.discoveryBaseline, 'A 口径上限被顺手改动').toBe(633);
+    expect(ledger.discoveryBaseline, 'A 口径上限被顺手改动').toBe(632);
   });
 
   it('② 行视图的宽松失真已修：import 行不再充当消费者，未闭合判据才开启吞块', () => {
@@ -8149,7 +8149,7 @@ describe('门禁：轮 62 跨文件消费者视图（别的文件的声明行算
     );
     expect(script, '读数钉若只盯涨不盯跌，把孤儿接回去也能绿').toContain('observed[key] !== count');
     expect(script, '读数钉漏了 B 口径').toContain("'decl', declCandidates.length");
-    expect(ledger.discoveryObserved?.a, '台账缺 A 口径读数').toBe(633);
+    expect(ledger.discoveryObserved?.a, '台账缺 A 口径读数').toBe(632);
     expect(ledger.discoveryObserved?.decl, '台账缺 B 口径读数').toBe(39);
     expect(
       ledger.discoveryObserved!.a,
@@ -8363,8 +8363,11 @@ describe('门禁：轮 63 窗口几何持久化链路（委派出去的那条腿
       discoveryObserved?: { a?: number };
       note: string[];
     };
-    expect(ledger.discoveryObserved?.a, '台账读数没跟上轮 63 的收口').toBe(633);
-    expect(ledger.discoveryBaseline, '上限没收口到实测（余量假象回来了）').toBe(633);
+    expect(
+      ledger.discoveryObserved?.a,
+      '台账读数没跟上最新收口（改过孤儿计数就要同步到这里）',
+    ).toBe(632);
+    expect(ledger.discoveryBaseline, '上限没收口到实测（余量假象回来了）').toBe(632);
     const note = ledger.note.join('\n');
     expect(note, '台账没记下 12 条候选的逐条定性').toContain('12 条 A 候选已逐条定性');
     expect(note, '真断链那一条被糊进其余 11 条里').toContain('①真断链 1 条');

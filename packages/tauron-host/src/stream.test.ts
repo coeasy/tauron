@@ -625,6 +625,9 @@ describe('额度背压（A79）：这份内核与宿主算的是同一笔账', (
     const resumed = await writeFrame(backend, streamId, {});
     expect(await probeCredit(backend, streamId)).toBe(100 - overhead);
     expect(resumed.seq, '补额后的第一帧仍由宿主铸号').toBe(3);
-    expect(seen.map((f) => f.seq)).toEqual([1, 2, 3], '三帧连续，中间没有静默丢帧');
+    expect(
+      seen.map((f) => f.seq),
+      '三帧连续，中间没有静默丢帧',
+    ).toEqual([1, 2, 3]);
   });
 });
