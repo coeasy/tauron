@@ -47,11 +47,6 @@ function loadSources() {
   return src;
 }
 
-function countOccurrences(text, re) {
-  const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`;
-  return [...text.matchAll(new RegExp(re.source, flags))].length;
-}
-
 function checkC1(src, failures) {
   const defs = src.distributeDefs;
   if (defs.length !== 1 || defs[0] !== UPGRADE) {

@@ -223,12 +223,24 @@ impl HostState {
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
 
-        // 1. 内部总线（Rust 侧订阅者，背压隔离）
-        self.events.write().emit(event.clone()).map_err(|err| PluginErrorBody {
-            code: format!("{}", PluginErrorCode::Internal),
-            message: format!("event bus rejected event: {err:?}"),
-            retryable: false,
-        })?;
+        // 1. 内部总线（Rust 侧订阅者，背压隔离）。
+        //
+        //    **投递必须在释放写锁之后**：`parking_lot::RwLock` 不可重入，若在持 `events`
+        //    写锁时调用 `deliver`，订阅者里任何回到 `handle_emit` 的路径（第三方插件在事件
+        //    处理器里同步再发一个事件）都会自我死锁、冻结整机。这里把「入队 + 取订阅者快照」
+        //    放在持锁段内，把「逐个 deliver」挪到锁外——快照是自有 `Vec<Arc>`，不借总线。
+        let subs = {
+            let mut bus = self.events.write();
+            bus.enqueue(event.clone()).map_err(|err| PluginErrorBody {
+                code: format!("{}", PluginErrorCode::Internal),
+                message: format!("event bus rejected event: {err:?}"),
+                retryable: false,
+            })?;
+            bus.subscribers_for(&event.namespace())
+        }; // 写锁在此释放
+        for sub in &subs {
+            sub.deliver(&event);
+        }
 
         // 2. 出站投递（前端监听 `plugin:<id>:<event>`）
         //
@@ -556,5 +568,77 @@ mod tests {
             .handle_emit("plugin:com.example.frame:changed", serde_json::json!({ "n": 1 }))
             .expect("emit should succeed");
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// N-06：订阅者在 `deliver()` 里重入 `handle_emit` 不得死锁。
+    ///
+    /// `parking_lot::RwLock` 不可重入——修复前 `handle_emit` 在持有 `events` 写锁时投递，
+    /// 第三方插件只要在事件处理器里同步再发一个事件就整机冻结。本用例把外层 emit 放到独立线程、
+    /// 用 `recv_timeout` 有界等待：一旦回退成「持锁投递」，重入会永久阻塞 ⇒ 5s 后**快红**
+    /// 而不是挂死整个测试二进制。
+    #[test]
+    fn reentrant_emit_from_subscriber_does_not_deadlock() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::sync::Mutex;
+        use std::sync::Weak;
+        use std::time::Duration;
+
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+
+        // 订阅 "first"：记录后重入 handle_emit 再发 "second"（深度闸只放行一次）。
+        struct Reentrant {
+            state: Weak<HostState>,
+            log: Arc<Mutex<Vec<String>>>,
+            depth: AtomicUsize,
+        }
+        impl EventSubscriber for Reentrant {
+            fn deliver(&self, event: &Event) {
+                self.log.lock().unwrap().push(event.event_name.clone());
+                if self.depth.fetch_add(1, Ordering::SeqCst) == 0 {
+                    if let Some(state) = self.state.upgrade() {
+                        let _ = state.handle_emit("plugin:p:second", serde_json::json!({}));
+                    }
+                }
+            }
+        }
+
+        // 订阅 "second"：仅记录，证明重入链真的走到底。
+        struct Recorder {
+            log: Arc<Mutex<Vec<String>>>,
+        }
+        impl EventSubscriber for Recorder {
+            fn deliver(&self, event: &Event) {
+                self.log.lock().unwrap().push(event.event_name.clone());
+            }
+        }
+
+        let state = Arc::new(HostState::new());
+        state.subscribe(
+            "plugin:p:first",
+            Box::new(Reentrant {
+                state: Arc::downgrade(&state),
+                log: log.clone(),
+                depth: AtomicUsize::new(0),
+            }),
+        );
+        state.subscribe("plugin:p:second", Box::new(Recorder { log: log.clone() }));
+
+        let (tx, rx) = mpsc::channel();
+        let outer = Arc::clone(&state);
+        std::thread::spawn(move || {
+            let r = outer.handle_emit("plugin:p:first", serde_json::json!({ "n": 1 }));
+            let _ = tx.send(r.is_ok());
+        });
+
+        let ok = rx.recv_timeout(Duration::from_secs(5)).expect(
+            "重入 handle_emit 未在 5s 内返回：投递仍持有 events 写锁（不可重入 RwLock 死锁回归）",
+        );
+        assert!(ok, "重入链应成功返回 Ok");
+        assert_eq!(
+            &*log.lock().unwrap(),
+            &["first".to_string(), "second".to_string()],
+            "外层与重入事件都必须按序投递"
+        );
     }
 }

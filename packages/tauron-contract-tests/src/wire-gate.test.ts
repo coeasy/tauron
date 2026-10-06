@@ -3712,6 +3712,39 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(read('crates/tauron-host/Cargo.toml')).not.toMatch(/tauron-shell/);
   });
 
+  it('轮 68：legacy plugin_emit 路径把订阅者投递挪到锁外，重入不再死锁（N-06）', () => {
+    const bus = read('crates/tauron-shell/src/eventbus.rs');
+    const dispatch = read('crates/tauron-shell/src/dispatch.rs');
+
+    // ① EventBus：订阅者改用 Arc 存 + 两个 pub(crate) 拆分件（不是 pub fn，不碰被冻结的 9 方法集）。
+    expect(bus).toMatch(/Vec<Arc<dyn EventSubscriber>>/);
+    expect(bus).toMatch(/pub\(crate\) fn enqueue\(&mut self, event: Event\)/);
+    expect(bus).toMatch(/pub\(crate\) fn subscribers_for\(&self, namespace: &str\)/);
+    // 反例：拆分件绝不能做成 pub fn——那等于给冻结的 legacy 面长新公开方法。
+    expect(bus, '拆分件被做成 pub fn，冻结面被撑大').not.toMatch(
+      /^\s{4}pub fn (enqueue|subscribers_for)\b/m,
+    );
+
+    // ② handle_emit：旧的「持 events 写锁跨投递」形态必须消失。
+    expect(dispatch, '仍在写锁内 emit（重入即死锁）').not.toMatch(/events\.write\(\)\.emit\(/);
+    // 入队 + 取快照在持锁块内，逐个 deliver 在块外。
+    expect(dispatch).toMatch(/bus\.enqueue\(event\.clone\(\)\)/);
+    expect(dispatch).toMatch(/bus\.subscribers_for\(&event\.namespace\(\)\)/);
+    expect(dispatch).toMatch(/for sub in &subs \{\s*sub\.deliver\(&event\);/s);
+
+    // ③ 陈旧的「不在此修复」说法必须被改掉，且本轮收口在册。
+    expect(bus, 'eventbus.rs 仍宣称死锁不修复').not.toMatch(/不在此修复/);
+    expect(bus).toMatch(/轮 68 起生产 `plugin_emit` 路径不再死锁/);
+
+    // ④ 行为用例在册（证明这不是纯文本门禁）。
+    expect(dispatch).toMatch(/reentrant_emit_from_subscriber_does_not_deadlock/);
+
+    // ⑤ 插件开发指南的对外警示与代码同批落地。
+    const guide = read('docs/api/plugin-development-guide.md');
+    expect(guide).toMatch(/轮 68 收口/);
+    expect(guide).toMatch(/写锁[^。]*之外/);
+  });
+
   // ────────────────────────────────────────────────────────────────────────
   // P0-2：进程插件运行时（激活孤儿 crate `tauron-proc`）
   // ────────────────────────────────────────────────────────────────────────

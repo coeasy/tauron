@@ -6,14 +6,17 @@
 //! **不得再添加功能**（wire-gate 会比对方法集指纹）。
 //! 决策依据与迁移路线见 `docs/architecture/canonical-owners.md`。
 //!
-//! **已知边界（不在此修复，属冻结范围）**：`emit()` 没有重入闸——订阅者的
-//! `deliver()` 里若反过来调 `emit()`，会因为外层持有 `&mut self` 而在 `std::sync::
-//! RwLock`（`dispatch.rs` 的 `events`）上**死锁**而不是无限递归（Rust 的 `RwLock`
-//! 不可重入）。修复它需要给 `emit` 加重入标志，那会改变公开方法的语义，已超出
-//! "冻结"允许的范围。canonical 侧的 `tauron_host::eventbus` 不受此限制。
+//! **已知边界（轮 68 已闭合生产路径）**：本总线历史上有一个死锁面——订阅者的
+//! `deliver()` 里若重入 `emit()`，因 `parking_lot::RwLock`（`dispatch.rs` 的 `events`）不可重入
+//! 而自我死锁。**轮 68 起生产 `plugin_emit` 路径不再死锁**：[`crate::dispatch::HostState::handle_emit`]
+//! 把「入队 + 取订阅者快照」放在持锁段内，投递（`deliver`）挪到**释放写锁之后**，订阅者可安全重入。
+//! 为此新增的 `enqueue` / `subscribers_for` 是 `pub(crate)`，不进入被冻结的公开方法集（9 个 `pub fn`）。
+//! 仍存的调用纪律：直接对 `EventBus` 持外部写锁再调 `emit()` 的用方需自行遵守锁外投递——
+//! canonical 侧的 `tauron_host::eventbus` 本就不受此限制。
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 事件（设计文档 §2.3）
 ///
@@ -66,8 +69,9 @@ pub const MAX_SUBSCRIBERS_PER_TOPIC: usize = 256;
 pub struct EventBus {
     /// 每插件独立队列（背压隔离）
     queues: HashMap<String, Vec<Event>>,
-    /// 订阅者
-    subscribers: HashMap<String, Vec<Box<dyn EventSubscriber>>>,
+    /// 订阅者。用 `Arc` 而非 `Box`：投递前要在**不持有外部写锁**的情况下拿到一份可移动的
+    /// 目标快照（见 `dispatch.rs` 的 `handle_emit`），`Box` 拿不出共享所有权。
+    subscribers: HashMap<String, Vec<Arc<dyn EventSubscriber>>>,
     /// 最大队列长度
     max_queue_size: usize,
     /// 丢弃计数
@@ -95,26 +99,40 @@ impl EventBus {
         }
     }
 
-    /// 发布事件
+    /// 发布事件（入队 + 投递给订阅者）。
+    ///
+    /// 直接调用方**不得在持有本总线外部写锁时调用**：`deliver` 里若重入会再次取那把锁，
+    /// 而 `parking_lot::RwLock` 不可重入 ⇒ 死锁。生产路径（`plugin_emit`）走
+    /// [`HostState::handle_emit`]，它把投递放到锁外，故无此问题。
     pub fn emit(&mut self, event: Event) -> Result<(), EventBusError> {
-        let key = event.namespace();
+        self.enqueue(event.clone())?;
+        // 先取目标快照再投递：`subs` 是自有 `Vec<Arc>`，投递时不再借 `self`，
+        // 订阅者可安全持有/回调其它总线句柄。
+        let subs = self.subscribers_for(&event.namespace());
+        for sub in &subs {
+            sub.deliver(&event);
+        }
+        Ok(())
+    }
 
-        // 背压检查
+    /// 仅做入队 + 背压（丢弃最旧并计数），不投递。供 `handle_emit` 在持锁段内调用。
+    pub(crate) fn enqueue(&mut self, event: Event) -> Result<(), EventBusError> {
         let queue = self.queues.entry(event.source_plugin.clone()).or_default();
         if queue.len() >= self.max_queue_size {
             queue.remove(0);
             self.dropped_count += 1;
         }
-        queue.push(event.clone());
-
-        // 分发到订阅者
-        if let Some(subs) = self.subscribers.get(&key) {
-            for sub in subs {
-                sub.deliver(&event);
-            }
-        }
-
+        queue.push(event);
         Ok(())
+    }
+
+    /// 取某命名空间当前订阅者的**可移动快照**（克隆 `Arc`，非借用）。
+    /// 让调用方能在释放总线写锁之后仍然持有投递目标。
+    pub(crate) fn subscribers_for(&self, namespace: &str) -> Vec<Arc<dyn EventSubscriber>> {
+        match self.subscribers.get(namespace) {
+            Some(subs) => subs.clone(),
+            None => Vec::new(),
+        }
     }
 
     /// 订阅事件
@@ -131,7 +149,7 @@ impl EventBus {
             self.dropped_count += 1;
             return;
         }
-        subs.push(subscriber);
+        subs.push(Arc::from(subscriber));
     }
 
     /// 取消订阅

@@ -252,6 +252,11 @@ tauron plugin new com.example.sys  --type process  # 骨架含 main.js
 | `event:allow-listen` | low | 监听事件 |
 | `event:allow-unlisten` | low | 取消监听 |
 
+> **在事件处理器里再发事件（重入）**：可以。生产 `plugin_emit` 路径已把订阅者投递挪到总线写锁**之外**
+> （轮 68 收口，见 `crates/tauron-shell/src/eventbus.rs` 头注），处理器里同步 `emit` 另一事件不会再
+> 触发不可重入 `RwLock` 的死锁。请仍避免无深度闸的自激环（A 发 B、B 又发 A），那属于业务级无限递归，
+> 框架只保证不锁死、不保证帮你收敛。
+
 ### 系统集成
 
 | 标识符 | risk | 说明 |

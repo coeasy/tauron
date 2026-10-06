@@ -4244,6 +4244,24 @@ Rust 那侧，TS 那侧直到本轮 baseline 自检（`passed !== total` 即 abo
 
 **一处必须写下的诚实修正**：本轮初版把孤儿 A 口径从 633 记到 630，并在台账里写成「接线面变好」——**那是假的**。用 `--discover --list-a` 对 HEAD 与本树做集合差实测：落读的三条 `upgrade.rs#current_dir`、`provider.rs#bump`、`remote_host.rs#resume` **没有一条是真接线**，它们是 A 口径对 Rust「不解析限定路径、跨文件同名互相作证」这一**既登记、既容忍**的局限（见本文件轮 62 段，以及 `execute.rs#execute` 一类同名双胞胎先例）被 `recovery` 模块成员名撞出来的假绿。修法分两支：①`current_dir` / `bump` 只是恢复腿的**私有** helper，与公开孤儿同名纯属偶然——改名为 `install_current_dir` / `tally_disposition`（零公开面影响）消歧后，`upgrade.rs#current_dir`、`provider.rs#bump` 两条真孤儿**重新计入**；②`remote_host.rs#resume` 与恢复腿的公开动作 `recovery.rs#resume` 是**语义正当的同名**，不为凑数去改公开 API，按既有双胞胎口径**如实登记**（`recovery.rs` 的 `resume` / `restore` 也因既有同名而未进候选）。净读数 **632 = 633 − 1**，这一条 −1 是**已知局限的产物、不是进展**——本轮**没接线任何孤儿、也没删任何公开面**。台账 `note` 与 `wire-gate` 三处 A 口径等值钉同步落到 632。
 
+### 轮 68：legacy 事件总线第一次「重入不死锁」（V9 S5 / N-06）
+
+**分诊口径**：目标是 V9 批次 S5 的 N-06。`tauron-shell::eventbus` 是 legacy（9 个 `pub fn`，被 wire-gate 的方法集指纹冻结），其模块头注自陈一条「已知边界」：订阅者的 `deliver()` 里若再发一个事件，会因为外层持着 `dispatch.rs` 的 `events`（`parking_lot::RwLock`，**不可重入**）而**自我死锁**，并明写「不在此修复」。实测定位＝`handle_emit` 用一行 `self.events.write().emit(event)` 把**一把写锁横跨整段投递**，投递里任何回到 `handle_emit` 的路径（第三方插件在事件处理器里同步再发）都会永久阻塞，且这条风险**没写进插件开发指南**。
+
+**断链**：缺的不是算法，是「投递必须在锁外」这条锁纪律——写锁被持有跨越了对订阅者的回调。canonical 侧 `tauron_host::eventbus` 本就不受此限，但生产 `plugin_emit` 走的正是这条 legacy 线。
+
+**修法**：①`EventBus::subscribers` 由 `Box<dyn EventSubscriber>` 改为 `Vec<Arc<dyn EventSubscriber>>`——投递前需要一份在**释放总线写锁之后**仍能持有的可移动快照，`Box` 给不出共享所有权；`subscribe` 的**公开签名不变**（仍收 `Box`，内部 `Arc::from`），被冻结的 9 方法集逐字不动。②拆出两个 `pub(crate)` 件：`enqueue`（只入队 + 背压，在持锁段内调）与 `subscribers_for`（克隆 `Arc` 得到 `Vec<Arc<…>>` 快照，非借用）；`pub fn emit` 重排为「enqueue → 取快照 → 对快照逐个 deliver」，投递时不再借 `self`。③`handle_emit`（**不在冻结面内**）重写：持锁块内 `enqueue` + `subscribers_for`，**块尾即释放写锁**，随后在锁外逐个 `deliver`、再投递出站 sink——重入的 `handle_emit` 此刻拿到的是空闲锁。链序保持「入队先于投递」，sink 失败不回滚内部总线（沿用原语义）。**不加新命令、85 条冻结线形逐字不变**。
+
+**门禁**：wire-gate 轮 68 段——①`eventbus.rs` 含 `Vec<Arc<dyn EventSubscriber>>` 与两个 `pub(crate)` 件，并立**反例针** `/^\s{4}pub fn (enqueue|subscribers_for)/` 断言拆分件不得被做成 `pub fn`（否则等于给冻结的 legacy 面长新公开方法）；②`dispatch.rs` **负向** `/events\.write\(\)\.emit\(/` 断言旧「持锁跨投递」形态消失，正向钉 `bus.enqueue(event.clone())` + `bus.subscribers_for(&event.namespace())` + 锁外 `for sub in &subs { sub.deliver(&event); }`；③`eventbus.rs` 陈旧「不在此修复」文案必须消失、「轮 68 起生产 `plugin_emit` 路径不再死锁」在册；④行为用例名 `reentrant_emit_from_subscriber_does_not_deadlock` 在册；⑤插件开发指南同批落「重入可以、但避免无深度闸的自激环」警示。R2-a 既有的 9 方法 `toEqual` 指纹作为第二道**独立**守卫继续生效。
+
+**边界**：①修的是生产 `plugin_emit` 路径；直接对 `EventBus` 持**外部**写锁再调 `emit()` 的用方仍需自行守「锁外投递」——那不是本 crate 能替调用方决定的。②`enqueue` / `subscribers_for` 是 `pub(crate)`，A 口径的 `pub fn` 枚举与冻结方法集指纹都看不见它们：**本轮不新增公开面、也不删公开面**。③无新命令。
+
+**变异证明**（行为 + 布线 **4/4 逐段按名变红**、还原复绿、4 个参与文件零残留）：M3 把 `handle_emit` 退回 `self.events.write().emit(…)`（持锁跨投递）→ 行为用例 `reentrant_emit_from_subscriber_does_not_deadlock` 在 `recv_timeout` 有界等待下 **5s 快红（不是挂死测试二进制）**、且 wire-gate 负向针翻转；M1 把 `subscribers_for` 做成 `pub fn` → 「拆分件被做成 pub fn」针 + 既有 9 方法 `toEqual` **两道独立**皆红；M2 把「不在此修复」写回 → `not.toMatch(/不在此修复/)` 红；M4 抹掉指南「轮 68 收口」标记 → 指南 `toMatch(/轮 68 收口/)` 红。
+
+**读数**（同轮日志，顺序＝改完→格式化→门禁与行为→电池→变异→复验）：`cargo fmt --all -- --check` rc=0；`cargo clippy -p tauron-shell -p tauron-adapter -p tauron-host --all-targets --locked -- -D warnings` rc=0；`cargo test --workspace --locked` rc=0（0 个 FAILED）；`cargo test -p tauron-shell --locked` **69 passed / 0 failed**（68 旧 + 本轮重入用例）、`-p tauron-distribute` **81** / `-p tauron-adapter` **319**（本仓本轮未改，沿用同轮实测）。node 侧：`@tauron/contract-tests` **2 文件 253 passed**（wire-gate 单文件 **232**）；`pnpm gates:check` rc=0（现 **11** 道，`check-upgrade-resume` self-test **8/8**）——孤儿 **A 632 ≤ 632 且实测＝读数钉 632**、B **39 ≤ 39**、lib.rs 顶层条目 **292 封顶**（19 域 / 94 组顶层 fn / 390 函数 / 41 impl / 187 方法）、Tier-Bundle 3/10/**85**；`docs:check` **7 文档 283 引用** OK（本轮小节刻意不写行号型引用，无重锚）、`command-surface:check` **85**（底座 61 / 运行时 22 / 安装 2）孤儿 0、`version:check` 26 处 = 1.1.0、`format:check` 绿、`lint --max-warnings 0` rc=0（0 warnings）；`pnpm verify` rc=0（**20 包 / aggregate 1994 passed**）。
+
+**一处必须写下的流程修正（顺带发现、随本轮一并修）**：本轮把 `lint` 拉回电池时抓到 `scripts/check-upgrade-resume.mjs`（轮 67 交付、已随 `4eea9c9` 推上 main）里一个**定义即闲置**的私有 helper `countOccurrences`——`eslint --max-warnings 0` 因此**在 main 上恒红**。根因是**轮 67 的「电池」漏跑了 `pnpm lint` 这条腿**（ci.yml 有、本地汇总时没列进去），dead-code  lint 违规就这么过了闸。修法＝删掉该未用 helper（其余检查一律用 `.test()`/数组长度，本就不需要计数），`check-upgrade-resume` 门禁 + self-test 8/8 复绿不受影响；并把 `lint` 固定补进每轮本地电池清单。诚实边界：这是**流程缺陷不是代码缺陷**，但门禁哲学最怕「闸是绿的、CI 是红的」这种口径裂，故同轮记录。
+
 ## 10. 对外口径修订（必须与代码同批改）
 
 1. 继续使用 §138.2 的表述：**「较强的 Tauri-first substrate 基础 + 完整的 Universal/Industrial 演进设计」**，
