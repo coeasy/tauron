@@ -7955,7 +7955,7 @@ describe('门禁：轮 61 孤儿棘轮的 TS 声明面口径（公开 const/type
       'pub fn ([a-z0-9_]+)',
     );
     expect(typeof ledger.discoveryBaselineDecl, '台账缺 B 口径上限').toBe('number');
-    expect(ledger.discoveryBaseline, 'A 口径上限被顺手改动').toBe(635);
+    expect(ledger.discoveryBaseline, 'A 口径上限被顺手改动').toBe(633);
   });
 
   it('② 行视图的宽松失真已修：import 行不再充当消费者，未闭合判据才开启吞块', () => {
@@ -8149,7 +8149,7 @@ describe('门禁：轮 62 跨文件消费者视图（别的文件的声明行算
     );
     expect(script, '读数钉若只盯涨不盯跌，把孤儿接回去也能绿').toContain('observed[key] !== count');
     expect(script, '读数钉漏了 B 口径').toContain("'decl', declCandidates.length");
-    expect(ledger.discoveryObserved?.a, '台账缺 A 口径读数').toBe(634);
+    expect(ledger.discoveryObserved?.a, '台账缺 A 口径读数').toBe(633);
     expect(ledger.discoveryObserved?.decl, '台账缺 B 口径读数').toBe(39);
     expect(
       ledger.discoveryObserved!.a,
@@ -8234,5 +8234,140 @@ describe('门禁：轮 62 跨文件消费者视图（别的文件的声明行算
     expect(note.note.join('\n'), '台账注释没记下 Rust 面为什么不动口径').toContain(
       'Rust 面本轮**不动口径**',
     );
+  });
+});
+
+describe('门禁：轮 63 窗口几何持久化链路（委派出去的那条腿要有装配点，读侧失败不许静默）', () => {
+  const CTRL = 'packages/tauron-host/src/shell-controller.ts';
+  const WST = 'packages/tauron-host/src/window-state.ts';
+  const CTRL_TEST = 'packages/tauron-host/src/shell-controller.test.ts';
+  const WST_TEST = 'packages/tauron-host/src/window-state.test.ts';
+  const ADAPTER = 'crates/tauron-adapter/src/lib.rs';
+
+  it('① 委派对象必须真的被装配：构造 WindowState，start() 接两条腿，stop() 升代际', () => {
+    const ctrl = read(CTRL);
+    expect(ctrl, '没有 import 已发布的 WindowState（委派链又回到零装配点）').toMatch(
+      /^import \{ WindowState \} from '\.\/window-state\.js';$/m,
+    );
+    expect(ctrl, '几何腿又变成无条件启动（没有可用存储时每次 resize 刷一次报错）').toContain(
+      'this._geometry = hasUsableStorage() ? new WindowState() : null;',
+    );
+    expect(ctrl, '存储探测被搬空（腿会跑在假存储上）').toContain('typeof storage.setItem');
+    expect(ctrl, '恢复腿不再挂 start()（在构造函数里发命令是另一件事）').toContain(
+      'void this._restoreGeometry();',
+    );
+    expect(ctrl, '落盘腿丢了 resize 触发（用户拉窗口不再记账）').toContain(
+      "'resize', () => this._saveGeometry()",
+    );
+    expect(ctrl, '落盘腿丢了 pagehide 触发（退出前最后一帧不落盘）').toContain(
+      "'pagehide', () => this._saveGeometry()",
+    );
+    expect(ctrl, 'stop() 不再升代际（在途恢复会继续动平台）').toContain(
+      'this._geometryGeneration++',
+    );
+    expect(ctrl, '守卫 1 被搬空（无存档也去 apply＝每次启动把窗口摁回默认尺寸）').toContain(
+      '!geometry.hasSavedState',
+    );
+    expect(ctrl, '守卫 2 被搬空（越界存档照落平台，外接屏拔掉后窗口看不见）').toContain(
+      'geometry.isValid(state, screenWidth, screenHeight)',
+    );
+    expect(ctrl, '守卫 3 被搬空（stop 之后剩余回写继续发）').toContain(
+      'generation === this._geometryGeneration',
+    );
+    expect(ctrl, '恢复失败重新静默').toContain("'window.geometry.restore'");
+    expect(ctrl, '落盘失败重新静默').toContain("'window.geometry.save'");
+  });
+
+  it('② 存档读侧一律留痕，apply 只需要 invoke；两条回写命令都必须在已注册面里', () => {
+    const ws = read(WST);
+    expect(ws, '读侧又回到整段吞掉的 catch {}').not.toMatch(/catch\s*\{\s*\}/);
+    expect(ws, '坏 JSON 不再留痕').toMatch(
+      /JSON\.parse\(raw\);\s*\}\s*catch\s*\(err\)\s*\{\s*this\._fail\(err\);/,
+    );
+    expect(ws, '非对象存档又被当成存档').toContain('存档内容不是对象');
+    expect(ws, 'clear() 不复位存在性（下一次恢复拿着假事实动窗口）').toMatch(
+      /this\._hasSavedState = false;\s*return ok;/,
+    );
+    expect(ws, 'save() 成功不登记存在性').toMatch(
+      /setItem\(this\._config\.storageKey, JSON\.stringify\(this\._currentState\)\);\s*this\._lastError = null;\s*this\._hasSavedState = true;/,
+    );
+    expect(ws, '读侧不再把「真读到存档」与「落盘成功」分开登记').toMatch(
+      /this\._hasSavedState = true;\s*return \{\s*x:/,
+    );
+    expect(ws, 'apply 的参数又收回到整份 Backend（守卫只能靠伪造传输层）').toContain(
+      "async apply(backend: Pick<Backend, 'invoke'>): Promise<boolean>",
+    );
+    const list = read('packages/tauron-host/src/tauri-backend.ts');
+    for (const cmd of [
+      'host_window_set_position',
+      'host_window_set_size',
+      'host_window_maximize',
+    ]) {
+      expect(list, `${cmd} 不在已注册命令清单里，恢复腿会当场 command not found`).toContain(
+        `'${cmd}'`,
+      );
+    }
+  });
+
+  it('③ 宿主的委派注释必须点到真实装配者，也不许反过来说账本有读取方', () => {
+    const rs = read(ADAPTER);
+    expect(rs, '注释又只说"在前端"而不交代装配者（下一轮会再次当成已接线）').toContain(
+      '这条前端腿由 `ShellController.start()` 装配',
+    );
+    expect(rs, '「没有任何生产读取方」这句真话被抹掉（账本仍是只写不读）').toContain(
+      '**接入状态：今天没有任何生产读取方**',
+    );
+  });
+
+  it('④ 三条守卫与两条失败出口各有行为用例，键名逐字钉住线上信封', () => {
+    const t = read(CTRL_TEST);
+    const cases = [
+      '没有存档时一条几何命令都不发（默认值长得像结论，但不是事实）',
+      '有存档且在屏内：先位置后尺寸，两条命令的键名逐字对上线上信封',
+      '越界存档不落平台，但必须留痕且不删存档（坏值不拒启）',
+      'stop() 之后剩余回写不再发出（两段式恢复不能只完成前一半）',
+      'resize 与 pagehide 各落一次盘（落的是 webview 可见的当前几何）',
+      '环境给不出可用存储时整条腿不启动（不恢复，也不把环境问题刷成用户报错）',
+      '写盘失败不静默，也不打断用户操作',
+    ];
+    for (const name of cases) {
+      expect(t, `缺行为用例：${name}`).toContain(`it('${name}'`);
+    }
+    expect(t, '位置命令的键名断言松掉').toContain(
+      "{ cmd: 'host_window_set_position', args: { x: 20, y: 30 } }",
+    );
+    expect(t, '尺寸命令的键名断言松掉').toContain(
+      "{ cmd: 'host_window_set_size', args: { width: 900, height: 600 } }",
+    );
+    const wt = read(WST_TEST);
+    for (const name of [
+      '坏 JSON 回落默认值，但把原因记下来',
+      '存档不是对象（例如一个裸数字）：留痕且不认作存档',
+      '只有读到合法存档才算 hasSavedState；save 置真、clear 置假',
+      'apply() 只需要 invoke：带守卫的窄后端即可（恢复腿据此在停止后拒发）',
+    ]) {
+      expect(wt, `缺读侧用例：${name}`).toContain(name);
+    }
+  });
+
+  it('⑤ 本轮记录、台账与上限同口径（余量真话不许留在纸上）', () => {
+    expect(
+      read('docs/architecture/v4-industrial-gap-closure-plan.md'),
+      '缺口方案缺轮 63 小节',
+    ).toContain('### 轮 63：宿主把窗口几何的持久化委派给前端，而前端没有任何装配点');
+    expect(read('CHANGELOG.md'), 'CHANGELOG 缺轮 63 条目').toContain(
+      '委派出去的那条腿第一次有了装配点',
+    );
+    const ledger = JSON.parse(read('contracts/orphan-public-api.json')) as {
+      discoveryBaseline: number;
+      discoveryObserved?: { a?: number };
+      note: string[];
+    };
+    expect(ledger.discoveryObserved?.a, '台账读数没跟上轮 63 的收口').toBe(633);
+    expect(ledger.discoveryBaseline, '上限没收口到实测（余量假象回来了）').toBe(633);
+    const note = ledger.note.join('\n');
+    expect(note, '台账没记下 12 条候选的逐条定性').toContain('12 条 A 候选已逐条定性');
+    expect(note, '真断链那一条被糊进其余 11 条里').toContain('①真断链 1 条');
+    expect(note, '其余 11 条的「破坏性等批准」口径被删').toContain('②其余 11 条');
   });
 });

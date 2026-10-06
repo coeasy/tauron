@@ -10119,9 +10119,9 @@ pub struct ShellExtState {
     ///
     /// ⚠️ **接入状态：今天没有任何生产读取方**（全仓只有本文件单测读它）。
     /// 窗口几何的**持久化与恢复在前端**：`@tauron/host` 的 `window-state.ts`
-    /// 把它存在 `localStorage`，恢复时经 `host_window_set_position/_set_size`
-    /// 回写平台。因此它是"进程内几何账本"，不是恢复链路的读取来源——不要据它
-    /// 推断"窗口状态恢复读宿主"。
+    /// 把它存在 `localStorage`，恢复时经 `host_window_set_position/_set_size` 回写
+    /// 平台——轮 63 起**这条前端腿由 `ShellController.start()` 装配**（`stop()` 升代际后
+    /// 剩余回写拒发）。它是"进程内几何账本"，不是恢复链路的读取来源，别据此推断恢复读宿主。
     pub window_rect: (i32, i32, u32, u32),
     /// 进程内剪贴板文本。
     pub clipboard: String,

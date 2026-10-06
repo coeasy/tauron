@@ -43,6 +43,7 @@ import {
   type PluginInstallEventDetail,
 } from '@tauron/shell-events';
 import { ShellClient, type NotificationsListResult } from './shell-client.js';
+import { WindowState } from './window-state.js';
 import { NOTIFICATION_TOPIC } from './host-topics.js';
 import { isUnsupportedBody } from './dialog-client.js';
 import {
@@ -53,6 +54,26 @@ import {
 import { AdminClient } from './host.js';
 import type { PendingCallInfo } from './events.js';
 import type { ApprovalRow } from './grants.js';
+
+/**
+ * 环境是否给得出一个可用的 `localStorage`（三个方法都在才算）。
+ *
+ * 探测而不是假设：几何腿的两端都建立在存储之上，缺存储时把腿装起来只会让每次
+ * `resize` 报一次「落盘失败」——那是把环境问题演成用户可见的噪声。
+ */
+function hasUsableStorage(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const storage = window.localStorage;
+    return (
+      typeof storage.getItem === 'function' &&
+      typeof storage.setItem === 'function' &&
+      typeof storage.removeItem === 'function'
+    );
+  } catch {
+    return false;
+  }
+}
 
 export interface ShellControllerOptions {
   backend: Backend;
@@ -139,6 +160,17 @@ export class ShellController {
     ((snapshot: NotificationsListResult) => void | Promise<void>) | undefined;
   private readonly _notificationLimit: number;
   /**
+   * 窗口几何持久化腿（轮 63）。`null` = 当前环境给不出可用的 `localStorage`
+   * （无头宿主 / 预渲染 / 隐私模式），此时恢复与落盘两条腿就地都不启动——
+   * **这不是失败**：没有存储就没有可恢复的事实，而窗口此刻还不存在。
+   */
+  private readonly _geometry: WindowState | null;
+  /**
+   * 几何腿的代际令牌（与通知腿同一纪律）：`stop()` 可能早于 `apply()` 的回帧，
+   * 那时它不得再把存档写回平台。
+   */
+  private _geometryGeneration = 0;
+  /**
    * 通知腿的代际令牌（与 `tauron-shell-matrix` 的 start/stop 同一纪律）。
    *
    * `listen()` 返回 Promise，`stop()` 可能比它先跑完；拉取快照本身也是异步的，
@@ -162,6 +194,7 @@ export class ShellController {
     this._onUpdaterCheck = options.onUpdaterCheck;
     this._onNotification = options.onNotification;
     this._notificationLimit = options.notificationLimit ?? 20;
+    this._geometry = hasUsableStorage() ? new WindowState() : null;
   }
 
   /** 统一的失败出口：交给 `onError`（缺省回落 console.warn）。 */
@@ -298,6 +331,15 @@ export class ShellController {
     this._listen(elements, SHELL_EVENTS.close, () =>
       this.client.windowClose().catch(this._fail('window.close')),
     );
+
+    // 窗口几何持久化（轮 63）：存档 → 启动回写平台；尺寸变化 / 页面退出 → 落盘。
+    // 挂在 `start()` 而不是构造函数：`start()` 是壳层唯一的生命周期入口（与 `stop()`
+    // 配对），构造函数里发命令会让「建好但从未启动」的控制器也在后台动窗口。
+    void this._restoreGeometry();
+    if (this._geometry !== null) {
+      this._listen([window], 'resize', () => this._saveGeometry());
+      this._listen([window], 'pagehide', () => this._saveGeometry());
+    }
 
     // 更新对话框事件：检查更新 → 宿主**真更新通道** `host_updater_check`
     // （判据见 [`_checkForUpdate`]）；开始更新 = 下载 + 安装（这两条宿主侧仍是
@@ -457,6 +499,74 @@ export class ShellController {
   }
 
   /**
+   * 把上次存档的几何回写平台（轮 63）。三条守卫，缺一不可：
+   *
+   * 1. **没有存档就整条不启动**。`WindowState` 无存档时读到的也是合法的默认值
+   *    （1200×800@(100,100)），无条件 apply 会把每次启动变成「把窗口摁到默认尺寸」
+   *    ——那是把「没有事实」演成「事实」。
+   * 2. **越界存档不落平台**（{@link WindowState.isValid}）：拔掉外接屏后旧坐标在屏外，
+   *    照恢复等于把窗口留在用户看不见的地方。这里的处置是**留痕 + 放弃恢复**、
+   *    **不删存档**（轮 57 同一判据：坏值不拒启；用户拉一次窗口就会覆盖它）。
+   * 3. **代际令牌**：`stop()` 之后回帧不得再 invoke。
+   *
+   * 存档里的 `isMaximized` 恒为 `false`（UI 面只路由 minimize/maximize/close，没有可信
+   * 的「取消最大化」信号源），所以恢复只搬位置与尺寸，不会自动最大化。
+   */
+  private async _restoreGeometry(): Promise<void> {
+    const geometry = this._geometry;
+    if (geometry === null || !geometry.hasSavedState) return;
+    const generation = this._geometryGeneration;
+    const state = geometry.getRestoreState();
+    const screenWidth = window.screen.width;
+    const screenHeight = window.screen.height;
+    if (!geometry.isValid(state, screenWidth, screenHeight)) {
+      this._onError(
+        new Error(
+          `窗口几何存档越界（${state.width}×${state.height} @ ${state.x},${state.y}，` +
+            `屏幕 ${screenWidth}×${screenHeight}）：跳过恢复，保持平台当前尺寸`,
+        ),
+        'window.geometry.restore',
+      );
+      return;
+    }
+    // 代际一升，剩余回写就地拒发——恢复腿做两件事（先位置后尺寸），中途停止不能
+    // 只完成前一半还留下「已恢复」的错误上报。
+    const guarded: Pick<Backend, 'invoke'> = {
+      invoke: <T>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
+        generation === this._geometryGeneration
+          ? this.backend.invoke<T>(cmd, args)
+          : Promise.reject(new Error('控制器已停止：窗口几何恢复不再回写平台')),
+    };
+    const applied = await geometry.apply(guarded);
+    if (generation !== this._geometryGeneration) return;
+    if (!applied) {
+      // apply() 中途失败时窗口停在**部分应用**的状态，这必须让接入方看见。
+      this._onError(
+        new Error(`恢复窗口几何失败（窗口可能停在部分应用的状态）：${geometry.lastError}`),
+        'window.geometry.restore',
+      );
+    }
+  }
+
+  /** 把 webview 可见的当前几何写进存档。 */
+  private _saveGeometry(): void {
+    if (this._geometry === null) return;
+    const ok = this._geometry.save({
+      x: window.screenX,
+      y: window.screenY,
+      width: window.outerWidth,
+      height: window.outerHeight,
+    });
+    // 写盘失败（隐私模式 / 配额 / 跨域 iframe）不静默：下次启动会发现「窗口每次都回到
+    // 默认位置」却没有任何线索，那比当场报一次更难查。落盘失败不影响本次会话。
+    if (!ok)
+      this._onError(
+        new Error(`窗口几何落盘失败：${this._geometry.lastError}`),
+        'window.geometry.save',
+      );
+  }
+
+  /**
    * 停止所有事件监听（含宿主的投信号订阅）。
    */
   stop(): void {
@@ -472,6 +582,8 @@ export class ShellController {
     this._notifUnlisten = null;
     this._notifInFlight = null;
     this._notifDirty = false;
+    // 几何腿：升代让在途恢复失去回写资格（存档本身留着，下次 `start()` 还会试）。
+    this._geometryGeneration++;
   }
 
   private _listen(targets: EventTarget[], type: string, fn: EventListener): void {

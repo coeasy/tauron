@@ -149,4 +149,51 @@ describe('WindowState', () => {
       expect(backend.invocations.some((i) => i.cmd === 'host_window_set_size')).toBe(true);
     });
   });
+
+  describe('轮 63：读侧失败不再静默 + 存档存在性', () => {
+    it('坏 JSON 回落默认值，但把原因记下来（此前是 catch {} 整段吞掉）', () => {
+      window.localStorage.setItem('test.window8', '{truncated');
+      const ws = new WindowState({ storageKey: 'test.window8' });
+      expect(ws.currentState.width).toBe(1200);
+      expect(ws.hasSavedState).toBe(false);
+      expect(ws.lastError).not.toBeNull();
+      window.localStorage.removeItem('test.window8');
+    });
+
+    it('存档不是对象（例如一个裸数字）：留痕且不认作存档', () => {
+      window.localStorage.setItem('test.window10', '7');
+      const ws = new WindowState({ storageKey: 'test.window10' });
+      expect(ws.hasSavedState).toBe(false);
+      expect(ws.lastError).toContain('存档内容不是对象');
+      window.localStorage.removeItem('test.window10');
+    });
+
+    it('只有读到合法存档才算 hasSavedState；save 置真、clear 置假', () => {
+      const ws = new WindowState({ storageKey: 'test.window9' });
+      expect(ws.hasSavedState).toBe(false);
+      expect(ws.save({ width: 900 })).toBe(true);
+      expect(ws.hasSavedState).toBe(true);
+      const reloaded = new WindowState({ storageKey: 'test.window9' });
+      expect(reloaded.hasSavedState).toBe(true);
+      expect(reloaded.currentState.width).toBe(900);
+      expect(reloaded.clear()).toBe(true);
+      expect(reloaded.hasSavedState).toBe(false);
+      expect(new WindowState({ storageKey: 'test.window9' }).hasSavedState).toBe(false);
+    });
+
+    it('apply() 只需要 invoke：带守卫的窄后端即可（恢复腿据此在停止后拒发）', async () => {
+      const seen: string[] = [];
+      const ws = new WindowState({ storageKey: 'test.window11' });
+      ws.save({ x: 5, y: 6, width: 700, height: 500 });
+      const ok = await ws.apply({
+        invoke: <T>(cmd: string): Promise<T> => {
+          seen.push(cmd);
+          return Promise.resolve(undefined as T);
+        },
+      });
+      expect(ok).toBe(true);
+      expect(seen).toEqual(['host_window_set_position', 'host_window_set_size']);
+      window.localStorage.removeItem('test.window11');
+    });
+  });
 });

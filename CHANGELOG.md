@@ -15,6 +15,9 @@
 
 ### Changed
 
+- **宿主委派出去的那条腿第一次有了装配点（轮 63）**：`ShellExtState::window_rect` 的注释把窗口几何的持久化交给前端 `window-state.ts`，而全仓没有一处 `new WindowState()`——`host_window_set_position/_set_size` 的 TS 侧唯一调用者在 `apply()` 里，`apply()` 又零读者，几何从未被存过也没被恢复过。现在恢复腿接进 `ShellController.start()`、落盘腿接 DOM `resize`/`pagehide`，并带三条守卫：无存档整条不启动（新增 `hasSavedState`，默认值不是事实）、越界存档不落平台（`isValid` 第一次有读者；沿用轮 57「坏值不拒启」：留痕且不删档）、`stop()` 升代际后剩余回写拒发。环境给不出可用 `localStorage` 时整条腿不启动，也不刷报错。
+- **窗口状态存档的读侧不再静默（轮 63）**：`_loadState` 原来整段空吞，把「存档坏了」和「没有存档」压成同一个结果，而写侧早已改成如实记录——两侧口径现在一致（坏 JSON / 非对象存档都留痕且都不算存档），`clear()` 也会把「有存档」这个事实复位。`apply()` 的参数收窄为 `Pick<Backend, 'invoke'>`，调用方因此能传一个带守卫的 invoke，而不是伪造整份 Backend。
+- **孤儿棘轮的上限收到实测 633，余量清零（轮 63）**：轮 62 口径改严后新出现的 12 条 A 候选逐条定性——1 条真断链（本轮接线）、11 条是已发布 npm/cli 包里「同文件内部调用 + barrel 再导出」或两个同名而返回类型不同的实现，删除与改名都是破坏性动作，只登记不静默删。等值读数钉已经负责「口径被换掉当场红」，上限不再预留余量；轮 62 那句「只剩 1 条余量」作废。
 - **孤儿门禁的「谁替它作证」第一次被当真（轮 62）**：`check-orphan-public-api.mjs` 判「有没有消费者」靠的
   是行视图，而那份视图同时犯了两条方向相反的错。**看不见真引用**：`lineView` 丢掉的是*每个*文件的
   `export …` 行，不只是候选自己那一份，于是 `export class MemoryTransport implements HostTransport`、

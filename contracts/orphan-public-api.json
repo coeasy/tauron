@@ -49,7 +49,17 @@
     "    歧义必须解析限定路径，留给专轮；两套口径的实测清单见本轮日志 r62-a-diff / r62-rust-step。",
     "  - 新增**等值读数钉** discoveryObserved（a / decl）：上限棘轮是单向的，只在孤儿变多时红，",
     "    轮 61 因此没法证明「消费者视图被换宽松」这件事（撤掉单行 use 的守卫后 622→624 仍 ≤ 635）。",
-    "    读数钉把口径与接线面的任何变动（涨跌都算）变成必须显式改账的动作，视图判据本身才有失败出口。"
+    "    读数钉把口径与接线面的任何变动（涨跌都算）变成必须显式改账的动作，视图判据本身才有失败出口。",
+    "轮 63：轮 62 口径改严后新出现的 12 条 A 候选已逐条定性。",
+    "①真断链 1 条：`packages/tauron-host/src/window-state.ts#WindowState`——宿主侧把窗口几何的持久化",
+    "  **委派给前端**（`crates/tauron-adapter/src/lib.rs` 的 `ShellExtState::window_rect` 注释），而全仓没有任何",
+    "  装配点 `new WindowState()`：`host_window_set_position/_set_size` 的 TS 侧唯一调用者在 `apply()` 里，",
+    "  `apply()` 又零读者。现在恢复腿接进 `ShellController.start()`（三条守卫：无存档不发、越界不落平台、",
+    "  `stop()` 后剩余回写拒发），落盘腿接 DOM `resize`/`pagehide`。",
+    "②其余 11 条是已发布 npm 包里「只被同包内使用 + 由 barrel 再导出」的对外面（app-cli 的 6 条脚手架生成器、",
+    "  cli 与 app-cli 各一份同名不同返回类型的 `generatePluginManifest`/`generatePackageJson`、",
+    "  `types/config.ts#validateConfig`、`host/errors.ts#normalizeError`）。删除/改名是破坏性动作，等单独批准；",
+    "  本轮只把它们计数与定性写清，不静默删、也不为凑数抬判据。"
   ],
   "plane": {
     "include": ["crates/*/src", "packages/*/src", "examples", "apps"],
@@ -222,17 +232,20 @@
     }
   ],
   "discoveryBaselineDecl": 43,
-  "discoveryBaseline": 635,
-  "discoveryObserved": { "a": 634, "decl": 39 },
+  "discoveryBaseline": 633,
+  "discoveryObserved": {
+    "a": 633,
+    "decl": 39
+  },
   "discoveryNote": [
     "A 口径：`pub fn` / `export function` / `export class` 声明中，在接线面零命中者。轮 62 起「接线面」",
     "按语言分两档：**TS 文件里别的文件的 `export …` 声明行算引用位**（自己顶格声明过同名的文件除外），",
     "Rust 文件保持旧口径（声明行不算）——两档都是实测逼出来的，理由记在本文件 note 的轮 62 段。",
     "B 口径（轮 61）：TS 的 `export const` / `export type` / `export interface` 声明中，在接线面",
     "（含声明文件正文，声明行本身除外）零命中者。上限独立（discoveryBaselineDecl），两条棘轮互不借余量。",
-    "存量（轮 2 实测 635 条）里绝大多数是**合法的对外库 API**（发布出去的 crate/包的公开面），棘轮只保证「不再新增」，不代表这 635 条都要删。",
-    "逐条收口后必须下调本数字；635 是本轮门禁实测值（同轮日志见 CHANGELOG 轮 22 条目），写死不动等于把债务固化。",
-    "轮 62 的余量真话：A 口径实测 634、上限 635——**只剩 1 条余量**。任何新增零消费者的 `pub fn`/`export function`/`export class` 都会当场红，",
-    "而下调基线需要先把对应的假孤儿/真孤儿逐条定性（口径改严后新出现的 12 条是跨包同名歧义被摘掉的假绿，见轮 62 note）。"
+    "存量里绝大多数是**合法的对外库 API**（发布出去的 crate/包的公开面），棘轮只保证「不再新增」，",
+    "不代表这些都要删；逐条收口后必须同步下调本数字（写死不动等于把债务固化）。",
+    "轮 63 起上限＝实测读数 633，**不留余量**：口径漂移已经由 discoveryObserved 等值钉负责（判据被换掉",
+    "当场红），上限的职责只剩「新增公开面必须显式改账」。轮 62 末那句「只剩 1 条余量」到此作废。"
   ]
 }

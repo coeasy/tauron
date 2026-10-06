@@ -3868,7 +3868,7 @@ B 的 5 条假孤儿整批回归；V2 撤修正二 → `口径 a 实测 609 ≠ 
 声明；V5 让 A 口径绕开修正后的视图；V6 多符号条目的 split 退化 → 门禁反过来指控台账那条 orphans「已接线」；
 V7 反向过紧＝所有 TS 文件一律失声）、读数钉 4 例（缺键、只盯涨、退化成「不超过上限」、整键缺失）、
 新增公开面 1 例（G1 加一个零消费者的 `export function`：635 仍 ≤ 上限 635，**只有等值钉把它打回**
-`口径 a 实测 635 ≠ 台账记录 634`——这条正是「只剩 1 条余量」时真正的闸）、① 的文本针 signal 8 例
+`口径 a 实测 635 ≠ 台账记录 634`——这条正是「只剩 1 条余量」时真正的闸；余量清零已由轮 63 落地）、① 的文本针 signal 8 例
 （等价改写——加花括号、去冒号后空格、可选链、数组多包一层、判据表改名——都必须红，否则针是空钉）、
 ③ 的引用行针 3 例、④ 的声明针 5 例、⑤ 的线形 6 例（TS 少字段 / Rust 多键 / TS 键名漂移 / 两侧注释各抹一句 /
 兼容记录字段改名）、⑥ 文档同步 3 例。两条**不设红、只量效应**的诊断把本轮的机制性 claim 落到数上：
@@ -3916,6 +3916,73 @@ Rust 侧发布级硬门禁同轮复跑：`pnpm lint:rust`（workspace clippy `-D
 | 把 `memory-transport.ts` 改名/升级为 MemoryHost | **不做** | 它是测试 transport，冒充 A27 的参考宿主比诚实登记更糟 |
 
 ---
+
+### 轮 63：宿主把窗口几何的持久化委派给前端，而前端没有任何装配点
+
+**断链**：`crates/tauron-adapter/src/lib.rs` 的 `ShellExtState::window_rect` 注释写着
+「窗口几何的**持久化与恢复在前端**：`@tauron/host` 的 `window-state.ts` 把它存在 localStorage，
+恢复时经 `host_window_set_position/_set_size` 回写平台」。轮 62 把跨包同名作证摘掉之后，
+`window-state.ts#WindowState` 当场变成 A 口径在册候选——实测：全仓**没有任何** `new WindowState()`
+调用点，`host_window_set_position` / `_set_size` 在 TS 侧唯一的调用者在 `WindowState.apply()` 里，
+而 `apply()` 零读者。也就是说宿主把一件事委派给了一条两端都没接的链路：几何从没被存过，
+也从没被恢复过（`window_rect` 本身仍是只写不读的账本，这一点没变）。
+
+**修法**：恢复腿接进壳层唯一的生命周期入口 `ShellController.start()`，落盘腿接 DOM。
+三条守卫缺一不可：①**没有存档整条不启动**（新增 `WindowState.hasSavedState`——默认值
+1200×800@(100,100) 长得像结论，无条件 apply 等于每次启动把窗口摁回默认尺寸）；②**越界存档
+不落平台**（`isValid` 此前零读者，正是为这件事写的），处置沿用轮 57 的「坏值不拒启」：留痕 +
+放弃恢复 + **不删存档**；③**代际令牌**：`apply()` 的参数收窄成 `Pick<Backend, invoke>`，
+于是 `stop()` 之后剩余那条 `host_window_set_size` 被拒发，而不是把窗口搬到一半再报「已恢复」。
+落盘侧接 `resize` + `pagehide`（后者覆盖 close/quit 前的最后一帧），写盘失败走 `onError`，
+不静默也不打断操作。环境给不出可用 `localStorage`（三个方法缺任一）时整条腿不启动——无头形态
+本就没有窗口可恢复，硬把腿装起来只会每次 resize 刷一次报错。读侧原来的 `catch` 空吞也改成
+如实留痕（此前「存档坏了」和「没有存档」被压成同一个结果，而写侧早就改成记录了）。
+
+**12 条 A 候选的逐条定性（轮 62 遗留①）**：
+
+| 候选 | 定性 | 处置 |
+| --- | --- | --- |
+| `host/window-state.ts#WindowState` | **真断链**（宿主把它当委派对象） | 本轮接线，A 634→633 |
+| `host/errors.ts#normalizeError` | 已发布 util，仓内零调用；UI 侧另有一份私有同名实现（返回形状不同） | 只登记；合并要动已发布面，等批准 |
+| `types/config.ts#validateConfig` | 已发布 SDK 校验器，仓内无调用者 | 只登记 |
+| `app-cli/scaffold.ts` 的 `validateConfig` / `generatePackageJson` / `generateViteConfig` / `generateAppEntry` / `generateCapabilitiesJson` / `generateGitignore`（6 条） | 同文件内部互相调用 + barrel 再导出的对外 CLI 面（A 口径按定义不计同文件正文） | 只登记 |
+| `app-cli/plugin.ts#generatePluginManifest`、`cli/plugin.ts#generatePluginManifest` / `generatePackageJson`（3 条） | 两个已发布 CLI 各有一份**同名但返回类型不同**（string vs PackageManifest）的实现 | 只登记；收敛为单一实现是破坏性动作 |
+
+**口径**：上限从 635 收到实测 **633，余量清零**。等值读数钉（轮 62）已经负责「口径被换掉当场红」，
+上限的职责只剩「新增公开面必须显式改账」。轮 62 变异段里那句「只剩 1 条余量」到本小节作废。
+
+**边界/遗留**：①最大化态没进存档（UI 面只路由 minimize/maximize/close，没有可信的「取消最大化」
+信号源），所以恢复不自动最大化；②用户**只移动不改尺寸**时不会触发 `resize`，位置因此只在
+pagehide 落一次盘——真实窗口事件面（moved 一类）不在 85 条命令冻结面内，属新命令，等批准；
+③存档在 localStorage（webview 侧），宿主侧 `window_rect` 仍无生产读取方，两侧不是同一份账；
+④其余 11 条候选的收敛都要动已发布面。
+
+**变异证明**：32/32 逐段按名变红（一次跑通），终检复跑门禁全绿 + 9/9 参与文件与开跑前同哈希。
+覆盖：装配腿 12 条（删 `WindowState` import、几何腿改无条件 `new WindowState()`、搬空存储探测里的
+`setItem` 判据、从 `start()` 摘掉恢复、`resize`/`pagehide` 两个落盘触发各改指空动作、`stop()` 不再
+升代际、三条守卫各搬空一处、两条失败出口的代码改名）；读侧与线形 8 条（`getItem` 的 catch 回退成
+空块、坏 JSON 只清错不留痕、非对象存档换一种文案、`clear()`/`save()`/`_loadState()` 三处存在性登记
+各摘一次、`apply` 参数收回整份 `Backend`、已注册命令清单删 `host_window_maximize`）；宿主注释 2 条；
+行为用例 5 条（用例名改写 + 两处键名断言逐字改写）；台账与文档 5 条（上限 633→634、读数 633→632、
+「①真断链 1 条」改写、计划小节标题与 CHANGELOG 短语改写）。
+两处缺陷在开跑前被脚本自己的预检拦下，值得记下来：①台账的 `discoveryObserved` 经 prettier 已成多行，
+单行字面针命中 0 处——**格式化之后必须重取针**，预检（字面命中数统计）就是干这个的；②把计划小节
+`### 轮 63：` 改成 `#### 轮 63：` 永远不可能变红，因为 `####` 含 `###` 子串——改写要断在针的
+**唯一性**上，最终改用「把→将」。另有一条本轮学到的：门禁首跑红在 `window-state.ts` 的**负向针**上
+（「文件里不许再出现空 catch」），而代码已经没有空 catch——是两处文档注释把当年那个空 catch 形状
+抄成了历史叙述。负向针的载体必须连注释一起洗，否则针的红由叙述决定而不是由代码决定。
+
+**读数**（本小节全部出自同一次跑批日志）：`pnpm build` rc=0；tauron-host 包 22 文件 **458** passed；
+contract-tests 2 文件 **235** passed（wire-gate 单跑 **214**）；`pnpm verify` **20** 包 **107** 文件
+**1970** passed rc=0（轮 62 末 1954，本轮 +16 = 新增 7 条装配用例 + 4 条读侧用例 + 5 条门禁用例）。
+`cargo fmt --all --check` rc=0；`pnpm lint:rust` rc=0；`cargo test --workspace --locked` **1605** passed；
+`-p tauron-market --features signing` **78**；`-p tauron-adapter --features plugin-install` **345**；
+`--features tauri,plugin-install` **379** + 1（doc 腿）+ 4 ignored。`gates:check` rc=0：孤儿台账
+**14** 条未接线宣称 + **6** 条已接线反例、A 口径 **633 ≤ 基线 633 且实测＝读数钉 633**、B 口径
+**39 ≤ 基线 43 且实测＝读数钉 39**、adapter 域归属 lib.rs 顶层条目 **292 已封顶**。`docs:check` rc=0：
+**7** 个文档 **281** 条引用。`version:check` 26 处 = 1.1.0；`command-surface:check` **85** 条命令
+（底座 61 / 运行时 22 / 安装 2），孤儿命令 0、未归类 0、无代码层判定 9；`format:check` 与
+`lint --max-warnings 0` 全 rc=0。
 
 ## 10. 对外口径修订（必须与代码同批改）
 

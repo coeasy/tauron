@@ -53,10 +53,18 @@ export class WindowState {
   private readonly _config: Required<WindowStateConfig>;
   private _currentState: WindowStateData;
   /**
+   * 本次构造是否**真读到过一份可解析的存档**。
+   *
+   * 为什么需要它：`_currentState` 在没有存档时也是合法的默认值（1200×800@(100,100)），
+   * 读侧分不清「上次真的这么大」和「从没存过」。恢复腿若照着它无条件 apply，
+   * 每次启动都会把窗口摁到默认尺寸——那是把「没有事实」演成「事实」。
+   */
+  private _hasSavedState = false;
+  /**
    * 最近一次持久化/应用失败的原因（成功或从未失败时为 `null`）。
    *
    * 为什么需要它：`localStorage` 在隐私模式、配额耗尽、跨域 iframe 下会抛异常。
-   * 此前 `save()` 用空 `catch {}` 吞掉——窗口状态永远存不上，宿主却毫不知情。
+   * 此前 `save()` 用空 catch 块吞掉——窗口状态永远存不上，宿主却毫不知情。
    * 现在失败会被**如实记录**，`save()`/`clear()`/`apply()` 也返回布尔结果。
    */
   private _lastError: string | null = null;
@@ -91,24 +99,45 @@ export class WindowState {
 
   /**
    * 从 localStorage 加载状态。
+   *
+   * 读侧的失败同样不许静默（轮 63）：此前这里的空 catch 块把「存档坏了」和「没有存档」
+   * 压成同一个结果，而 `save()` 早就改成如实记录了——两侧口径必须一致，否则
+   * 一次 JSON 截断会让恢复永久回到默认尺寸且无人知情。
    */
   private _loadState(): WindowStateData {
+    let raw: string | null;
     try {
-      const raw = window.localStorage.getItem(this._config.storageKey);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        return {
-          x: typeof parsed.x === 'number' ? parsed.x : this._config.defaultX,
-          y: typeof parsed.y === 'number' ? parsed.y : this._config.defaultY,
-          width: typeof parsed.width === 'number' ? parsed.width : this._config.defaultWidth,
-          height: typeof parsed.height === 'number' ? parsed.height : this._config.defaultHeight,
-          isMaximized: typeof parsed.isMaximized === 'boolean' ? parsed.isMaximized : false,
-        };
-      }
-    } catch {
-      // localStorage 不可用或数据损坏，使用默认值
+      raw = window.localStorage.getItem(this._config.storageKey);
+    } catch (err) {
+      this._fail(err);
+      return this._defaults();
     }
-    return this._defaults();
+    if (raw === null) return this._defaults();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      this._fail(err);
+      return this._defaults();
+    }
+    if (typeof parsed !== 'object' || parsed === null) {
+      this._fail(`存档内容不是对象：${raw.slice(0, 60)}`);
+      return this._defaults();
+    }
+    const saved = parsed as Partial<WindowStateData>;
+    this._hasSavedState = true;
+    return {
+      x: typeof saved.x === 'number' ? saved.x : this._config.defaultX,
+      y: typeof saved.y === 'number' ? saved.y : this._config.defaultY,
+      width: typeof saved.width === 'number' ? saved.width : this._config.defaultWidth,
+      height: typeof saved.height === 'number' ? saved.height : this._config.defaultHeight,
+      isMaximized: typeof saved.isMaximized === 'boolean' ? saved.isMaximized : false,
+    };
+  }
+
+  /** 是否存在一份可读到的历史存档（没有则恢复腿应整条不启动）。 */
+  get hasSavedState(): boolean {
+    return this._hasSavedState;
   }
 
   /** 默认状态 */
@@ -136,6 +165,7 @@ export class WindowState {
     try {
       window.localStorage.setItem(this._config.storageKey, JSON.stringify(this._currentState));
       this._lastError = null;
+      this._hasSavedState = true;
       return true;
     } catch (err) {
       // localStorage 不可用（隐私模式 / 配额 / 跨域）——如实记录，不静默吞掉。
@@ -160,6 +190,7 @@ export class WindowState {
       ok = false;
     }
     this._currentState = this._defaults();
+    this._hasSavedState = false;
     return ok;
   }
 
@@ -197,10 +228,14 @@ export class WindowState {
   /**
    * 应用窗口状态（调用后端命令）。
    *
+   * 参数只取 `invoke`（轮 63）：本方法全程只做命令调用，不需要事件/通道/身份。
+   * 收窄成 `Pick<Backend, 'invoke'>` 之后，调用方可以传一个**带守卫的** invoke
+   * （例如控制器已停止时拒发剩余命令），而不必伪造整份 `Backend`。
+   *
    * @returns `true` = 全部命令成功；`false` = 中途失败（原因见 {@link lastError}）。
    * 失败时窗口停在部分应用的状态，调用方可据此决定是否回退到默认尺寸。
    */
-  async apply(backend: Backend): Promise<boolean> {
+  async apply(backend: Pick<Backend, 'invoke'>): Promise<boolean> {
     const state = this.getRestoreState();
     try {
       await backend.invoke('host_window_set_position', {

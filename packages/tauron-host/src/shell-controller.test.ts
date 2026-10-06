@@ -1330,3 +1330,192 @@ describe('ShellController 通知腿（轮 36：信号 → 拉取 → 上屏）',
     c.stop();
   });
 });
+
+describe('轮 63：窗口几何持久化链路（存档 → 恢复、DOM → 落盘）', () => {
+  const KEY = 'tauron.window.state';
+  const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+  /** 把环境尺寸钉成固定值：断言不该依赖 happy-dom 的默认 screen/outer 读数。 */
+  function pinEnv(dims: {
+    screenW: number;
+    screenH: number;
+    outerW: number;
+    outerH: number;
+    x: number;
+    y: number;
+  }): void {
+    Object.defineProperty(window.screen, 'width', { value: dims.screenW, configurable: true });
+    Object.defineProperty(window.screen, 'height', { value: dims.screenH, configurable: true });
+    Object.defineProperty(window, 'outerWidth', { value: dims.outerW, configurable: true });
+    Object.defineProperty(window, 'outerHeight', { value: dims.outerH, configurable: true });
+    Object.defineProperty(window, 'screenX', { value: dims.x, configurable: true });
+    Object.defineProperty(window, 'screenY', { value: dims.y, configurable: true });
+  }
+
+  /** invoke 停在闸门上的后端：用来证明 `stop()` 之后剩余回写不再发出。 */
+  class GateBackend extends MockBackend {
+    private _gate: Promise<void> = Promise.resolve();
+    private _release: (() => void) | null = null;
+    hold(): void {
+      this._gate = new Promise<void>((resolve) => {
+        this._release = resolve;
+      });
+    }
+    release(): void {
+      this._release?.();
+    }
+    override async invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+      await this._gate;
+      return super.invoke<T>(cmd, args);
+    }
+  }
+
+  /**
+   * 本文件的 happy-dom 环境没有完整 `Storage`（`clear()` 就不存在），而控制器在构造时
+   * 探测存储可用性、探不到就整条腿不启动。用一个内存桩把前提钉成事实——而不是
+   * 让「腿没启动」冒充「恢复逻辑正确」。
+   */
+  function installStorage(): void {
+    const store = new Map<string, string>();
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+        setItem: (k: string, v: string) => {
+          store.set(k, String(v));
+        },
+        removeItem: (k: string) => {
+          store.delete(k);
+        },
+      },
+    });
+  }
+
+  let geomBackend: MockBackend;
+  let errors: string[];
+  let ctl: ShellController;
+  let box: HTMLElement;
+
+  /** 先落存档再建控制器——恢复腿在构造函数里读盘，顺序反过来就是另一件事。 */
+  function build(saved?: Record<string, unknown>, b?: MockBackend): void {
+    if (saved !== undefined) window.localStorage.setItem(KEY, JSON.stringify(saved));
+    ctl = new ShellController({
+      backend: b ?? geomBackend,
+      onError: (_err, context) => {
+        errors.push(context);
+      },
+    });
+  }
+
+  beforeEach(() => {
+    installStorage();
+    pinEnv({ screenW: 1920, screenH: 1080, outerW: 1100, outerH: 700, x: 60, y: 40 });
+    errors = [];
+    geomBackend = new MockBackend({
+      capabilities: [...CONTROLLER_CAPS, 'host_window_set_position', 'host_window_set_size'],
+      pluginId: 'p.geom',
+    });
+    box = document.createElement('div');
+    document.body.appendChild(box);
+    build();
+  });
+
+  afterEach(() => {
+    ctl.stop();
+    box.remove();
+    Reflect.deleteProperty(window, 'localStorage');
+  });
+
+  const geometryCalls = (b: MockBackend = geomBackend) =>
+    b.invocations.filter(
+      (i) => i.cmd === 'host_window_set_position' || i.cmd === 'host_window_set_size',
+    );
+
+  it('没有存档时一条几何命令都不发（默认值长得像结论，但不是事实）', async () => {
+    ctl.start([box]);
+    await flush();
+    expect(geometryCalls()).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it('有存档且在屏内：先位置后尺寸，两条命令的键名逐字对上线上信封', async () => {
+    build({ x: 20, y: 30, width: 900, height: 600, isMaximized: false });
+    ctl.start([box]);
+    await flush();
+    expect(geomBackend.invocations).toEqual([
+      { cmd: 'host_window_set_position', args: { x: 20, y: 30 } },
+      { cmd: 'host_window_set_size', args: { width: 900, height: 600 } },
+    ]);
+  });
+
+  it('越界存档不落平台，但必须留痕且不删存档（坏值不拒启）', async () => {
+    build({ x: 5000, y: 5000, width: 900, height: 600, isMaximized: false });
+    ctl.start([box]);
+    await flush();
+    expect(geometryCalls()).toEqual([]);
+    expect(errors).toEqual(['window.geometry.restore']);
+    expect(window.localStorage.getItem(KEY)).not.toBeNull();
+  });
+
+  it('stop() 之后剩余回写不再发出（两段式恢复不能只完成前一半）', async () => {
+    const gated = new GateBackend({
+      capabilities: [...CONTROLLER_CAPS, 'host_window_set_position', 'host_window_set_size'],
+    });
+    gated.hold();
+    build({ x: 20, y: 30, width: 900, height: 600, isMaximized: false }, gated);
+    ctl.start([box]);
+    ctl.stop();
+    gated.release();
+    await flush();
+    expect(gated.invocations.map((i) => i.cmd)).toEqual(['host_window_set_position']);
+    expect(errors).toEqual([]);
+  });
+
+  it('resize 与 pagehide 各落一次盘（落的是 webview 可见的当前几何）', async () => {
+    ctl.start([box]);
+    pinEnv({ screenW: 1920, screenH: 1080, outerW: 1366, outerH: 768, x: 12, y: 34 });
+    window.dispatchEvent(new Event('resize'));
+    expect(JSON.parse(String(window.localStorage.getItem(KEY)))).toMatchObject({
+      x: 12,
+      y: 34,
+      width: 1366,
+      height: 768,
+    });
+    pinEnv({ screenW: 1920, screenH: 1080, outerW: 800, outerH: 600, x: 1, y: 2 });
+    window.dispatchEvent(new Event('pagehide'));
+    expect(JSON.parse(String(window.localStorage.getItem(KEY)))).toMatchObject({
+      x: 1,
+      y: 2,
+      width: 800,
+      height: 600,
+    });
+    expect(geometryCalls()).toEqual([]);
+  });
+
+  it('环境给不出可用存储时整条腿不启动（不恢复，也不把环境问题刷成用户报错）', async () => {
+    // 只有 getItem 的“存储”不算存储：三个方法都在才敢把腿装起来。这份桩故意返回
+    // 一个看着合法的存档——腿若启动就会照着它动窗口。
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: { getItem: () => '{"width":900,"height":600,"x":20,"y":30}' },
+    });
+    build();
+    ctl.start([box]);
+    await flush();
+    expect(geometryCalls()).toEqual([]);
+    window.dispatchEvent(new Event('resize'));
+    expect(errors).toEqual([]);
+  });
+
+  it('写盘失败不静默，也不打断用户操作', () => {
+    ctl.start([box]);
+    Object.defineProperty(window.localStorage, 'setItem', {
+      value: () => {
+        throw new Error('QuotaExceeded');
+      },
+      configurable: true,
+    });
+    expect(() => window.dispatchEvent(new Event('resize'))).not.toThrow();
+    expect(errors).toEqual(['window.geometry.save']);
+  });
+});
