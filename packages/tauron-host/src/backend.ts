@@ -11,6 +11,17 @@ import { DEFAULT_STREAM_CREDIT_BYTES, MAX_STREAM_CREDIT_BYTES, parseStreamKind }
 import type { StreamFrame, StreamKind } from './stream.js';
 
 /**
+ * 写一帧的代价 = 固定开销 + JSON 字节 + raw 字节。这条开销镜像宿主
+ * `tauron_host::stream` 的同名 `pub const`，判定式与 Rust 的 `saturating_add`
+ * 链同形——空帧也占额度，否则一条只发空帧的流能在额度上走得无限远。
+ *
+ * 轮 66 之前这里是一个裸字面量 `32`：宿主抬高开销后，测试替身仍按旧开销放行
+ * 大帧，前端契约测试全绿而真机报背压——轮 65 打包端那笔账的同族。刻意**不导出**：
+ * 它是这份内核的算术细节，不是已发布面；门禁按源码文本对读两侧常量。
+ */
+const STREAM_FRAME_OVERHEAD_BYTES = 32;
+
+/**
  * Tauri `Channel<T>` 的消息端口形状（避免 core 直接依赖 @tauri-apps/api）。
  *
  * **R5 修正**：此前这里要求 `message: MessagePort`，而真实 Tauri `Channel` 上
@@ -209,6 +220,9 @@ export class MockBackend implements Backend {
   // 语义与 Rust `tauron_host::stream` 对齐：宿主铸 `seq`、终帧后句柄失效、
   // 未知句柄报错、帧经**调用方传入的** Channel 派发。这样 HostRpc 的 mock
   // 往返与真机往返走的是同一条调用序列。
+  //
+  // 额度（A79 背压）同样在这一份内核里：初始/封顶/帧开销三笔账镜像宿主，
+  // 拒绝必须发生在扣额与占 `seq` **之前**（被拒的帧不留部分效果）。
 
   private readonly channels = new Map<string, ChannelPort<StreamFrame>>();
   private readonly callChannels = new Map<string, string>();
@@ -294,7 +308,7 @@ export class MockBackend implements Backend {
           : Array.isArray(req.argsRaw)
             ? req.argsRaw.length
             : 0;
-      const required = 32 + jsonBytes + rawBytes;
+      const required = STREAM_FRAME_OVERHEAD_BYTES + jsonBytes + rawBytes;
       if (required > state.creditBytes)
         throw new Error(`E_STREAM_BACKPRESSURE: need ${required}, remain ${state.creditBytes}`);
       state.creditBytes -= required;

@@ -8617,3 +8617,211 @@ describe('门禁：轮 65 打包端预算必须停在宿主的拒收线上（@ta
     );
   });
 });
+
+describe('门禁：轮 66 流的三笔额度账必须与宿主同源（@tauron/host ↔ tauron-host::stream）', () => {
+  // 额度是接收方驱动的：宿主只保证「超过余额即拒、补给封顶」。这份内核把同样
+  // 三条算术又写了一遍，所以每一笔都要能对回真源——轮 65 的教训是同值的数字
+  // 不等于同值的判据，也不等于这条判据真的被用例行使过。
+  const STREAM_RS = 'crates/tauron-host/src/stream.rs';
+  const ADMISSION_RS = 'crates/tauron-host/src/admission.rs';
+  const REGISTRY_RS = 'crates/tauron-host/src/registry.rs';
+  const ADAPTER = 'crates/tauron-adapter/src/lib.rs';
+  const TAURI = 'crates/tauron-adapter/src/tauri.rs';
+  const STREAM_TS = 'packages/tauron-host/src/stream.ts';
+  const BACKEND_TS = 'packages/tauron-host/src/backend.ts';
+  const HOST_TS = 'packages/tauron-host/src/host.ts';
+  const TEST_TS = 'packages/tauron-host/src/stream.test.ts';
+  const PLAN = 'docs/architecture/v4-industrial-gap-closure-plan.md';
+
+  /** 只认 `N` 与 `N * 1024 [* 1024]` 两种写法；读不懂的算式当场抛，不许静默变绿。 */
+  const product = (expr: string, where: string): number => {
+    const parts = expr.trim().split(/\s*\*\s*/);
+    if (!parts.every((part) => /^\d+$/.test(part)))
+      throw new Error(`读不懂的算式 \`${expr}\`（${where}）`);
+    return parts.reduce((acc, part) => acc * Number(part), 1);
+  };
+  const rustNum = (src: string, name: string): number => {
+    const expr = src.match(new RegExp(`pub const ${name}: usize = ([^;]+);`))?.[1];
+    if (expr === undefined)
+      throw new Error(`Rust 侧读不到 pub const ${name}: usize = …;（被改名或换了类型）`);
+    return product(expr, name);
+  };
+  const tsNum = (src: string, name: string): number => {
+    const expr = src.match(new RegExp(`(?:export )?const ${name} = ([^;]+);`))?.[1];
+    if (expr === undefined)
+      throw new Error(`TS 侧读不到 const ${name} = …;（被改名，或降回裸字面量）`);
+    return product(expr, name);
+  };
+  const hits = (src: string, needle: string): number => src.split(needle).length - 1;
+
+  it('① 三笔账同值：初始额度、补额封顶、帧开销（附「读成 0 即自我豁免」自检）', () => {
+    const rs = read(STREAM_RS);
+    const ts = read(STREAM_TS);
+    const backend = read(BACKEND_TS);
+    expect(tsNum(ts, 'DEFAULT_STREAM_CREDIT_BYTES'), '初始额度镜像与宿主脱钩').toBe(
+      rustNum(rs, 'DEFAULT_STREAM_CREDIT_BYTES'),
+    );
+    expect(tsNum(ts, 'MAX_STREAM_CREDIT_BYTES'), '补额封顶镜像与宿主脱钩').toBe(
+      rustNum(rs, 'MAX_STREAM_CREDIT_BYTES'),
+    );
+    expect(tsNum(backend, 'STREAM_FRAME_OVERHEAD_BYTES'), '帧开销镜像与宿主脱钩').toBe(
+      rustNum(rs, 'STREAM_FRAME_OVERHEAD_BYTES'),
+    );
+    const readings: Array<[string, number]> = [
+      ['宿主初始额度', rustNum(rs, 'DEFAULT_STREAM_CREDIT_BYTES')],
+      ['宿主补额封顶', rustNum(rs, 'MAX_STREAM_CREDIT_BYTES')],
+      ['宿主帧开销', rustNum(rs, 'STREAM_FRAME_OVERHEAD_BYTES')],
+    ];
+    for (const [label, value] of readings) {
+      expect(value, `${label}被读成 0：等值针在 0 == 0 上自我豁免`).toBeGreaterThan(0);
+    }
+    // 同族的方向也要钉：初始必须严格低于封顶，否则「补额封顶」无处可试，
+    // 而 ② 的 min() 针会变成一句永远成立的话。
+    expect(
+      rustNum(rs, 'DEFAULT_STREAM_CREDIT_BYTES'),
+      '初始额度不低于封顶：窗口没有增长空间，封顶针成为空话',
+    ).toBeLessThan(rustNum(rs, 'MAX_STREAM_CREDIT_BYTES'));
+  });
+
+  it('② 宿主的构造点与判定式逐字：额度只有那一份原语说了算', () => {
+    const rs = read(STREAM_RS);
+    const admission = read(ADMISSION_RS);
+    expect(rs, '窗口不再由两侧镜像常量构造（初始/封顶换了来源，①的等值针就成了空账）').toContain(
+      'CreditWindow::new(DEFAULT_STREAM_CREDIT_BYTES as u64, MAX_STREAM_CREDIT_BYTES as u64)',
+    );
+    expect(rs, '帧开销没进代价式：空帧免费，只发空帧的流能把额度走得无限远').toMatch(
+      /STREAM_FRAME_OVERHEAD_BYTES\s*\.saturating_add\(json_bytes\)\s*\.saturating_add\(/,
+    );
+    expect(
+      admission,
+      '拒绝判据被换成 >=：恰好等于余额的帧也会被拒（两侧差一，轮 65 同形）',
+    ).toContain('if credits > self.available {');
+    expect(admission).not.toMatch(/if credits >=\s*self\.available/);
+    expect(admission, '补给不再封顶：窗口可以越过 MAX 无限增长').toContain(
+      'self.available = self.available.saturating_add(credits).min(self.max);',
+    );
+  });
+
+  it('③ 测试替身的判据方向逐字，裸字面量不许回潮', () => {
+    const backend = read(BACKEND_TS);
+    expect(backend).toContain(
+      'const required = STREAM_FRAME_OVERHEAD_BYTES + jsonBytes + rawBytes;',
+    );
+    expect(backend, '开销降回裸字面量：那是第三份可以各自漂移的账').not.toMatch(
+      /const required = \d+ \+/,
+    );
+    expect(backend, '拒绝判据方向漂走（>= 会把恰好用光的帧也拒掉）').toContain(
+      'if (required > state.creditBytes)',
+    );
+    expect(backend).not.toContain('if (required >= state.creditBytes)');
+    expect(backend, '拒了却仍扣额：留下部分效果，与宿主的「拒绝零副作用」相反').toContain(
+      'state.creditBytes -= required;',
+    );
+    expect(backend, '补额不封顶：这份内核的窗口可以越过宿主的硬上限').toContain(
+      'state.creditBytes = Math.min(MAX_STREAM_CREDIT_BYTES, state.creditBytes + bytes);',
+    );
+    expect(backend, '拒绝不再报背压码：用例与真机的失败面从此无关').toContain(
+      'E_STREAM_BACKPRESSURE',
+    );
+    expect(
+      hits(backend, 'if (!Number.isSafeInteger(bytes) || bytes < 0)'),
+      '补给入参的判定处数变了（这份内核只该有一处）',
+    ).toBe(1);
+  });
+
+  it('④ 补额这条腿全链可达：命令 → 线格式 → 注册表 → 那份原语', () => {
+    const tauri = read(TAURI);
+    const adapter = read(ADAPTER);
+    const registry = read(REGISTRY_RS);
+    const rs = read(STREAM_RS);
+    const start = tauri.indexOf('pub fn host_stream_grant(');
+    expect(start, '读不到补额命令的定义（下面的切片针会整条失效）').toBeGreaterThanOrEqual(0);
+    const body = tauri.slice(start, tauri.indexOf('pub fn host_stream_close', start));
+    expect(body, '补额命令不再是 tauri 命令').toContain('#[tauri::command]');
+    expect(body, '命令不再取订阅者身份：补额会落到任意主体上（宿主侧是 owner-scoped）').toContain(
+      'subscriber_of(window.label())',
+    );
+    expect(body, '命令体不再进线格式层').toContain('wire_stream_grant(&state, &subscriber, &req)');
+    expect(tauri, '命令没注册进 invoke_handler（前端调它只会 command not found）').toContain(
+      '$crate::tauri::host_stream_grant,',
+    );
+    expect(tauri, '线格式层没把字节数交给核心').toContain(
+      'crate::cmd_stream_grant(state, subscriber, &req.stream_id, req.bytes)',
+    );
+    expect(adapter, '核心没问注册表要额度（把返回值换成常数，门禁必须红）').toContain(
+      'state.registry.stream_grant(stream_id, subscriber, bytes)',
+    );
+    expect(registry, '注册表没把补额交给那条流的窗口').toContain(
+      'self.streams.lock().grant(stream_id, subscriber, bytes)',
+    );
+    expect(rs, '原语本身不再收额：§98 的 Consumer 补给无处可去').toContain(
+      'handle.credit.grant(bytes as u64)',
+    );
+    expect(
+      hits(read(HOST_TS), "this.call<StreamCredit>('host_stream_grant'"),
+      '前端两条补额路径少了一条（开流句柄腿与独立入口腿各一条）',
+    ).toBe(2);
+  });
+
+  it('⑤ 回执线形态两端字段序同构（宿主驼峰化后 = TS 声明序）', () => {
+    const adapter = read(ADAPTER);
+    const rustStruct = adapter.slice(
+      adapter.indexOf('pub struct StreamCredit {'),
+      adapter.indexOf('pub fn cmd_stream_grant('),
+    );
+    expect(
+      [...rustStruct.matchAll(/pub (\w+):/g)].map((m) => m[1]),
+      '宿主回执字段序被改：TS 侧读到的就不再是同一份事实',
+    ).toEqual(['stream_id', 'credit_bytes']);
+    expect(
+      adapter,
+      '宿主回执不再 camelCase 上线（TS 侧读到 undefined，探针与补额回执从此脱钩）',
+    ).toMatch(/#\[serde\(rename_all = "camelCase"\)\]\s*pub struct StreamCredit \{/);
+    const ts = read(STREAM_TS);
+    const tsStruct = ts.slice(
+      ts.indexOf('export interface StreamCredit {'),
+      ts.indexOf('export function isTerminalKind'),
+    );
+    expect(
+      [...tsStruct.matchAll(/^\s{2}(\w+)\??:/gm)].map((m) => m[1]),
+      'TS 回执字段序与宿主不同构',
+    ).toEqual(['streamId', 'creditBytes']);
+  });
+
+  it('⑥ 镜像注释、本轮记录与 4 条行为用例同册', () => {
+    const stream = read(STREAM_TS);
+    const backend = read(BACKEND_TS);
+    const t = read(TEST_TS);
+    expect(stream, '两个镜像常量没交代真源是谁').toContain('轮 65 在打包端抓到过同一类账');
+    expect(backend, '开销常量没交代它是镜像、也没交代为什么不导出').toContain(
+      '轮 66 之前这里是一个裸字面量 `32`',
+    );
+    expect(backend, '内核没交代「拒绝不留部分效果」这条与宿主同形的边界').toContain(
+      '拒绝必须发生在扣额与占 `seq` **之前**',
+    );
+    expect(read(PLAN), '缺口方案缺轮 66 小节').toContain(
+      '### 轮 66：额度这条腿第一次被两侧同值钉住',
+    );
+    const changelog = read('CHANGELOG.md');
+    expect(changelog, 'CHANGELOG 缺轮 66 的收口条目').toContain('却从未与宿主对过表');
+    expect(changelog, 'CHANGELOG 缺轮 66 的登记条目（补额无生产调用点）').toContain(
+      '补额入口在仓内零生产调用点（轮 66 登记，等批准）',
+    );
+    for (const title of [
+      "it('开流即拿到宿主的初始额度：空帧扣固定开销，载荷只按字节数加账'",
+      "it('恰好用光额度必须放行，多 1 字节当场拒且零副作用（不发帧、不占 seq）'",
+      "it('补额封顶在宿主的硬上限，非法补给当场拒'",
+      "it('接收方补额后立刻恢复写帧，扣额仍由同一笔算术裁决'",
+    ]) {
+      expect(t, `缺行为用例：${title}`).toContain(title);
+    }
+    // 用例跑得起来的前提：补额命令在本文件的 CAPS 里。此前不在——那条分支从未
+    // 被任何用例行使过，值针再多也只会钉住一份没人走过的代码。
+    expect(t, '补额命令没进流式用例的 CAPS：那条分支又回到从未被行使').toContain(
+      "  'host_stream_grant',\n",
+    );
+    expect(t, '开销不是从空帧现推的（第三份数字回到了用例里）').toContain(
+      'async function deriveFrameOverhead',
+    );
+  });
+});

@@ -84,7 +84,13 @@
     "    链没断在「没人读」，断在「读了错的数」。修法＝打包端跟随宿主（总预算 200 MiB、单文件严格小于），",
     "    wire-gate 除等值针外还钉**判据方向**与两处总大小判定的**处数**；本轮不改声明名，A/B 读数不变。",
     "    遗留同族：`tauron-host/src/stream.ts` 的 `DEFAULT_STREAM_CREDIT_BYTES` / `MAX_STREAM_CREDIT_BYTES`",
-    "    与 `tauron-host::stream` 同名 const 之间仍无针；`types/envelope.ts#DEFAULT_TIMEOUT_MS` 在 Rust 侧无强制点，登记不动。"
+    "    与 `tauron-host::stream` 同名 const 之间仍无针；`types/envelope.ts#DEFAULT_TIMEOUT_MS` 在 Rust 侧无强制点，登记不动。",
+    "轮 66：收上条前半（三笔额度账第一次两侧同值钉住）。`stream.ts` 两个镜像与宿主 `pub const` 由",
+    "  wire-gate 逐值对读并自检「读成 0」，`MockBackend` 的帧开销从裸字面量升为**模块内具名常量**（刻意不导出：",
+    "  导出即扩已发布面，日后收敛要走破坏性批准），判据方向两侧同钉。新登记：`host_stream_grant` 的补额 API",
+    "  在仓内**零生产调用点**（SDK 面 + example 之外无读者），真机每条流只能吃初始额度、后续须嵌入方主动补给——",
+    "  这是 §98「Consumer: grant N bytes」的应有语义而非缺陷；改成收帧即自动补额会动已发布 SDK 的流控语义，等批准。",
+    "  本轮不改声明名、不改数值，A/B 两侧读数不变。"
   ],
   "plane": {
     "include": ["crates/*/src", "packages/*/src", "examples", "apps"],

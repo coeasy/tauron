@@ -11,8 +11,18 @@ export type StreamKind = 'data' | 'end' | 'error';
 
 /** 合法帧种类（运行时校验用；未知取值一律拒绝，不做兜底）。 */
 export const STREAM_KINDS: readonly StreamKind[] = ['data', 'end', 'error'];
+/**
+ * 测试替身（`MockBackend` 的流式内核）复算额度用的两个镜像值。
+ *
+ * 真源是宿主 `tauron_host::stream` 里同序的两个 `pub const`（初始额度、单条流
+ * 未兑付额度的硬上限）。轮 65 在打包端抓到过同一类账——镜像的数值漂了没人报红，
+ * 前端契约测试全绿、真机却拒收；wire-gate 轮 66 起逐值钉等式并自检「读成 0」。
+ * 第三笔账（帧开销）的镜像不在这里：判定发生在 `backend.ts`，它就住在哪儿。
+ */
 export const DEFAULT_STREAM_CREDIT_BYTES = 64 * 1024;
+/** 补额时两侧都夹到它（`min`，不是「加完不管」）；超限补给等于白给。 */
 export const MAX_STREAM_CREDIT_BYTES = 16 * 1024 * 1024;
+/** 额度补充命令的回执（宿主同名结构的 camelCase 线形态：哪条流、还剩多少）。 */
 export interface StreamCredit {
   streamId: string;
   creditBytes: number;

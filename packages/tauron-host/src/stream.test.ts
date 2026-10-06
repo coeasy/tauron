@@ -11,13 +11,19 @@ import { describe, expect, it, vi } from 'vitest';
 import { MockBackend } from './backend.js';
 import { HostClient } from './host.js';
 import { toHostRpc } from './rpc.js';
-import { isStreamFrame, parseStreamKind } from './stream.js';
-import type { StreamFrame } from './stream.js';
+import {
+  DEFAULT_STREAM_CREDIT_BYTES,
+  MAX_STREAM_CREDIT_BYTES,
+  isStreamFrame,
+  parseStreamKind,
+} from './stream.js';
+import type { StreamCredit, StreamFrame } from './stream.js';
 
 const CAPS = [
   'host_plugin_call',
   'host_stream_open',
   'host_stream_write',
+  'host_stream_grant',
   'host_stream_close',
   'host_events_publish',
   'host_events_subscribe',
@@ -70,6 +76,26 @@ async function writeFrame(
   return backend.invoke<StreamFrame>('host_stream_write', {
     req: { streamId, ...body },
   });
+}
+
+/** 只读探针：补 0 字节把当前额度读回来（宿主补额命令的返回值就是同一份事实）。 */
+async function probeCredit(backend: MockBackend, streamId: string): Promise<number> {
+  const credit = await backend.invoke<StreamCredit>('host_stream_grant', {
+    req: { streamId, bytes: 0 },
+  });
+  return credit.creditBytes;
+}
+
+/**
+ * 现推帧开销：空帧的扣额就是开销本身。
+ *
+ * 用例因此不必再抄一份开销数字——轮 66 之前那个数在源码里是裸字面量，
+ * 再抄进用例就成了第三份可以各自漂移的账。
+ */
+async function deriveFrameOverhead(backend: MockBackend, streamId: string): Promise<number> {
+  const before = await probeCredit(backend, streamId);
+  await writeFrame(backend, streamId, {});
+  return before - (await probeCredit(backend, streamId));
 }
 
 /** 让挂起的微任务跑完（`openStream` 的开流是异步的）。 */
@@ -489,5 +515,116 @@ describe('HostRpc（R5）', () => {
     expect(parseStreamKind('done')).toBeNull();
     expect(parseStreamKind('')).toBeNull();
     expect(parseStreamKind(1)).toBeNull();
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// 额度背压（A79）——轮 66 补的用例族。
+//
+// 这份内核从轮 10 起就在自己算额度（初始值、补额封顶、写帧扣额），而真源是宿主
+// `tauron_host::stream` 的那套 `CreditWindow`；此前**一条用例都没有**，连
+// `host_stream_grant` 都不在本文件的 `CAPS` 里（发出去只会 "command not found"，
+// 于是这条分支从未被行使）。缺口的形状和轮 65 的打包端同族：镜像自己算自己那份账，
+// 前端全绿、真机按另一套数拒收——差别只在这里连"绿"都没有，是从未测过。
+// 宿主侧对应的是 `stream.rs` 的四条用例（初始额度、恰好用光、+1 拒绝、补额封顶），
+// 下面按同一条序列复刻，数值全部现推或读自镜像，不抄第三份。
+// ──────────────────────────────────────────────────────────────────────────
+
+describe('额度背压（A79）：这份内核与宿主算的是同一笔账', () => {
+  /** 开一条流，并把帧收进 `seen`（载体仍由 `host_plugin_call` 登记）。 */
+  async function open(backend: MockBackend, host: HostClient, seen: StreamFrame[]) {
+    const pending = await host.pluginCall(
+      { callId: 'caller-c', method: 'fmt', kind: 'stream' },
+      (f) => seen.push(f),
+    );
+    const { streamId } = await openStream(backend, pending.callId);
+    return streamId;
+  }
+
+  async function grant(backend: MockBackend, streamId: string, bytes: number) {
+    return backend.invoke<StreamCredit>('host_stream_grant', { req: { streamId, bytes } });
+  }
+
+  it('开流即拿到宿主的初始额度：空帧扣固定开销，载荷只按字节数加账', async () => {
+    const { backend, host } = setup();
+    const seen: StreamFrame[] = [];
+    const streamId = await open(backend, host, seen);
+
+    expect(await probeCredit(backend, streamId)).toBe(DEFAULT_STREAM_CREDIT_BYTES);
+
+    const overhead = await deriveFrameOverhead(backend, streamId);
+    expect(overhead, '空帧不占额度的话，只发空帧的流能把额度走得无限远').toBeGreaterThan(0);
+
+    // 固定：再来一空帧，扣得一模一样。
+    const mid = await probeCredit(backend, streamId);
+    await writeFrame(backend, streamId, {});
+    expect(await probeCredit(backend, streamId)).toBe(mid - overhead);
+
+    // 线性：10 字节 raw 的代价 = 开销 + 10。
+    const before = await probeCredit(backend, streamId);
+    await writeFrame(backend, streamId, { argsRaw: new Uint8Array(10) });
+    expect(await probeCredit(backend, streamId)).toBe(before - overhead - 10);
+  });
+
+  it('恰好用光额度必须放行，多 1 字节当场拒且零副作用（不发帧、不占 seq）', async () => {
+    const { backend, host } = setup();
+    const seen: StreamFrame[] = [];
+    const streamId = await open(backend, host, seen);
+    const overhead = await deriveFrameOverhead(backend, streamId);
+
+    // 把余下额度恰好用光：raw = 余额 - 开销。
+    const remain = await probeCredit(backend, streamId);
+    const drained = await writeFrame(backend, streamId, {
+      argsRaw: new Uint8Array(remain - overhead),
+    });
+    expect(await probeCredit(backend, streamId)).toBe(0);
+
+    // 多 1 字节即拒（判据是「所需 > 余额」，不是「≥」——恰好等于余额得放行，上面已证）。
+    const delivered = seen.length;
+    await expect(writeFrame(backend, streamId, { argsRaw: new Uint8Array(1) })).rejects.toThrow(
+      new RegExp(`E_STREAM_BACKPRESSURE: need ${overhead + 1}, remain 0`),
+    );
+    expect(seen, '被拒的帧不得派发').toHaveLength(delivered);
+    expect(await probeCredit(backend, streamId), '拒绝不得留下部分扣额').toBe(0);
+
+    // 被拒的帧也不许占 seq：下一帧仍紧接上一个号。
+    await grant(backend, streamId, 100);
+    const resumed = await writeFrame(backend, streamId, {});
+    expect(resumed.seq).toBe(drained.seq + 1);
+  });
+
+  it('补额封顶在宿主的硬上限，非法补给当场拒', async () => {
+    const { backend, host } = setup();
+    const streamId = await open(backend, host, []);
+
+    const clamped = await grant(backend, streamId, Number.MAX_SAFE_INTEGER);
+    expect(clamped.creditBytes).toBe(MAX_STREAM_CREDIT_BYTES);
+    expect(clamped.streamId, '回执必须指向被补的那条流（宿主回执同形）').toBe(streamId);
+    expect(await probeCredit(backend, streamId), '探针与补额回执报同一份事实').toBe(
+      MAX_STREAM_CREDIT_BYTES,
+    );
+
+    // 封顶后继续补仍是白给：不会越过上限，也不会报错。
+    expect((await grant(backend, streamId, 1)).creditBytes).toBe(MAX_STREAM_CREDIT_BYTES);
+
+    await expect(grant(backend, streamId, -1)).rejects.toThrow(/E_INVALID_MANIFEST/);
+    await expect(grant(backend, streamId, 1.5)).rejects.toThrow(/E_INVALID_MANIFEST/);
+    await expect(grant(backend, streamId, Number.NaN)).rejects.toThrow(/E_INVALID_MANIFEST/);
+  });
+
+  it('接收方补额后立刻恢复写帧，扣额仍由同一笔算术裁决', async () => {
+    const { backend, host } = setup();
+    const seen: StreamFrame[] = [];
+    const streamId = await open(backend, host, seen);
+    const overhead = await deriveFrameOverhead(backend, streamId);
+    const remain = await probeCredit(backend, streamId);
+    await writeFrame(backend, streamId, { argsRaw: new Uint8Array(remain - overhead) });
+    expect(await probeCredit(backend, streamId)).toBe(0);
+
+    expect((await grant(backend, streamId, 100)).creditBytes).toBe(100);
+    const resumed = await writeFrame(backend, streamId, {});
+    expect(await probeCredit(backend, streamId)).toBe(100 - overhead);
+    expect(resumed.seq, '补额后的第一帧仍由宿主铸号').toBe(3);
+    expect(seen.map((f) => f.seq)).toEqual([1, 2, 3], '三帧连续，中间没有静默丢帧');
   });
 });
