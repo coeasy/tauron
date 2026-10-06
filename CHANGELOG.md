@@ -15,6 +15,35 @@
 
 ### Changed
 
+- **孤儿门禁的「谁替它作证」第一次被当真（轮 62）**：`check-orphan-public-api.mjs` 判「有没有消费者」靠的
+  是行视图，而那份视图同时犯了两条方向相反的错。**看不见真引用**：`lineView` 丢掉的是*每个*文件的
+  `export …` 行，不只是候选自己那一份，于是 `export class MemoryTransport implements HostTransport`、
+  `export function generateKeyPair(): KeyPair` 这类真在生产代码里引用候选的行不作数——B 口径 43 条里逐条
+  人工核对，实测 5 条假孤儿（`HostTransport`/`KeyPair`/`SignatureResult`/`ShellManager`/`ShellManagerOptions`），
+  假孤儿比假红贵，它驱动人去收口一条本来完好的链路。**同名声明互相作证**：只把声明行放回去会立刻造出另一侧
+  的假绿——`@tauron/host` 的 `events.ts#PublishResult` 被 `@tauron-app-cli/src/pack.ts` 自己声明的同名
+  `export interface PublishResult` 判成已接线，`host/window-state.ts#WindowState`（class）被 ui-primitives 的
+  同名字符串联合作证，`host/errors.ts#normalizeError` 被 `tauron-ui/plugin-manager.ts` 的同名私有函数作证，
+  CLI 的 `scaffold.ts#generatePackageJson` 被 `packages/tauron-cli/src/plugin.ts` 里那行*它自己的*调用作证。
+  两条修正只在 **TS 面成对落地**（`otherView`：别的文件的声明行算引用位，自己顶格声明过同名的文件整份
+  不作证），Rust 面**口径不动**并逐名说明为什么——只放开第一条会让 `eventbus.rs#queue_stats`、
+  `installation.rs/admin_audit.rs#is_durable`、`execute.rs#execute` 这类跨 crate 双胞胎互相作证（实测 9 条真孤儿
+  被打成已接线），加上第二条又把 `adapter/lib.rs:1619` 的 `"host_settings_migrate",`（命令注册表里那条，正是
+  同名命令函数的线上接线证据）抹成假孤儿；Rust 侧要判对歧义得解析限定路径，登记为遗留。实测净效果：
+  **A 口径 622→634**（+12 全是被摘掉的假绿）、**B 口径 43→39**（−5 假孤儿 +1 真孤儿 `LogLevel`），
+  台账 `note`/`discoveryNote` 同步改口并把余量真话写进去（634/635——**只剩 1 条余量**）。
+  顺带修掉同轮暴露的第三处守卫退化：多符号台账条目（`A / B / C`）此前被整串当名字匹配，守卫对这类条目
+  **静默失效**，`dialog-client.ts` 自己的定义行会反过来替「已接线」作证。
+- **上限棘轮证明不了判据，于是给它装了等值读数钉（轮 62）**：轮 61 留过一条没法回答的诊断（撤掉单行 `use`
+  的 `;` 守卫后 A 口径 622→624，仍在 635 上限内，门禁照绿）。新增 `discoveryObserved { a, decl }`：与实测
+  **等值**才绿、缺键即红、涨跌都算不匹配——「消费者视图被换宽松」第一次有了失败出口，代价是「接线面变好了」
+  也变成必须显式改账的动作。
+- **通知读取端的线形第一次被逐字段钉住（轮 62）**：`host_notifications_list` 的 TS `NotifyItem` /
+  `DispatchRecord` 字段集与宿主手工 `serde_json::json!` 的键集、兼容用的 `NotificationRecord` 与 Rust
+  `pub struct` 的字段（按 camelCase 折叠）在 `wire-gate` 里比对成集合相等，两侧那句「与 Rust `NotifyEntry`
+  逐字段 camelCase 映射」「与 TS 契约一致」的注释宣称一起钉住。本轮实测**没有发现漂移**，它是防回归钉：
+  轮 61 的 `PluginCancelRequest` 已经证明这类键名漂移的代价是运行期读出 `undefined` 或整次反序列化失败，
+  而编译与既有测试都不红。
 - **孤儿棘轮第一次看见「TS 声明面」，并顺手补掉一条真断链（轮 61）**：`check-orphan-public-api.mjs`
   的自动发现只枚举 `pub fn` / `export function` / `export class`，`export const` / `export type` /
   `export interface` 全程在棘轮外——轮 58 遗留②「SDK 面未审」正是从这里漏下去的。现在 B 口径是

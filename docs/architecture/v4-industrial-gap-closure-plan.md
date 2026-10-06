@@ -3772,7 +3772,138 @@ Tier↔Bundle **3 tiers / 10 bundles / 85 commands**）、`docs:check` **7 个�
 逐字节还原，跑这两条是按轮 57 立的规矩：工具链漂移能把 HEAD 上的门禁照红，不查就不知道）。
 
 
-## 9. 明确推迟 / 不做（附理由）
+### 轮 62：跨文件消费者视图看不见声明行，同名声明却在互相作证
+
+**断链**：孤儿门禁的判据是一句话——「文档宣称可用，而接线面里没有任何消费者」。轮 22 到轮 61 之间，
+这句话里的「消费者」由 `lineView()` 生成的行视图代读，而那份视图同时犯了两条方向相反的错：
+
+1. **看不见真引用（假孤儿）**。`lineView` 丢掉的是**每个文件**的 `export …` 行，不只是候选自己那一份。
+   于是 `export class MemoryTransport implements HostTransport {`、`export function generateKeyPair(): KeyPair {`、
+   `createShellManager(options: ShellManagerOptions = {}): ShellManager {` 这些真在生产代码里引用候选的行
+   不作数。B 口径 43 条里逐条人工核对，实测 5 条是这种假孤儿：`HostTransport`、`KeyPair`、`SignatureResult`、
+   `ShellManager`、`ShellManagerOptions`。「声明行不算」的初衷是防候选给自己作证，但给自己作证只在**声明它的
+   那个文件**里发生，而 B 口径早就用 `isSelfDeclaration` 精确剔除了那一行——把全体文件的声明行一起丢掉，
+   换来的是把在用面判成债务，而假孤儿比假红贵：它驱动人去「收口」一条本来完好接线的链路。
+2. **同名声明互相作证（假绿）**。只把声明行放回去，当场造出另一侧的失真：`@tauron/host` 的
+   `events.ts#PublishResult` 被 `@tauron-app-cli/src/pack.ts` 自己声明的同名 `export interface PublishResult`
+   判成已接线；`host/window-state.ts#WindowState`（一个 class）被 `ui-primitives/title-bar.ts` 的同名
+   字符串联合类型作证；`host/errors.ts#normalizeError` 被 `tauron-ui/plugin-manager.ts` 里自己的同名私有
+   函数作证；`LogLevel` 被 `tauron-app-cli/src/logger.ts` 的同名声明作证。CLI 侧还有一类更隐蔽的：
+   `@tauron/app-cli` 的 `scaffold.ts#generatePackageJson` 由 `packages/tauron-cli/src/plugin.ts` 的那行调用作证——
+   而那一行调用的是**它自己包内**的同名函数。这类「形状相同、名字相同、归属不同」的行是纯粹的词面巧合。
+
+两条必须**成对**落地：只修 1 会把 2 放大（新计入的声明行正是同名双胞胎最容易重合的地方），只修 2 会把 1
+放大（剔掉的文件本来就没有别的引用位）。实测净效果（`--list-a` / `--list-decl` 前后清单逐名 diff）：
+**A 口径 622→634**（+12，全部是被摘掉的假绿：CLI scaffold 家族 9 条 + `host/errors.ts#normalizeError` +
+`host/window-state.ts#WindowState` + `types/config.ts#validateConfig`），**B 口径 43→39**
+（−5 假孤儿 +1 真孤儿 `host/client-config.ts#LogLevel`）。
+
+**同一轮的第三处守卫退化**：台账 `orphan` 条目的 `symbol` 允许多符号写法（`createAutoUpdateClient /
+createDialogClient / createDeepLinkClient / startAutoCheck`），而新增的同名守卫取的是
+`symbol.split('::').pop()`——对多符号条目那拿到的是整串，永远匹配不上任何声明，于是守卫对这类条目
+**静默失效**：`dialog-client.ts` 自己的定义行会替「已接线」作证，门禁反过来指控这条 orphan「已经接上了」。
+修法是把 symbol 拆成名字集合（`split(/\s*\/\s*|\s*::\s*/)`）再逐个核对。
+
+**为什么只有 TS 面动口径**：把同两条规则套到 Rust 上，两个方向都实测不成立——
+① 只放开修正一：`host/eventbus.rs#queue_stats` 与 `shell/eventbus.rs#queue_stats`、`admin_audit.rs#is_durable`
+与 `installation.rs#is_durable`、`execute.rs#execute` 这些跨 crate 同名双胞胎改成互相作证，**9 条真孤儿**被打成
+已接线；② 再加上修正二：`adapter/lib.rs:1619` 的 `"host_settings_migrate",` 是 tauri 命令注册表里那一条，
+正是同名命令函数的线上接线证据，而 lib.rs 顶格也声明了同名 `pub fn`，守卫把它抹掉就打出一条假孤儿。
+要在 Rust 上正确判歧义必须解析限定路径（`crate::x::y` 到底指向谁），本轮不并入，按名登记进遗留。
+另外同名判据只认**顶格**声明：Rust 函数体里的 `let summary = …`、带缩进的 impl 方法名（`    fn mkdir`）
+都不是裸路径能解析到的名字——不区分缩进时，一次性把 36 条既有接线打回孤儿（`C:/tmp/r62-rust-step.diff`）。
+
+**等值读数钉（本轮给门禁本身装的失败出口）**：上限型棘轮是单向的，只在孤儿变多时红，所以轮 61 留下的那条
+诊断——「撤掉单行 `use` 的 `;` 守卫后 A 口径 622→624，仍在 635 上限内，门禁照样绿」——本轮没法回答。
+新增 `discoveryObserved { a, decl }`：与实测**等值**才绿，缺键即红，涨和跌都算不匹配。于是「消费者视图被换掉」
+这件事第一次有了红绿信号，而代价是把「接线面变好了」也变成一个必须显式改账的动作（读数钉的报错文案对
+涨跌给两条不同指令）。这是 doctrine 里「上限棘轮证明不了判据」的那条缺口，不是新的第五把锁。
+
+**修法**：
+
+1. `otherView(rel, names)`——TS 文件的消费者视图换成含声明行版本（`declViews`），同文件同名顶格声明者
+   整份不作证（`declaresSame`），Rust 文件保持 `views`；A 口径的自动发现、B 口径的 `hasDeclConsumer`
+   与台账 probe 三条路径统一走这一个函数，杜绝「口径只修了一半」。
+2. `DECL_NAME_RES` 按语言给同名判据（Rust 只认顶格 `pub …`/`const|static|fn|struct|…`，TS 只认顶格
+   `export …`/`const|let|var|function|class|interface|type|enum`），带缩进的一律不算声明。
+3. 台账 `orphan` / `wiredWitness` 复核与自动发现共用上述视图，多符号条目按名字集合核对。
+4. `contracts/orphan-public-api.json` 的 `note` 与 `discoveryNote` 同步改口：「接线面（除声明文件）」
+   这句从今天起只对 Rust 成立；A 口径余量（634/635，**只剩 1 条**）与被摘掉的 12 条假绿逐名写进台账，
+   避免下一轮把「数变大了」误读成「代码变差了」。
+
+**新增行为测试**（`packages/tauron-contract-tests/src/wire-gate.test.ts`，轮 62 一个 describe、6 条 `it()`）：
+① 两条视图修正各钉方向（一松一紧，缺一条就是另一种错），含 Rust 侧那一行的**行锚**针与 `DECL_NAME_RES`
+两块模式、多符号 split；② 读数钉本身（缺键守卫、双向不等即红、B 口径也在钉内、台账读数与上限不打架）；
+③ 被改判的 5 条假孤儿——引用行必须还在线上，不许靠删代码凑数；④ 被摘掉的 4 处假绿——跨包顶格同名声明
+必须还在（声明一旦被合并/改名，守卫的依据就要重新核对）＋多符号工厂条目仍在台账；⑤ **通知读取端的线形
+一致性**：`host_notifications_list` 的 TS `NotifyItem` / `DispatchRecord` 字段集与宿主手工
+`serde_json::json!` 的键集逐字相等，兼容用的 `NotificationRecord` 与 Rust `pub struct` 的字段按
+camelCase 折叠后相等，并把两侧那句「与 Rust `NotifyEntry` 逐字段 camelCase 映射」「与 TS 契约一致」的
+注释宣称一起钉住——轮 61 的 `PluginCancelRequest` 证明了这类漂移的运行期代价（键名错→`undefined` 读或
+整次反序列化失败，编译与既有测试都不红），通知这条链是同一形状的下一个候选；⑥ 本轮记录与台账注释同步。
+
+**诚实边界（本轮没做到的部分）**：
+
+- ⑤ 本轮实测**没有发现漂移**（两侧键集本来就一致），它是防回归钉，不是「修好的一条断链」；把通知线形
+  读成端到端证据会超出实际——两侧仍没有同一条真宿主链路跑过 `host_notifications_list`。
+- 视图判据没有第三档：整份文件失去作证资格是**过严**的一侧。若某个 TS 文件通过 alias import
+  （`import { generatePackageJson as other } from '@tauron/cli'`）引用别包的同名符号，别名不是裸名字，
+  守卫会把它一并抹掉→假孤儿。本轮实测这种写法在仓内为 0 处，但它不是判据本身的性质，是巧合。
+- Rust 面的盲区原样保留（见上），台账按名登记；`--discover` 的 A 口径数字因此仍是「Rust 侧未审」口径下的读数。
+- 12 条新计入的候选只被**数对了**，没有逐条 disposition：它们绝大多数是合法的对外 CLI/SDK 面
+  （包内被同文件调用、包外只有 `index.ts` 再导出，而 A 口径按设计不把再导出当消费者），
+  但「合法」这句话本轮没有逐条核实到文档宣称层面。
+- A 口径余量只剩 1 条：任何新增零消费者的 `pub fn`/`export function`/`export class` 当场红。这是棘轮的
+  本意，但也意味着下一轮若要新增公开面，必须同时接消费者或下调别处的基线——不是加余量。
+
+**遗留**：① 12 条新计入候选的逐条定性（`--discover --list-a` 可列全量），收口后下调 `discoveryBaseline`；
+② Rust 侧限定路径解析（把 ①/② 两条修正安全地推到 Rust 面，并回收 `lib.rs:1619` 那类注册表接线证据）；
+③ alias import 的判据补强（守卫改为「按名字的解析来源」而不是「按文件」）；④ ⑤ 的线形一致性只覆盖通知，
+其余手工 `json!` 载荷（`host_updater_status`、`host_capabilities` 等）同样没有逐字段针；⑤ 轮 61 遗留①–④
+（B 口径 39 条逐条定性、测试读者档位、三处破坏性动作、轮 58 遗留①）仍在。
+
+**变异证明**：终检 **40 例全红、树完整性 14/14 OK**（`C:/tmp/r62-mut2.log`；本节文字收口后按
+「动过被钉文件必须重跑」复跑一遍仍 40/40）。分布：口径本体 7 例（V1 撤修正一 → `口径 decl 实测 44 ≠ 台账记录 39`，
+B 的 5 条假孤儿整批回归；V2 撤修正二 → `口径 a 实测 609 ≠ 台账记录 634`；V3 把修正一推到 Rust；V4 让缩进也算
+声明；V5 让 A 口径绕开修正后的视图；V6 多符号条目的 split 退化 → 门禁反过来指控台账那条 orphans「已接线」；
+V7 反向过紧＝所有 TS 文件一律失声）、读数钉 4 例（缺键、只盯涨、退化成「不超过上限」、整键缺失）、
+新增公开面 1 例（G1 加一个零消费者的 `export function`：635 仍 ≤ 上限 635，**只有等值钉把它打回**
+`口径 a 实测 635 ≠ 台账记录 634`——这条正是「只剩 1 条余量」时真正的闸）、① 的文本针 signal 8 例
+（等价改写——加花括号、去冒号后空格、可选链、数组多包一层、判据表改名——都必须红，否则针是空钉）、
+③ 的引用行针 3 例、④ 的声明针 5 例、⑤ 的线形 6 例（TS 少字段 / Rust 多键 / TS 键名漂移 / 两侧注释各抹一句 /
+兼容记录字段改名）、⑥ 文档同步 3 例。两条**不设红、只量效应**的诊断把本轮的机制性 claim 落到数上：
+DIAG-1 撤掉守卫后，被摘掉的四个假绿 `host/events.ts#PublishResult`、`host/window-state.ts#WindowState`、
+`host/errors.ts#normalizeError`、`types/config.ts#validateConfig` **逐个从孤儿清单里消失**（＝重新被打成已接线），
+候选同时掉到 A 609 / B 37；DIAG-2 撤掉修正一则 **A 634 一动不动、B 39→44**——修正一确实只作用在
+「别的文件的声明行算不算引用」这一侧，而修正二才是 A 面那 12 条的来源。
+另有一条设计层教训值得进门禁 doctrine：把 `export interface PublishResult` 就地改名**不会**让假绿回来
+（改名后的声明行里已经没有 `PublishResult` 这个裸 token，`\b` 边界不匹配），最初设想的两个「反向」变异
+因此根本不成立，被改成 ④ 的声明针用例；假绿的前提是**同名声明行真实存在**，这一点由 ④ 钉住而不是由门禁判据钉住。
+
+**读数（本轮收口时同批采集，全部来自本轮日志）**：`pnpm verify` rc=0——**20 个包**全绿，逐包相加
+**107 个测试文件 / 1954 条测试**（轮 61 收口时 1948，本轮 +6 全在 wire-gate）；`tauron-contract-tests`
+**230 passed / 2 files**（轮 61 的 224 + 本轮 6 条 `it()`），wire-gate 单文件在门禁针每次改动后先 prettier
+再复跑，最后一次 **209 passed**。这条绿不是首跑就拿到的：新块首次进 `pnpm verify` 时红在
+`@tauron/contract-tests` 的 `tsc -p tsconfig.build.json` 构建——三处 `m[1]` 在
+`noUncheckedIndexedAccess` 下是 `string | undefined`，而 `pnpm -C packages/tauron-contract-tests exec vitest run`
+单跑**全绿**（vitest 不做类型检查）。补 `!` 之后才 20/20 绿，另有一条同类失真在写块当场被抓：
+`region.matchAll()` 的正则缺 `g` 旗标，`matchAll` 直接抛 `TypeError`——若只按「测试变红就算有信号」来验收，
+这类针会以错误的理由红着，永远证不了它要证的东西。
+`pnpm gates:check` rc=0，九条闸各打印一行 OK：孤儿台账 **14 条未接线宣称 + 6 条已接线反例**、
+**A 口径 634 ≤ 基线 635 且实测＝读数钉 634、B 口径 39 ≤ 基线 43 且实测＝读数钉 39**；域归属
+**lib.rs 顶层条目 292 已封顶** / 19 个域 / 41 个 impl 类型 / 187 个方法 / 93 组顶层 fn / 389 个函数；
+Tier↔Bundle **3 tiers / 10 bundles / 85 commands**；`pnpm docs:check` **7 个文档 / 281 条引用**全 OK——
+本轮新小节里有一条被它当场判红过：把 npm 包名与文件路径连写成一串再带上行号，被解析器当成仓库路径，
+报「路径在仓库里找不到」，改成真实路径 `packages/tauron-cli/src/plugin.ts` 之后才绿——这条闸确实把文档里的路径引用当可执行断言在跑。
+`pnpm version:check` **26 处版本号全部 1.1.0**、`pnpm command-surface:check` **85 commands**
+（底座 61 / 运行时 22 / 安装 2，孤儿命令 0、未归类 0）、`pnpm format:check`
+（`All matched files use Prettier code style!`）、`pnpm lint`（`eslint . --max-warnings 0`）全 rc=0。
+Rust 侧发布级硬门禁同轮复跑：`pnpm lint:rust`（workspace clippy `-D warnings`）rc=0（0 条 warning、
+`Finished dev profile`，`C:/tmp/r62-clippy.log`）、`cargo fmt --all --check` rc=0——本轮对 Rust 源码
+**零改写**（⑤ 的线形核对只读文本），跑这两条沿用轮 57 立的规矩：工具链漂移能把 HEAD 上原本绿的门禁照红，
+不查就不知道。
+
+
 
 | 项 | 处置 | 理由 |
 |---|---|---|

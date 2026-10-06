@@ -8083,3 +8083,156 @@ describe('门禁：轮 61 孤儿棘轮的 TS 声明面口径（公开 const/type
     );
   });
 });
+
+describe('门禁：轮 62 跨文件消费者视图（别的文件的声明行算引用、同名顶格声明不作证、读数钉双向）', () => {
+  const SCRIPT = 'scripts/check-orphan-public-api.mjs';
+  const LEDGER = 'contracts/orphan-public-api.json';
+  const HOST_CLIENT = 'packages/tauron-host/src/shell-client.ts';
+  const ADAPTER = 'crates/tauron-adapter/src/lib.rs';
+
+  /** 取 TS interface 的字段名（跳过注释行）。 */
+  function tsFields(text: string, name: string): string[] {
+    const block = new RegExp(`export interface ${name}\\s*\\{([\\s\\S]*?)\\n\\}`).exec(text)?.[1];
+    if (block === undefined) throw new Error(`找不到 TS 声明：export interface ${name}`);
+    return [...block.matchAll(/^\s+([a-z][A-Za-z0-9]*)\s*[?]?:/gm)].map((m) => m[1]!).sort();
+  }
+
+  /** 取 Rust 手工 json! 线形的键名（限定在某个函数体内，避免抓到别的 json!）。 */
+  function rustJsonKeys(text: string, fnName: string, valuePrefix: string): string[] {
+    const start = text.indexOf(`fn ${fnName}`);
+    if (start < 0) throw new Error(`找不到 Rust 函数：${fnName}`);
+    const region = text.slice(start, start + 2400);
+    return [...region.matchAll(new RegExp(`"([a-z][A-Za-z0-9]*)":\\s*${valuePrefix}\\.`, 'g'))]
+      .map((m) => m[1]!)
+      .sort();
+  }
+
+  it('① 两条视图修正都在线上，且各自钉住方向（一松一紧，缺一条就是另一种错）', () => {
+    const script = read(SCRIPT);
+    expect(script, '跨文件声明行不再算引用位（B 口径的 5 条假孤儿会回来）').toContain(
+      'function otherView(',
+    );
+    expect(script, 'A 口径不再走修正后的消费者视图').toContain('otherView(g, [name])');
+    expect(script, '台账 probe 不再走修正后的消费者视图').toContain('otherView(f, names)');
+    // 紧的那一条：同名顶格声明的文件整份不作证（PublishResult / WindowState 那类跨包同名类型）。
+    expect(script, '同名顶格声明守卫被搬空（跨包同名类型会互相作证）').toContain(
+      'declaresSame(rel, n)',
+    );
+    // 松的那一条只给 TS 用；Rust 一旦跟着放开，跨 crate 同名双胞胎就改成互相作证（实测 9 条）。
+    expect(
+      script,
+      'Rust 侧消费者口径被顺手放开（会让 is_durable/queue_stats 双胞胎互相作证）',
+    ).toMatch(/^  if \(rel\.endsWith\('\.rs'\)\) return views\.get\(rel\);$/m);
+    // 同名判据只认顶格：带缩进的 impl 方法名不该让整份文件失去作证资格。
+    const declBlock = /const DECL_NAME_RES = \{[\s\S]*?\n\};/.exec(script);
+    expect(declBlock, '同名判据表被搬走').not.toBeNull();
+    expect(declBlock![0], 'Rust 同名判据不再限定顶格声明').toContain('rust: /^(?:pub');
+    expect(declBlock![0], 'TS 同名判据不再限定顶格声明').toContain('ts: /^(?:export');
+    // 多符号台账条目：整串当名字等于没有守卫（dialog-client.ts 的定义行会替「已接线」作证）。
+    expect(script, '多符号台账条目的同名守卫退化成整串匹配').toContain(
+      'split(/\\s*\\/\\s*|\\s*::\\s*/)',
+    );
+  });
+
+  it('② 等值读数钉：缺键即红、涨跌都要显式改账（上限棘轮对「口径被换掉」是瞎的）', () => {
+    const script = read(SCRIPT);
+    const ledger = JSON.parse(read(LEDGER)) as {
+      discoveryBaseline: number;
+      discoveryBaselineDecl: number;
+      discoveryObserved?: { a?: number; decl?: number };
+    };
+    expect(script, '等值读数钉被搬空（口径被换掉时门禁没有失败出口）').toContain(
+      'discoveryObserved',
+    );
+    expect(script, '缺 discoveryObserved 若不红，视图判据就永远证不了').toContain(
+      "typeof observed[key] !== 'number'",
+    );
+    expect(script, '读数钉若只盯涨不盯跌，把孤儿接回去也能绿').toContain('observed[key] !== count');
+    expect(script, '读数钉漏了 B 口径').toContain("'decl', declCandidates.length");
+    expect(ledger.discoveryObserved?.a, '台账缺 A 口径读数').toBe(634);
+    expect(ledger.discoveryObserved?.decl, '台账缺 B 口径读数').toBe(39);
+    expect(
+      ledger.discoveryObserved!.a,
+      'A 口径读数越过上限（读数钉与棘轮打架）',
+    ).toBeLessThanOrEqual(ledger.discoveryBaseline);
+    expect(
+      ledger.discoveryObserved!.decl,
+      'B 口径读数越过上限（读数钉与棘轮打架）',
+    ).toBeLessThanOrEqual(ledger.discoveryBaselineDecl);
+  });
+
+  it('③ B 口径改判的 5 条假孤儿：引用行必须还在线上，不许靠删代码凑数', () => {
+    expect(
+      read('packages/tauron-host/src/memory-transport.ts'),
+      'Transport 实现行的引用位没了',
+    ).toMatch(/^export class MemoryTransport implements HostTransport \{$/m);
+    expect(read('packages/tauron-market/src/sign.ts'), 'KeyPair 的返回类型标注没了').toMatch(
+      /^export function generateKeyPair\(\): KeyPair \{$/m,
+    );
+    expect(
+      read('packages/tauron-shell-matrix/src/manager.ts'),
+      'ShellManager 的签名引用没了',
+    ).toMatch(
+      /^export function createShellManager\(options: ShellManagerOptions = \{\}\): ShellManager \{$/m,
+    );
+  });
+
+  it('④ 被摘掉的假绿：跨包同名声明必须还在（守卫的前提不成立时，这条要一起改）', () => {
+    const pairs = [
+      ['packages/tauron-ui-primitives/src/title-bar.ts', /^export type WindowState = /m],
+      ['packages/tauron-ui/src/plugin-manager.ts', /^function normalizeError\(/m],
+      ['packages/tauron-app-cli/src/logger.ts', /^export type LogLevel = /m],
+      ['packages/tauron-app-cli/src/pack.ts', /^export interface PublishResult \{$/m],
+    ] as const;
+    for (const [file, re] of pairs) {
+      expect(read(file), `${file} 的顶格同名声明没了——同名守卫的依据需要重新核对`).toMatch(re);
+    }
+    // 台账里那条多符号 orphans 依然成立（工厂函数在接线面确实没人调）。
+    const ledger = JSON.parse(read(LEDGER)) as { orphans: { symbol: string }[] };
+    const entry = ledger.orphans.find((o) => o.symbol.startsWith('createAutoUpdateClient'));
+    expect(entry, '多符号工厂条目被误删（它至今仍是零消费者的对外宣称）').toBeDefined();
+    expect(read('packages/tauron-host/src/dialog-client.ts'), '工厂函数的定义行形态变了').toMatch(
+      /^export function createDialogClient\(/m,
+    );
+  });
+
+  it('⑤ 通知读取端线形：TS NotifyItem / DispatchRecord 与宿主 json! 的键逐字对齐', () => {
+    const client = read(HOST_CLIENT);
+    const rust = read(ADAPTER);
+    expect(tsFields(client, 'NotifyItem'), '通知条目键集与宿主手工 json! 不再逐字段一致').toEqual(
+      rustJsonKeys(rust, 'notifications_list_payload', 'e'),
+    );
+    expect(tsFields(client, 'DispatchRecord'), '分发日志键集与宿主 json! 不再逐字段一致').toEqual(
+      rustJsonKeys(rust, 'notifications_list_payload', 'r'),
+    );
+    // 三份宣称都得有出处：TS 侧写「与 Rust NotifyEntry 逐字段 camelCase 映射」，Rust 侧写「与 TS 契约一致」。
+    expect(client, 'TS 侧的映射对象名字漂了（注释钉的是 NotifyEntry）').toContain(
+      '与 Rust `NotifyEntry` 逐字段 camelCase 映射',
+    );
+    expect(rust, 'Rust 侧不再声称与 TS 契约一致').toContain('与 TS 契约一致');
+    // 兼容日志那份：不在线上，但两侧都宣称字段名对齐——改名会静默读出 undefined。
+    expect(tsFields(client, 'NotificationRecord'), '兼容记录两侧字段不再一致').toEqual(
+      (() => {
+        const block = /pub struct NotificationRecord \{([\s\S]*?)\n\}/.exec(rust)?.[1] ?? '';
+        return [...block.matchAll(/pub ([a-z_]+):/g)]
+          .map((m) => m[1]!.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase()))
+          .sort();
+      })(),
+    );
+    expect(rust, '兼容记录的 camelCase 线形注解被摘掉（TS 侧的字段名宣称就失去依据）').toContain(
+      'pub struct NotificationRecord',
+    );
+  });
+
+  it('⑥ 本轮记录与文档同步', () => {
+    expect(
+      read('docs/architecture/v4-industrial-gap-closure-plan.md'),
+      '缺口方案缺轮 62 小节',
+    ).toContain('### 轮 62：跨文件消费者视图看不见声明行，同名声明却在互相作证');
+    expect(read('CHANGELOG.md'), 'CHANGELOG 缺轮 62 条目').toContain('「谁替它作证」第一次被当真');
+    const note = JSON.parse(read(LEDGER)) as { note: string[] };
+    expect(note.note.join('\n'), '台账注释没记下 Rust 面为什么不动口径').toContain(
+      'Rust 面本轮**不动口径**',
+    );
+  });
+});
