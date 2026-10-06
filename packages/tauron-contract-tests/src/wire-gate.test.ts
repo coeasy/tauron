@@ -3745,6 +3745,57 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(guide).toMatch(/写锁[^。]*之外/);
   });
 
+  it('轮 69：升级树的共享遍历器 tree_hashes 不再跟随符号链接（死循环 / 越界哈希）', () => {
+    const upgrade = read('crates/tauron-distribute/src/upgrade.rs');
+    // 只取 tree_hashes 函数体：`symlink_metadata` / `is_symlink` 在别处也用（siblings +
+    // 解包侧），整文件裸 token 会被那些用法喂成假绿。函数切片保证针钉的是被修的这条腿。
+    const start = upgrade.indexOf('pub(crate) fn tree_hashes');
+    expect(start, '找不到 tree_hashes 函数').toBeGreaterThan(-1);
+    const end = upgrade.indexOf('fn copy_file_fsynced', start);
+    expect(end, 'tree_hashes 函数体右界漂移').toBeGreaterThan(start);
+    const body = upgrade.slice(start, end);
+
+    // ① 用 lstat，且绝不再用会跟随链接的 fs::metadata 走树（跟随 → 环 = 永不收敛）。
+    expect(body).toMatch(/fs::symlink_metadata\(&path\)/);
+    expect(body, 'tree_hashes 仍在用跟随链接的 fs::metadata').not.toMatch(/\bfs::metadata\(/);
+    // ② 在下降 / 取哈希之前显式拒绝符号链接，且拒绝分支必须排在 stack.push 之前。
+    expect(body).toMatch(/if meta\.is_symlink\(\) \{[\s\S]*?拒绝跟随[\s\S]*?\n\s*\}/);
+    // 用完整代码形态 `if meta.is_symlink()` 定位，不用裸 token `is_symlink`——函数上方的
+    // 文档注释里写了 `entry.is_symlink()`，裸 token 会被注释喂饱、令排序断言恒真（假绿）。
+    const rejectIdx = body.indexOf('if meta.is_symlink()');
+    const pushIdx = body.indexOf('stack.push(path)');
+    expect(rejectIdx, 'is_symlink 拒绝分支消失').toBeGreaterThan(-1);
+    expect(pushIdx, '目录下降点漂移').toBeGreaterThan(-1);
+    expect(rejectIdx < pushIdx, '符号链接未被先拒绝就下降').toBe(true);
+    // ③ 与既有威胁模型一致：解包侧同样拒绝符号链接条目（同一份纪律，不是第二套判定）。
+    expect(upgrade).toMatch(/拒绝符号链接条目/);
+    // ④ 行为用例在册（证明非纯文本门禁），含死循环回归的超时快红设计。
+    expect(upgrade).toMatch(
+      /tree_hashes_rejects_directory_symlink_cycle_instead_of_looping_forever/,
+    );
+    expect(upgrade).toMatch(
+      /tree_hashes_rejects_out_of_tree_file_symlink_instead_of_hashing_target/,
+    );
+    expect(upgrade).toMatch(/tree_hashes_still_walks_nested_real_directories/);
+    expect(upgrade).toMatch(/recv_timeout\(Duration::from_secs\(5\)\)/);
+  });
+
+  it('轮 69：docs/contracts 每份安全契约都能从 overview.md 抵达（文档图谱无孤儿）', () => {
+    // 审计发现 `remote-host-security-v1.md` 描述的是**活的** `tauron-host::remote_host`
+    // （canonical 实现 + 在 CI target 矩阵真跑的 example），却在整仓零入链——不是可删的
+    // 无效历史文档，而是断掉的可发现性链。修法＝把它接回 overview.md 的 crate 表（对齐
+    // ffi-v1.md 的待遇），并用这条门禁杜绝 contracts 下任何安全文档再次变孤儿。
+    const overview = read('docs/architecture/overview.md');
+    const files = readdirSync(join(workspaceRoot, 'docs', 'contracts')).filter((f) =>
+      f.endsWith('.md'),
+    );
+    expect(files.length).toBeGreaterThanOrEqual(2);
+    const orphans = files.filter((f) => !overview.includes(f));
+    expect(orphans, `overview.md 未引用这些 docs/contracts 文档：${orphans.join(', ')}`).toEqual(
+      [],
+    );
+  });
+
   // ────────────────────────────────────────────────────────────────────────
   // P0-2：进程插件运行时（激活孤儿 crate `tauron-proc`）
   // ────────────────────────────────────────────────────────────────────────

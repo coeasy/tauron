@@ -832,8 +832,21 @@ pub(crate) fn tree_hashes(root: &Path) -> DistributeResult<BTreeMap<String, Stri
             let entry = entry
                 .map_err(|e| io_fail(format!("读取目录项（`{}`）失败：{e}", dir.display())))?;
             let path = entry.path();
-            let meta = fs::metadata(&path)
+            // 用 lstat（`symlink_metadata`），绝不用会跟随链接的 `fs::metadata`：安装 / 备份 /
+            // 暂存树都来自解包，而解包侧已拒符号链接条目（见 zip 校验里的 `entry.is_symlink()`
+            // 分支），所以走到这里的树内任何链接都是异常。若在此跟随：一个指向祖先目录的符号
+            // 链接会让这趟**无访问集、无深度上界**的栈遍历永不收敛（死循环），指向字符设备
+            // （如 `/dev/zero`）的文件链接会让 `sha256_file` 的读循环无限跑，普通文件链接则被
+            // 越界取哈希——三者都让升级快照 / 校验 / 回滚 / 轮 67 恢复对账整条腿挂死或误判。
+            let meta = fs::symlink_metadata(&path)
                 .map_err(|e| io_fail(format!("读取元数据 `{}` 失败：{e}", path.display())))?;
+            if meta.is_symlink() {
+                return Err(io_fail(format!(
+                    "树 `{}` 含符号链接条目 `{}`，拒绝跟随（解包树内不得有链接）",
+                    root.display(),
+                    path.display()
+                )));
+            }
             if meta.is_dir() {
                 stack.push(path);
             } else if meta.is_file() {
@@ -2369,6 +2382,71 @@ mod tests {
         assert_eq!(
             tree_hashes(&h.root().join("install").join(CURRENT_DIR)).unwrap(),
             tree_of(&[("app.bin", b"old")])
+        );
+    }
+
+    /// 轮 69（死循环回归）：`tree_hashes` 必须用 lstat 并在下降前**拒绝**符号链接，
+    /// 一个指向祖先目录的符号链接不得让这趟无访问集 / 无深度上界的栈遍历永不收敛。
+    /// 用超时线程守：修复后瞬间返回 `Err`；若退回跟随链接的 `fs::metadata`，会挂死 →
+    /// 断言在 `recv_timeout` 处变红，而不是把整个测试二进制拖挂（与轮 68 同类快红设计）。
+    #[cfg(unix)]
+    #[test]
+    fn tree_hashes_rejects_directory_symlink_cycle_instead_of_looping_forever() {
+        use std::os::unix::fs::symlink;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let h = Harness::new();
+        h.seed_current(&[("app.bin", b"old")]);
+        let current = h.root().join("install").join(CURRENT_DIR);
+        symlink(h.root().join("install"), current.join("loop-link")).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(tree_hashes(&current).map(|_| ()));
+        });
+        let outcome = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("tree_hashes 必须有限返回；超时＝符号链接环被跟随（死循环回归）");
+        let err = outcome.unwrap_err();
+        assert!(
+            matches!(err, DistributeError::FileOperationFailed(ref m) if m.contains("符号链接")),
+            "目录符号链接应在下降前被拒绝，实际：{err:?}"
+        );
+    }
+
+    /// 轮 69（越界哈希回归）：指向树外普通文件的符号链接不得被取哈希后当成树内条目——
+    /// 那会让「快照 / 校验」对同一棵树给出被链接目标污染的结果。
+    #[cfg(unix)]
+    #[test]
+    fn tree_hashes_rejects_out_of_tree_file_symlink_instead_of_hashing_target() {
+        use std::os::unix::fs::symlink;
+
+        let h = Harness::new();
+        h.seed_current(&[("app.bin", b"old")]);
+        let current = h.root().join("install").join(CURRENT_DIR);
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), b"secret").unwrap();
+        symlink(outside.path().join("secret.txt"), current.join("escape-link")).unwrap();
+
+        let err = tree_hashes(&current).unwrap_err();
+        assert!(
+            matches!(err, DistributeError::FileOperationFailed(ref m) if m.contains("符号链接")),
+            "树外文件符号链接应被拒绝而非越界取哈希，实际：{err:?}"
+        );
+    }
+
+    /// 轮 69（未破正常遍历）：改用 lstat 后，纯真实嵌套目录树仍被完整、正确地枚举。
+    #[test]
+    fn tree_hashes_still_walks_nested_real_directories() {
+        let h = Harness::new();
+        let current = h.root().join("install").join(CURRENT_DIR);
+        fs::create_dir_all(current.join("pkg/sub")).unwrap();
+        fs::write(current.join("app.bin"), b"old").unwrap();
+        fs::write(current.join("pkg/sub/deep.bin"), b"deep").unwrap();
+        assert_eq!(
+            tree_hashes(&current).unwrap(),
+            tree_of(&[("app.bin", b"old"), ("pkg/sub/deep.bin", b"deep")])
         );
     }
 

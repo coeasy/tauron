@@ -161,7 +161,7 @@ tauron-*       ← 全部 Rust crate
 | Crate | 层 | 职责 |
 |---|---|---|
 | **tauron-shell** | 框架 | 信封、`HostState` 命令核心、ACL、注册表、事件总线、配置；`tauri` feature 提供命令层 |
-| **tauron-host** | 应用 | 宿主核心：清单、生命周期、注册表、授权、事件总线、配置 |
+| **tauron-host** | 应用 | 宿主核心：清单、生命周期、注册表、授权、事件总线、配置；远程宿主（Remote Host）TLS 传输的安全契约见 `docs/contracts/remote-host-security-v1.md`（canonical 实现 `tauron-host::remote_host`） |
 | **tauron-adapter** | 应用 | Tauri 命令适配（`host_*`），`tauri` feature |
 | **tauron-acl** | 应用 | 权限授予与审批 |
 | **tauron-schema** | 应用 | Schema 规范化管线 |
