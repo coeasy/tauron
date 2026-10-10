@@ -146,7 +146,7 @@
 
 ### V7-P0-02：WASM 实例池按错误 key 查找，复用和统计失真
 
-位置：`crates/tauron-wasm/src/lib.rs:325,397`、`crates/tauron-wasm/src/execute.rs:254,349,376-385`。
+位置：`crates/tauron-wasm/src/lib.rs:318,397`、`crates/tauron-wasm/src/execute.rs:254,349,376-385`。
 
 `InstancePool` 用 `instance_id` 作为 map key；`execute()` 却用 `plugin_id` 调用 `get_instance()`。结果是：
 
@@ -199,7 +199,7 @@
 
 ### V7-P1-01：重复 Runtime 装配仍可能产生恢复 split-brain
 
-位置：`crates/tauron-adapter/src/lib.rs:3310-3400`、`crates/tauron-adapter/src/tauri.rs:3382-3425`。
+位置：`crates/tauron-adapter/src/lib.rs:3310-3400`、`crates/tauron-adapter/src/tauri.rs:3392-3425`。
 
 当前已有改进：底座用 `Arc` 共享，`plugin_flags` 和 `process_sandbox` 用 `OnceLock`，重复注入会打印冲突日志，V6 的静默覆盖已被消除。
 
@@ -616,7 +616,7 @@ SDK 收敛规则：
 - [ ] market/update 的真实路径和 simulated 路径在类型和 UI 上不可混淆。
 - [ ] lazy loader、Shell、Dual-world 的代际/销毁语义有 deterministic race tests。
 - [ ] Local/Remote Host 的 reference、contract、production transport 三层边界明确且有对应测试。
-- [ ] Adapter 拆分或至少冻结 domain ownership，避免继续向单文件追加核心逻辑。
+- [x] Adapter 拆分或至少冻结 domain ownership，避免继续向单文件追加核心逻辑。（round 69 T-7 已把命令族二十二片逐字节纯 move 拆出 `lib.rs`、`pub fn cmd_*` 清零、六 feature profile 全绿；domain ownership 台账冻结并逐片 `--record` 重分预算。同族私助手 / 跨域助手 / 更广基础设施 `struct`·`const` 刻意暂留 `lib.rs`——搬它们需放宽可见性、属语义改动，留待与 T-9 灭并行态合并处理。）
 - [ ] npm/crates 真实 registry clean consumer、四平台 artifact、MSI policy、performance/size、cargo-deny 全部有同 SHA 证据。
 
 ## 11. 建议执行顺序

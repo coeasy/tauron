@@ -18,6 +18,29 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = 'docs/api/command-surface.md';
 const TAURI = 'crates/tauron-adapter/src/tauri.rs';
 const LIB = 'crates/tauron-adapter/src/lib.rs';
+const DIALOG = 'crates/tauron-adapter/src/dialog.rs';
+const MENU_TRAY = 'crates/tauron-adapter/src/menu_tray.rs';
+const FS = 'crates/tauron-adapter/src/fs.rs';
+const THEME = 'crates/tauron-adapter/src/theme.rs';
+const I18N = 'crates/tauron-adapter/src/i18n.rs';
+const WINDOW = 'crates/tauron-adapter/src/window.rs';
+const CLIP_DL = 'crates/tauron-adapter/src/clipboard_deep_link.rs';
+const RESOURCE = 'crates/tauron-adapter/src/resource.rs';
+const CONTRIBUTES = 'crates/tauron-adapter/src/contributes.rs';
+const LIFECYCLE = 'crates/tauron-adapter/src/lifecycle.rs';
+const EVENTS = 'crates/tauron-adapter/src/events.rs';
+const NOTIFY = 'crates/tauron-adapter/src/notify.rs';
+const SETTINGS = 'crates/tauron-adapter/src/settings.rs';
+const CALL_STREAM = 'crates/tauron-adapter/src/call_stream.rs';
+const RECOVER = 'crates/tauron-adapter/src/recover.rs';
+const REGISTRY = 'crates/tauron-adapter/src/registry.rs';
+const HTTP = 'crates/tauron-adapter/src/http.rs';
+const UPDATER = 'crates/tauron-adapter/src/updater.rs';
+const MARKET = 'crates/tauron-adapter/src/market.rs';
+const CAPABILITIES = 'crates/tauron-adapter/src/capabilities.rs';
+const BRAND = 'crates/tauron-adapter/src/brand.rs';
+const DOCTOR = 'crates/tauron-adapter/src/doctor.rs';
+const RUNTIME = 'crates/tauron-adapter/src/runtime.rs';
 const AUTHZ = 'crates/tauron-host/src/authz.rs';
 const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');
 const oneLine = (s) => s.replace(/\s+/g, ' ').trim();
@@ -200,7 +223,33 @@ for (let i = 0; i < tauriLines.length; i++) {
 // ── 2. 授权判定：必须**沿委托链**收集 ───────────────────────────────────────
 // 命令函数几乎都只做「判定 + 转发」，真判定落在它委托的 `cmd_*_as` 里。只扫命令自己的
 // 函数体就会把「有代码层判定」写成「没有」——轮 12 自查时真的踩过，方向与谎报能力同样糟。
-const fns = new Map([...indexFunctions(LIB), ...indexFunctions(TAURI)]);
+const fns = new Map([
+  ...indexFunctions(LIB),
+  ...indexFunctions(DIALOG),
+  ...indexFunctions(MENU_TRAY),
+  ...indexFunctions(FS),
+  ...indexFunctions(THEME),
+  ...indexFunctions(I18N),
+  ...indexFunctions(WINDOW),
+  ...indexFunctions(CLIP_DL),
+  ...indexFunctions(RESOURCE),
+  ...indexFunctions(CONTRIBUTES),
+  ...indexFunctions(LIFECYCLE),
+  ...indexFunctions(EVENTS),
+  ...indexFunctions(NOTIFY),
+  ...indexFunctions(SETTINGS),
+  ...indexFunctions(CALL_STREAM),
+  ...indexFunctions(RECOVER),
+  ...indexFunctions(REGISTRY),
+  ...indexFunctions(HTTP),
+  ...indexFunctions(UPDATER),
+  ...indexFunctions(MARKET),
+  ...indexFunctions(CAPABILITIES),
+  ...indexFunctions(BRAND),
+  ...indexFunctions(DOCTOR),
+  ...indexFunctions(RUNTIME),
+  ...indexFunctions(TAURI),
+]);
 for (const [name, def] of defs) {
   const seen = new Set([name]);
   const queue = [[name, 0]];

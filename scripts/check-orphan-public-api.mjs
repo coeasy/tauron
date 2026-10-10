@@ -10,6 +10,11 @@
 //   3. A 口径（`pub fn` / `export function` / `export class`）自动发现总数 ≤ `discoveryBaseline`。
 //   4. B 口径（轮 61 新增：TS `export const` / `export type` / `export interface`）总数 ≤
 //      `discoveryBaselineDecl`。两条棘轮各自独立，一条的余量不能拿来给另一条遮丑。
+//   5. 轮 62 的等值读数钉：`discoveryObserved.a / .decl` 必须逐一等于实测候选数（涨跌都算）。
+//
+// 轮 69（本次落地）：把上面四条判据拆成 `loadSources → runChecks`，并补 `--self-test`——
+// 对台账 JSON 做结构化变异（接线面候选数只由产品代码决定、与台账无关，故改账本就够证牙）：
+// 每条变异都打红且**只**打红它对应的那条判据，否则就是空转针。
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
@@ -20,26 +25,6 @@ const LEDGER = join(ROOT, 'contracts/orphan-public-api.json');
 const SKIP = new Set(['node_modules', '.git', 'target', 'dist', 'coverage', 'memory', '.qoder']);
 const EXT = /\.(rs|ts|tsx|mjs|cjs|vue|svelte)$/;
 const TESTY = /\.test\.|\.spec\.|[\\/](tests|__tests__)[\\/]/;
-
-const ledger = JSON.parse(readFileSync(LEDGER, 'utf8'));
-
-const files = [];
-(function walk(dir) {
-  for (const name of readdirSync(dir)) {
-    if (SKIP.has(name)) continue;
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) {
-      walk(full);
-      continue;
-    }
-    if (!EXT.test(name)) continue;
-    const rel = relative(ROOT, full).split(sep).join('/');
-    // 接线面：产品代码 + 示例；工具脚本与台账本身不算消费者。
-    if (!/^(crates\/[^/]+\/src|packages\/[^/]+\/src|examples\/|apps\/)/.test(rel)) continue;
-    if (TESTY.test(rel)) continue;
-    files.push(rel);
-  }
-})(join(ROOT, '.'));
 
 /**
  * 逐块摘掉 `#[cfg(test)]` 修饰的模块/条目：必须**配对花括号**找块尾。
@@ -145,12 +130,6 @@ function lineView(rel, regionText, keepDeclarations) {
   return kept.join('\n');
 }
 
-const regions = new Map(files.map((f) => [f, stripRegion(f)]));
-/** 旧 A 口径与台账 probe 用：声明行与再导出都不算消费者。 */
-const views = new Map(files.map((f) => [f, lineView(f, regions.get(f), false)]));
-/** B 口径用：声明行算引用位（`PluginForm` 只出现在同文件函数签名里，就是在用）。 */
-const declViews = new Map(files.map((f) => [f, lineView(f, regions.get(f), true)]));
-
 function langOk(rel, lang) {
   if (lang === 'rust') return rel.endsWith('.rs');
   if (lang === 'ts') return /\.(ts|tsx|vue|svelte)$/.test(rel);
@@ -175,12 +154,12 @@ const DECL_NAME_RES = {
   rust: /^(?:pub(?:\([^)]*\))?\s+)?(?:const|static|fn|struct|enum|trait|type|mod|union)\s+([A-Za-z0-9_]+)/gm,
   ts: /^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:const|let|var|function|class|interface|type|enum)\s+([A-Za-z0-9_]+)/gm,
 };
-const declaredNames = new Map();
-function declaresSame(rel, name) {
-  let set = declaredNames.get(rel);
+
+function declaresSame(src, rel, name) {
+  let set = src.declaredNames.get(rel);
   if (!set) {
     set = new Set();
-    const text = regions.get(rel);
+    const text = src.regions.get(rel);
     // 两条实测教训都收在这三行里：
     //   - **按语言取模式**：给 Rust 套 TS 模式会把函数体里的 `let summary = …` 当声明，那个文件
     //     对 `summary` 整份失声——A 口径被顶高 31 条假孤儿。
@@ -189,13 +168,13 @@ function declaresSame(rel, name) {
     //     trait 实现里的方法名），顶格口径下剩下的才是「跨 crate 同名 pub 项互相作证」这种真歧义。
     for (const m of text.matchAll(rel.endsWith('.rs') ? DECL_NAME_RES.rust : DECL_NAME_RES.ts))
       set.add(m[1]);
-    declaredNames.set(rel, set);
+    src.declaredNames.set(rel, set);
   }
   return set.has(name);
 }
 
 /** 候选名集合在文件 rel 里能否构成消费者视图。 */
-function otherView(rel, names) {
+function otherView(src, rel, names) {
   // Rust 保持旧口径（声明行不算，`views`）。两条修正要一起用才成立：让「别的文件的声明行」算引用，
   // 就必须同时禁止「自己声明过同名」的文件作证。本仓 Rust 面上有大量跨 crate 同名双胞胎
   // （`eventbus.rs#queue_stats`、`installation.rs/admin_audit.rs#is_durable`、`execute.rs#execute` 等），
@@ -203,14 +182,14 @@ function otherView(rel, names) {
   // 而第二条单独用在 Rust 上又会打出**假孤儿**：`lib.rs:1619` 的 `"host_settings_migrate",` 是 tauri
   // 命令注册表里的那一条，正是同名命令函数的线上接线证据，加名字歧义守卫会把它抹掉。
   // 要正确修 Rust 得解析限定路径（`crate::x::y` 指向谁），本轮不做，已按名登记进台账遗留。
-  if (rel.endsWith('.rs')) return views.get(rel);
+  if (rel.endsWith('.rs')) return src.views.get(rel);
   // 台账条目的 probe 可以是「多符号或」（如四个工厂函数），任一符号被该文件顶格声明过就整份不作证——
   // 否则 `export function createDialogClient` 这条**定义行**会替「createDialogClient 已接线」作证。
-  if (names.some((n) => declaresSame(rel, n))) return '';
-  return declViews.get(rel);
+  if (names.some((n) => declaresSame(src, rel, n))) return '';
+  return src.declViews.get(rel);
 }
 
-function consumers(entry) {
+function consumers(src, entry) {
   const re = new RegExp(entry.probe);
   const declared = entry.declaredIn;
   const names = entry.symbol
@@ -218,32 +197,12 @@ function consumers(entry) {
     .map((s) => s.trim())
     .filter(Boolean);
   const hits = [];
-  for (const f of files) {
+  for (const f of src.files) {
     if (f === declared) continue;
     if (!langOk(f, entry.lang)) continue;
-    if (re.test(otherView(f, names))) hits.push(f);
+    if (re.test(otherView(src, f, names))) hits.push(f);
   }
   return hits;
-}
-
-const failures = [];
-
-for (const entry of ledger.orphans) {
-  const hits = consumers(entry);
-  if (hits.length > 0) {
-    failures.push(
-      `orphans 条目已接线，必须从台账删除并同步文档：${entry.symbol}（消费者：${hits.slice(0, 3).join(', ')}）`,
-    );
-  }
-}
-
-for (const entry of ledger.wiredWitnesses) {
-  const hits = consumers(entry);
-  if (hits.length === 0) {
-    failures.push(
-      `witness 失效（判定逻辑或链路坏了）：${entry.symbol} 在接线面查不到任何消费者；本条宣称它已接线`,
-    );
-  }
 }
 
 // ── 自动发现棘轮 A 口径：函数/类（轮 2 起） ──────────────────────────────────
@@ -253,32 +212,6 @@ function declarations(rel, text) {
   for (const m of text.matchAll(/^\s*export (?:async )?(?:function|class) ([A-Za-z0-9_]+)/gm))
     names.add(m[1]);
   return [...names].map((name) => ({ name, rel }));
-}
-
-const orphanCandidates = [];
-for (const f of files) {
-  for (const { name } of declarations(f, regions.get(f))) {
-    const re = new RegExp(`\\b${name}\\b`);
-    let found = false;
-    for (const g of files) {
-      if (g === f) continue;
-      if (!langOk(g, f.endsWith('.rs') ? 'rust' : 'ts')) continue;
-      if (re.test(otherView(g, [name]))) {
-        found = true;
-        break;
-      }
-    }
-    if (!found) orphanCandidates.push(`${f}#${name}`);
-  }
-}
-
-const baseline = ledger.discoveryBaseline;
-if (orphanCandidates.length > baseline) {
-  failures.push(
-    `新增孤儿公共 API ${orphanCandidates.length - baseline} 个（总数 ${orphanCandidates.length} > 基线 ${baseline}）。\n` +
-      `  要么接上真实消费者，要么降级为内部实现（去掉 pub/export），要么在文档里明确它「宣称可用但无人使用」并登记进台账。\n` +
-      `  当前候选（前 20 个，用 --discover 看全量分布）：\n    ${orphanCandidates.slice(0, 20).join('\n    ')}`,
-  );
 }
 
 // ── 自动发现棘轮 B 口径（轮 61）：TS 公开声明面 ──────────────────────────────
@@ -295,10 +228,10 @@ const TS_DECL_PATTERNS = [
   ['interface', /^\s*export interface ([A-Za-z0-9_]+)\b/],
 ];
 
-function tsDeclarations(rel) {
+function tsDeclarations(src, rel) {
   if (rel.endsWith('.rs')) return [];
   const out = [];
-  for (const line of regions.get(rel).split('\n')) {
+  for (const line of src.regions.get(rel).split('\n')) {
     for (const [kind, re] of TS_DECL_PATTERNS) {
       const m = re.exec(line);
       if (m) out.push({ name: m[1], kind });
@@ -315,107 +248,196 @@ function isSelfDeclaration(name, line) {
   ).test(line);
 }
 
-function hasDeclConsumer(name, file) {
+function hasDeclConsumer(src, name, file) {
   const re = new RegExp(`\\b${name.replace(/[$]/g, '\\$&')}\\b`);
-  const own = declViews
+  const own = src.declViews
     .get(file)
     .split('\n')
     .filter((line) => !isSelfDeclaration(name, line))
     .join('\n');
   if (re.test(own)) return true;
-  for (const g of files) {
+  for (const g of src.files) {
     if (g === file) continue;
     if (!langOk(g, 'ts')) continue;
-    if (re.test(otherView(g, [name]))) return true;
+    if (re.test(otherView(src, g, [name]))) return true;
   }
   return false;
 }
 
 /** 同一声明集按 A 判据（除声明文件）的候选数——只用于 --discover 里对照两种判据的落差。 */
-function countUnderARule(name, file) {
+function countUnderARule(src, name, file) {
   const re = new RegExp(`\\b${name.replace(/[$]/g, '\\$&')}\\b`);
-  for (const g of files) {
+  for (const g of src.files) {
     if (g === file) continue;
     if (!langOk(g, 'ts')) continue;
-    if (re.test(views.get(g))) return false;
+    if (re.test(src.views.get(g))) return false;
   }
   return true;
 }
 
-const declCandidates = [];
-let declUnderARule = 0;
-for (const f of files) {
-  for (const { name, kind } of tsDeclarations(f)) {
-    if (countUnderARule(name, f)) declUnderARule += 1;
-    if (!hasDeclConsumer(name, f)) declCandidates.push({ key: `${f}#${name}`, kind });
+/**
+ * 载入并计算「接线面」——扫描产品代码、构建两档行视图、跑自动发现（A/B 两口径）。
+ * 候选数只由产品代码决定、与台账 JSON 无关，故 self-test 只变异台账即可逐条打红。
+ */
+function loadSources() {
+  const files = [];
+  (function walk(dir) {
+    for (const name of readdirSync(dir)) {
+      if (SKIP.has(name)) continue;
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!EXT.test(name)) continue;
+      const rel = relative(ROOT, full).split(sep).join('/');
+      // 接线面：产品代码 + 示例；工具脚本与台账本身不算消费者。
+      if (!/^(crates\/[^/]+\/src|packages\/[^/]+\/src|examples\/|apps\/)/.test(rel)) continue;
+      if (TESTY.test(rel)) continue;
+      files.push(rel);
+    }
+  })(join(ROOT, '.'));
+
+  const regions = new Map(files.map((f) => [f, stripRegion(f)]));
+  /** 旧 A 口径与台账 probe 用：声明行与再导出都不算消费者。 */
+  const views = new Map(files.map((f) => [f, lineView(f, regions.get(f), false)]));
+  /** B 口径用：声明行算引用位（`PluginForm` 只出现在同文件函数签名里，就是在用）。 */
+  const declViews = new Map(files.map((f) => [f, lineView(f, regions.get(f), true)]));
+  const src = { files, regions, views, declViews, declaredNames: new Map() };
+
+  // A 口径候选。
+  src.orphanCandidates = [];
+  for (const f of files) {
+    for (const { name } of declarations(f, regions.get(f))) {
+      const re = new RegExp(`\\b${name}\\b`);
+      let found = false;
+      for (const g of files) {
+        if (g === f) continue;
+        if (!langOk(g, f.endsWith('.rs') ? 'rust' : 'ts')) continue;
+        if (re.test(otherView(src, g, [name]))) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) src.orphanCandidates.push(`${f}#${name}`);
+    }
   }
+
+  // B 口径候选 + A 判据对照数。
+  src.declCandidates = [];
+  src.declUnderARule = 0;
+  for (const f of files) {
+    for (const { name, kind } of tsDeclarations(src, f)) {
+      if (countUnderARule(src, name, f)) src.declUnderARule += 1;
+      if (!hasDeclConsumer(src, name, f)) src.declCandidates.push({ key: `${f}#${name}`, kind });
+    }
+  }
+
+  src.ledger = JSON.parse(readFileSync(LEDGER, 'utf8'));
+  return src;
 }
 
-const declBaseline = ledger.discoveryBaselineDecl;
-if (typeof declBaseline !== 'number') {
-  failures.push(
-    `台账缺少 discoveryBaselineDecl（B 口径棘轮基线）；当前 B 口径候选 = ${declCandidates.length}。缺键必须红，否则新口径会静默不设上限。`,
-  );
-} else if (declCandidates.length > declBaseline) {
-  failures.push(
-    `新增孤儿公开声明 ${declCandidates.length - declBaseline} 个（总数 ${declCandidates.length} > 基线 ${declBaseline}，B 口径）。\n` +
-      `  要么接上真实消费者（含同文件正文），要么去掉 export 降级为内部实现，要么登记台账并写清 disposition。\n` +
-      `  当前候选（前 20 个，用 --discover 看全量分布）：\n    ${declCandidates
-        .slice(0, 20)
-        .map((c) => c.key)
-        .join('\n    ')}`,
-  );
-}
+/** 纯判据：拿接线面（src 里的候选/视图）对照台账（src.ledger）逐条判定，返回失败清单。 */
+function runChecks(src) {
+  const { ledger } = src;
+  const failures = [];
 
-// ── 轮 62：双向读数钉 ────────────────────────────────────────────────────────
-// 上限棘轮是单向的：它只在「孤儿变多」时红。轮 61 因此吃过一次教训——把消费者视图改宽松
-// （撤掉单行 `use` 的守卫）时，A 口径 622→624 仍 ≤ 635，门禁给不出任何红色信号，只能把它
-// 记成「判据余量」。视图判据本身必须可证，否则「视图被换掉」这件事没有失败出口。
-// 这里补的是一条**等值**读数钉：实测数与台账记录的数不一致就红，涨跌都算——它把「口径变了」
-// 和「接线变了」都变成需要显式改账的动作，变异证明才有红色可拿（见 wire-gate 轮 62 段）。
-const observed = ledger.discoveryObserved ?? {};
-for (const [key, count] of [
-  ['a', orphanCandidates.length],
-  ['decl', declCandidates.length],
-]) {
-  if (typeof observed[key] !== 'number') {
+  for (const entry of ledger.orphans) {
+    const hits = consumers(src, entry);
+    if (hits.length > 0) {
+      failures.push(
+        `orphans 条目已接线，必须从台账删除并同步文档：${entry.symbol}（消费者：${hits.slice(0, 3).join(', ')}）`,
+      );
+    }
+  }
+
+  for (const entry of ledger.wiredWitnesses) {
+    const hits = consumers(src, entry);
+    if (hits.length === 0) {
+      failures.push(
+        `witness 失效（判定逻辑或链路坏了）：${entry.symbol} 在接线面查不到任何消费者；本条宣称它已接线`,
+      );
+    }
+  }
+
+  const baseline = ledger.discoveryBaseline;
+  if (src.orphanCandidates.length > baseline) {
     failures.push(
-      `台账缺少 discoveryObserved.${key}（等值读数钉）；当前实测 = ${count}。缺键必须红，否则口径被换掉时门禁不会响。`,
-    );
-  } else if (observed[key] !== count) {
-    failures.push(
-      `口径 ${key} 实测 ${count} ≠ 台账记录 ${observed[key]}。` +
-        (count > observed[key]
-          ? '新增孤儿：接上真实消费者、去掉 pub/export 降级，或登记台账并写清 disposition。'
-          : '接线面变好了——把台账的 discoveryObserved 与 discoveryBaseline 一起改成新读数，别留着旧数当假账。'),
+      `新增孤儿公共 API ${src.orphanCandidates.length - baseline} 个（总数 ${src.orphanCandidates.length} > 基线 ${baseline}）。\n` +
+        `  要么接上真实消费者，要么降级为内部实现（去掉 pub/export），要么在文档里明确它「宣称可用但无人使用」并登记进台账。\n` +
+        `  当前候选（前 20 个，用 --discover 看全量分布）：\n    ${src.orphanCandidates.slice(0, 20).join('\n    ')}`,
     );
   }
+
+  const declBaseline = ledger.discoveryBaselineDecl;
+  if (typeof declBaseline !== 'number') {
+    failures.push(
+      `台账缺少 discoveryBaselineDecl（B 口径棘轮基线）；当前 B 口径候选 = ${src.declCandidates.length}。缺键必须红，否则新口径会静默不设上限。`,
+    );
+  } else if (src.declCandidates.length > declBaseline) {
+    failures.push(
+      `新增孤儿公开声明 ${src.declCandidates.length - declBaseline} 个（总数 ${src.declCandidates.length} > 基线 ${declBaseline}，B 口径）。\n` +
+        `  要么接上真实消费者（含同文件正文），要么去掉 export 降级为内部实现，要么登记台账并写清 disposition。\n` +
+        `  当前候选（前 20 个，用 --discover 看全量分布）：\n    ${src.declCandidates
+          .slice(0, 20)
+          .map((c) => c.key)
+          .join('\n    ')}`,
+    );
+  }
+
+  // ── 轮 62：双向读数钉 ────────────────────────────────────────────────────────
+  // 上限棘轮是单向的：它只在「孤儿变多」时红。轮 61 因此吃过一次教训——把消费者视图改宽松
+  // （撤掉单行 `use` 的守卫）时，A 口径 622→624 仍 ≤ 635，门禁给不出任何红色信号，只能把它
+  // 记成「判据余量」。视图判据本身必须可证，否则「视图被换掉」这件事没有失败出口。
+  // 这里补的是一条**等值**读数钉：实测数与台账记录的数不一致就红，涨跌都算——它把「口径变了」
+  // 和「接线变了」都变成需要显式改账的动作，变异证明才有红色可拿（见 wire-gate 轮 62 段）。
+  const observed = ledger.discoveryObserved ?? {};
+  for (const [key, count] of [
+    ['a', src.orphanCandidates.length],
+    ['decl', src.declCandidates.length],
+  ]) {
+    if (typeof observed[key] !== 'number') {
+      failures.push(
+        `台账缺少 discoveryObserved.${key}（等值读数钉）；当前实测 = ${count}。缺键必须红，否则口径被换掉时门禁不会响。`,
+      );
+    } else if (observed[key] !== count) {
+      failures.push(
+        `口径 ${key} 实测 ${count} ≠ 台账记录 ${observed[key]}。` +
+          (count > observed[key]
+            ? '新增孤儿：接上真实消费者、去掉 pub/export 降级，或登记台账并写清 disposition。'
+            : '接线面变好了——把台账的 discoveryObserved 与 discoveryBaseline 一起改成新读数，别留着旧数当假账。'),
+      );
+    }
+  }
+
+  return failures;
 }
 
-if (process.argv.includes('--discover')) {
+function printDiscover(src) {
+  const { ledger } = src;
   const byCrate = new Map();
-  for (const c of orphanCandidates) {
+  for (const c of src.orphanCandidates) {
     const top = c.split('/src/')[0];
     byCrate.set(top, (byCrate.get(top) ?? 0) + 1);
   }
   console.log(
-    `A 口径（pub fn / export function / export class）候选 = ${orphanCandidates.length}（基线 ${baseline}）`,
+    `A 口径（pub fn / export function / export class）候选 = ${src.orphanCandidates.length}（基线 ${ledger.discoveryBaseline}）`,
   );
   if (process.argv.includes('--list-a'))
-    for (const c of [...orphanCandidates].sort()) console.log(`  ${c}`);
+    for (const c of [...src.orphanCandidates].sort()) console.log(`  ${c}`);
   for (const [k, v] of [...byCrate].sort((a, b) => b[1] - a[1]))
     console.log(`  ${String(v).padStart(4)}  ${k}`);
 
   const byKind = new Map();
   const declByTop = new Map();
-  for (const { key, kind } of declCandidates) {
+  for (const { key, kind } of src.declCandidates) {
     byKind.set(kind, (byKind.get(kind) ?? 0) + 1);
     const top = key.split('/src/')[0];
     declByTop.set(top, (declByTop.get(top) ?? 0) + 1);
   }
   console.log(
-    `\nB 口径（TS export const / type / interface）候选 = ${declCandidates.length}（基线 ${declBaseline}）；` +
-      `同一声明集若按 A 判据（除声明文件）会报 ${declUnderARule} 个——落差即「只被同文件使用」的在用面。`,
+    `\nB 口径（TS export const / type / interface）候选 = ${src.declCandidates.length}（基线 ${ledger.discoveryBaselineDecl}）；` +
+      `同一声明集若按 A 判据（除声明文件）会报 ${src.declUnderARule} 个——落差即「只被同文件使用」的在用面。`,
   );
   for (const [k, v] of [...byKind].sort((a, b) => b[1] - a[1]))
     console.log(`  ${String(v).padStart(4)}  ${k}`);
@@ -424,19 +446,125 @@ if (process.argv.includes('--discover')) {
     console.log(`  ${String(v).padStart(4)}  ${k}`);
 
   if (process.argv.includes('--list-decl')) {
-    for (const { key, kind } of [...declCandidates].sort((a, b) => a.key.localeCompare(b.key)))
+    for (const { key, kind } of [...src.declCandidates].sort((a, b) => a.key.localeCompare(b.key)))
       console.log(`  ${kind.padEnd(10)} ${key}`);
   }
 }
 
-if (failures.length > 0) {
-  console.error('孤儿公共 API 台账门禁失败：\n- ' + failures.join('\n- '));
-  process.exit(1);
+// ── self-test：对台账 JSON 做结构化变异，证明每条判据都会红（非空转）───────────
+// 关键前提：接线面候选数（631 / 39）只由产品代码算出、与本台账无关，所以 runChecks 复用同一份
+// src（views/候选数组不变），只把 ledger 换成变异深拷贝——每条变异必须且只把对应判据打红。
+const MUTATIONS = [
+  {
+    name: 'orphan 探针若在接线面命中，该「未接线宣称」必须红',
+    expect: 'orphans 条目已接线',
+    mutate: (l) => {
+      l.orphans[0].probe = '\\bsettle_call\\b'; // 撞到一个确已接线的符号
+    },
+  },
+  {
+    name: 'witness 探针若在接线面查不到任何消费者，非空洞性证明必须红',
+    expect: 'witness 失效',
+    mutate: (l) => {
+      l.wiredWitnesses[0].probe = '\\bZZZ_no_such_symbol_ZZZ\\b';
+    },
+  },
+  {
+    name: 'A 口径基线低于实测候选，棘轮必须红',
+    expect: '新增孤儿公共 API',
+    mutate: (l) => {
+      l.discoveryBaseline = 0;
+    },
+  },
+  {
+    name: 'A 口径等值读数钉与实测不符，必须红',
+    expect: '口径 a 实测',
+    mutate: (l) => {
+      l.discoveryObserved.a = l.discoveryObserved.a - 1;
+    },
+  },
+  {
+    name: 'A 口径等值读数钉缺键，必须红（否则口径被换掉时门禁不响）',
+    expect: '台账缺少 discoveryObserved.a',
+    mutate: (l) => {
+      delete l.discoveryObserved.a;
+    },
+  },
+  {
+    name: 'B 口径基线低于实测候选，棘轮必须红',
+    expect: '新增孤儿公开声明',
+    mutate: (l) => {
+      l.discoveryBaselineDecl = 0;
+    },
+  },
+  {
+    name: 'B 口径基线缺键，必须红（新口径不得静默不设上限）',
+    expect: '缺少 discoveryBaselineDecl',
+    mutate: (l) => {
+      delete l.discoveryBaselineDecl;
+    },
+  },
+  {
+    name: 'B/decl 等值读数钉与实测不符，必须红',
+    expect: '口径 decl 实测',
+    mutate: (l) => {
+      l.discoveryObserved.decl = l.discoveryObserved.decl + 1;
+    },
+  },
+];
+
+function selfTest() {
+  const base = loadSources();
+  const baseFailures = runChecks(base);
+  if (baseFailures.length > 0) {
+    console.error('self-test 前置失败：真实台账本应全绿，但门禁已红——');
+    for (const failure of baseFailures) console.error(`- ${failure}`);
+    process.exit(1);
+  }
+  let judged = 0;
+  const bad = [];
+  for (const mutation of MUTATIONS) {
+    const mutatedLedger = JSON.parse(JSON.stringify(base.ledger));
+    mutation.mutate(mutatedLedger);
+    const failures = runChecks({ ...base, ledger: mutatedLedger });
+    const bitten = failures.some((f) => f.includes(mutation.expect));
+    if (!bitten) {
+      bad.push(
+        `${mutation.name}: 期望「${mutation.expect}」变红，实际 ${failures.length ? failures.map((f) => f.slice(0, 24)).join(' | ') : 'GREEN(假绿!)'}`,
+      );
+      continue;
+    }
+    judged += 1;
+  }
+  if (bad.length > 0) {
+    console.error(`self-test 失败（${bad.length} 条）：`);
+    for (const line of bad) console.error(`- ${line}`);
+    process.exit(1);
+  }
+  console.log(
+    `check-orphan-public-api self-test OK (${judged}/${MUTATIONS.length} 条台账变异各按预期把对应判据打红)`,
+  );
 }
 
-console.log(
-  `孤儿公共 API 台账 OK：${ledger.orphans.length} 条未接线宣称复核通过、` +
-    `${ledger.wiredWitnesses.length} 条已接线反例复核通过、` +
-    `A 口径 ${orphanCandidates.length} ≤ 基线 ${baseline} 且实测＝读数钉 ${observed.a}、` +
-    `B 口径 ${declCandidates.length} ≤ 基线 ${declBaseline} 且实测＝读数钉 ${observed.decl}`,
-);
+if (process.argv.includes('--self-test')) {
+  selfTest();
+} else {
+  const src = loadSources();
+  const failures = runChecks(src);
+
+  if (process.argv.includes('--discover')) printDiscover(src);
+
+  if (failures.length > 0) {
+    console.error('孤儿公共 API 台账门禁失败：\n- ' + failures.join('\n- '));
+    process.exit(1);
+  }
+
+  const { ledger } = src;
+  const observed = ledger.discoveryObserved ?? {};
+  console.log(
+    `孤儿公共 API 台账 OK：${ledger.orphans.length} 条未接线宣称复核通过、` +
+      `${ledger.wiredWitnesses.length} 条已接线反例复核通过、` +
+      `A 口径 ${src.orphanCandidates.length} ≤ 基线 ${ledger.discoveryBaseline} 且实测＝读数钉 ${observed.a}、` +
+      `B 口径 ${src.declCandidates.length} ≤ 基线 ${ledger.discoveryBaselineDecl} 且实测＝读数钉 ${observed.decl}`,
+  );
+}

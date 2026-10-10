@@ -29,6 +29,10 @@ const RECOVERY = 'crates/tauron-distribute/src/recovery.rs';
 const UPGRADE = 'crates/tauron-distribute/src/upgrade.rs';
 const ADAPTER_RECOVERY = 'crates/tauron-adapter/src/upgrade_recovery.rs';
 const ADAPTER_LIB = 'crates/tauron-adapter/src/lib.rs';
+// T-7 十七片之二：cmd_updater_status（读恢复账本、拼「上次升级有未收尾操作」读数的那条诊断腿）
+// 已随 updater 命令族从 lib.rs 逐字节纯搬移到 updater.rs。C4 判据的作用域跟着迁到 updater.rs，
+// 判据字节一字未改，只换归属文件。
+const ADAPTER_UPDATER = 'crates/tauron-adapter/src/updater.rs';
 
 const read = (file) => readFileSync(file, 'utf8');
 
@@ -40,6 +44,7 @@ function loadSources() {
     upgrade: read(UPGRADE),
     adapterRecovery: read(ADAPTER_RECOVERY),
     adapterLib: read(ADAPTER_LIB),
+    adapterUpdater: read(ADAPTER_UPDATER),
     distributeDefs: distributeFiles
       .filter((f) => read(f).match(/^\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+restore_backup_tree\b/m))
       .map((f) => f.replace(/\\/g, '/')),
@@ -108,11 +113,11 @@ function checkC3(src, failures) {
 }
 
 function checkC4(src, failures) {
-  const body = src.adapterLib.slice(
-    src.adapterLib.indexOf('pub fn cmd_updater_status'),
-    src.adapterLib.indexOf('pub fn cmd_updater_status') === -1
+  const body = src.adapterUpdater.slice(
+    src.adapterUpdater.indexOf('pub fn cmd_updater_status'),
+    src.adapterUpdater.indexOf('pub fn cmd_updater_status') === -1
       ? -1
-      : src.adapterLib.indexOf('pub fn cmd_updater_status') + 6000,
+      : src.adapterUpdater.indexOf('pub fn cmd_updater_status') + 6000,
   );
   if (body.length === 0) {
     failures.push('C4 找不到 cmd_updater_status 函数体');
@@ -188,14 +193,14 @@ const MUTATIONS = [
   },
   {
     name: 'C4a cmd_updater_status 去掉 has_pending 门控',
-    file: 'adapterLib',
+    file: 'adapterUpdater',
     from: 'if report.has_pending() {',
     to: 'if true {',
     expect: 'C4',
   },
   {
     name: 'C4b 删掉恢复读数文案',
-    file: 'adapterLib',
+    file: 'adapterUpdater',
     from: '上次升级有未收尾操作：未提交交换 {}、staging 残骸 {}、撕裂日志已隔离 {}',
     to: '（读数已隐藏）',
     expect: 'C4',

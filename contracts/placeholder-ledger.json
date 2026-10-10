@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "purpose": "IND-3 占位登记台账：全仓 `simulated: true` 诚实占位的逐文件计数 + 归宿（disposition/batch），由 scripts/check-placeholder-ledger.mjs --write 复算落盘。纪律 2「占位必须有归宿、不许无限期挂半成品」的机器化——手写 count 即 bug（--check 与源码复算双向核对），新桩 --write 只留空逼维护者亲自填归宿。",
+  "generatedBy": "scripts/check-placeholder-ledger.mjs --write",
+  "marker": "simulated: true",
+  "scope": {
+    "roots": ["crates", "packages"],
+    "languages": [".rs", ".ts"],
+    "excludes": [
+      "/target/",
+      "/node_modules/",
+      "/dist/",
+      "/build/",
+      "/gen/",
+      "*.test.ts",
+      "*.spec.ts",
+      "*.d.ts"
+    ],
+    "note": "注释 / 字符串 / doc 里的 simulated:true 经 stripped 投影剔除，只计代码级出现。"
+  },
+  "dispositions": {
+    "wire": "排入转正批次（把桩接成真链路）",
+    "downgrade-private": "降级为 private / 移出发布面（保留代码，等真引擎再回公开面）",
+    "delete": "排入删除批次",
+    "defer": "明确延期（带批次归属，非无限期挂账）"
+  },
+  "rules": {
+    "unregistered": "源码有占位但台账没登记",
+    "stale": "台账登记了但源码已无该形状（转正/删除后没销账）",
+    "count": "同一文件的占位数量与台账不符",
+    "disposition": "disposition 必须 ∈ {wire, downgrade-private, delete, defer}",
+    "batch": "batch 必须是非空批次归属字符串"
+  },
+  "entries": [
+    {
+      "file": "crates/tauron-adapter/src/market.rs",
+      "count": 3,
+      "disposition": "wire",
+      "batch": "T-14",
+      "note": "cmd_market_check 桩 + cmd_market_download/install 的 _simulated 孪生腿：wired 腿在 native_supported 门后，真效果待 HttpDownloader/Ed25519Verifier 网络闭环（T-14）落地；拆 lib.rs（T-7）后本条从重锚后的文件计起，恒 honest simulated:true。"
+    },
+    {
+      "file": "crates/tauron-market/src/api.rs",
+      "count": 2,
+      "disposition": "wire",
+      "batch": "T-14",
+      "note": "MarketplaceApi::install/uninstall 进程内 mock（不下载/不验签/不落盘），恒 honest simulated:true；网络闭环成真时接真实现并转正。"
+    },
+    {
+      "file": "packages/tauron-cli/src/plugin-lifecycle.ts",
+      "count": 11,
+      "disposition": "wire",
+      "batch": "T-15",
+      "note": "plugin dev/test/pack/publish/sign 未实现命令 + 摘要式签名诚实标 simulated:true（success 侧由 check-simulated-never-commits A4 钉死）；易用 DX-2「插件开发闭环转正」即其归宿批次。"
+    },
+    {
+      "file": "packages/tauron-shell-matrix/src/manager.ts",
+      "count": 1,
+      "disposition": "downgrade-private",
+      "batch": "T-17",
+      "note": "dual-world / shell-matrix 沙箱占位（SANDBOX_UNAVAILABLE 语义）：无真引擎，按易用 DX-6.2 转 private + 移出发布面（shelf-rules Inv-B 已禁其上广告位），等真引擎接入再回公开面。"
+    }
+  ]
+}

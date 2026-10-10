@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "purpose": "R-5 货架规则台账：README `pnpm add` 广告位、create-tauron-app#dependencies、所有 packages/*/package.json 的 private:true 集合、module-maturity 的 reference-only 集合——四段\"观察产出\"，全部由 scripts/check-shelf-rules.mjs --write 复算落盘；手写即 bug（本仓 module-maturity.json purpose 已明确拒绝手写成熟度分级）。",
+  "generatedBy": "scripts/check-shelf-rules.mjs --write",
+  "rules": {
+    "sync": "四段观察必须与源码复算逐条相等（漂移=红）",
+    "private-advertised": "private:true 的包不得出现在 pnpm add / 脚手架 deps",
+    "reference-in-scaffold": "reference-only 的包不得进入脚手架 deps",
+    "unknown-advert": "广告位里的 npm 名必须在 module-maturity packages 或已知集合内"
+  },
+  "readmePnpmAdd": [
+    {
+      "package": "@tauron/host",
+      "line": 143
+    },
+    {
+      "package": "@tauron/ui",
+      "line": 143
+    }
+  ],
+  "scaffoldDependencies": [
+    {
+      "package": "@tauron/app-cli",
+      "manifest": "packages/create-tauron-app/package.json"
+    }
+  ],
+  "privatePackages": [
+    {
+      "package": "@tauron/contract-tests",
+      "manifest": "packages/tauron-contract-tests/package.json"
+    }
+  ],
+  "referenceOnlyPackages": [
+    {
+      "package": "@tauron/adapter-react"
+    },
+    {
+      "package": "@tauron/adapter-svelte"
+    },
+    {
+      "package": "@tauron/adapter-vue"
+    },
+    {
+      "package": "@tauron/app-contract-kit"
+    },
+    {
+      "package": "@tauron/dual-world"
+    },
+    {
+      "package": "@tauron/framework"
+    },
+    {
+      "package": "@tauron/shell-matrix"
+    }
+  ],
+  "knownPackages": [
+    "@tauron/adapter-react",
+    "@tauron/adapter-svelte",
+    "@tauron/adapter-vue",
+    "@tauron/app-cli",
+    "@tauron/app-contract-kit",
+    "@tauron/app-plugin-sdk",
+    "@tauron/cli",
+    "@tauron/contract-tests",
+    "@tauron/core",
+    "@tauron/dual-world",
+    "@tauron/framework",
+    "@tauron/host",
+    "@tauron/market",
+    "@tauron/plugin-context-contract",
+    "@tauron/plugin-sdk",
+    "@tauron/shell-events",
+    "@tauron/shell-matrix",
+    "@tauron/types",
+    "@tauron/ui",
+    "@tauron/ui-primitives",
+    "create-tauron-app"
+  ]
+}

@@ -339,7 +339,13 @@ describe('门禁：sidecar ABI 契约 TS ↔ Rust 同值', () => {
   });
 
   it('spawn 前真的调用了 validate_abi（否则 E_ABI_MISMATCH 永不产生 = 孤儿码）', () => {
-    const adapterSrc = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 二十二片：cmd_runtime_spawn（含 validate_abi 调用）连同 spawn_as 逐字节纯搬移到 runtime.rs，
+    // 故检索源换成 lib + runtime.rs 并集（判据字节一字未改，属输入集更新非削弱）；
+    // ProcError::AbiMismatch 的映射仍在 lib.rs 的 proc_error_to_host（留 lib 私助手），并集照样命中。
+    const adapterSrc =
+      read('crates/tauron-adapter/src/lib.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/runtime.rs');
     expect(adapterSrc).toMatch(
       /validate_abi\(&current_abi_contract\(\), &cfg\.abi\)\.map_err\(proc_error_to_host\)\?;/,
     );
@@ -1272,7 +1278,10 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
     // 品牌 provider 缺失必须返回显式 Unsupported，而非空对象假装已连接。
     // R9 起 `cmd_brand_info` 接 `tauron-brand` 真实现：返回 `ProviderResult<BrandInfo>`
     // ——未配置来源时走 `ProviderResult::Unsupported`，配置了则跑品牌配置校验。
-    const brandFn = /pub fn cmd_brand_info\([\s\S]*?\n\}/.exec(lib)?.[0] ?? '';
+    // T-7 二十片：`cmd_brand_info` 已逐字节纯搬到 `brand.rs`，检索源换成 lib.rs +
+    // brand.rs 并集（输入集更新非削弱）；下面的正则与两条 `toContain` 判据一字未改。
+    const brandRs = read('crates/tauron-adapter/src/brand.rs');
+    const brandFn = /pub fn cmd_brand_info\([\s\S]*?\n\}/.exec(lib + '\n' + brandRs)?.[0] ?? '';
     expect(brandFn, 'cmd_brand_info 缺失').not.toBe('');
     expect(brandFn, '品牌 provider 缺失必须显式 Unsupported').toContain(
       'ProviderResult::Unsupported',
@@ -1288,18 +1297,42 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
     expect(body).toMatch(/supported:\s*bool/);
     expect(body).toMatch(/reason:\s*String/);
     expect(body).toMatch(/fallback:\s*Option<String>/);
+    // 对话框命令实现自 `lib.rs` 纯搬移到 `dialog.rs`（T-7 拆分），故在这个文件里判定；
+    // 断言本身一字未改：每条 `cmd_dialog_*` 仍必须显式判 provider 能力并诚实返回 Unsupported。
+    const dialogRs = read('crates/tauron-adapter/src/dialog.rs');
+    // 剪贴板 / 深链接命令实现自 `lib.rs` 纯搬移到 `clipboard_deep_link.rs`（T-7 拆分）。
+    // 下面三条 `cmd_clipboard_*` / `cmd_deep_link_register` 的返回类型体读只换检索文件，
+    // 判据（UnsupportedBody / DegradedValue<String> / ProviderResult<()>）一字未改；
+    // 紧随其后的 brand 仍靠 lib+clipboard 并集；market 两 struct 自 `lib.rs` 纯搬移到
+    // `market.rs`（T-7 十七片之三），下面两条 `pub struct Market{Check,Update}Result` 改走
+    // lib+market 并集，判据一字未改（同 dialog/clipboard 的并集手法，属输入集更新非削弱）。
+    const clipDl = read('crates/tauron-adapter/src/clipboard_deep_link.rs');
+    // brand 那条断言的 `[\s\S]*?` 原本靠 `cmd_brand_info` 之后最近的
+    // `HostResult<UnsupportedBody>` 满足——那字面量其实是紧随其后的 `cmd_clipboard_write`
+    // 签名（brand 自身返回 `ProviderResult<BrandInfo>`）。clipboard_write 纯搬到
+    // clipboard_deep_link.rs 后该邻接在 lib.rs 内断开，故把检索源换成 lib.rs +
+    // clipboard_deep_link.rs 的并集（正则/判据一字不改，同 window/i18n 的 fnBody 并集手法，
+    // 属输入集更新非削弱；这条既有脆弱性记入路线图，本片不擅改判据）。
+    // T-7 二十片：`cmd_brand_info` 已逐字节纯搬到 `brand.rs`，其邻接 `HostResult<UnsupportedBody>`
+    // 仍靠随后 `cmd_clipboard_write` 的签名满足（与原命中同一匹配）。检索源换成 lib.rs +
+    // brand.rs + clipboard_deep_link.rs 并集，且把 brand.rs 置于 clipDl 之前以保 `[\s\S]*?`
+    // 邻接方向不变；下面那条 `toMatch` 的正则/判据一字未改，属输入集更新非削弱。
+    const libClipDl = lib + '\n' + read('crates/tauron-adapter/src/brand.rs') + '\n' + clipDl;
+    // T-7 十七片之三：market 两 struct 逐字节纯搬到 market.rs；检索源取 lib+market 并集。
+    const libMarket = lib + '\n' + read('crates/tauron-adapter/src/market.rs');
     for (const cmd of ['open', 'save', 'message', 'confirm']) {
-      const impl = new RegExp(`pub fn cmd_dialog_${cmd}\\([\\s\\S]*?\\n\\}`).exec(lib)?.[0] ?? '';
+      const impl =
+        new RegExp(`pub fn cmd_dialog_${cmd}\\([\\s\\S]*?\\n\\}`).exec(dialogRs)?.[0] ?? '';
       expect(impl, `cmd_dialog_${cmd} 缺失`).not.toBe('');
       expect(impl, `cmd_dialog_${cmd} 未判定 provider 能力`).toContain('native_supported()');
       expect(impl, `cmd_dialog_${cmd} 未返回 Unsupported`).toContain('ProviderResult::Unsupported');
     }
-    expect(lib).toMatch(/pub fn cmd_clipboard_write[\s\S]*?HostResult<UnsupportedBody>/);
-    expect(lib).toMatch(/pub fn cmd_clipboard_read[\s\S]*?HostResult<DegradedValue<String>>/);
-    expect(lib).toMatch(/pub fn cmd_deep_link_register[\s\S]*?HostResult<ProviderResult<\(\)>>/);
-    expect(lib).toMatch(/pub fn cmd_brand_info[\s\S]*?HostResult<UnsupportedBody>/);
-    expect(lib).toMatch(/pub struct MarketCheckResult[\s\S]*?pub simulated: bool/);
-    expect(lib).toMatch(/pub struct MarketUpdateResult[\s\S]*?pub simulated: bool/);
+    expect(clipDl).toMatch(/pub fn cmd_clipboard_write[\s\S]*?HostResult<UnsupportedBody>/);
+    expect(clipDl).toMatch(/pub fn cmd_clipboard_read[\s\S]*?HostResult<DegradedValue<String>>/);
+    expect(clipDl).toMatch(/pub fn cmd_deep_link_register[\s\S]*?HostResult<ProviderResult<\(\)>>/);
+    expect(libClipDl).toMatch(/pub fn cmd_brand_info[\s\S]*?HostResult<UnsupportedBody>/);
+    expect(libMarket).toMatch(/pub struct MarketCheckResult[\s\S]*?pub simulated: bool/);
+    expect(libMarket).toMatch(/pub struct MarketUpdateResult[\s\S]*?pub simulated: bool/);
     const dialogTs = read('packages/tauron-host/src/dialog-client.ts');
     expect(dialogTs).toContain('clipboardReadDetailed');
     expect(dialogTs).toContain('isUnsupportedBody');
@@ -1317,7 +1350,12 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
   });
 
   it('recover_boot 返回键必须是 camelCase（TS RecoveryBootResult 消费）', () => {
-    const lib = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 十五片：恢复命令族连同 recovery_boot_payload 逐字节纯搬到 recover.rs，
+    // 字面量随族体一起迁移；检索源取 lib+recover 并集，判定字节不变。
+    const lib =
+      read('crates/tauron-adapter/src/lib.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/recover.rs');
     expect(lib).toContain('"phaseName"');
     expect(lib).toContain('"consecutiveFailures"');
     expect(lib).toContain('"safemodeFailures"');
@@ -1349,7 +1387,8 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
   });
 
   it('i18n 返回键必须是 camelCase（TS I18nState 消费）', () => {
-    const lib = read('crates/tauron-adapter/src/lib.rs');
+    // i18n 命令族已按原名纯搬到 i18n.rs（T-7），返回体的字面量随命令体一起迁移。
+    const lib = read('crates/tauron-adapter/src/i18n.rs');
     expect(lib).toContain('"fallbackChain"');
     expect(lib).toContain('"registeredLocales"');
     expect(lib).toContain('"bundleKeys"');
@@ -1367,7 +1406,8 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
   });
 
   it('i18n_t 全缺失时返回 key 本身而非空串（两侧文档一致，防前端按空串分支）', () => {
-    const lib = read('crates/tauron-adapter/src/lib.rs');
+    // cmd_i18n_t 的文档随 i18n 命令族纯搬到 i18n.rs（T-7）。
+    const lib = read('crates/tauron-adapter/src/i18n.rs');
     expect(lib).toMatch(/全部缺失时返回 key 本身/);
     const ts = read('packages/tauron-host/src/shell-client.ts');
     expect(ts).toMatch(/全部落空时返回 key 本身/);
@@ -1378,7 +1418,13 @@ describe('门禁：返回值形状 TS ↔ Rust 一致', () => {
   it('recover 阶段对账必须在宿主侧发生（引擎只判、状态机执行）', () => {
     // 对账缺失 = 引擎进入 safemode 而注册表的 disabledBySafemode 不变，
     // <oc-plugin-manager> 角标会静默失真。
-    const lib = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 十五片：cmd_recover_report / cmd_recover_trial_enable 族体逐字节纯搬到 recover.rs，
+    // 其对 reconcile_recovery_phase(state) 的调用随族体迁移（对账助手本体仍留 lib.rs）；
+    // 检索源取 lib+recover 并集，正则判定字节不变。
+    const lib =
+      read('crates/tauron-adapter/src/lib.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/recover.rs');
     expect(lib).toMatch(/fn reconcile_recovery_phase/);
     // report 与 trial_enable 两条写路径都必须调用对账。
     expect(lib).toMatch(/fn cmd_recover_report[\s\S]{0,4000}reconcile_recovery_phase\(state\)/);
@@ -1705,6 +1751,9 @@ describe('门禁：断链回归（贡献身份绑定 / 事件取件泵 / 声明�
     // 注册了却没声明（来源不明的入口）都无人发现。这条门禁钉住四件事：
     const tauri = read('crates/tauron-adapter/src/tauri.rs');
     const lib = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 拆分：cmd_contributes_reconcile 命令体已逐字节纯搬移到 contributes.rs，
+    // 体读改指新文件（判据字节不变）；E_CONTRIBUTES_DRIFT 仍命中 lib.rs 内联测试。
+    const contributes = read('crates/tauron-adapter/src/contributes.rs');
 
     // ① 命令真的注册进 handler 宏（否则线上不可达）。
     expect(tauri, 'host_contributes_reconcile 未进注册宏').toMatch(
@@ -1714,7 +1763,7 @@ describe('门禁：断链回归（贡献身份绑定 / 事件取件泵 / 声明�
     expect(tauri).toMatch(/fn host_contributes_reconcile[\s\S]{0,600}resolve_self_identity/);
     // ③ 分叉必须报**专用**错误码，且该码两侧词表都有（追加在末尾）。
     expect(lib, '未定义 E_CONTRIBUTES_DRIFT').toMatch(/ErrorCode::E_CONTRIBUTES_DRIFT/);
-    expect(lib, '对账必须比对声明与注册两侧').toMatch(
+    expect(contributes, '对账必须比对声明与注册两侧').toMatch(
       /fn cmd_contributes_reconcile[\s\S]{0,2000}difference/,
     );
     const rustErr = read('crates/tauron-host/src/error.rs');
@@ -1859,9 +1908,16 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
   });
 
   it('通知链必须读写成对，卸载必须回收通知（只写不读 = 通知中心无处取数）', () => {
-    const lib = read('crates/tauron-adapter/src/lib.rs');
-    expect(lib).toMatch(/fn cmd_notifications_list/);
-    expect(lib).toMatch(/fn cmd_notifications_read/);
+    // T-7 十六片：cmd_registry_admin / cmd_registry_admin_as 定义体已按原名纯搬到 registry.rs，
+    // 下面按 `pub fn cmd_registry_admin(` → `pub fn cmd_registry_admin_as(` 的顺序锚切出 admin 体、
+    // 判据 `/notify_store[\s\S]{0,200}cleanup_plugin/` 一字未改，只把检索源并入 registry.rs。
+    const lib =
+      read('crates/tauron-adapter/src/lib.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/registry.rs');
+    const notifyRs = read('crates/tauron-adapter/src/notify.rs');
+    expect(notifyRs).toMatch(/fn cmd_notifications_list/);
+    expect(notifyRs).toMatch(/fn cmd_notifications_read/);
     // 卸载/清除必须回收该插件的通知（未读计数不得被死条目永久膨胀）。
     const admin = lib.slice(
       lib.indexOf('pub fn cmd_registry_admin('),
@@ -2389,11 +2445,32 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // 写入点：唯一咽喉函数，且**路由的命令名集合与登记表全等**（多一个=白审计，
     // 少一个=漏审计，两者都必须红）。
     const adapter = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 十六片：注册表域命令族（含 host_registry_admin/install/install_preview 的
+    // admin_gate 路由）连同入口逐字节纯搬移到 registry.rs。T-7 十七片之三：商城域的
+    // host_market_download / host_market_install 两条 admin_gate 路由随 cmd_market_*_as
+    // 逐字节纯搬移到 market.rs。咽喉点两条安全判据——①「routed 集合 == 审计登记表」、
+    // ②「任何审计命令都不得走裸 require_main_window」——的作用域必须跟着覆盖这些兄弟模块，
+    // 否则搬出去的命令既进不了 routed（集合缺项即红）、又逃过裸判定回扫＝判断被削弱。
+    // 故这三条并读 lib + registry + market；正向的 def/doctor 锚点仍只读 lib（admin_gate
+    // 定义与装配留痕都在 lib，避免跨拼接缝的假命中）。host_market_check 是只读桩、不在登记表，
+    // 它走裸 require_main_window 是允许且既有事实，不影响②。
+    // T-7 二十二片：cmd_runtime_spawn_as（携 admin_gate(...,"host_runtime_spawn") 路由）逐字节纯
+    // 搬移到 runtime.rs——host_runtime_spawn 在 AUDITED_ADMIN_COMMANDS 内，若咽喉点扫描源不并读
+    // runtime.rs，则 routed 集合缺 host_runtime_spawn（toEqual(registered) 即红）、又逃过裸判定回扫
+    // ＝判断被削弱。故并读；正向 def/admin_gate 定义锚仍只读 lib（留 lib，避免跨拼接缝假命中）。
+    const auditScan =
+      adapter +
+      '\n' +
+      read('crates/tauron-adapter/src/registry.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/market.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/runtime.rs');
     expect(adapter, '缺 admin_gate 咽喉点').toMatch(/pub fn admin_gate\(/);
     expect(adapter, 'admin_gate 必须复用既有特权判定后再留痕').toMatch(
       /pub fn admin_gate\([\s\S]{0,500}require_main_window\(caller, command\)[\s\S]{0,200}record_admin_audit\(/,
     );
-    expect(adapter, '开关位复活：适配器不得再持有 admin_audit_available').not.toMatch(
+    expect(auditScan, '开关位复活：适配器不得再持有 admin_audit_available').not.toMatch(
       /admin_audit_available/,
     );
     const registryStart = audit.indexOf('AUDITED_ADMIN_COMMANDS');
@@ -2404,8 +2481,11 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     ]
       .map((m) => m[1]!)
       .sort();
+    const eventsRouted = read('crates/tauron-adapter/src/events.rs');
     const routed = [
-      ...adapter.matchAll(/admin_gate\((?:&state\.substrate|state), caller, "(host_[a-z_]+)"\)/g),
+      ...(auditScan + '\n' + eventsRouted).matchAll(
+        /admin_gate\((?:&state\.substrate|state), caller, "(host_[a-z_]+)"\)/g,
+      ),
     ].map((m) => m[1]!);
     // 一名多点是允许的（`host_registry_install` 有 legacy 与 reviewed 两个入口），
     // 但两侧集合必须全等；且**任何**审计命令都不得再走裸判定——一个入口绕开咽喉点
@@ -2413,7 +2493,7 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect([...new Set(routed)].sort(), '审计登记表与咽喉点路由的命令必须同源').toEqual(registered);
     expect(registered.length, '审计集不该被清空').toBeGreaterThanOrEqual(4);
     for (const name of registered) {
-      expect(adapter, `${name} 有入口绕过 admin_gate（裸 require_main_window）`).not.toMatch(
+      expect(auditScan, `${name} 有入口绕过 admin_gate（裸 require_main_window）`).not.toMatch(
         new RegExp(`require_main_window\\(caller, "${name}"\\)`),
       );
       expect(
@@ -2423,10 +2503,18 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     }
 
     // 读取点：doctor 的检查项由 sink 健康态推导，快照本身也上线。
-    expect(adapter).toMatch(
+    // T-7 二十一片：cmd_production_doctor_as 与其唯一私助手 production_doctor_report
+    // 逐字节纯搬移到 doctor.rs——两条读取点锚（audit_for_admin_operations_available 由
+    // sink 健康态推导、report.admin_audit = audit 快照上线）命中的正是搬走的函数体，故检索源
+    // 换成 lib + doctor.rs 并集（判据字节一字不改，属输入集更新非削弱）。同段
+    // validate_for_start / 装配期 open sink / 内联测试 fn 名仍在 lib（未搬），保持只读 adapter；
+    // admin_gate 定义与 routed 集合的正向锚也仍只读 adapter/auditScan——host_production_doctor
+    // 走裸 require_main_window、不在 AUDITED_ADMIN_COMMANDS，故 doctor.rs 刻意**不**并入 auditScan。
+    const adapterDoctor = adapter + '\n' + read('crates/tauron-adapter/src/doctor.rs');
+    expect(adapterDoctor).toMatch(
       /audit_for_admin_operations_available =\s*\n?\s*audit\.as_ref\(\)\.is_some_and\(\s*\n?\s*tauron_host::AdminAuditFacts::healthy/,
     );
-    expect(adapter, 'doctor 报告未附带审计快照').toMatch(/report\.admin_audit = audit/);
+    expect(adapterDoctor, 'doctor 报告未附带审计快照').toMatch(/report\.admin_audit = audit/);
     expect(adapter, '审计目录必须在启动时真的打得开').toMatch(
       /fn validate_for_start\([\s\S]{0,900}AdminAuditSink::open\(dir\)/,
     );
@@ -2613,7 +2701,11 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
 
     // 消费点：撤销是主窗特权命令，管理面拿到 `true` 就必须真的停流。
     const adapter = read('crates/tauron-adapter/src/lib.rs');
-    expect(adapter, 'host_events_revoke 未走特权咽喉点').toMatch(
+    // T-7 拆分：cmd_events_revoke_as 命令体与其 rustdoc（撤销即失效）已逐字节纯搬移到
+    // events.rs；两条体读（admin_gate 咽喉点 + 撤销效力文档）改指 eventsRs，判据一字不改。
+    // 同段两条订阅侧断言（subscribed_topics_of / 撤销后的提交不得再镜像）是 lib.rs 内联测试内容，仍读 adapter。
+    const eventsRs = read('crates/tauron-adapter/src/events.rs');
+    expect(eventsRs, 'host_events_revoke 未走特权咽喉点').toMatch(
       /admin_gate\(state, caller, "host_events_revoke"\)/,
     );
     expect(adapter, '缺订阅侧的撤销效力回归测试').toMatch(
@@ -2622,7 +2714,7 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(adapter, '缺「撤销后提交不再镜像」断言').toMatch(
       /撤销后的提交不得再镜像给已撤销的观察方/,
     );
-    expect(adapter, '命令面文档未交代撤销效力').toMatch(/撤销即失效[\s\S]{0,200}待取帧一并作废/);
+    expect(eventsRs, '命令面文档未交代撤销效力').toMatch(/撤销即失效[\s\S]{0,200}待取帧一并作废/);
 
     // 前端契约：TS SDK 的方法注释必须把「撤销有实效」讲清楚，否则调用方会以为
     // 还得自己补一次 unsubscribe。
@@ -2730,7 +2822,15 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // 而闭包含磁盘写。后果是**文档与实现互相矛盾**：`settings_write_lock` 的注释说它
     // 是单写者事务边界，实测把它的 `_write` 换成 `None`，并发写测试仍然全绿——闸门替它
     // 把一切串好了，只读命令也被排在别人的磁盘写之后。
-    const lib = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 十三片：三条写命令（set/adopt_legacy/migrate）的定义体已按原名纯搬到 settings.rs，
+    // 三处 `_write` 租约与「写租约故意横跨落盘」说明随迁；reconcile_settings_boundary 与其
+    // 租约仍在 lib.rs。判据（4 处租约 + 全部正/负 needle 与 regex）一字未改，只把检索源
+    // 换成 lib.rs + settings.rs 并集，同名 inline test 与 `settings_write_lock` struct 注释
+    // （"互斥量**绝不**进入"、"单写者不是性能选项…"）都留在 lib.rs 一侧继续被覆盖。
+    const lib =
+      read('crates/tauron-adapter/src/lib.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/settings.rs');
     expect(lib, '闸门不得再把边界锁跨在闭包上（那等于用故障状态当串行化点）').not.toMatch(
       /settings_fault\.lock\(\)\.run\(/,
     );
@@ -2772,6 +2872,10 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // `durable.rs` 那个通用 `MigrationSnapshot<T>` 零消费者。于是「迁移可回滚」在最需要
     // 它的场景——迁移后正式文档写坏、下一次启动才暴露——一条都不成立。
     const lib = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 十三片：`cmd_settings_migrate` 已按原名纯搬到 settings.rs（Block B 命令段），
+    // 设置域其余私助手（stage/load/clear/persist/atomic_write/report 等）仍在 lib.rs，
+    // 故下面这条 fnBody 只把 migrate 的检索源换成 settingsRs，判据一字未改。
+    const settingsRs = read('crates/tauron-adapter/src/settings.rs');
     // 定义锚定在列 0：装配段（`load_settings_rollback_image(&…)`）在文件里出现在定义
     // 之前，不锚定就会把调用点当成函数体。
     const fnBody = (src: string, name: string): string => {
@@ -2791,7 +2895,7 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     );
 
     // ② 迁移链的顺序即正确性：取快照 → 迁移 → 先写镜像 → 再写正式文档。
-    const migrate = fnBody(lib, 'cmd_settings_migrate');
+    const migrate = fnBody(settingsRs, 'cmd_settings_migrate');
     expect(migrate, '迁移前没有取用户层快照').toMatch(
       /let before = state\.settings\.lock\(\)\.snapshot_all\(\);/,
     );
@@ -2848,7 +2952,10 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // 而这种红教人的是「别给生产语义加测试」。测试里的调用不是消费点。
     const testsAt = lib.search(/^#\[cfg\(test\)\]\r?\nmod tests \{$/m);
     if (testsAt < 0) throw new Error('adapter lib.rs 的测试模块锚点消失，消费点计数失去边界');
-    const productionLib = lib.slice(0, testsAt);
+    // T-7 十三片：cmd_settings_migrate（含「迁移落盘失败」那个作废出口）已按原名纯搬到
+    // settings.rs。settings.rs 是同级模块、只装 Block B 搬来的设置命令、无 #[cfg(test)] 段，
+    // 整文件皆生产区，故把它的全文并入计数源；判据（正则与 .toBe(3)）一字未改。
+    const productionLib = lib.slice(0, testsAt) + '\n' + settingsRs;
     expect(
       (productionLib.match(/clear_settings_rollback_image\(&/g) ?? []).length,
       '作废出口的消费点漂移（装配消费 + 迁移落盘失败 + 健康启动回执）',
@@ -3475,7 +3582,13 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
 
   it('R5：流式三命令成组注册，且 plugin_call 真正接上帧载体', () => {
     const tauri = read('crates/tauron-adapter/src/tauri.rs');
-    const lib = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 十四片：call + stream 两族命令（含 cmd_stream_open/write/close 三条实现体）已按原名
+    // 从 lib.rs 纯搬到 call_stream.rs。故把 lib 检索源并集 lib.rs + call_stream.rs，③ 的三条
+    // `.stream_*` toMatch 与「流式命令不得接受前端 seq」反向钉均命中搬走的函数体，判据一字未改。
+    const lib =
+      read('crates/tauron-adapter/src/lib.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/call_stream.rs');
     const registry = read('crates/tauron-host/src/registry.rs');
     const { substrate, full } = rustHandlerFamilies();
 
@@ -3803,6 +3916,12 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
   it('P0-2：runtime 两命令成组注册、真调实现，且失败码语义分明', () => {
     const tauri = read('crates/tauron-adapter/src/tauri.rs');
     const lib = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 二十二片：cmd_runtime_spawn / cmd_runtime_health 命令体（含 validate_spawn_config、
+    // E_PLUGIN_TYPE_NO_RUNTIME、runtime_lease 调用）逐字节纯搬移到 runtime.rs。凡命中这些搬走
+    // 函数体的正/负判据，检索源换成 lib + runtime.rs 并集（判据字节一字未改，属输入集更新非削弱）；
+    // 仍命中 lib 留痕的判据（use tauron_proc 模块顶、CrashTracker/ProcSpawner 设施字段、
+    // E_LEASE_EXPIRED 文档）保持只读 lib。
+    const libRt = lib + '\n' + read('crates/tauron-adapter/src/runtime.rs');
     const { substrate, full } = rustHandlerFamilies();
 
     // ① 两命令成组：只有 spawn 没有 health 会让租约永远无法对账（进程死了没人知道）。
@@ -3822,16 +3941,16 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
 
     // ③ 孤儿 crate 必须真的被用上（否则"激活"只是文档说法）。
     expect(lib, 'tauron-proc 未被接入').toMatch(/use tauron_proc::\{/);
-    expect(lib, '未复用 tauron-proc 的 spawn 校验（两份规则 = 迟早不一致）').toMatch(
+    expect(libRt, '未复用 tauron-proc 的 spawn 校验（两份规则 = 迟早不一致）').toMatch(
       /validate_spawn_config/,
     );
     expect(lib, '崩溃计数未复用 tauron-proc 的 CrashTracker').toMatch(/CrashTracker/);
 
     // ④ 失败码语义分明：类型不对 vs 租约失效，是两种不同的下一步动作。
-    expect(lib, '非 Process 插件必须诚实失败').toMatch(/E_PLUGIN_TYPE_NO_RUNTIME/);
+    expect(libRt, '非 Process 插件必须诚实失败').toMatch(/E_PLUGIN_TYPE_NO_RUNTIME/);
     expect(lib, '租约失效必须用租约语义的码').toMatch(/E_LEASE_EXPIRED/);
     expect(
-      /runtime_lease\([^)]*\)[\s\S]{0,200}E_CALL_NOT_FOUND/.test(lib),
+      /runtime_lease\([^)]*\)[\s\S]{0,200}E_CALL_NOT_FOUND/.test(libRt),
       '租约失效不得复用 E_CALL_NOT_FOUND（调用方会做错动作）',
     ).toBe(false);
 
@@ -3904,6 +4023,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     const runtime = read('crates/tauron-host/src/runtime.rs');
     const registry = read('crates/tauron-host/src/registry.rs');
     const adapter = read('crates/tauron-adapter/src/lib.rs');
+    // cmd_resource_stats 本体已按 T-7 纯搬移到 resource.rs；此处两条体读判据一字不改，
+    // 只把检索源换成搬来的新文件（读数是注册表事实的线形，与所在文件无关）。
+    const resourceRs = read('crates/tauron-adapter/src/resource.rs');
     const ts = read('packages/tauron-host/src/shell-client.ts');
 
     // ① 号源必须是全局单调计数器，不是每资源序号：否则摘除跟踪后重装会退回旧号。
@@ -3933,10 +4055,11 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       /pub fn generation_stats\(&self\) -> GenerationStats/,
     );
     expect(registry, 'Registry 未暴露代际读数').toMatch(/pub fn runtime_generation_stats\(&self\)/);
-    expect(adapter, 'host_resource_stats 的读数不是来自注册表（另造计数器＝第二事实源）').toMatch(
-      /let generations = state\.registry\.runtime_generation_stats\(\)/,
-    );
-    expect(adapter, 'host_resource_stats 未带上代际读数').toMatch(/"generations": generations/);
+    expect(
+      resourceRs,
+      'host_resource_stats 的读数不是来自注册表（另造计数器＝第二事实源）',
+    ).toMatch(/let generations = state\.registry\.runtime_generation_stats\(\)/);
+    expect(resourceRs, 'host_resource_stats 未带上代际读数').toMatch(/"generations": generations/);
     expect(ts, 'TS 侧 ResourceStats 缺 generations 字段').toMatch(/generations: GenerationStats/);
 
     // ④ churn 证明：「有界」这件事只有真跑一遍大量 id 才钉得住，注释里的上界不算。
@@ -3974,6 +4097,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     const runtime = read('crates/tauron-host/src/runtime.rs');
     const registry = read('crates/tauron-host/src/registry.rs');
     const adapter = read('crates/tauron-adapter/src/lib.rs');
+    // cmd_resource_stats 本体已按 T-7 纯搬移到 resource.rs；下面 cmdBody / "reap": reap
+    // 两条体读判据一字不改，只把检索源换成搬来的新文件（重试先于取读数的顺序线形与所在文件无关）。
+    const resourceRs = read('crates/tauron-adapter/src/resource.rs');
     const proc = read('crates/tauron-proc/src/spawner.rs');
     const ts = read('packages/tauron-host/src/shell-client.ts');
 
@@ -4011,7 +4137,7 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     );
     const cmdBody =
       /pub fn cmd_resource_stats\(state: &PluginRuntimeState\)[\s\S]*?\n    \}/.exec(
-        adapter,
+        resourceRs,
       )?.[0] ?? '';
     const retryAt = cmdBody.indexOf('state.registry.runtime_retry_pending_reaps()');
     const readAt = cmdBody.indexOf('let reap = state.registry.runtime_reap_stats()');
@@ -4019,7 +4145,7 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(readAt, 'host_resource_stats 取读数不再经过注册表（第二事实源）').toBeGreaterThan(
       retryAt,
     );
-    expect(adapter, 'host_resource_stats 未带上回收留痕').toMatch(/"reap": reap/);
+    expect(resourceRs, 'host_resource_stats 未带上回收留痕').toMatch(/"reap": reap/);
     expect(ts, 'TS 侧 ResourceStats.global 缺 reap 字段').toMatch(
       /generations: GenerationStats;[\s\S]{0,600}reap: ReapStats;/,
     );
@@ -4250,7 +4376,13 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     //    入口、返回判别形且 executed 分支老字段留顶层；
     // ③ TS——token/判别联合镜像、管理面与壳层两条腿的预览→确认→提交链、无 DOM 失败关闭；
     // ④ 测试在场（Rust 定向 + TS 两条腿）；⑤ 台账行翻篇 + 轮 43 小节在场。
-    const lib = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 十六片：cmd_registry_admin_as / cmd_registry_admin_reviewed_as 定义体随注册表族纯搬到
+    // registry.rs（令牌/铸发/消费等共用助手仍留 lib.rs），故把 registry.rs 并入本用例对 lib 的检索源；
+    // 所有判据（toContain/toMatch/bodyOf 正则）字节不变，属输入集补全非削弱。
+    const lib =
+      read('crates/tauron-adapter/src/lib.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/registry.rs');
     const tauri = read('crates/tauron-adapter/src/tauri.rs');
     const events = read('packages/tauron-host/src/events.ts');
     const host = read('packages/tauron-host/src/host.ts');
@@ -4639,6 +4771,192 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     expect(plan, '轮 11 未做清单未划掉 A65').toContain('~~A65');
   });
 
+  it('轮 69 R-5：货架规则门禁布线（脚本+台账+链+CI）', () => {
+    // T-5 落地的对偶约束：本仓 module-maturity.json 已明确拒绝手写成熟度分级
+    // （"手写等级字段只会复制谎报模式"），因此 R-5 只做三条纯机械反推——
+    // private 包不得上广告、reference-only 不得进脚手架、广告名必须在已知集合。
+    // 这里钉的是"门禁存在 + 台账形状与源码复算一致 + pnpm 入口 + CI 调用"，
+    // 语义判定由 scripts/check-shelf-rules.mjs 与 --self-test 变异夹具实跑。
+    const gate = read('scripts/check-shelf-rules.mjs');
+    for (const needle of [
+      'shelf-advertising.json',
+      'sync-readme',
+      'sync-scaffold',
+      'sync-private',
+      'sync-reference',
+      'private-advertised',
+      'reference-in-scaffold',
+      'unknown-advert',
+      'MUTATIONS',
+      'self-test',
+    ]) {
+      expect(gate, `货架门禁脚本缺 ${needle}（判定被掏空）`).toContain(needle);
+    }
+
+    const ledger = JSON.parse(read('contracts/shelf-advertising.json')) as {
+      schemaVersion: number;
+      readmePnpmAdd: { package: string; line: number }[];
+      scaffoldDependencies: { package: string; manifest: string }[];
+      privatePackages: { package: string; manifest: string }[];
+      referenceOnlyPackages: { package: string }[];
+      knownPackages: string[];
+    };
+    expect(ledger.schemaVersion, '货架台账 schemaVersion 变了要同步改门禁').toBe(1);
+
+    // 台账 vs 源码复算：README `pnpm add` 行、脚手架 deps、private 集合、reference-only 集合
+    // 任一侧偷偷改而另一侧没改，都必须在 wire-gate 层红（不只是 check-shelf-rules 本地红）。
+    const readmePnpmAddLines = read('README.md')
+      .split(/\r?\n/)
+      .map((l, i) => ({ l, n: i + 1 }))
+      .filter(({ l }) => /^\s*(?:\$\s+)?pnpm\s+add\s+(.+)$/u.test(l));
+    const observedAdvert = new Set<string>();
+    for (const { l } of readmePnpmAddLines) {
+      const m = /^\s*(?:\$\s+)?pnpm\s+add\s+(.+)$/u.exec(l)?.[1] ?? '';
+      for (const t of m.split(/\s+/))
+        if (/^(?:@tauron\/|tauron$|create-tauron-app$)/u.test(t)) observedAdvert.add(t);
+    }
+    const ledgerAdvert = new Set(ledger.readmePnpmAdd.map((x) => x.package));
+    expect([...ledgerAdvert].sort(), '货架台账 README 广告位与实存 pnpm add 行不齐').toEqual(
+      [...observedAdvert].sort(),
+    );
+    expect(
+      ledger.readmePnpmAdd.length,
+      'README pnpm-add 行没被抽全（正则被改了要同步）',
+    ).toBeGreaterThanOrEqual(observedAdvert.size);
+
+    const scaffold = JSON.parse(read('packages/create-tauron-app/package.json')) as {
+      dependencies?: Record<string, string>;
+    };
+    const scaffoldNames = Object.keys(scaffold.dependencies ?? {})
+      .filter((n) => n.startsWith('@tauron/') || n === 'tauron' || n === 'create-tauron-app')
+      .sort();
+    expect(
+      ledger.scaffoldDependencies.map((x) => x.package).sort(),
+      '货架台账 scaffoldDependencies 与 package.json#dependencies 漂移',
+    ).toEqual(scaffoldNames);
+
+    const maturity = JSON.parse(read('contracts/module-maturity.json')) as {
+      packages: Record<string, { name?: string; consumerStatus?: string }>;
+    };
+    const observedReferenceOnly = Object.values(maturity.packages)
+      .filter((x) => x?.consumerStatus === 'reference-only')
+      .map((x) => x.name ?? '')
+      .sort();
+    expect(
+      ledger.referenceOnlyPackages.map((x) => x.package).sort(),
+      '货架台账 referenceOnlyPackages 与 module-maturity 漂移',
+    ).toEqual(observedReferenceOnly);
+
+    // 规则本身：广告位不得含 private、不得含 reference-only、名不得未知。
+    const advertised = new Set([
+      ...ledger.readmePnpmAdd.map((x) => x.package),
+      ...ledger.scaffoldDependencies.map((x) => x.package),
+    ]);
+    const privates = new Set(ledger.privatePackages.map((x) => x.package));
+    const refs = new Set(ledger.referenceOnlyPackages.map((x) => x.package));
+    const known = new Set(ledger.knownPackages);
+    for (const p of advertised) {
+      expect(p, `广告位含 private 包 ${p}（R-5 会红）`).not.toMatch(/^$/);
+      expect(privates.has(p), `广告位含 private 包 ${p}`).toBe(false);
+      expect(known.has(p), `广告位含未收录包 ${p}`).toBe(true);
+    }
+    for (const p of ledger.scaffoldDependencies.map((x) => x.package)) {
+      expect(refs.has(p), `脚手架 deps 含 reference-only 包 ${p}`).toBe(false);
+    }
+
+    // 布线：pnpm 入口 + gates:check 链 + CI 步骤。
+    const pkg = read('package.json');
+    const gatesChain = /"gates:check":\s*"([^"]+)"/.exec(pkg)?.[1] ?? '';
+    expect(gatesChain, 'gates:check 链缺 check-shelf-rules（本地不再跑它）').toContain(
+      'check-shelf-rules.mjs',
+    );
+    expect(gatesChain, 'gates:check 缺 shelf-rules 自证').toContain(
+      'check-shelf-rules.mjs --self-test',
+    );
+    const ci = read('.github/workflows/ci.yml');
+    expect(ci, 'CI 缺 Shelf-Rules 步骤').toContain('node scripts/check-shelf-rules.mjs');
+    expect(ci, 'CI 缺 Shelf-Rules 自证').toContain(
+      'node scripts/check-shelf-rules.mjs --self-test',
+    );
+  });
+
+  it('轮 69 IND-3：占位登记台账门禁布线（脚本+台账归宿+链+CI）', () => {
+    // 独立审计根因 1 / 统一计划纪律 2「占位必须有归宿」的机器化。既有两座诚实针门只
+    // 钉 6 个具名文件的行为形状，抓不到「别处新长出一个 simulated:true 没登记」；
+    // check-placeholder-ledger 把作用域扩到全仓源文件做逐文件双向计数核对。这里钉
+    // 「门禁存在 + 台账每条都有归宿 + pnpm 入口 + CI 调用」，精确计数与变异自证由脚本
+    // --self-test（已入 gates:check 与 CI）实跑；本块只做跨源松核对，防台账凭空说谎。
+    const gate = read('scripts/check-placeholder-ledger.mjs');
+    for (const needle of [
+      'placeholder-ledger.json',
+      'unregistered',
+      'stale',
+      'count',
+      'disposition',
+      'batch',
+      'simulated',
+      'MUTATIONS',
+      'self-test',
+    ]) {
+      expect(gate, `占位门禁脚本缺 ${needle}（判定被掏空）`).toContain(needle);
+    }
+
+    const ledger = JSON.parse(read('contracts/placeholder-ledger.json')) as {
+      schemaVersion: number;
+      marker: string;
+      dispositions: Record<string, string>;
+      entries: { file: string; count: number; disposition: string; batch: string }[];
+    };
+    expect(ledger.schemaVersion, '占位台账 schemaVersion 变了要同步改门禁').toBe(1);
+    expect(ledger.marker, '占位标记被改（须与门禁 MARKER 正则一致）').toBe('simulated: true');
+    const ALLOWED = new Set(['wire', 'downgrade-private', 'delete', 'defer']);
+    for (const key of Object.keys(ledger.dispositions)) {
+      expect(ALLOWED.has(key), `dispositions 表出现未知归宿 ${key}`).toBe(true);
+    }
+    expect(
+      ledger.entries.length,
+      '占位台账空了（全仓难道没有一处 simulated:true？）',
+    ).toBeGreaterThan(0);
+    const seen = new Set<string>();
+    for (const e of ledger.entries) {
+      expect(e.file, '占位条目无 file').not.toBe('');
+      expect(seen.has(e.file), `占位条目 file 重复：${e.file}`).toBe(false);
+      seen.add(e.file);
+      expect(Number.isInteger(e.count) && e.count > 0, `${e.file} count 非正整数`).toBe(true);
+      expect(ALLOWED.has(e.disposition), `${e.file} disposition "${e.disposition}" 非法`).toBe(
+        true,
+      );
+      expect(e.batch.trim(), `${e.file} 缺 batch（归宿没写排进哪个批次）`).not.toBe('');
+      // 跨源松核对：登记的每个文件确实还在、且真的含 simulated 形状（防 stale 凭空挂账）。
+      const text = read(e.file);
+      const rawMatches = text.split(/\r?\n/).filter((l) => /simulated:/.test(l)).length;
+      expect(
+        rawMatches >= e.count,
+        `${e.file} 台账登记 ${e.count} 处，但源码连注释都不足 ${e.count} 行提到 simulated`,
+      ).toBe(true);
+    }
+
+    // 布线：pnpm 入口 + gates:check 链 + CI 调用（与货架同区跑，CI 步骤行数中性）。
+    const pkg = read('package.json');
+    const gatesChain = /"gates:check":\s*"([^"]+)"/.exec(pkg)?.[1] ?? '';
+    expect(gatesChain, 'gates:check 链缺 check-placeholder-ledger').toContain(
+      'check-placeholder-ledger.mjs',
+    );
+    expect(gatesChain, 'gates:check 缺 placeholder 自证').toContain(
+      'check-placeholder-ledger.mjs --self-test',
+    );
+    for (const entry of ['placeholder:gen', 'placeholder:check', 'placeholder:self-test']) {
+      expect(pkg, `package.json 缺 ${entry} 入口`).toContain(`"${entry}"`);
+    }
+    const ci = read('.github/workflows/ci.yml');
+    expect(ci, 'CI 缺 Placeholder-Ledger 步骤').toContain(
+      'node scripts/check-placeholder-ledger.mjs',
+    );
+    expect(ci, 'CI 缺 Placeholder-Ledger 自证').toContain(
+      'node scripts/check-placeholder-ledger.mjs --self-test',
+    );
+  });
+
   it('轮 46：零 Surface 就绪集合与真跑 conformance 同形（A66 ReadinessSet）', () => {
     // 轮 46 立的规矩：「headless 可零 Surface 运行」从判词变成可求值集合 + 真跑用例。
     // 这条门禁钉模块形状（六组事实 / 具名 blockers 入口 / headless 构造）、三条
@@ -4725,7 +5043,16 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     }
 
     // 接线数：定义在场还不够，闸门要真的包在命令面上（定义与测试调用不匹配该计数模式）。
-    const countSites = (re: RegExp): number => [...adapter.matchAll(re)].length;
+    // T-7 拆分：`run_events_boundary(state, "` 的 7 个命令面调用点随 `cmd_events_*` 纯搬移到
+    // events.rs（lib 侧现为 0、events.rs 侧为 7）；计数源并入 events.rs，合计仍 7。
+    // T-7 十六片：注册表族 `cmd_registry_*` 纯搬到 registry.rs 后，`run_registry_boundary` 的 5 个调用点
+    // 全落 registry.rs、`run_review_boundary` 的 install_review_consume 1 点落 registry.rs（另 3 点在 lib
+    // 的令牌助手内不动）、`reconcile_review_boundary` 的 2 个 preview 调用点也落 registry.rs；计数源并入
+    // registry.rs，合计 5/4/2 一字不变。判据（各 ===N）属输入集更新非削弱。
+    const eventsBoundary = read('crates/tauron-adapter/src/events.rs');
+    const registryBoundary = read('crates/tauron-adapter/src/registry.rs');
+    const countSites = (re: RegExp): number =>
+      [...(adapter + '\n' + eventsBoundary + '\n' + registryBoundary).matchAll(re)].length;
     expect(countSites(/run_events_boundary\(state, "/g), '事件命令闸门接线数变了（7 条）').toBe(7);
     expect(countSites(/run_review_boundary\(state, "/g), '令牌消费点闸门接线数变了（4 个）').toBe(
       4,
@@ -4744,7 +5071,10 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       /\*state\.bus\.lock\(\)\s*=\s*EventBus::default\(\);/,
     );
     // 修复驱动：cmd_recover_boot 必须驱动 events+registry 两条修复（审批修复另有骑点）。
-    const boot = adapter.slice(adapter.indexOf('pub fn cmd_recover_boot('));
+    // T-7 十五片：cmd_recover_boot 族体逐字节纯搬到 recover.rs，切片源并入 recover.rs 再定位，
+    // 两条 toContain 判定字节不变。
+    const bootSrc = adapter + '\n' + read('crates/tauron-adapter/src/recover.rs');
+    const boot = bootSrc.slice(bootSrc.indexOf('pub fn cmd_recover_boot('));
     expect(boot, 'cmd_recover_boot 不再驱动事件修复').toContain('reconcile_events_boundary(state)');
     expect(boot, 'cmd_recover_boot 不再驱动注册表修复').toContain(
       'reconcile_registry_boundary(state)',
@@ -4783,7 +5113,14 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       'resolve_redirect_location',
     );
 
-    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 十七片之一：HTTP 命令族（cmd_http_request + 私助手 http_policy_denied /
+    // authorize_http_url / validated_http_method）按原名逐字节纯搬移到 http.rs。下面单跳契约/
+    // 逐跳授权链的 needles、countSites 三处策略调用计数、以及 cmd_http_request 的 slice 锚点，
+    // 检索源都换成 lib + http.rs 并集——判据（needle 字面量、期望计数、正则）一字未改，属输入集
+    // 更新非削弱；仍留 lib 的 needle（HttpSink trait doc、with_http_sink builder、resolved_addrs
+    // 线字段、lib 测试模块里五条 http_* 测试函数名）在并集里同样命中。
+    const adapter =
+      read('crates/tauron-adapter/src/lib.rs') + '\n' + read('crates/tauron-adapter/src/http.rs');
     for (const needle of [
       'fn http_policy_denied(',
       'pub fn with_http_sink(mut self, sink: Arc<dyn HttpSink>) -> Self',
@@ -5002,7 +5339,13 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // ③两个新可选字段带出去且缺席时整字段省略（线形与既有 TS 镜像一致）；④TS 类型同步；
     // ⑤台账条目已删除。语义（顺序=manifest 顺序、文案=词表原文、高危不勾+确认词、无 scope 为 None）
     // 由适配层测试在 cargo 上实跑判定。
-    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 十六片：注册表域 preview_inner 族连同审批行接线逐字节纯搬移到 registry.rs，
+    // 审批行单源判据的落点随之从 lib 迁到兄弟模块。输入集扩为并集（lib + registry），
+    // 四根 needle、反向内联副本钉、skip_serializing_if 计数钉（2）判据字节全部不变。
+    const adapter =
+      read('crates/tauron-adapter/src/lib.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/registry.rs');
     for (const needle of [
       'tauron_acl::build_approval_rows(&draft, &index)',
       'let confirmation_hint = row.confirmation_hint().map(str::to_string);',
@@ -5118,7 +5461,13 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // 字面量；④磁盘坏值必须留痕（降级不许静默）；⑤孤儿条目已删、声明侧注释改口；
     // ⑥四条行为测试在。语义（驱逐最旧、unread 记账、非法值零副作用、重启仍生效、坏值不拒启）
     // 由 cargo 实跑判定。
-    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 十三片：cmd_settings_set（写前判定 + 落盘后生效）与 cmd_settings_migrate（迁移落盘前读盘）
+    // 已按原名从 lib.rs 纯搬到 settings.rs，这些容量调用点随函数体搬走。故把 adapter 的检索源
+    // 并集 lib.rs + settings.rs——判据（各 toContain、各 matchAll 计数、反向 not.toContain）一字未改。
+    const adapter =
+      read('crates/tauron-adapter/src/lib.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/settings.rs');
     const capacity = read('crates/tauron-adapter/src/notify_capacity.rs');
     // 判定与生效的**实现**都在域文件里（轮 57：`lib.rs` 顶层条目已封顶，新能力按台账建议开新域文件）。
     for (const needle of [
@@ -5271,7 +5620,14 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // 轮 57 只给 `host_settings_set` 加了先判后写，`cmd_settings_adopt_legacy` /
     // `cmd_settings_migrate` 两条整份文档路径仍不校验——同一个键两套标准，坏值经旧文档
     // 就能进磁盘（当时的注释还把它写成坏值的「真实来路」）。轮 59 把三条路径收到同一判定上。
-    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 十三片：三条命令（set/adopt_legacy/migrate 及 _as 变体）的定义体已按原名纯搬到
+    // settings.rs，判据（ needles 与 matchAll 计数 2/3）一字未改，只把检索源换成
+    // lib.rs + settings.rs 并集——同名 inline test 仍在 lib.rs、搬走的三处 apply_notify_capacity
+    // 与两处 validate_notify_capacity_document 调用现落在 settings.rs 一侧。
+    const adapter =
+      read('crates/tauron-adapter/src/lib.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/settings.rs');
     const capacity = read('crates/tauron-adapter/src/notify_capacity.rs');
 
     for (const needle of [
@@ -5518,7 +5874,16 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
 
   it('轮 29：更新可用性只有一条权威通道（SDK 不得再拿宿主桩当结论）', () => {
     const sdk = read('packages/tauron-host/src/auto-update-client.ts');
-    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 十七片之三：② 的两条分派/模拟腿与 ③ 的 cmd_market_check 桩体逐字节纯搬到
+    // market.rs；T-7 十九片：market-update 能力域说明（连同 cmd_host_capabilities 函数体）
+    // 逐字节纯搬到 capabilities.rs。这里对 adapter 的四条判据全是正检（toMatch），检索源换成
+    // lib+market+capabilities 并集只会补回迁移体、不会放过任何负检，判据一字未改。
+    const adapter =
+      read('crates/tauron-adapter/src/lib.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/market.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/capabilities.rs');
 
     // ① 检查腿：真通道。`host_updater_check` 是被调的一方，`host_market_check` 不得再出现。
     expect(sdk, 'SDK 的检查没有走真通道 host_updater_check').toContain("'host_updater_check'");
@@ -5617,7 +5982,20 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
   });
 
   it('轮 33：更新通道诊断只有一个出口，账本的模拟推进不得被读成真实状态', () => {
-    const adapter = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 十七片之二：诊断腿 cmd_updater_status（把账本对成对交给 sink 的那句）连同
+    // cmd_updater_check / _as / _status_as 逐字节纯搬移到 updater.rs。下面 ②「成对读出」体读
+    // `status(ext.update_state.clone(), ext.update_state_simulated)` 现落在 updater.rs，故检索源
+    // 换成 lib + updater 并集；① 的 UpdaterStatus 线形（rustStruct 读 lib.rs，UpdaterSink trait /
+    // 实现 / 两个线形类型都留 lib）、② 的 trait/impl needles 判据一字未改。T-7 十七片之三又把
+    // ③ 的四个账本写入方（market 双胞胎腿）逐字节纯搬移到 market.rs，故检索源再加 market.rs——
+    // 否则 ③ 的每条写入 matcher 会落空、④ 的「写入数 == 标注数」会退化成 0==0 的空转（削弱）。
+    // 三文件并集后判据一字未改，属输入集更新非削弱。
+    const adapter =
+      read('crates/tauron-adapter/src/lib.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/updater.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/market.rs');
     const client = read('packages/tauron-host/src/shell-client.ts');
     const shell = read('packages/tauron-host/src/shell-controller.ts');
     const shellTest = read('packages/tauron-host/src/shell-controller.test.ts');
@@ -6017,7 +6395,13 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       /last_context[\s\S]{0,200}unwrap_or/,
     );
     // 线形：boot 返回必须带上它。
-    const lib = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 十五片：boot 线形态由 recovery_boot_payload 生成，该私助手逐字节纯搬到 recover.rs；
+    // 只读 lib 会撞上 #[cfg(test)] 里 r["lastContext"] 的索引字面量（假绿），故检索源并入 recover.rs
+    // 命中生产载荷那一条，toMatch 判定字节不变。
+    const lib =
+      read('crates/tauron-adapter/src/lib.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/recover.rs');
     expect(lib, 'host_recover_boot 线形未回传 lastContext').toMatch(/"lastContext"/);
     // 引擎侧容量常量必须存在且被测试钉住（N 是设计决定，不能是魔数）。
     const engine = read('crates/tauron-recovery/src/lib.rs');
@@ -6031,7 +6415,13 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // 方案 R7 门禁原文：「settings 必须经 Store（非裸 HashMap）」。
     const cargo = read('crates/tauron-adapter/Cargo.toml');
     expect(cargo, 'adapter 未依赖 tauron-settings（孤儿 crate 未激活）').toMatch(/tauron-settings/);
-    const lib = read('crates/tauron-adapter/src/lib.rs');
+    // T-7 十三片：cmd_settings_set（set_deferred 写点 + persist→commit 顺序）已按原名从 lib.rs
+    // 纯搬到 settings.rs；SettingsStore 装配与 fn commit_settings_change 定义仍在 lib.rs。
+    // 故把 lib 检索源并集 lib.rs + settings.rs，四条 toMatch 判据（正则与顺序窗口）一字未改。
+    const lib =
+      read('crates/tauron-adapter/src/lib.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/settings.rs');
     expect(lib, 'settings 未走 SettingsStore').toMatch(/SettingsStore/);
     expect(lib, 'settings_set 未走 V4 deferred transaction 写入').toMatch(
       /set_deferred\(HOST_SETTINGS_NAMESPACE,\s*HOST_SETTINGS_NAMESPACE/,
@@ -6064,8 +6454,10 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
 
   it('R7：cmd_notify 必须经 dispatch（顺序：先入缓冲再推系统），且 DispatchSink 有 Tauri 实现', () => {
     // 方案 R7 门禁原文：「cmd_notify 必须调 dispatch」「DispatchSink 必须有 Tauri 实现」。
-    const lib = read('crates/tauron-adapter/src/lib.rs');
-    expect(lib, 'cmd_notify 未接 dispatch').toMatch(/tauron_notify::dispatch|notify::dispatch/);
+    const notifyCmd = read('crates/tauron-adapter/src/notify.rs');
+    expect(notifyCmd, 'cmd_notify 未接 dispatch').toMatch(
+      /tauron_notify::dispatch|notify::dispatch/,
+    );
     const notify = read('crates/tauron-notify/src/lib.rs');
     // 顺序不变量：push 必须早于 send（反过来 = dispatch 失败就丢通知）。
     const dispatchBody = notify.slice(notify.indexOf('pub fn dispatch('));
@@ -6087,8 +6479,8 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
   });
 
   it('R7：通知读取端暴露 dispatchLog（线形字段，不是只写日志）', () => {
-    const lib = read('crates/tauron-adapter/src/lib.rs');
-    expect(lib, 'host_notifications_list 未返回 dispatchLog').toMatch(/"dispatchLog"/);
+    const notifyRs = read('crates/tauron-adapter/src/notify.rs');
+    expect(notifyRs, 'host_notifications_list 未返回 dispatchLog').toMatch(/"dispatchLog"/);
     const shell = read('packages/tauron-host/src/shell-client.ts');
     expect(shell, 'TS 侧 NotificationsListResult 缺 dispatchLog').toMatch(
       /NotificationsListResult[\s\S]{0,600}dispatchLog/,
@@ -6099,15 +6491,22 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
 
   it('R8：窗口/商城的"降级与模拟"必须是线字段，不是注释里的承诺', () => {
     const lib = read('crates/tauron-adapter/src/lib.rs');
+    // 窗口命令实现自 `lib.rs` 纯搬移到 `window.rs`（T-7 拆分）。下面「先对账后重启」的
+    // 顺序体读只换检索文件、判据（reconcile 早于 .relaunch()）一字未改。
+    const windowRs = read('crates/tauron-adapter/src/window.rs');
+    // 商城两 struct + cmd_market_check 的 `simulated: true` 构造点自 `lib.rs` 逐字节纯搬到
+    // `market.rs`（T-7 十七片之三）；① 三条商城判据改走 lib+market 并集，正则一字未改。
+    // ② 两条窗口 outcome 结构仍在 lib.rs，继续走 lib。
+    const libMarket = lib + '\n' + read('crates/tauron-adapter/src/market.rs');
     // ① 商城返回必须是有类型的结构体（此前是裸 json! 字面量）且带 simulated。
-    expect(lib, 'MarketCheckResult 不是类型化结构体').toMatch(
+    expect(libMarket, 'MarketCheckResult 不是类型化结构体').toMatch(
       /pub struct MarketCheckResult[\s\S]{0,400}pub simulated: bool/,
     );
-    expect(lib, 'MarketUpdateResult 不是类型化结构体').toMatch(
+    expect(libMarket, 'MarketUpdateResult 不是类型化结构体').toMatch(
       /pub struct MarketUpdateResult[\s\S]{0,400}pub simulated: bool/,
     );
     // `check` 此前是 `{ "available": false }`，连 simulated 都没有 —— 回归锁。
-    expect(lib, 'host_market_check 未返回 simulated').toMatch(
+    expect(libMarket, 'host_market_check 未返回 simulated').toMatch(
       /MarketCheckResult[\s\S]{0,300}simulated: true/,
     );
 
@@ -6119,9 +6518,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       /pub struct WindowCreateOutcome[\s\S]{0,1200}created: bool/,
     );
     // ③ 先对账、后重启：顺序在源码里必须是这两行的次序（反序 = 重启循环）。
-    const core = lib.slice(
-      lib.indexOf('pub fn cmd_window_relaunch_as'),
-      lib.indexOf('pub fn cmd_window_create_as'),
+    const core = windowRs.slice(
+      windowRs.indexOf('pub fn cmd_window_relaunch_as'),
+      windowRs.indexOf('pub fn cmd_window_create_as'),
     );
     const iReconcile = core.indexOf('reconcile_recovery_phase');
     const iRelaunch = core.indexOf('.relaunch()');
@@ -6201,6 +6600,44 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       const end = src.indexOf('\n}\n', at);
       return src.slice(at, end === -1 ? undefined : end);
     };
+    // i18n 命令族已按原名纯搬到 i18n.rs（T-7）；selfScoped 循环里 cmd_i18n_load_as /
+    // cmd_i18n_cleanup_plugin_as 的定义体在 i18n.rs，cmd_notify_as 的定义体随通知族搬到
+    // notify.rs，cmd_recover_report_as 的定义体随恢复族搬到 recover.rs（T-7 十五片），
+    // 故用 lib.rs + i18n.rs + notify.rs + recover.rs 并集作为 fnBody 的检索源（判据不变，仅补全输入集）。
+    const libI18n =
+      lib +
+      '\n' +
+      read('crates/tauron-adapter/src/i18n.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/notify.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/recover.rs');
+    // 窗口命令族已按原名纯搬到 window.rs、资源诊断 cmd_resource_stats_as 已纯搬到
+    // resource.rs、设置命令族 cmd_settings_adopt_legacy_as / cmd_settings_migrate_as
+    // 已按原名纯搬到 settings.rs（T-7 十三片）、注册表命令族 cmd_registry_list_all_as /
+    // cmd_registry_admin_as 已按原名纯搬到 registry.rs（T-7 十六片）；下面 privileged 循环里
+    // cmd_window_relaunch_as / cmd_window_create_as 的定义体在 window.rs、
+    // cmd_resource_stats_as 的定义体在 resource.rs、cmd_settings_adopt_legacy_as /
+    // cmd_settings_migrate_as 的定义体在 settings.rs、cmd_registry_list_all_as /
+    // cmd_registry_admin_as 的定义体在 registry.rs、cmd_production_doctor_as 的定义体在 doctor.rs
+    // （T-7 二十一片）、cmd_runtime_spawn_as / cmd_runtime_health_as 的定义体在 runtime.rs
+    // （T-7 二十二片），故用 lib.rs + window.rs + resource.rs + settings.rs + registry.rs +
+    // doctor.rs + runtime.rs 并集作为 fnBody 的检索源（判据
+    // require_main_window|admin_gate\( 一字未改，仅补全输入集）。
+    const libWindow =
+      lib +
+      '\n' +
+      read('crates/tauron-adapter/src/window.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/resource.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/settings.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/registry.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/doctor.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/runtime.rs');
 
     // 主体类型**刻意没有** Invalid 变体：让"未知主体"连构造都构造不出来，
     // 否则它迟早被当作可传递值漏判（R7 的设计决定，这里锁死）。
@@ -6244,7 +6681,9 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       // 判定可以是裸 `require_main_window`，也可以是它的**审计版** `admin_gate`
       // （内部就是同一条判定 + 留痕；见「特权管理操作必须在唯一咽喉点产出结构化
       // 审计事实」那条门禁，它钉死了 admin_gate 体内必须调 require_main_window）。
-      expect(fnBody(lib, core), `${core} 收了主体却不判定`).toMatch(
+      // 检索源用 lib.rs + window.rs 并集：cmd_window_relaunch_as / cmd_window_create_as
+      // 已纯搬到 window.rs，判据（require_main_window 或 admin_gate）一字未改。
+      expect(fnBody(libWindow, core), `${core} 收了主体却不判定`).toMatch(
         /require_main_window|admin_gate\(/,
       );
     }
@@ -6267,7 +6706,7 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       expect(wrapper, `${cmd} 未把解析出的主体交给核心`).toMatch(
         new RegExp(`(?:crate::)?${core}\\(&caller`),
       );
-      expect(fnBody(lib, core), `${core} 收了主体却不做自身范围判定`).toMatch(
+      expect(fnBody(libI18n, core), `${core} 收了主体却不做自身范围判定`).toMatch(
         /require_self_plugin_scope/,
       );
     }
@@ -6283,6 +6722,16 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
     // 第二批的四条主窗专属命令（试启别人的插件、宿主级更新操作）。判定可以是裸
     // `require_main_window`，也可以是它的**审计版** `admin_gate`（轮 40 起
     // download/install 走后者：判定 + 结构化审计留痕，内部仍调 require_main_window）。
+    // T-7 十五片：cmd_recover_trial_enable_as 定义体随恢复族纯搬到 recover.rs。
+    // T-7 十七片之三：cmd_market_check_as / _download_as / _install_as 定义体随商城族纯搬到
+    // market.rs。故 fnBody 检索源取 lib+recover+market 并集；判据 /require_main_window|admin_gate\(/
+    // 一字未改（admin_gate 本体定义仍在 lib.rs，这里只核**调用点**存在判定，属输入集更新非削弱）。
+    const libRecover =
+      lib +
+      '\n' +
+      read('crates/tauron-adapter/src/recover.rs') +
+      '\n' +
+      read('crates/tauron-adapter/src/market.rs');
     for (const [cmd, core] of [
       ['host_recover_trial_enable', 'cmd_recover_trial_enable_as'],
       ['host_market_check', 'cmd_market_check_as'],
@@ -6292,12 +6741,19 @@ describe('门禁：写入侧回扫（通知读写成对 / 能力表全集 / 设�
       expect(fnBody(tauri, cmd), `${cmd} 未从受信传输上下文取得主体`).toMatch(
         /(?:window\.caller\(\)|Caller::from_label\(window\.label\(\)\))/,
       );
-      expect(fnBody(lib, core), `${core} 未做主窗判定`).toMatch(/require_main_window|admin_gate\(/);
+      expect(fnBody(libRecover, core), `${core} 未做主窗判定`).toMatch(
+        /require_main_window|admin_gate\(/,
+      );
     }
 
     // 设置族不是"整条命令主窗专属"（插件本来就需要读自己的设置），而是**按键**判定。
+    // T-7 十三片：cmd_settings_get_as / cmd_settings_set_as 的定义体已按原名纯搬到
+    // settings.rs，判据 `/require_settings_key_scope/` 一字未改，只把 fnBody 的检索源
+    // 换成 libWindow（lib.rs + window.rs + resource.rs + settings.rs 并集，见上面）。
     for (const core of ['cmd_settings_get_as', 'cmd_settings_set_as']) {
-      expect(fnBody(lib, core), `${core} 未做键空间判定`).toMatch(/require_settings_key_scope/);
+      expect(fnBody(libWindow, core), `${core} 未做键空间判定`).toMatch(
+        /require_settings_key_scope/,
+      );
     }
     const scope = fnBody(lib, 'require_settings_key_scope');
     // 判定写法锁死：必须 `strip_prefix` 后要求"剩下为空或以 `.` 开头"。
@@ -8039,7 +8495,7 @@ describe('门禁：轮 61 孤儿棘轮的 TS 声明面口径（公开 const/type
       'pub fn ([a-z0-9_]+)',
     );
     expect(typeof ledger.discoveryBaselineDecl, '台账缺 B 口径上限').toBe('number');
-    expect(ledger.discoveryBaseline, 'A 口径上限被顺手改动').toBe(632);
+    expect(ledger.discoveryBaseline, 'A 口径上限被顺手改动').toBe(619);
   });
 
   it('② 行视图的宽松失真已修：import 行不再充当消费者，未闭合判据才开启吞块', () => {
@@ -8196,17 +8652,17 @@ describe('门禁：轮 62 跨文件消费者视图（别的文件的声明行算
     expect(script, '跨文件声明行不再算引用位（B 口径的 5 条假孤儿会回来）').toContain(
       'function otherView(',
     );
-    expect(script, 'A 口径不再走修正后的消费者视图').toContain('otherView(g, [name])');
-    expect(script, '台账 probe 不再走修正后的消费者视图').toContain('otherView(f, names)');
+    expect(script, 'A 口径不再走修正后的消费者视图').toContain('otherView(src, g, [name])');
+    expect(script, '台账 probe 不再走修正后的消费者视图').toContain('otherView(src, f, names)');
     // 紧的那一条：同名顶格声明的文件整份不作证（PublishResult / WindowState 那类跨包同名类型）。
     expect(script, '同名顶格声明守卫被搬空（跨包同名类型会互相作证）').toContain(
-      'declaresSame(rel, n)',
+      'declaresSame(src, rel, n)',
     );
     // 松的那一条只给 TS 用；Rust 一旦跟着放开，跨 crate 同名双胞胎就改成互相作证（实测 9 条）。
     expect(
       script,
       'Rust 侧消费者口径被顺手放开（会让 is_durable/queue_stats 双胞胎互相作证）',
-    ).toMatch(/^  if \(rel\.endsWith\('\.rs'\)\) return views\.get\(rel\);$/m);
+    ).toMatch(/^  if \(rel\.endsWith\('\.rs'\)\) return src\.views\.get\(rel\);$/m);
     // 同名判据只认顶格：带缩进的 impl 方法名不该让整份文件失去作证资格。
     const declBlock = /const DECL_NAME_RES = \{[\s\S]*?\n\};/.exec(script);
     expect(declBlock, '同名判据表被搬走').not.toBeNull();
@@ -8232,8 +8688,8 @@ describe('门禁：轮 62 跨文件消费者视图（别的文件的声明行算
       "typeof observed[key] !== 'number'",
     );
     expect(script, '读数钉若只盯涨不盯跌，把孤儿接回去也能绿').toContain('observed[key] !== count');
-    expect(script, '读数钉漏了 B 口径').toContain("'decl', declCandidates.length");
-    expect(ledger.discoveryObserved?.a, '台账缺 A 口径读数').toBe(632);
+    expect(script, '读数钉漏了 B 口径').toContain("'decl', src.declCandidates.length");
+    expect(ledger.discoveryObserved?.a, '台账缺 A 口径读数').toBe(619);
     expect(ledger.discoveryObserved?.decl, '台账缺 B 口径读数').toBe(39);
     expect(
       ledger.discoveryObserved!.a,
@@ -8282,7 +8738,7 @@ describe('门禁：轮 62 跨文件消费者视图（别的文件的声明行算
 
   it('⑤ 通知读取端线形：TS NotifyItem / DispatchRecord 与宿主 json! 的键逐字对齐', () => {
     const client = read(HOST_CLIENT);
-    const rust = read(ADAPTER);
+    const rust = read(ADAPTER) + '\n' + read('crates/tauron-adapter/src/notify.rs');
     expect(tsFields(client, 'NotifyItem'), '通知条目键集与宿主手工 json! 不再逐字段一致').toEqual(
       rustJsonKeys(rust, 'notifications_list_payload', 'e'),
     );
@@ -8450,8 +8906,8 @@ describe('门禁：轮 63 窗口几何持久化链路（委派出去的那条腿
     expect(
       ledger.discoveryObserved?.a,
       '台账读数没跟上最新收口（改过孤儿计数就要同步到这里）',
-    ).toBe(632);
-    expect(ledger.discoveryBaseline, '上限没收口到实测（余量假象回来了）').toBe(632);
+    ).toBe(619);
+    expect(ledger.discoveryBaseline, '上限没收口到实测（余量假象回来了）').toBe(619);
     const note = ledger.note.join('\n');
     expect(note, '台账没记下 12 条候选的逐条定性').toContain('12 条 A 候选已逐条定性');
     expect(note, '真断链那一条被糊进其余 11 条里').toContain('①真断链 1 条');
@@ -8713,6 +9169,7 @@ describe('门禁：轮 66 流的三笔额度账必须与宿主同源（@tauron/h
   const ADMISSION_RS = 'crates/tauron-host/src/admission.rs';
   const REGISTRY_RS = 'crates/tauron-host/src/registry.rs';
   const ADAPTER = 'crates/tauron-adapter/src/lib.rs';
+  const CALL_STREAM = 'crates/tauron-adapter/src/call_stream.rs';
   const TAURI = 'crates/tauron-adapter/src/tauri.rs';
   const STREAM_TS = 'packages/tauron-host/src/stream.ts';
   const BACKEND_TS = 'packages/tauron-host/src/backend.ts';
@@ -8818,7 +9275,9 @@ describe('门禁：轮 66 流的三笔额度账必须与宿主同源（@tauron/h
 
   it('④ 补额这条腿全链可达：命令 → 线格式 → 注册表 → 那份原语', () => {
     const tauri = read(TAURI);
-    const adapter = read(ADAPTER);
+    // T-7 十四片：cmd_stream_grant 的核心实现体（state.registry.stream_grant(...)）已按原名
+    // 从 lib.rs 纯搬到 call_stream.rs，故 adapter 检索源并集 lib.rs + call_stream.rs，判据一字未改。
+    const adapter = read(ADAPTER) + '\n' + read(CALL_STREAM);
     const registry = read(REGISTRY_RS);
     const rs = read(STREAM_RS);
     const start = tauri.indexOf('pub fn host_stream_grant(');
@@ -8851,7 +9310,10 @@ describe('门禁：轮 66 流的三笔额度账必须与宿主同源（@tauron/h
   });
 
   it('⑤ 回执线形态两端字段序同构（宿主驼峰化后 = TS 声明序）', () => {
-    const adapter = read(ADAPTER);
+    // T-7 十四片：StreamCredit 结构体与 cmd_stream_grant 定义都随族搬到了 call_stream.rs（二者
+    // 仍相邻、struct 在前 grant 在后，slice 有效），故 adapter 并集 lib.rs + call_stream.rs，
+    // 字段序 matchAll 与 camelCase toMatch 判据一字未改。
+    const adapter = read(ADAPTER) + '\n' + read(CALL_STREAM);
     const rustStruct = adapter.slice(
       adapter.indexOf('pub struct StreamCredit {'),
       adapter.indexOf('pub fn cmd_stream_grant('),

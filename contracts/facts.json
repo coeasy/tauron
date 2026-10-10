@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "description": "对外承诺数字的单一真源。由 `scripts/generate-facts.mjs` 从代码复算；README/文档读取本文件。手写数字即 bug。",
+  "rust": {
+    "testDeclarations": 1724,
+    "note": "源码 #[test] 声明数（静态可复算），非某次 cargo test 的通过数。",
+    "crateCount": 17
+  },
+  "typescript": {
+    "testFileCount": 107,
+    "note": "packages/** 下 *.test.ts(x) 文件数（排除 dist/node_modules），非用例数。",
+    "packageCount": 21
+  },
+  "commandSurface": {
+    "total": 85,
+    "substrate": 61,
+    "pluginRuntime": 22,
+    "pluginInstall": 2,
+    "note": "解析 tauron-adapter/src/lib.rs 三个编译期命令集合，与 command-surface:check 同源。"
+  },
+  "versioning": {
+    "repoCargoWorkspaceVersion": "1.1.0",
+    "rootNpmVersion": "1.1.0",
+    "note": "registry 实际发布版本由 `pnpm version:check` 联网比对 dist-tag，不在本静态文件钉死（避免离线不可复算）。"
+  }
+}

@@ -133,7 +133,7 @@ foreach ($m in 'tauron_substrate_handler','tauron_plugin_handler') {
 另有**门禁**持续守住这两个数字之间的关系（不靠人眼）：
 `wire-gate.test.ts:318-331` 解析两个宏的命令清单，断言
 ①底座集合 ⊂ 全量集合、②底座集合不含插件域命令、③全量集合 == `tauri.rs` 中全部
-`#[tauri::command]` 定义；`wire-gate.test.ts:1504-1507,1586-1591` 断言两组 handler
+`#[tauri::command]` 定义；`wire-gate.test.ts`（host handler 宏严格同源 + origin_gated 两组包裹）断言两组 handler
 都经同一个 `origin_gated_handler` 包裹。运行期可用性证据：
 `crates/tauron-adapter/src/lib.rs` 的单测 `substrate_only_state_serves_base_commands`
 （连同 `plugin_runtime_shares_one_substrate_and_injects_sink`）。

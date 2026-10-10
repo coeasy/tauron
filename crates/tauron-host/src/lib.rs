@@ -43,6 +43,7 @@ pub mod registry;
 pub mod remote_host;
 pub mod remote_host_reference;
 pub mod runtime;
+pub mod runtime_driver;
 pub mod scoped_fs;
 pub mod service_graph;
 pub mod storage;

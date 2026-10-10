@@ -46,6 +46,18 @@ const DEFAULT_TARGETS = [
   // 生成物也要查：它的行内引用（专题文档路径、代码符号）同样是宣称。
   'docs/api/command-surface.md',
   'docs/integration/incremental-adoption.md',
+  // 治理/方案文档（审计点名的「白名单不含方案文档」缺口）：它们的 `file:NNN` 行号引用过去靠
+  // 人工维护、极易漂移。纳入默认集后，任何代码增删导致方案文档行号失配都会在 docs:check 当场红
+  // ——把「文档说的位置」变成可执行断言。**只列纳入版本控制的方案文档**：本表每个条目都会
+  // `readFileSync` 逐行扫描、无缺失兜底，一旦列入未提交（untracked）的文件，干净 CI 检出即 ENOENT 崩。
+  // 被 V4/V5/V7 与 2026-10-06 三份收口方案取代、且从未提交的旧草稿轮次
+  // （TAURON-FULL / V8 / V9 / V10）已从默认集移除并清理，避免把未发布草稿当承重门禁输入。
+  'docs/Tauron-Universal-Industrial-Application-Substrate-Final-Architecture-V4.md',
+  'docs/Tauron-Architecture-Competitive-Analysis-Optimization-Plan-V5.md',
+  'docs/Tauron-Deep-Audit-and-Optimization-Plan-V7.md',
+  'docs/Tauron-易用性-第三方集成-工业级收口方案-2026-10-06.md',
+  'docs/Tauron-独立审计与重构方案-2026-10-06.md',
+  'docs/Tauron-统一开发计划与落地路线图-2026-10-06.md',
 ];
 const args = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 const FIX = process.argv.includes('--fix');

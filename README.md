@@ -3,7 +3,7 @@
 > Tauri 2 之上的插件化桌面客户端基础设施 —— 插件隔离、受控能力面、跨语言契约与多形态插件执行。
 
 [![CI](https://github.com/coeasy/tauron/actions/workflows/ci.yml/badge.svg)](https://github.com/coeasy/tauron/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-1759%20TS%20%C2%B7%201426%20Rust-informational)](#测试)
+[![Tests](https://img.shields.io/badge/tests-107%20TS%20files%20%C2%B7%201724%20Rust%20%23%5Btest%5D-informational)](#测试)
 [![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![Node](https://img.shields.io/badge/Node-22.x-brightgreen)](#)
 [![Rust](https://img.shields.io/badge/Rust-1.98-orange)](#)
@@ -556,17 +556,24 @@ tauron/
 
 ### 用例数
 
-| 侧 | 用例数 | 口径 |
-|---|---|---|
-| TypeScript | **1759**（104 个测试文件 / 20 包，0 failed） | `pnpm -r test` 实跑通过（2026-10-02 本机，轮 9 收尾那次运行） |
-| Rust | **1426 passed / 0 failed**（21 个测试二进制） | `cargo test --workspace --locked --lib --tests` 实跑（2026-10-02 本机，默认特性，exit 0）；源码 `#[test]` **声明数** 1498 |
-| 跨语言契约 | **130** | `@tauron/contract-tests` 的 wire-gate（`vitest run src/wire-gate.test.ts` 实跑）；本包合计 151 条 / 2 个文件 |
+> **单一真源**：下表里所有"可复算的静态事实"（`#[test]` 声明数、测试文件数、crate/package 数、
+> 命令面条数）都由 `contracts/facts.json` 承载，`node scripts/generate-facts.mjs` 从代码复算、
+> `pnpm facts:check` 复算比对、CI 门禁。README 不再手写这些数字——**手写数字即 bug**
+> （历史上徽章/正文/各方案曾给出互相矛盾的 1759/1426/1498/1284/1221，无一正确）。
 
-> **关于 Rust 一栏的口径**：表中给的是**执行结果**（默认特性）。Rust 侧另有
-> **feature 门控**用例（`tauron-adapter` / `tauron-shell` 的 `tauri`、
-> `tauron-adapter` 的 `plugin-install`），所以要高于默认特性执行数——源码
-> `#[test]` 声明数 **1498** 就是这个差额的来源。feature 矩阵的执行结果以 CI 的
-> `Rust (tauri feature)` / `Rust (minimal substrate)` 两个 job 为准。
+| 口径 | 值 | 来源 |
+|---|---|---|
+| Rust `#[test]` 声明数 | **1724** | `contracts/facts.json`（源码静态复算，含 `tests/` 集成测试；排除 `#[test]` 出现在文档注释里的假计数） |
+| TypeScript 测试文件数 | **107** | `contracts/facts.json`（`packages/**/*.test.ts(x)`，排除 `dist`/`node_modules`） |
+| crate / package 数 | **17 / 21** | `contracts/facts.json` |
+| 命令面（总 / 底座 / 运行时 / 安装） | **85 / 61 / 22 / 2** | `contracts/facts.json`，与 `pnpm command-surface:check` 同源 |
+| 跨语言契约（wire-gate） | **130** | `@tauron/contract-tests`（`vitest run src/wire-gate.test.ts`） |
+
+> **声明数 ≠ 执行通过数**（诚实边界）：上表 Rust 一栏是源码里 `#[test]` 属性的**声明数**，一个可复算
+> 的静态事实。某次 `cargo test` 的**实际通过数**会因 `#[ignore]`、feature 门（`tauri` /
+> `plugin-install` / `runtime-wasm-broker`）与编译期裁剪而与声明数不同——feature 矩阵的真实执行结果
+> 以 CI 的 `Rust (tauri feature)` / `Rust (minimal substrate)` 等 job 为准，本 README 不再钉死一个
+> 会腐烂的"实跑数"。复算命令：`node scripts/generate-facts.mjs && node scripts/generate-facts.mjs --check`。
 
 ### 本地命令
 
